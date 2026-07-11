@@ -2,6 +2,7 @@ import asyncio
 import json
 import subprocess
 
+from app.errors import ResolverProviderMismatchError
 from app.integrations.youtube.playback.models import YtDlpAudioPayload
 from app.playback.contracts import (
     PlaybackResolver,
@@ -45,8 +46,8 @@ class YouTubePlaybackResolver(PlaybackResolver):
 
     async def resolve(self, source: PlaybackSource) -> ResolvedPlaybackSource:
         if source.provider != self.provider:
-            raise ValueError(
-                f"Expected provider {self.provider!r}, got {source.provider!r}"
+            raise ResolverProviderMismatchError(
+                expected=self.provider, actual=source.provider
             )
 
         return await asyncio.to_thread(_resolve_audio, source.external_id)

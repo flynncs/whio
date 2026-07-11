@@ -3,6 +3,7 @@ from uuid import UUID
 
 from app.domain.catalogue import CatalogueSearchResult, SourceIdentity
 from app.domain.catalogue_repository import InMemoryCatalogueRepository
+from app.errors import RecordingNotFoundError, SourceConflictError
 
 
 class CatalogueRepositoryTests(unittest.TestCase):
@@ -115,13 +116,13 @@ class CatalogueRepositoryTests(unittest.TestCase):
 
         repository.attach_source(first.id, source)
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(SourceConflictError):
             repository.attach_source(second.id, source)
 
     def test_cannot_attach_source_to_unknown_recording(self) -> None:
         repository = InMemoryCatalogueRepository()
 
-        with self.assertRaises(LookupError):
+        with self.assertRaises(RecordingNotFoundError):
             repository.attach_source(
                 UUID("00000000-0000-0000-0000-000000000099"),
                 SourceIdentity(

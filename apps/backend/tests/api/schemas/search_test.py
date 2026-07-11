@@ -1,4 +1,5 @@
 import unittest
+from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -36,8 +37,7 @@ class SearchSchemaTests(unittest.TestCase):
         response = SearchResponse(
             results=[
                 SearchResult(
-                    provider="youtube_music",
-                    external_id="abc123",
+                    id=UUID("00000000-0000-0000-0000-000000000001"),
                     title="Instant Crush",
                     artists=["Daft Punk"],
                     duration_seconds=337,

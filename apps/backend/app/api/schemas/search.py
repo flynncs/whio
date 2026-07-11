@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -9,8 +11,7 @@ class SearchQuery(BaseModel):
 
 
 class SearchResult(BaseModel):
-    provider: str
-    external_id: str
+    id: UUID
     title: str
     artists: list[str]
     duration_seconds: int | None = None

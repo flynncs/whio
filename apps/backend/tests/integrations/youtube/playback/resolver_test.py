@@ -3,6 +3,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
+from app.errors import ResolverProviderMismatchError
 from app.integrations.youtube.playback.resolver import YouTubePlaybackResolver
 from app.playback.contracts import PlaybackSource
 
@@ -51,7 +52,7 @@ class YouTubeResolverTests(unittest.IsolatedAsyncioTestCase):
             external_id="abc123",
         )
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ResolverProviderMismatchError):
             await YouTubePlaybackResolver().resolve(source)
 
 

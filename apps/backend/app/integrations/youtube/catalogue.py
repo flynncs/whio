@@ -8,6 +8,13 @@ from app.domain.catalogue import CatalogueSearchResult
 ytmusic = YTMusic()
 
 
+class YoutubeMusicCatalogueProvider:
+    provider = "youtube_music"
+
+    def search(self, query: str, limit: int) -> list[CatalogueSearchResult]:
+        return search_songs(query, limit)
+
+
 def search_songs(query: str, limit: int) -> list[CatalogueSearchResult]:
     results = ytmusic.search(query, filter="songs", limit=limit)
 

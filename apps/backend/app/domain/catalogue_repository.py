@@ -7,6 +7,7 @@ from app.domain.catalogue import (
     SourceIdentity,
     SourceReference,
 )
+from app.errors import RecordingNotFoundError, SourceConflictError
 
 
 class CatalogueRepository(Protocol):
@@ -59,13 +60,13 @@ class InMemoryCatalogueRepository:
 
     def attach_source(self, recording_id: UUID, source: SourceIdentity) -> None:
         if recording_id not in self._recordings:
-            raise LookupError(f"Recording {recording_id} does not exist")
+            raise RecordingNotFoundError(recording_id)
 
         existing_id = self._recording_ids_by_source.get(source)
 
         if existing_id is not None:
             if existing_id != recording_id:
-                raise ValueError("Source belongs to another recording")
+                raise SourceConflictError()
             return
 
         reference = SourceReference(recording_id, identity=source)
