@@ -21,8 +21,13 @@ class Recording:
 
 
 @dataclass(frozen=True)
-class SourceReference:
-    recording_id: UUID
+class SourceIdentity:
     provider: str
     external_id: str
     upstream_server_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class SourceReference:
+    recording_id: UUID
+    identity: SourceIdentity
