@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Request
 
-from app.playback.youtube import stream_youtube_audio
+from app.integrations.youtube.playback.stream import stream_youtube_audio
 
 router = APIRouter(prefix="/playback", tags=["Playback"])
 
