@@ -1,6 +1,9 @@
 .DS_Store
 .vscode/
 
+# Local development notes and experiment logs
+docs/
+
 # Python virtual environments (including apps/backend/.venv)
 .venv/
 # Byte-compiled / optimized / DLL files
