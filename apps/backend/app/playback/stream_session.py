@@ -7,7 +7,7 @@ import httpx
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
-from app.integrations.youtube.playback.resolver import resolve_audio
+from app.playback.contracts import ResolvedPlaybackSource
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -16,14 +16,10 @@ PREFETCH_BYTES = 8 * 1024 * 1024
 PREFETCH_CHUNKS = PREFETCH_BYTES // CHUNK_SIZE
 
 
-async def stream_youtube_audio(
-    video_id: str,
-    range_header: str | None,
+async def stream_source(
+    source: ResolvedPlaybackSource, range_header: str | None
 ) -> StreamingResponse:
-    logger.info("Resolving YouTube audio for video_id=%s", video_id)
-    resolved = await asyncio.to_thread(resolve_audio, video_id)
-
-    upstream_headers = resolved.headers.copy()
+    upstream_headers = dict(source.headers)
 
     if range_header:
         upstream_headers["Range"] = range_header
@@ -33,9 +29,7 @@ async def stream_youtube_audio(
         timeout=None,
     )
 
-    upstream_request = client.build_request(
-        "GET", resolved.url, headers=upstream_headers
-    )
+    upstream_request = client.build_request("GET", source.url, headers=upstream_headers)
     upstream_response = await client.send(upstream_request, stream=True)
 
     logger.info(

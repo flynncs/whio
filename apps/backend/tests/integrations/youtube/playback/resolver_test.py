@@ -3,12 +3,13 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from app.integrations.youtube.playback.resolver import resolve_audio
+from app.integrations.youtube.playback.resolver import YouTubePlaybackResolver
+from app.playback.contracts import PlaybackSource
 
 
-class YouTubeResolverTests(unittest.TestCase):
+class YouTubeResolverTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.integrations.youtube.playback.resolver.subprocess.run")
-    def test_resolve_audio_maps_yt_dlp_output(self, run) -> None:
+    async def test_resolve_returns_generic_playback_source(self, run) -> None:
         run.return_value = subprocess.CompletedProcess(
             args=["yt-dlp"],
             returncode=0,
@@ -24,8 +25,15 @@ class YouTubeResolverTests(unittest.TestCase):
             stderr="",
         )
 
-        resolved = resolve_audio("abc123")
+        source = PlaybackSource(
+            provider="youtube_music",
+            source_type="youtube_music",
+            external_id="abc123",
+        )
+        resolved = await YouTubePlaybackResolver().resolve(source)
 
+        self.assertEqual(resolved.provider, "youtube_music")
+        self.assertEqual(resolved.external_id, "abc123")
         self.assertEqual(resolved.url, "https://example.test/audio")
         self.assertEqual(resolved.headers["User-Agent"], "test")
         self.assertEqual(resolved.codec, "opus")
@@ -35,6 +43,16 @@ class YouTubeResolverTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[0], "yt-dlp")
         self.assertIn("https://www.youtube.com/watch?v=abc123", command)
+
+    async def test_resolve_rejects_a_different_provider(self) -> None:
+        source = PlaybackSource(
+            provider="monochrome",
+            source_type="monochrome",
+            external_id="abc123",
+        )
+
+        with self.assertRaises(ValueError):
+            await YouTubePlaybackResolver().resolve(source)
 
 
 if __name__ == "__main__":

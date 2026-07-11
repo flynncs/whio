@@ -1,18 +1,16 @@
+import asyncio
 import json
 import subprocess
 
-from pydantic import BaseModel, Field
+from app.integrations.youtube.playback.models import YtDlpAudioPayload
+from app.playback.contracts import (
+    PlaybackResolver,
+    PlaybackSource,
+    ResolvedPlaybackSource,
+)
 
 
-class ResolvedYouTubeAudio(BaseModel):
-    url: str
-    headers: dict[str, str] = Field(default_factory=dict)
-    codec: str | None = None
-    bitrate: float | None = None
-    duration: float | None = None
-
-
-def resolve_audio(video_id: str) -> ResolvedYouTubeAudio:
+def _resolve_audio(video_id: str) -> ResolvedPlaybackSource:
     command = [
         "yt-dlp",
         "--ignore-config",
@@ -27,12 +25,28 @@ def resolve_audio(video_id: str) -> ResolvedYouTubeAudio:
         command, capture_output=True, text=True, check=True, timeout=30
     )
 
-    stream = json.loads(result.stdout)
+    payload = YtDlpAudioPayload.model_validate(json.loads(result.stdout))
 
-    return ResolvedYouTubeAudio(
-        url=stream["url"],
-        headers=stream.get("http_headers", {}),
-        codec=stream.get("acodec"),
-        bitrate=stream.get("abr"),
-        duration=stream.get("duration"),
+    return ResolvedPlaybackSource(
+        provider="youtube_music",
+        external_id=video_id,
+        url=payload.url,
+        headers=payload.http_headers,
+        codec=payload.acodec,
+        bitrate=payload.abr,
+        duration=payload.duration,
     )
+
+
+class YouTubePlaybackResolver(PlaybackResolver):
+    """YouTube implementation of the generic playback resolver strategy."""
+
+    provider = "youtube_music"
+
+    async def resolve(self, source: PlaybackSource) -> ResolvedPlaybackSource:
+        if source.provider != self.provider:
+            raise ValueError(
+                f"Expected provider {self.provider!r}, got {source.provider!r}"
+            )
+
+        return await asyncio.to_thread(_resolve_audio, source.external_id)
