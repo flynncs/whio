@@ -1,0 +1,17 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.139.0",
+    "httpx>=0.28.1",
+    "uvicorn[standard]>=0.51.0",
+    "ytmusicapi>=1.12.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.21",
+]
