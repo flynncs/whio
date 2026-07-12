@@ -6,10 +6,11 @@ from starlette.responses import Response
 from app.api.errors import lumen_error_handler
 from app.api.playback import router as playback_router
 from app.api.search import router as search_router
+from app.composition import create_application
 from app.errors import LumenError
 
 app = FastAPI()
-
+app.state.application = create_application()
 app.add_exception_handler(LumenError, lumen_error_handler)
 
 

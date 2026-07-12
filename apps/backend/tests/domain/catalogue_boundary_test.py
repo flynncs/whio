@@ -1,111 +1,80 @@
 import unittest
 from uuid import UUID
 
-from app.domain.catalogue import CatalogueSearchResult, SourceIdentity
+from app.domain.catalogue import SourceIdentity, Track
 from app.domain.catalogue_repository import InMemoryCatalogueRepository
 from app.errors import SourceConflictError, TrackNotFoundError
 
 
 class CatalogueRepositoryTests(unittest.TestCase):
-    def test_same_external_source_keeps_same_lumen_track_id(self) -> None:
-        repository = InMemoryCatalogueRepository()
-        candidate = CatalogueSearchResult(
-            provider="youtube_music",
-            external_id="abc123",
+    def _add_track(
+        self,
+        repository: InMemoryCatalogueRepository,
+        track_id: str = "00000000-0000-0000-0000-000000000001",
+    ) -> Track:
+        track = Track(
+            id=UUID(track_id),
             title="Instant Crush",
             artists=("Daft Punk",),
             duration_seconds=337,
         )
-
-        first = repository.import_candidate(candidate)
-        second = repository.import_candidate(candidate)
-
-        self.assertEqual(first.id, second.id)
+        repository.add_track(track)
+        return track
 
     def test_track_and_source_can_be_loaded_by_lumen_id(self) -> None:
         repository = InMemoryCatalogueRepository()
-        candidate = CatalogueSearchResult(
+        track = self._add_track(repository)
+        source = SourceIdentity(
             provider="youtube_music",
             external_id="abc123",
-            title="Instant Crush",
-            artists=("Daft Punk",),
-            duration_seconds=337,
         )
 
-        imported = repository.import_candidate(candidate)
+        repository.attach_source(track.id, source)
 
-        self.assertEqual(repository.get_track(imported.id), imported)
-
-        sources = repository.get_sources(imported.id)
-
-        self.assertEqual(len(sources), 1)
-        self.assertEqual(
-            SourceIdentity(
-                provider=candidate.provider,
-                external_id=candidate.external_id,
-            ),
-            sources[0],
-        )
+        self.assertEqual(repository.get_track(track.id), track)
+        self.assertEqual(repository.find_track_by_source(source), track)
+        self.assertEqual(repository.get_sources(track.id), (source,))
 
     def test_can_attach_an_additional_source_to_a_track(self) -> None:
         repository = InMemoryCatalogueRepository()
-        candidate = CatalogueSearchResult(
+        track = self._add_track(repository)
+        primary_source = SourceIdentity(
             provider="youtube_music",
             external_id="abc123",
-            title="Instant Crush",
-            artists=["Daft Punk"],
-            duration_seconds=337,
         )
-        imported = repository.import_candidate(candidate)
         alternate_source = SourceIdentity(
             provider="navidrome",
             external_id="song-456",
             upstream_server_id=UUID("00000000-0000-0000-0000-000000000001"),
         )
 
-        repository.attach_source(imported.id, alternate_source)
+        repository.attach_source(track.id, primary_source)
+        repository.attach_source(track.id, alternate_source)
 
-        sources = repository.get_sources(imported.id)
-        self.assertEqual(len(sources), 2)
-        self.assertEqual(sources[1], alternate_source)
+        self.assertEqual(
+            repository.get_sources(track.id),
+            (primary_source, alternate_source),
+        )
 
     def test_attaching_the_same_source_twice_is_idempotent(self) -> None:
         repository = InMemoryCatalogueRepository()
-        candidate = CatalogueSearchResult(
-            provider="youtube_music",
-            external_id="abc123",
-            title="Instant Crush",
-            artists=["Daft Punk"],
-            duration_seconds=337,
-        )
-        imported = repository.import_candidate(candidate)
+        track = self._add_track(repository)
         source = SourceIdentity(
             provider="navidrome",
             external_id="song-456",
         )
 
-        repository.attach_source(imported.id, source)
-        repository.attach_source(imported.id, source)
+        repository.attach_source(track.id, source)
+        repository.attach_source(track.id, source)
 
-        self.assertEqual(len(repository.get_sources(imported.id)), 2)
+        self.assertEqual(repository.get_sources(track.id), (source,))
 
     def test_cannot_attach_one_source_to_two_tracks(self) -> None:
         repository = InMemoryCatalogueRepository()
-        first = repository.import_candidate(
-            CatalogueSearchResult(
-                provider="youtube_music",
-                external_id="abc123",
-                title="Instant Crush",
-                artists=["Daft Punk"],
-            )
-        )
-        second = repository.import_candidate(
-            CatalogueSearchResult(
-                provider="youtube_music",
-                external_id="def456",
-                title="Get Lucky",
-                artists=["Daft Punk"],
-            )
+        first = self._add_track(repository)
+        second = self._add_track(
+            repository,
+            track_id="00000000-0000-0000-0000-000000000002",
         )
         source = SourceIdentity(
             provider="navidrome",

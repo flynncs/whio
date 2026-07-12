@@ -1,8 +1,7 @@
 from typing import Protocol
-from uuid import UUID, uuid7
+from uuid import UUID
 
 from app.domain.catalogue import (
-    CatalogueSearchResult,
     SourceIdentity,
     Track,
 )
@@ -10,7 +9,12 @@ from app.errors import SourceConflictError, TrackNotFoundError
 
 
 class CatalogueRepository(Protocol):
-    def import_candidate(self, candidate: CatalogueSearchResult) -> Track: ...
+    def add_track(self, track: Track) -> None: ...
+
+    def find_track_by_source(
+        self,
+        source: SourceIdentity,
+    ) -> Track | None: ...
 
     def get_track(self, track_id: UUID) -> Track | None: ...
 
@@ -25,31 +29,19 @@ class InMemoryCatalogueRepository:
         self._sources: dict[UUID, tuple[SourceIdentity, ...]] = {}
         self._track_ids_by_source: dict[SourceIdentity, UUID] = {}
 
-    def import_candidate(self, candidate: CatalogueSearchResult) -> Track:
-        source_identity = SourceIdentity(
-            provider=candidate.provider,
-            external_id=candidate.external_id,
-        )
+    def add_track(self, track: Track) -> None:
+        self._tracks[track.id] = track
 
-        existing_track_id = self._track_ids_by_source.get(source_identity)
+    def find_track_by_source(
+        self,
+        source: SourceIdentity,
+    ) -> Track | None:
+        track_id = self._track_ids_by_source.get(source)
 
-        if existing_track_id is not None:
-            return self._tracks[existing_track_id]
+        if track_id is None:
+            return None
 
-        track_id = uuid7()
-
-        track = Track(
-            id=track_id,
-            title=candidate.title,
-            artists=tuple(candidate.artists),
-            duration_seconds=candidate.duration_seconds,
-            provisional=True,
-        )
-
-        self._tracks[track_id] = track
-        self.attach_source(track_id, source_identity)
-
-        return track
+        return self._tracks.get(track_id)
 
     def get_track(self, track_id: UUID) -> Track | None:
         return self._tracks.get(track_id)
