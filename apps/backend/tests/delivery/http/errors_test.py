@@ -22,9 +22,7 @@ class ErrorHandlerTests(unittest.IsolatedAsyncioTestCase):
             transport=transport,
             base_url="http://test",
         ) as client:
-            response = await client.get(
-                "/tracks/00000000-0000-0000-0000-000000000001"
-            )
+            response = await client.get("/tracks/00000000-0000-0000-0000-000000000001")
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(

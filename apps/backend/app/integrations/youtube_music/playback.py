@@ -2,11 +2,10 @@ import asyncio
 import json
 import subprocess
 
-from app.catalogue.domain import ProviderId
-from app.errors import ResolverProviderMismatchError
-from app.playback.domain import PlaybackSource, ResolvedPlaybackSource
-from app.playback.ports import PlaybackResolver
-from app.providers.youtube.models import YtDlpAudioPayload
+from app.catalogue.domain import ProviderId, SourceIdentity
+from app.errors import PlaybackProviderMismatchError
+from app.integrations.youtube_music.models import YtDlpAudioPayload
+from app.playback.domain import ResolvedPlaybackSource
 
 
 def _resolve_audio(video_id: str) -> ResolvedPlaybackSource:
@@ -21,7 +20,11 @@ def _resolve_audio(video_id: str) -> ResolvedPlaybackSource:
     ]
 
     result = subprocess.run(
-        command, capture_output=True, text=True, check=True, timeout=30
+        command,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
     )
     payload = YtDlpAudioPayload.model_validate(json.loads(result.stdout))
 
@@ -36,15 +39,17 @@ def _resolve_audio(video_id: str) -> ResolvedPlaybackSource:
     )
 
 
-class YouTubePlaybackResolver(PlaybackResolver):
-    """YouTube implementation of the generic playback resolver strategy."""
+class YouTubeMusicPlayback:
+    """Resolves a YouTube Music source into temporary playable media."""
 
-    provider = ProviderId.YOUTUBE_MUSIC
-
-    async def resolve(self, source: PlaybackSource) -> ResolvedPlaybackSource:
-        if source.provider != self.provider:
-            raise ResolverProviderMismatchError(
-                expected=self.provider, actual=source.provider
+    async def resolve(
+        self,
+        source: SourceIdentity,
+    ) -> ResolvedPlaybackSource:
+        if source.provider != ProviderId.YOUTUBE_MUSIC:
+            raise PlaybackProviderMismatchError(
+                expected=ProviderId.YOUTUBE_MUSIC,
+                actual=source.provider,
             )
 
         return await asyncio.to_thread(_resolve_audio, source.external_id)

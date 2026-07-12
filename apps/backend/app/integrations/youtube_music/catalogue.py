@@ -5,19 +5,18 @@ from ytmusicapi import YTMusic
 
 from app.catalogue.domain import CatalogueResult, ProviderId
 
-ytmusic = YTMusic()
 
+class YouTubeMusicCatalogue:
+    """Searches YouTube Music and returns Lumen catalogue values."""
 
-class YoutubeMusicCatalogueProvider:
     provider = ProviderId.YOUTUBE_MUSIC
 
+    def __init__(self, client: YTMusic | None = None) -> None:
+        self._client = client or YTMusic()
+
     def search(self, query: str, limit: int) -> list[CatalogueResult]:
-        return search_songs(query, limit)
-
-
-def search_songs(query: str, limit: int) -> list[CatalogueResult]:
-    results = ytmusic.search(query, filter="songs", limit=limit)
-    return [normalize_song_result(result) for result in results]
+        results = self._client.search(query, filter="songs", limit=limit)
+        return [normalize_song_result(result) for result in results]
 
 
 def normalize_song_result(result: Mapping[str, Any]) -> CatalogueResult:

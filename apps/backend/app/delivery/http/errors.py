@@ -12,7 +12,8 @@ STATUS_BY_ERROR_CODE = {
     "source_conflict": 409,
     "provider_unavailable": 503,
     "search_unavailable": 503,
-    "resolver_provider_mismatch": 500,
+    "playback_provider_mismatch": 500,
+    "no_playable_source": 404,
 }
 
 

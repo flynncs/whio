@@ -2,7 +2,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class YtDlpAudioPayload(BaseModel):
-    """The subset of raw yt-dlp JSON consumed by the YouTube adapter."""
+    """The subset of raw yt-dlp JSON consumed by the YouTube Music adapter."""
 
     model_config = ConfigDict(extra="ignore")
 

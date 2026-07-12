@@ -1,10 +1,8 @@
 from typing import Protocol
 
-from app.catalogue.domain import ProviderId
-from app.playback.domain import PlaybackSource, ResolvedPlaybackSource
+from app.catalogue.domain import SourceIdentity
+from app.playback.domain import ResolvedPlaybackSource
 
 
-class PlaybackResolver(Protocol):
-    provider: ProviderId
-
-    async def resolve(self, source: PlaybackSource) -> ResolvedPlaybackSource: ...
+class PlaybackGateway(Protocol):
+    async def resolve(self, source: SourceIdentity) -> ResolvedPlaybackSource: ...

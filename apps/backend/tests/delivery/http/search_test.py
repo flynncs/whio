@@ -25,8 +25,8 @@ class SearchRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_search_route_can_override_configured_service(self) -> None:
         test_app = FastAPI()
         test_app.include_router(search_router)
-        test_app.dependency_overrides[get_search_catalogue] = (
-            lambda: FakeSearchCatalogue()
+        test_app.dependency_overrides[get_search_catalogue] = lambda: (
+            FakeSearchCatalogue()
         )
 
         transport = httpx.ASGITransport(app=test_app)

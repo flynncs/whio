@@ -3,14 +3,13 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from app.catalogue.domain import ProviderId
-from app.errors import ResolverProviderMismatchError
-from app.playback.domain import PlaybackSource
-from app.providers.youtube.playback import YouTubePlaybackResolver
+from app.catalogue.domain import ProviderId, SourceIdentity
+from app.errors import PlaybackProviderMismatchError
+from app.integrations.youtube_music.playback import YouTubeMusicPlayback
 
 
-class YouTubeResolverTests(unittest.IsolatedAsyncioTestCase):
-    @patch("app.providers.youtube.playback.subprocess.run")
+class YouTubeMusicPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    @patch("app.integrations.youtube_music.playback.subprocess.run")
     async def test_resolve_returns_generic_playback_source(self, run) -> None:
         run.return_value = subprocess.CompletedProcess(
             args=["yt-dlp"],
@@ -27,12 +26,11 @@ class YouTubeResolverTests(unittest.IsolatedAsyncioTestCase):
             stderr="",
         )
 
-        source = PlaybackSource(
+        source = SourceIdentity(
             provider=ProviderId.YOUTUBE_MUSIC,
-            source_type="youtube_music",
             external_id="abc123",
         )
-        resolved = await YouTubePlaybackResolver().resolve(source)
+        resolved = await YouTubeMusicPlayback().resolve(source)
 
         self.assertEqual(resolved.provider, ProviderId.YOUTUBE_MUSIC)
         self.assertEqual(resolved.external_id, "abc123")
@@ -47,14 +45,13 @@ class YouTubeResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("https://www.youtube.com/watch?v=abc123", command)
 
     async def test_resolve_rejects_a_different_provider(self) -> None:
-        source = PlaybackSource(
+        source = SourceIdentity(
             provider=ProviderId.MONOCHROME,
-            source_type="monochrome",
             external_id="abc123",
         )
 
-        with self.assertRaises(ResolverProviderMismatchError):
-            await YouTubePlaybackResolver().resolve(source)
+        with self.assertRaises(PlaybackProviderMismatchError):
+            await YouTubeMusicPlayback().resolve(source)
 
 
 if __name__ == "__main__":

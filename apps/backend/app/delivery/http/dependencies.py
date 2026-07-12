@@ -1,28 +1,22 @@
-from typing import Annotated
+from fastapi import Request
 
-from fastapi import Depends, Request
-
-from app.bootstrap.application import Application
 from app.catalogue.application import SearchCatalogue
-from app.providers.gateway import ProviderPlaybackGateway
+from app.playback.application import ResolveTrackPlayback
 
 
-def get_application(request: Request) -> Application:
+def get_search_catalogue(request: Request) -> SearchCatalogue:
     application = getattr(request.app.state, "application", None)
-
-    if not isinstance(application, Application):
+    service = getattr(application, "search_catalogue", None)
+    if not isinstance(service, SearchCatalogue):
         raise RuntimeError("Application is not configured")
 
-    return application
+    return service
 
 
-def get_search_catalogue(
-    application: Annotated[Application, Depends(get_application)],
-) -> SearchCatalogue:
-    return application.search_catalogue
+def get_resolve_track_playback(request: Request) -> ResolveTrackPlayback:
+    application = getattr(request.app.state, "application", None)
+    use_case = getattr(application, "resolve_track_playback", None)
+    if not isinstance(use_case, ResolveTrackPlayback):
+        raise RuntimeError("Application is not configured")
 
-
-def get_playback_gateway(
-    application: Annotated[Application, Depends(get_application)],
-) -> ProviderPlaybackGateway:
-    return application.playback_gateway
+    return use_case

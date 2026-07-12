@@ -1,10 +1,10 @@
-from app.errors.base import LumenError
 from app.catalogue.domain import ProviderId
+from app.errors.base import LumenError
 
 
-class ResolverProviderMismatchError(LumenError):
-    code = "resolver_provider_mismatch"
-    public_message = "Playback resolver configuration error"
+class PlaybackProviderMismatchError(LumenError):
+    code = "playback_provider_mismatch"
+    public_message = "Playback provider configuration error"
 
     def __init__(self, expected: ProviderId, actual: ProviderId) -> None:
         super().__init__(
@@ -13,3 +13,8 @@ class ResolverProviderMismatchError(LumenError):
                 "actual_provider": actual.value,
             }
         )
+
+
+class NoPlayableSourceError(LumenError):
+    code = "no_playable_source"
+    public_message = "No playable source found for the track"
