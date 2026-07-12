@@ -3,14 +3,14 @@ from uuid import UUID
 from app.errors.base import LumenError
 
 
-class RecordingNotFoundError(LumenError):
-    code = "recording_not_found"
-    public_message = "Recording not found"
+class TrackNotFoundError(LumenError):
+    code = "track_not_found"
+    public_message = "Track not found"
 
-    def __init__(self, recording_id: UUID) -> None:
-        super().__init__(context={"recording_id": str(recording_id)})
+    def __init__(self, track_id: UUID) -> None:
+        super().__init__(context={"track_id": str(track_id)})
 
 
 class SourceConflictError(LumenError):
     code = "source_conflict"
-    public_message = "Source is already attached to another recording"
+    public_message = "Source is already attached to another track"

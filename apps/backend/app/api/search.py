@@ -18,16 +18,16 @@ search_service = SearchService(
 
 @router.get("", response_model=SearchResponse)
 def search(params: Annotated[SearchQuery, Query()]) -> SearchResponse:
-    recordings = search_service.search(query=params.query, limit=params.limit)
+    tracks = search_service.search(query=params.query, limit=params.limit)
 
     return SearchResponse(
         results=[
             SearchResult(
-                id=recording.id,
-                title=recording.title,
-                artists=list(recording.artists),
-                duration_seconds=recording.duration_seconds,
+                id=track.id,
+                title=track.title,
+                artists=list(track.artists),
+                duration_seconds=track.duration_seconds,
             )
-            for recording in recordings
+            for track in tracks
         ]
     )

@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from app.domain.catalogue import CatalogueSearchResult, Recording
+from app.domain.catalogue import CatalogueSearchResult, Track
 from app.domain.catalogue_repository import CatalogueRepository
 
 
@@ -19,12 +19,12 @@ class SearchService:
         self._repository = repository
         self._providers = providers
 
-    def search(self, query: str, limit: int) -> list[Recording]:
-        recordings: list[Recording] = []
+    def search(self, query: str, limit: int) -> list[Track]:
+        tracks: list[Track] = []
 
         for provider in self._providers:
             candidates = provider.search(query, limit)
             for candidate in candidates:
-                recordings.append(self._repository.import_candidate(candidate))
+                tracks.append(self._repository.import_candidate(candidate))
 
-        return recordings
+        return tracks

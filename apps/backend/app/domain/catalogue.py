@@ -7,12 +7,12 @@ class CatalogueSearchResult:
     provider: str
     external_id: str
     title: str
-    artists: list[str]
+    artists: tuple[str, ...]
     duration_seconds: int | None = None
 
 
 @dataclass(frozen=True)
-class Recording:
+class Track:
     id: UUID
     title: str
     artists: tuple[str, ...]
@@ -25,9 +25,3 @@ class SourceIdentity:
     provider: str
     external_id: str
     upstream_server_id: UUID | None = None
-
-
-@dataclass(frozen=True)
-class SourceReference:
-    recording_id: UUID
-    identity: SourceIdentity

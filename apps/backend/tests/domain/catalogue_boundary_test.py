@@ -3,7 +3,7 @@ from uuid import UUID
 
 from app.domain.catalogue import CatalogueSearchResult, SourceIdentity
 from app.domain.catalogue_repository import InMemoryCatalogueRepository
-from app.errors import RecordingNotFoundError, SourceConflictError
+from app.errors import SourceConflictError, TrackNotFoundError
 
 
 class CatalogueRepositoryTests(unittest.TestCase):
@@ -13,7 +13,7 @@ class CatalogueRepositoryTests(unittest.TestCase):
             provider="youtube_music",
             external_id="abc123",
             title="Instant Crush",
-            artists=["Daft Punk"],
+            artists=("Daft Punk",),
             duration_seconds=337,
         )
 
@@ -22,33 +22,32 @@ class CatalogueRepositoryTests(unittest.TestCase):
 
         self.assertEqual(first.id, second.id)
 
-    def test_recording_and_source_can_be_loaded_by_lumen_id(self) -> None:
+    def test_track_and_source_can_be_loaded_by_lumen_id(self) -> None:
         repository = InMemoryCatalogueRepository()
         candidate = CatalogueSearchResult(
             provider="youtube_music",
             external_id="abc123",
             title="Instant Crush",
-            artists=["Daft Punk"],
+            artists=("Daft Punk",),
             duration_seconds=337,
         )
 
         imported = repository.import_candidate(candidate)
 
-        self.assertEqual(repository.get_recording(imported.id), imported)
+        self.assertEqual(repository.get_track(imported.id), imported)
 
         sources = repository.get_sources(imported.id)
 
         self.assertEqual(len(sources), 1)
-        self.assertEqual(sources[0].recording_id, imported.id)
         self.assertEqual(
-            sources[0].identity,
             SourceIdentity(
                 provider=candidate.provider,
                 external_id=candidate.external_id,
             ),
+            sources[0],
         )
 
-    def test_can_attach_an_additional_source_to_a_recording(self) -> None:
+    def test_can_attach_an_additional_source_to_a_track(self) -> None:
         repository = InMemoryCatalogueRepository()
         candidate = CatalogueSearchResult(
             provider="youtube_music",
@@ -68,8 +67,7 @@ class CatalogueRepositoryTests(unittest.TestCase):
 
         sources = repository.get_sources(imported.id)
         self.assertEqual(len(sources), 2)
-        self.assertEqual(sources[1].recording_id, imported.id)
-        self.assertEqual(sources[1].identity, alternate_source)
+        self.assertEqual(sources[1], alternate_source)
 
     def test_attaching_the_same_source_twice_is_idempotent(self) -> None:
         repository = InMemoryCatalogueRepository()
@@ -91,7 +89,7 @@ class CatalogueRepositoryTests(unittest.TestCase):
 
         self.assertEqual(len(repository.get_sources(imported.id)), 2)
 
-    def test_cannot_attach_one_source_to_two_recordings(self) -> None:
+    def test_cannot_attach_one_source_to_two_tracks(self) -> None:
         repository = InMemoryCatalogueRepository()
         first = repository.import_candidate(
             CatalogueSearchResult(
@@ -119,10 +117,10 @@ class CatalogueRepositoryTests(unittest.TestCase):
         with self.assertRaises(SourceConflictError):
             repository.attach_source(second.id, source)
 
-    def test_cannot_attach_source_to_unknown_recording(self) -> None:
+    def test_cannot_attach_source_to_unknown_track(self) -> None:
         repository = InMemoryCatalogueRepository()
 
-        with self.assertRaises(RecordingNotFoundError):
+        with self.assertRaises(TrackNotFoundError):
             repository.attach_source(
                 UUID("00000000-0000-0000-0000-000000000099"),
                 SourceIdentity(

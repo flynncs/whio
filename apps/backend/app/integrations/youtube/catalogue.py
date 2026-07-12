@@ -26,7 +26,7 @@ def normalize_song_result(result: Mapping[str, Any]) -> CatalogueSearchResult:
         provider="youtube_music",
         external_id=result["videoId"],
         title=result["title"],
-        artists=[artist["name"] for artist in result.get("artists", [])],
+        artists=tuple(artist["name"] for artist in result.get("artists", [])),
         duration_seconds=parse_duration(result.get("duration")),
     )
 

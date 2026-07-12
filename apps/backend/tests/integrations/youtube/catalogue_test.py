@@ -33,7 +33,7 @@ class YouTubeMusicTests(unittest.TestCase):
         self.assertEqual(result.provider, "youtube_music")
         self.assertEqual(result.external_id, "abc123")
         self.assertEqual(result.title, "Instant Crush")
-        self.assertEqual(result.artists, ["Daft Punk"])
+        self.assertEqual(result.artists, ("Daft Punk",))
         self.assertEqual(result.duration_seconds, 337)
 
     @patch("app.integrations.youtube.catalogue.ytmusic.search")

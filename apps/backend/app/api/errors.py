@@ -8,7 +8,7 @@ from app.errors import LumenError
 logger = logging.getLogger(__name__)
 
 STATUS_BY_ERROR_CODE = {
-    "recording_not_found": 404,
+    "track_not_found": 404,
     "source_conflict": 409,
     "provider_unavailable": 503,
     "search_unavailable": 503,
