@@ -6,6 +6,7 @@ from app.integrations.youtube.catalogue import (
     parse_duration,
     search_songs,
 )
+from app.domain.providers import ProviderName
 
 
 class YouTubeMusicTests(unittest.TestCase):
@@ -30,7 +31,7 @@ class YouTubeMusicTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(result.provider, "youtube_music")
+        self.assertEqual(result.provider, ProviderName.YOUTUBE_MUSIC)
         self.assertEqual(result.external_id, "abc123")
         self.assertEqual(result.title, "Instant Crush")
         self.assertEqual(result.artists, ("Daft Punk",))

@@ -3,6 +3,7 @@ import json
 import subprocess
 
 from app.errors import ResolverProviderMismatchError
+from app.domain.providers import ProviderName
 from app.integrations.youtube.playback.models import YtDlpAudioPayload
 from app.playback.contracts import (
     PlaybackResolver,
@@ -29,7 +30,7 @@ def _resolve_audio(video_id: str) -> ResolvedPlaybackSource:
     payload = YtDlpAudioPayload.model_validate(json.loads(result.stdout))
 
     return ResolvedPlaybackSource(
-        provider="youtube_music",
+        provider=ProviderName.YOUTUBE_MUSIC,
         external_id=video_id,
         url=payload.url,
         headers=payload.http_headers,
@@ -42,7 +43,7 @@ def _resolve_audio(video_id: str) -> ResolvedPlaybackSource:
 class YouTubePlaybackResolver(PlaybackResolver):
     """YouTube implementation of the generic playback resolver strategy."""
 
-    provider = "youtube_music"
+    provider = ProviderName.YOUTUBE_MUSIC
 
     async def resolve(self, source: PlaybackSource) -> ResolvedPlaybackSource:
         if source.provider != self.provider:

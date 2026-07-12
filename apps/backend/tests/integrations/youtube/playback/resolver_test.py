@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from app.errors import ResolverProviderMismatchError
+from app.domain.providers import ProviderName
 from app.integrations.youtube.playback.resolver import YouTubePlaybackResolver
 from app.playback.contracts import PlaybackSource
 
@@ -27,13 +28,13 @@ class YouTubeResolverTests(unittest.IsolatedAsyncioTestCase):
         )
 
         source = PlaybackSource(
-            provider="youtube_music",
+            provider=ProviderName.YOUTUBE_MUSIC,
             source_type="youtube_music",
             external_id="abc123",
         )
         resolved = await YouTubePlaybackResolver().resolve(source)
 
-        self.assertEqual(resolved.provider, "youtube_music")
+        self.assertEqual(resolved.provider, ProviderName.YOUTUBE_MUSIC)
         self.assertEqual(resolved.external_id, "abc123")
         self.assertEqual(resolved.url, "https://example.test/audio")
         self.assertEqual(resolved.headers["User-Agent"], "test")
@@ -47,7 +48,7 @@ class YouTubeResolverTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resolve_rejects_a_different_provider(self) -> None:
         source = PlaybackSource(
-            provider="monochrome",
+            provider=ProviderName.MONOCHROME,
             source_type="monochrome",
             external_id="abc123",
         )

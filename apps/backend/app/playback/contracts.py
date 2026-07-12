@@ -2,12 +2,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from app.domain.providers import ProviderName
+
 
 @dataclass(frozen=True, slots=True)
 class PlaybackSource:
     """A provider-bound candidate that can be resolved for playback."""
 
-    provider: str
+    provider: ProviderName
     source_type: str
     external_id: str
 
@@ -16,7 +18,7 @@ class PlaybackSource:
 class ResolvedPlaybackSource:
     """A short-lived source ready for the generic streaming layer."""
 
-    provider: str
+    provider: ProviderName
     external_id: str
     url: str
     headers: Mapping[str, str]
@@ -28,7 +30,7 @@ class ResolvedPlaybackSource:
 class PlaybackResolver(Protocol):
     """Strategy interface implemented by playback-capable integrations."""
 
-    provider: str
+    provider: ProviderName
 
     async def resolve(self, source: PlaybackSource) -> ResolvedPlaybackSource:
         """Resolve one candidate into a short-lived playable source."""

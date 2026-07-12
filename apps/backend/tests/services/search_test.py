@@ -1,14 +1,15 @@
 import unittest
+from uuid import UUID
 
-from app.domain.catalogue import CatalogueSearchResult, SourceIdentity
-from app.domain.catalogue_repository import InMemoryCatalogueRepository
+from app.domain.catalogue import CatalogueSearchResult, Track
+from app.domain.providers import ProviderName
 from app.services.search import SearchService
 
 
 class FakeCatalogueSearchProvider:
     def __init__(
         self,
-        provider: str,
+        provider: ProviderName,
         candidates: list[CatalogueSearchResult],
     ) -> None:
         self.provider = provider
@@ -20,56 +21,69 @@ class FakeCatalogueSearchProvider:
         return list(self._candidates)
 
 
+class FakeTrackIdentityResolver:
+    def __init__(self) -> None:
+        self.candidates: list[CatalogueSearchResult] = []
+        self._track_ids = {
+            "abc123": UUID("00000000-0000-0000-0000-000000000001"),
+            "song-456": UUID("00000000-0000-0000-0000-000000000002"),
+        }
+
+    def resolve_candidate(self, candidate: CatalogueSearchResult) -> Track:
+        self.candidates.append(candidate)
+        return Track(
+            id=self._track_ids[candidate.external_id],
+            title=candidate.title,
+            artists=candidate.artists,
+            duration_seconds=candidate.duration_seconds,
+        )
+
+
 class SearchServiceTests(unittest.TestCase):
-    def test_search_provisions_tracks_and_attaches_provider_sources(self) -> None:
-        repository = InMemoryCatalogueRepository()
+    def test_delegates_candidates_from_multiple_providers(self) -> None:
+        youtube_candidate = CatalogueSearchResult(
+            provider=ProviderName.YOUTUBE_MUSIC,
+            external_id="abc123",
+            title="Instant Crush",
+            artists=("Daft Punk",),
+            duration_seconds=337,
+        )
+        navidrome_candidate = CatalogueSearchResult(
+            provider=ProviderName.NAVIDROME,
+            external_id="song-456",
+            title="Instant Crush",
+            artists=("Daft Punk",),
+            duration_seconds=337,
+        )
         youtube_provider = FakeCatalogueSearchProvider(
-            provider="youtube_music",
-            candidates=[
-                CatalogueSearchResult(
-                    provider="youtube_music",
-                    external_id="abc123",
-                    title="Instant Crush",
-                    artists=("Daft Punk",),
-                    duration_seconds=337,
-                )
-            ],
+            provider=ProviderName.YOUTUBE_MUSIC,
+            candidates=[youtube_candidate],
         )
         navidrome_provider = FakeCatalogueSearchProvider(
-            provider="navidrome",
-            candidates=[
-                CatalogueSearchResult(
-                    provider="navidrome",
-                    external_id="song-456",
-                    title="Instant Crush",
-                    artists=("Daft Punk",),
-                    duration_seconds=337,
-                )
-            ],
+            provider=ProviderName.NAVIDROME,
+            candidates=[navidrome_candidate],
         )
+        identity_resolver = FakeTrackIdentityResolver()
         service = SearchService(
-            repository=repository,
+            identity_resolver=identity_resolver,
             providers=(youtube_provider, navidrome_provider),
         )
 
-        first_results = service.search("Daft Punk", limit=5)
-        second_results = service.search("Daft Punk", limit=5)
+        tracks = service.search("Daft Punk", limit=5)
 
-        self.assertEqual(len(first_results), 2)
         self.assertEqual(
-            [track.id for track in first_results],
-            [track.id for track in second_results],
+            [candidate for candidate in identity_resolver.candidates],
+            [youtube_candidate, navidrome_candidate],
         )
         self.assertEqual(
-            repository.get_sources(first_results[0].id),
-            (SourceIdentity(provider="youtube_music", external_id="abc123"),),
+            [track.id for track in tracks],
+            [
+                UUID("00000000-0000-0000-0000-000000000001"),
+                UUID("00000000-0000-0000-0000-000000000002"),
+            ],
         )
-        self.assertEqual(
-            repository.get_sources(first_results[1].id),
-            (SourceIdentity(provider="navidrome", external_id="song-456"),),
-        )
-        self.assertEqual(youtube_provider.calls, [("Daft Punk", 5)] * 2)
-        self.assertEqual(navidrome_provider.calls, [("Daft Punk", 5)] * 2)
+        self.assertEqual(youtube_provider.calls, [("Daft Punk", 5)])
+        self.assertEqual(navidrome_provider.calls, [("Daft Punk", 5)])
 
 
 if __name__ == "__main__":

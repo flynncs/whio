@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 
 from app.api.dependencies import get_playback_service
+from app.domain.providers import ProviderName
 from app.playback.contracts import PlaybackSource
 from app.playback.service import PlaybackService
 from app.playback.stream_session import stream_source
@@ -17,7 +18,7 @@ async def stream(
     service: Annotated[PlaybackService, Depends(get_playback_service)],
 ):
     source = PlaybackSource(
-        provider="youtube_music",
+        provider=ProviderName.YOUTUBE_MUSIC,
         source_type="youtube_music",
         external_id=video_id,
     )

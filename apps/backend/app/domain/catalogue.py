@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 from uuid import UUID
 
+from app.domain.providers import ProviderName
+
 
 @dataclass(frozen=True)
 class CatalogueSearchResult:
-    provider: str
+    provider: ProviderName
     external_id: str
     title: str
     artists: tuple[str, ...]
@@ -22,6 +24,6 @@ class Track:
 
 @dataclass(frozen=True)
 class SourceIdentity:
-    provider: str
+    provider: ProviderName
     external_id: str
     upstream_server_id: UUID | None = None

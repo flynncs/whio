@@ -3,6 +3,7 @@ from uuid import UUID
 
 from app.domain.catalogue import SourceIdentity, Track
 from app.domain.catalogue_repository import InMemoryCatalogueRepository
+from app.domain.providers import ProviderName
 from app.errors import SourceConflictError, TrackNotFoundError
 
 
@@ -25,7 +26,7 @@ class CatalogueRepositoryTests(unittest.TestCase):
         repository = InMemoryCatalogueRepository()
         track = self._add_track(repository)
         source = SourceIdentity(
-            provider="youtube_music",
+            provider=ProviderName.YOUTUBE_MUSIC,
             external_id="abc123",
         )
 
@@ -39,11 +40,11 @@ class CatalogueRepositoryTests(unittest.TestCase):
         repository = InMemoryCatalogueRepository()
         track = self._add_track(repository)
         primary_source = SourceIdentity(
-            provider="youtube_music",
+            provider=ProviderName.YOUTUBE_MUSIC,
             external_id="abc123",
         )
         alternate_source = SourceIdentity(
-            provider="navidrome",
+            provider=ProviderName.NAVIDROME,
             external_id="song-456",
             upstream_server_id=UUID("00000000-0000-0000-0000-000000000001"),
         )
@@ -60,7 +61,7 @@ class CatalogueRepositoryTests(unittest.TestCase):
         repository = InMemoryCatalogueRepository()
         track = self._add_track(repository)
         source = SourceIdentity(
-            provider="navidrome",
+            provider=ProviderName.NAVIDROME,
             external_id="song-456",
         )
 
@@ -77,7 +78,7 @@ class CatalogueRepositoryTests(unittest.TestCase):
             track_id="00000000-0000-0000-0000-000000000002",
         )
         source = SourceIdentity(
-            provider="navidrome",
+            provider=ProviderName.NAVIDROME,
             external_id="song-456",
         )
 
@@ -93,7 +94,7 @@ class CatalogueRepositoryTests(unittest.TestCase):
             repository.attach_source(
                 UUID("00000000-0000-0000-0000-000000000099"),
                 SourceIdentity(
-                    provider="navidrome",
+                    provider=ProviderName.NAVIDROME,
                     external_id="song-456",
                 ),
             )

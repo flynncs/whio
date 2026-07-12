@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 
+from app.domain.providers import ProviderName
 from app.playback.contracts import (
     PlaybackResolver,
     PlaybackSource,
@@ -10,7 +11,10 @@ from app.playback.contracts import (
 class PlaybackService:
     """Dispatches playback candidates to the matching resolver strategy."""
 
-    def __init__(self, resolvers: Mapping[str, PlaybackResolver]) -> None:
+    def __init__(
+        self,
+        resolvers: Mapping[ProviderName, PlaybackResolver],
+    ) -> None:
         self._resolvers = dict(resolvers)
 
     async def resolve(self, source: PlaybackSource) -> ResolvedPlaybackSource:

@@ -4,12 +4,13 @@ from typing import Any
 from ytmusicapi import YTMusic
 
 from app.domain.catalogue import CatalogueSearchResult
+from app.domain.providers import ProviderName
 
 ytmusic = YTMusic()
 
 
 class YoutubeMusicCatalogueProvider:
-    provider = "youtube_music"
+    provider = ProviderName.YOUTUBE_MUSIC
 
     def search(self, query: str, limit: int) -> list[CatalogueSearchResult]:
         return search_songs(query, limit)
@@ -23,7 +24,7 @@ def search_songs(query: str, limit: int) -> list[CatalogueSearchResult]:
 
 def normalize_song_result(result: Mapping[str, Any]) -> CatalogueSearchResult:
     return CatalogueSearchResult(
-        provider="youtube_music",
+        provider=ProviderName.YOUTUBE_MUSIC,
         external_id=result["videoId"],
         title=result["title"],
         artists=tuple(artist["name"] for artist in result.get("artists", [])),

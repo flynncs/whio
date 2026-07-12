@@ -1,5 +1,6 @@
 import unittest
 
+from app.domain.providers import ProviderName
 from app.playback.contracts import (
     PlaybackSource,
     ResolvedPlaybackSource,
@@ -8,7 +9,7 @@ from app.playback.service import PlaybackService
 
 
 class FakePlaybackResolver:
-    provider = "fake"
+    provider = ProviderName.YOUTUBE_MUSIC
 
     async def resolve(self, source: PlaybackSource) -> ResolvedPlaybackSource:
         return ResolvedPlaybackSource(
@@ -21,22 +22,24 @@ class FakePlaybackResolver:
 
 class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_dispatches_to_resolver_for_source_provider(self) -> None:
-        service = PlaybackService(resolvers={"fake": FakePlaybackResolver()})
+        service = PlaybackService(
+            resolvers={ProviderName.YOUTUBE_MUSIC: FakePlaybackResolver()}
+        )
         source = PlaybackSource(
-            provider="fake",
+            provider=ProviderName.YOUTUBE_MUSIC,
             source_type="temporary",
             external_id="abc123",
         )
 
         resolved = await service.resolve(source)
 
-        self.assertEqual(resolved.provider, "fake")
+        self.assertEqual(resolved.provider, ProviderName.YOUTUBE_MUSIC)
         self.assertEqual(resolved.external_id, "abc123")
 
     async def test_rejects_unregistered_provider(self) -> None:
         service = PlaybackService(resolvers={})
         source = PlaybackSource(
-            provider="unknown",
+            provider=ProviderName.YOUTUBE_MUSIC,
             source_type="temporary",
             external_id="abc123",
         )
