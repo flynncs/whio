@@ -1,4 +1,5 @@
 import unittest
+from http import HTTPStatus
 from uuid import UUID
 
 import httpx
@@ -8,6 +9,11 @@ from starlette.responses import Response
 from app.delivery.http.errors import lumen_error_handler, unexpected_error_handler
 from app.errors import LumenError, TrackNotFoundError
 from app.main import app as main_app
+
+
+class UnmappedLumenError(LumenError):
+    code = "unmapped_test_error"
+    public_message = "Test error"
 
 
 class ErrorHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -82,6 +88,30 @@ class ErrorHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(
             main_app.exception_handlers[Exception],
             unexpected_error_handler,
+        )
+
+    async def test_lumen_error_defaults_to_internal_server_error(self) -> None:
+        test_app = FastAPI()
+        test_app.add_exception_handler(LumenError, lumen_error_handler)
+
+        @test_app.get("/unmapped")
+        def unmapped() -> None:
+            raise UnmappedLumenError()
+
+        transport = httpx.ASGITransport(app=test_app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/unmapped")
+
+        self.assertEqual(response.status_code, HTTPStatus.INTERNAL_SERVER_ERROR)
+        self.assertEqual(
+            response.json(),
+            {
+                "code": "unmapped_test_error",
+                "message": "Test error",
+            },
         )
 
 

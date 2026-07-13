@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from http import HTTPStatus
 from typing import ClassVar
 
 
@@ -7,6 +8,7 @@ class LumenError(Exception):
 
     code: ClassVar[str] = "lumen_error"
     public_message: ClassVar[str] = "An application error occurred"
+    status_code: ClassVar[HTTPStatus] = HTTPStatus.INTERNAL_SERVER_ERROR
 
     def __init__(
         self,

@@ -1,4 +1,5 @@
 import logging
+from http import HTTPStatus
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -7,18 +8,15 @@ from app.errors import LumenError
 
 logger = logging.getLogger(__name__)
 
-STATUS_BY_ERROR_CODE = {
-    "track_not_found": 404,
-    "source_conflict": 409,
-    "provider_unavailable": 503,
-    "search_unavailable": 503,
-    "playback_provider_mismatch": 500,
-    "no_playable_source": 404,
-}
-
 
 def _request_id(request: Request) -> str | None:
     return getattr(request.state, "request_id", None)
+
+
+def _response_headers(request_id: str | None) -> dict[str, str]:
+    if request_id is None:
+        return {}
+    return {"X-Request-ID": request_id}
 
 
 async def lumen_error_handler(
@@ -38,8 +36,9 @@ async def lumen_error_handler(
         content["request_id"] = request_id
 
     return JSONResponse(
-        status_code=STATUS_BY_ERROR_CODE.get(exception.code, 500),
+        status_code=exception.status_code,
         content=content,
+        headers=_response_headers(request_id),
     )
 
 
@@ -64,4 +63,8 @@ async def unexpected_error_handler(
     if request_id is not None:
         content["request_id"] = request_id
 
-    return JSONResponse(status_code=500, content=content)
+    return JSONResponse(
+        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        content=content,
+        headers=_response_headers(request_id),
+    )
