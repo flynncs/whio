@@ -5,13 +5,17 @@ from starlette.responses import Response
 
 from app.bootstrap.application import build_application
 from app.delivery.http.catalogue_routes import router as catalogue_router
-from app.delivery.http.errors import lumen_error_handler
+from app.delivery.http.errors import (
+    lumen_error_handler,
+    unexpected_error_handler,
+)
 from app.delivery.http.playback_routes import router as playback_router
-from app.errors import LumenError
+from app.errors.base import LumenError
 
 app = FastAPI()
 app.state.application = build_application()
 app.add_exception_handler(LumenError, lumen_error_handler)
+app.add_exception_handler(Exception, unexpected_error_handler)
 
 
 @app.middleware("http")

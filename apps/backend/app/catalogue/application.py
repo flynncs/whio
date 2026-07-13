@@ -1,8 +1,12 @@
+import logging
 from collections.abc import Callable, Sequence
 from uuid import UUID, uuid7
 
 from app.catalogue.domain import CatalogueResult, SourceIdentity, Track
 from app.catalogue.ports import CatalogueGateway, TrackIdentityResolver, TrackRepository
+from app.errors.search import SearchUnavailableError
+
+logger = logging.getLogger(__name__)
 
 
 class TrackIdentityService:
@@ -47,11 +51,26 @@ class SearchCatalogue:
         self._providers = tuple(providers)
 
     def search(self, query: str, limit: int) -> list[Track]:
-        tracks: list[Track] = []
+        tracks_by_id: dict[UUID, Track] = {}
+        successful_providers = 0
 
         for provider in self._providers:
-            candidates = provider.search(query, limit)
-            for candidate in candidates:
-                tracks.append(self._identity_resolver.resolve_candidate(candidate))
+            try:
+                candidates = provider.search(query, limit)
+            except Exception:
+                logger.exception(
+                    "Catalogue provider search failed",
+                    extra={"provider": provider.provider.value},
+                )
+                continue
 
-        return tracks
+            for candidate in candidates:
+                track = self._identity_resolver.resolve_candidate(candidate)
+                tracks_by_id.setdefault(track.id, track)
+
+            successful_providers += 1
+
+        if successful_providers == 0 and self._providers:
+            raise SearchUnavailableError()
+
+        return list(tracks_by_id.values())[:limit]
