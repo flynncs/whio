@@ -2,7 +2,7 @@
 .vscode/
 
 # Local development notes and experiment logs
-docs/
+docs/sessions
 
 # Python virtual environments (including apps/backend/.venv)
 .venv/
