@@ -1,16 +1,9 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from app.errors import (
-    PlaybackResolutionError,
-    ProviderUnavailableError,
-    UnsupportedProviderError,
-)
 from app.generated.resolver_v1 import (
-    ErrorCode,
-    ErrorResponse,
     PlaybackResolveRequest,
     PlaybackResolveResponse,
 )
@@ -31,32 +24,6 @@ def get_playback() -> YouTubeMusicPlayback:
 )
 def resolve_playback(
     body: PlaybackResolveRequest,
-    request: Request,
     playback: Annotated[YouTubeMusicPlayback, Depends(get_playback)],
 ) -> PlaybackResolveResponse | JSONResponse:
-    try:
-        return playback.resolve(body.source)
-    except UnsupportedProviderError:
-        error = ErrorResponse(
-            code=ErrorCode.unsupported_provider,
-            message="The provider is not supported",
-            request_id=request.state.request_id,
-        )
-        return JSONResponse(status_code=422, content=error.model_dump(mode="json"))
-    except PlaybackResolutionError:
-        error = ErrorResponse(
-            code=ErrorCode.resolution_failed,
-            message="Playback could not be resolved",
-            request_id=request.state.request_id,
-        )
-        return JSONResponse(status_code=502, content=error.model_dump(mode="json"))
-    except ProviderUnavailableError:
-        error = ErrorResponse(
-            code=ErrorCode.provider_unavailable,
-            message="The provider is temporarily unavailable",
-            request_id=request.state.request_id,
-        )
-        return JSONResponse(
-            status_code=503,
-            content=error.model_dump(mode="json"),
-        )
+    return playback.resolve(body.source)
