@@ -1,7 +1,20 @@
 from collections.abc import Mapping
 from typing import Any
 
+from ytmusicapi import YTMusic
+
 from app.generated.resolver_v1 import Artist, CatalogueCandidate, SourceIdentity
+
+
+class YouTubeMusicCatalogue:
+    _client: YTMusic
+
+    def __init__(self, client: YTMusic) -> None:
+        self._client = client
+
+    def search(self, query: str, limit: int) -> list[CatalogueCandidate]:
+        results = self._client.search(query, filter="songs", limit=limit)
+        return [normalize_song_result(result) for result in results]
 
 
 def normalize_song_result(result: Mapping[str, Any]) -> CatalogueCandidate:
