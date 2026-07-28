@@ -25,9 +25,8 @@ def get_playback() -> YouTubeMusicPlayback:
 @playback_router.post(
     "/resolve",
     response_model=PlaybackResolveResponse,
-    responses={422: {"model": ErrorResponse}, 502: {"model": ErrorResponse}},
 )
-def get_capabilities(
+def resolve_playback(
     body: PlaybackResolveRequest,
     request: Request,
     playback: Annotated[YouTubeMusicPlayback, Depends(get_playback)],
