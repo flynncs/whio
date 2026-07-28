@@ -15,10 +15,10 @@ async def get_capabilities() -> CapabilitiesResponse:
         contract_version="1",
         providers=[
             ProviderCapabilities(
-                provider_id="youtube_musc",
+                provider_id="youtube_music",
                 capabilities=[
                     CapabilityId("catalogue.search"),
-                    CapabilityId("provider.resolve"),
+                    CapabilityId("playback.resolve"),
                 ],
             )
         ],
