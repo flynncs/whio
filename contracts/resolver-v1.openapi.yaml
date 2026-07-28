@@ -1,0 +1,509 @@
+openapi: 3.1.0
+
+info:
+  title: Whio Resolver API
+  version: 1.0.0
+  description: |
+    Contract between the Whio core and resolver services.
+
+servers:
+  - url: /
+    description: The configured resolver endpoint
+
+security: []
+
+paths:
+  /health/live:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    get:
+      operationId: getLiveness
+      summary: Check whether the resolver process is running
+      responses:
+        "200":
+          description: The resolver process is running
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+
+  /health/ready:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    get:
+      operationId: getReadiness
+      summary: Check whether the resolver can accept requests
+      responses:
+        "200":
+          description: The resolver is ready
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+              example:
+                status: ready
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/capabilities:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    get:
+      operationId: getCapabilities
+      summary: List the providers and capabilities exposed by this resolver
+      responses:
+        "200":
+          description: Resolver capabilities
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitiesResponse"
+              example:
+                contract_version: "1"
+                providers:
+                  - provider_id: example_music
+                    capabilities:
+                      - catalogue.search
+                      - playback.resolve
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/catalogue/search:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: searchCatalogue
+      summary: Search the catalogues exposed by this resolver
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogueSearchRequest"
+            example:
+              query: Instant Crush
+              limit: 5
+      responses:
+        "200":
+          description: Normalized catalogue candidates
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueSearchResponse"
+              example:
+                results:
+                  - source:
+                      provider_id: example_music
+                      external_id: example-source-id
+                    title: Instant Crush
+                    artists:
+                      - Daft Punk
+                    duration_ms: 337000
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/playback/resolve:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: resolvePlayback
+      summary: Resolve one provider source into temporary playable media
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaybackResolveRequest"
+            example:
+              source:
+                provider_id: example_music
+                external_id: example-source-id
+      responses:
+        "200":
+          description: A short-lived playable representation of the source
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaybackResolveResponse"
+              example:
+                url: https://media.example.test/audio
+                headers:
+                  User-Agent: resolver-example
+                expires_at: "2026-07-28T12:00:00Z"
+                media:
+                  content_type: audio/webm
+                  codec: opus
+                  bitrate_kbps: 128.5
+                  duration_ms: 337250
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/SourceNotFound"
+        "422":
+          $ref: "#/components/responses/UnsupportedProvider"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/ResolutionFailed"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+components:
+  parameters:
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: An opaque request identifier to propagate when supplied.
+      schema:
+        $ref: "#/components/schemas/RequestId"
+
+  headers:
+    RequestId:
+      required: true
+      description: The supplied or resolver-generated request identifier.
+      schema:
+        $ref: "#/components/schemas/RequestId"
+
+  responses:
+    BadRequest:
+      description: The request is invalid
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: invalid_request
+            message: The request is invalid
+            request_id: 0198f123-4567-7abc-8def-0123456789ab
+
+    SourceNotFound:
+      description: The source does not exist or is no longer available
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: source_not_found
+            message: The source is unavailable
+            request_id: 0198f123-4567-7abc-8def-0123456789ab
+
+    UnsupportedProvider:
+      description: The resolver does not support the requested provider
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: unsupported_provider
+            message: The provider is not supported
+            request_id: 0198f123-4567-7abc-8def-0123456789ab
+
+    ResolutionFailed:
+      description: The provider could not resolve the source
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: resolution_failed
+            message: Playback could not be resolved
+            request_id: 0198f123-4567-7abc-8def-0123456789ab
+
+    ServiceUnavailable:
+      description: The resolver or its provider is temporarily unavailable
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: provider_unavailable
+            message: The provider is temporarily unavailable
+            request_id: 0198f123-4567-7abc-8def-0123456789ab
+
+    InternalError:
+      description: The resolver encountered an unexpected error
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: internal_error
+            message: An unexpected error occurred
+            request_id: 0198f123-4567-7abc-8def-0123456789ab
+
+  schemas:
+    RequestId:
+      type: string
+      minLength: 1
+      maxLength: 128
+
+    ContractVersion:
+      type: string
+      const: "1"
+
+    ProviderId:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+      examples:
+        - example_music
+
+    CapabilityId:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+      examples:
+        - catalogue.search
+        - playback.resolve
+
+    SourceIdentity:
+      type: object
+      additionalProperties: false
+      required:
+        - provider_id
+        - external_id
+      properties:
+        provider_id:
+          $ref: "#/components/schemas/ProviderId"
+        external_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          const: ok
+
+    ReadyResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          const: ready
+
+    CapabilitiesResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - contract_version
+        - providers
+      properties:
+        contract_version:
+          $ref: "#/components/schemas/ContractVersion"
+        providers:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ProviderCapabilities"
+
+    ProviderCapabilities:
+      type: object
+      additionalProperties: false
+      required:
+        - provider_id
+        - capabilities
+      properties:
+        provider_id:
+          $ref: "#/components/schemas/ProviderId"
+        capabilities:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/CapabilityId"
+
+    CatalogueSearchRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - query
+        - limit
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 500
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 25
+
+    CatalogueSearchResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogueCandidate"
+
+    CatalogueCandidate:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - title
+        - artists
+      properties:
+        source:
+          $ref: "#/components/schemas/SourceIdentity"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        artists:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            minLength: 1
+            maxLength: 500
+        duration_ms:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+
+    PlaybackResolveRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+      properties:
+        source:
+          $ref: "#/components/schemas/SourceIdentity"
+
+    PlaybackResolveResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - url
+        - headers
+        - media
+      properties:
+        url:
+          type: string
+          format: uri
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        expires_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        media:
+          $ref: "#/components/schemas/MediaMetadata"
+
+    MediaMetadata:
+      type: object
+      additionalProperties: false
+      properties:
+        content_type:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        content_length_bytes:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        codec:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        bitrate_kbps:
+          type:
+            - number
+            - "null"
+          exclusiveMinimum: 0
+        duration_ms:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+
+    ErrorCode:
+      type: string
+      enum:
+        - invalid_request
+        - source_not_found
+        - unsupported_provider
+        - resolution_failed
+        - provider_unavailable
+        - internal_error
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+        - request_id
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          minLength: 1
+          maxLength: 500
+        request_id:
+          $ref: "#/components/schemas/RequestId"
