@@ -4,13 +4,14 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from app.api.playback import get_playback
+from app.errors import (
+    PlaybackResolutionError,
+    ProviderUnavailableError,
+    UnsupportedProviderError,
+)
 from app.generated.resolver_v1 import PlaybackResolveResponse
 from app.main import app
-from app.youtube.playback import (
-    PlaybackResolutionError,
-    UnsupportedProviderError,
-    YouTubeMusicPlayback,
-)
+from app.youtube.playback import YouTubeMusicPlayback
 
 
 class PlaybackRoutesTest(unittest.TestCase):
@@ -82,6 +83,12 @@ class PlaybackRoutesTest(unittest.TestCase):
                 502,
                 "resolution_failed",
                 "Playback could not be resolved",
+            ),
+            (
+                ProviderUnavailableError("private provider details"),
+                503,
+                "provider_unavailable",
+                "The provider is temporarily unavailable",
             ),
         ]:
             with self.subTest(code=code):

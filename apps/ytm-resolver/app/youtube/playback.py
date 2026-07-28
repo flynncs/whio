@@ -2,19 +2,16 @@ import subprocess
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field
 
+from app.errors import (
+    PlaybackResolutionError,
+    ProviderUnavailableError,
+    UnsupportedProviderError,
+)
 from app.generated.resolver_v1 import (
     MediaMetadata,
     PlaybackResolveResponse,
     SourceIdentity,
 )
-
-
-class UnsupportedProviderError(Exception):
-    pass
-
-
-class PlaybackResolutionError(Exception):
-    pass
 
 
 class YtDlpAudioPayload(BaseModel):
@@ -74,3 +71,7 @@ class YouTubeMusicPlayback:
             return _resolve_audio(source.external_id)
         except subprocess.CalledProcessError as error:
             raise PlaybackResolutionError("Playback could not be resolved") from error
+        except (subprocess.TimeoutExpired, FileNotFoundError) as error:
+            raise ProviderUnavailableError(
+                "The provider is temporarily unavailable"
+            ) from error

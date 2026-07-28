@@ -3,12 +3,13 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from app.generated.resolver_v1 import SourceIdentity
-from app.youtube.playback import (
+from app.errors import (
     PlaybackResolutionError,
+    ProviderUnavailableError,
     UnsupportedProviderError,
-    YouTubeMusicPlayback,
 )
+from app.generated.resolver_v1 import SourceIdentity
+from app.youtube.playback import YouTubeMusicPlayback
 
 
 class YouTubeMusicPlaybackTest(unittest.TestCase):
@@ -39,6 +40,23 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
                     external_id="abc123",
                 )
             )
+
+    @patch("app.youtube.playback.subprocess.run")
+    def test_resolve_translates_unavailable_yt_dlp(self, run) -> None:
+        for failure in [
+            subprocess.TimeoutExpired(cmd=["yt-dlp"], timeout=30),
+            FileNotFoundError("yt-dlp"),
+        ]:
+            with self.subTest(failure=type(failure).__name__):
+                run.side_effect = failure
+
+                with self.assertRaises(ProviderUnavailableError):
+                    YouTubeMusicPlayback().resolve(
+                        SourceIdentity(
+                            provider_id="youtube_music",
+                            external_id="abc123",
+                        )
+                    )
 
     @patch("app.youtube.playback.subprocess.run")
     def test_resolve_calls_yt_dlp_and_maps_the_contract(self, run) -> None:
