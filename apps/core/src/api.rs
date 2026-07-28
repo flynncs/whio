@@ -1,6 +1,11 @@
 use axum::{
-    extract::Request, http::HeaderValue, middleware::Next, response::Response as AxumResponse,
+    Extension, Json,
+    extract::Request,
+    http::{HeaderValue, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response as AxumResponse},
 };
+use serde::Serialize;
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -29,4 +34,40 @@ pub(crate) async fn request_id(mut request: Request, next: Next) -> AxumResponse
     response.headers_mut().insert("x-request-id", header_val);
 
     response
+}
+
+#[derive(Serialize)]
+struct ApiErrorResponse {
+    code: &'static str,
+    message: &'static str,
+    request_id: String,
+}
+
+pub(crate) enum ApiError {
+    NotFound(RequestId),
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> AxumResponse {
+        match self {
+            ApiError::NotFound(request_id) => {
+                let status = StatusCode::NOT_FOUND;
+                let code = "not_found";
+                let message = "Not found";
+                let request_id = request_id.0;
+
+                let body = ApiErrorResponse {
+                    code,
+                    message,
+                    request_id,
+                };
+
+                (status, Json(body)).into_response()
+            }
+        }
+    }
+}
+
+pub(crate) async fn not_found(Extension(request_id): Extension<RequestId>) -> ApiError {
+    ApiError::NotFound(request_id)
 }

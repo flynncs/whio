@@ -20,5 +20,6 @@ pub fn router() -> Router {
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .fallback(api::not_found)
         .layer(axum::middleware::from_fn(api::request_id))
 }
