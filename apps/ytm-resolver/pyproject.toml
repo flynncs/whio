@@ -1,0 +1,29 @@
+[project]
+name = "ytm-resolver"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi[standard]>=0.140.7",
+]
+
+[dependency-groups]
+dev = [
+    "datamodel-code-generator>=0.71.0",
+]
+
+[tool.datamodel-codegen]
+input = "../../contracts/resolver-v1.openapi.yaml"
+input-file-type = "openapi"
+output = "app/generated/resolver_v1.py"
+output-model-type = "pydantic_v2.BaseModel"
+target-python-version = "3.14"
+use-standard-collections = true
+use-union-operator = true
+use-subclass-enum = true
+strict-nullable = true
+field-constraints = true
+collapse-root-models = true
+disable-timestamp = true
+formatters = ["builtin"]
