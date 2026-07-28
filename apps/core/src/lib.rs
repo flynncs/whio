@@ -1,6 +1,8 @@
 use axum::{Json, Router, routing::get};
 use serde::Serialize;
 
+mod api;
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -18,4 +20,5 @@ pub fn router() -> Router {
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .layer(axum::middleware::from_fn(api::request_id))
 }
