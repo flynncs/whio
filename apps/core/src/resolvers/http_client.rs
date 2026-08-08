@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use thiserror::Error;
 use whio_resolver_api::{
     apis::{
         Error as TransportError, configuration::Configuration, default_api::SearchCatalogueError,
@@ -9,53 +8,10 @@ use whio_resolver_api::{
     models::{CatalogueCandidate as CatalogueCandidateDto, CatalogueSearchRequest},
 };
 
-use crate::catalogue::{CatalogueCandidate, ProviderId, SourceIdentity, ValidationError};
-
-#[derive(Debug, Error)]
-pub enum ResolverError {
-    #[error("resolver request failed")]
-    Request(#[source] reqwest::Error),
-
-    #[error("resolver returned malformed JSON")]
-    MalformedResponse(#[source] Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("resolver transport failed")]
-    Transport(#[source] std::io::Error),
-
-    #[error("search limit must be between 1 and 25")]
-    InvalidLimit,
-
-    #[error("search query must be between 1 and 500 characters")]
-    InvalidQuery,
-
-    #[error("request ID must be between 1 and 128 characters")]
-    InvalidRequestId,
-
-    #[error("resolver returned invalid catalogue data")]
-    InvalidResponse(#[source] ValidationError),
-
-    #[error("resolver rejected the request")]
-    InvalidRequest,
-
-    #[error("resolver provider is unavailable")]
-    ProviderUnavailable,
-
-    #[error("resolver failed internally")]
-    Internal,
-
-    #[error("resolver returned an unexpected HTTP status: {0}")]
-    UnexpectedStatus(reqwest::StatusCode),
-}
-
-#[async_trait]
-pub trait CatalogueResolver: Send + Sync {
-    async fn search(
-        &self,
-        query: &str,
-        limit: u32,
-        request_id: Option<&str>,
-    ) -> Result<Vec<CatalogueCandidate>, ResolverError>;
-}
+use super::errors::ResolverError;
+use crate::catalogue::{
+    CatalogueCandidate, CatalogueResolver, ProviderId, SourceIdentity, ValidationError,
+};
 
 pub struct ResolverClient {
     transport: Configuration,
