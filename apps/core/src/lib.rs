@@ -7,6 +7,7 @@ pub mod request;
 pub mod resolvers;
 pub mod tracks;
 pub use resolvers as resolver;
+pub mod playback;
 
 use crate::catalogue::CatalogueService;
 

@@ -18,6 +18,8 @@ uuid = { version = "1.24.0", features = ["v7"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 async-trait = "0.1"
 whio-resolver-api = { path = "../resolver-client-generated", default-features = false, features = ["rustls"] }
+chrono = "0.4.45"
+url = "2.5"
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

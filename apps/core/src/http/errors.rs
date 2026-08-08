@@ -67,7 +67,7 @@ impl IntoResponse for ApiError {
                         "The catalogue resolver failed",
                     ),
 
-                    CatalogueError::State => (
+                    CatalogueError::Repository(_) => (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "internal_error",
                         "An unexpected error occurred",

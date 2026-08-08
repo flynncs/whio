@@ -6,7 +6,7 @@ use crate::{
     catalogue::{CatalogueResolver, CatalogueSearch},
     request::RequestContext,
     resolvers::ResolverError,
-    tracks::{Track, TrackRepository},
+    tracks::{Track, TrackRepository, TrackRepositoryError},
 };
 
 #[derive(Debug, Error)]
@@ -14,8 +14,8 @@ pub enum CatalogueError {
     #[error("catalogue resolver failed")]
     Resolver(#[source] ResolverError),
 
-    #[error("catalogue state is unavailable")]
-    State,
+    #[error("track repository failed")]
+    Repository(#[source] TrackRepositoryError),
 }
 
 pub struct CatalogueService {
@@ -52,7 +52,7 @@ impl CatalogueService {
                 let track_id = self
                     .track_repository
                     .get_or_create_id(source)
-                    .map_err(|_| CatalogueError::State)?;
+                    .map_err(CatalogueError::Repository)?;
 
                 Ok(Track::new(track_id, metadata))
             })
@@ -77,6 +77,24 @@ mod tests {
 
     struct StubResolver {
         responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ResolverError>>>,
+    }
+
+    struct FailingTrackRepository;
+
+    impl TrackRepository for FailingTrackRepository {
+        fn get_or_create_id(
+            &self,
+            _source: SourceIdentity,
+        ) -> Result<crate::tracks::TrackId, TrackRepositoryError> {
+            Err(TrackRepositoryError::Unavailable)
+        }
+
+        fn find_source(
+            &self,
+            _track_id: &crate::tracks::TrackId,
+        ) -> Result<Option<SourceIdentity>, TrackRepositoryError> {
+            Err(TrackRepositoryError::Unavailable)
+        }
     }
 
     impl StubResolver {
@@ -158,6 +176,21 @@ mod tests {
         assert!(matches!(
             result,
             Err(CatalogueError::Resolver(ResolverError::ProviderUnavailable))
+        ));
+    }
+
+    #[tokio::test]
+    async fn search_preserves_repository_errors() {
+        let resolver = StubResolver::new(vec![Ok(vec![candidate("source-a", "Title")])]);
+        let service = CatalogueService::new(Arc::new(resolver), Arc::new(FailingTrackRepository));
+
+        let result = service.search(&search(), &context()).await;
+
+        assert!(matches!(
+            result,
+            Err(CatalogueError::Repository(
+                TrackRepositoryError::Unavailable
+            ))
         ));
     }
 }
