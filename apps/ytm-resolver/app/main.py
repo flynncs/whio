@@ -5,6 +5,7 @@ from app.api import capabilities, catalogue, health, playback
 from app.api.errors import (
     request_validation_exception_handler,
     resolver_exception_handler,
+    unexpected_exception_handler,
 )
 from app.api.request_ids import attach_request_id
 from app.errors import ResolverError
@@ -12,7 +13,14 @@ from app.errors import ResolverError
 app = FastAPI()
 
 app.add_exception_handler(ResolverError, resolver_exception_handler)
-app.add_exception_handler(RequestValidationError, request_validation_exception_handler)
+app.add_exception_handler(
+    RequestValidationError,
+    request_validation_exception_handler,
+)
+app.add_exception_handler(
+    Exception,
+    unexpected_exception_handler,
+)
 
 app.include_router(health.health_router)
 app.include_router(capabilities.capability_router)

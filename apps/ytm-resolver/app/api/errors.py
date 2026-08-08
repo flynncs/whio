@@ -68,3 +68,21 @@ async def request_validation_exception_handler(
     )
 
     return JSONResponse(status_code=400, content=error.model_dump(mode="json"))
+
+
+async def unexpected_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    request_id = request.state.request_id
+
+    error = ErrorResponse(
+        code=ErrorCode.internal_error,
+        message="An unexpected error occurred",
+        request_id=request_id,
+    )
+
+    return JSONResponse(
+        status_code=500,
+        content=error.model_dump(mode="json"),
+        headers={"X-Request-ID": request_id},
+    )
