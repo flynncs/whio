@@ -7,7 +7,6 @@ from ytmusicapi.exceptions import YTMusicServerError
 from app.errors import ProviderUnavailableError
 from app.youtube.catalogue import (
     YouTubeMusicCatalogue,
-    normalize_song_result,
     parse_duration_ms,
 )
 
@@ -41,7 +40,18 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
         client.search.assert_called_once_with(
             "Daft Punk", filter="songs", limit=5
         )
-        self.assertEqual(results[0].source.external_id, "abc123")
+        self.assertEqual(
+            results[0].model_dump(mode="json"),
+            {
+                "source": {
+                    "provider_id": "youtube_music",
+                    "external_id": "abc123",
+                },
+                "title": "Instant Crush",
+                "artists": ["Daft Punk"],
+                "duration_ms": 337000,
+            },
+        )
 
     def test_parse_duration_returns_milliseconds(self) -> None:
         for value, expected in [
@@ -55,26 +65,3 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
         for value in [None, "", "unknown"]:
             with self.subTest(value=value):
                 self.assertIsNone(parse_duration_ms(value))
-
-    def test_normalize_song_result_maps_the_resolver_contract(self) -> None:
-        result = normalize_song_result(
-            {
-                "videoId": "abc123",
-                "title": "Instant Crush",
-                "artists": [{"name": "Daft Punk"}],
-                "duration": "5:37",
-            }
-        )
-
-        self.assertEqual(
-            result.model_dump(mode="json"),
-            {
-                "source": {
-                    "provider_id": "youtube_music",
-                    "external_id": "abc123",
-                },
-                "title": "Instant Crush",
-                "artists": ["Daft Punk"],
-                "duration_ms": 337000,
-            },
-        )

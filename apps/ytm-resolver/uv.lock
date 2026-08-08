@@ -983,7 +983,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "datamodel-code-generator" },
-    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -995,10 +994,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "datamodel-code-generator", specifier = ">=0.71.0" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-]
+dev = [{ name = "datamodel-code-generator", specifier = ">=0.71.0" }]
 
 [[package]]
 name = "ytmusicapi"

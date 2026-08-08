@@ -11,14 +11,19 @@ contracts/          cross-service contracts
 
 the python app stays in place until the rust core proves the same behaviour.
 
-## Generated resolver DTOs
+## resolver api generation
 
-The Rust resolver wire models are generated from the OpenAPI contract. After installing
-OpenAPI Generator, regenerate them with:
+the openapi contract generates the python models and rust client.
 
 ```sh
-./tools/generate-resolver-dto.sh
+./tools/generate-resolver-contract.sh
 ```
 
-Do not edit files under `apps/core/src/resolver/generated/` by hand. Keep domain types,
-the resolver client, and mappings in handwritten Rust code.
+check for drift with:
+
+```sh
+./tools/generate-resolver-contract.sh --check
+```
+
+don't edit `apps/resolver-client-generated/` or
+`apps/ytm-resolver/app/generated/resolver_v1.py` by hand.

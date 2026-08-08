@@ -139,13 +139,13 @@ async fn unavailable_resolver_becomes_provider_unavailable() {
 }
 
 #[tokio::test]
-async fn malformed_success_response_becomes_request_error() {
+async fn malformed_success_response_becomes_malformed_response_error() {
     let router = Router::new().route("/v1/catalogue/search", post(malformed_response));
     let (base_url, server) = spawn_server(router).await;
     let result = client(base_url).search("query", 1, None).await;
     stop_server(server).await;
 
-    assert!(matches!(result, Err(ResolverError::Request(_))));
+    assert!(matches!(result, Err(ResolverError::MalformedResponse(_))));
 }
 
 #[tokio::test]
@@ -169,4 +169,21 @@ async fn invalid_limit_is_rejected_before_request() {
     let result = client(base_url).search("query", 0, None).await;
 
     assert!(matches!(result, Err(ResolverError::InvalidLimit)));
+}
+
+#[tokio::test]
+async fn invalid_query_is_rejected_before_request() {
+    let base_url = "http://127.0.0.1:1/".parse().unwrap();
+    let result = client(base_url).search("", 1, None).await;
+
+    assert!(matches!(result, Err(ResolverError::InvalidQuery)));
+}
+
+#[tokio::test]
+async fn invalid_request_id_is_rejected_before_request() {
+    let base_url = "http://127.0.0.1:1/".parse().unwrap();
+    let request_id = "x".repeat(129);
+    let result = client(base_url).search("query", 1, Some(&request_id)).await;
+
+    assert!(matches!(result, Err(ResolverError::InvalidRequestId)));
 }

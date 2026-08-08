@@ -2,28 +2,34 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use thiserror::Error;
-
-use crate::{
-    catalogue::{CatalogueCandidate, ProviderId, SourceIdentity, ValidationError},
-    resolver::generated::{
-        CatalogueCandidate as CatalogueCandidateDto, CatalogueSearchRequest,
-        CatalogueSearchResponse,
+use whio_resolver_api::{
+    apis::{
+        Error as TransportError, configuration::Configuration, default_api::SearchCatalogueError,
     },
+    models::{CatalogueCandidate as CatalogueCandidateDto, CatalogueSearchRequest},
 };
 
-#[allow(dead_code)]
-mod generated;
+use crate::catalogue::{CatalogueCandidate, ProviderId, SourceIdentity, ValidationError};
 
 #[derive(Debug, Error)]
 pub enum ResolverError {
     #[error("resolver request failed")]
     Request(#[source] reqwest::Error),
 
-    #[error("resolver URL is invalid")]
-    InvalidUrl,
+    #[error("resolver returned malformed JSON")]
+    MalformedResponse(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("resolver transport failed")]
+    Transport(#[source] std::io::Error),
 
     #[error("search limit must be between 1 and 25")]
     InvalidLimit,
+
+    #[error("search query must be between 1 and 500 characters")]
+    InvalidQuery,
+
+    #[error("request ID must be between 1 and 128 characters")]
+    InvalidRequestId,
 
     #[error("resolver returned invalid catalogue data")]
     InvalidResponse(#[source] ValidationError),
@@ -52,8 +58,7 @@ pub trait CatalogueResolver: Send + Sync {
 }
 
 pub struct ResolverClient {
-    http: reqwest::Client,
-    base_url: reqwest::Url,
+    transport: Configuration,
 }
 
 impl ResolverClient {
@@ -68,7 +73,13 @@ impl ResolverClient {
             .build()
             .map_err(ResolverError::Request)?;
 
-        Ok(Self { http, base_url })
+        Ok(Self {
+            transport: Configuration {
+                base_path: base_url.as_str().trim_end_matches('/').to_owned(),
+                client: http,
+                ..Configuration::default()
+            },
+        })
     }
 }
 
@@ -80,48 +91,53 @@ impl CatalogueResolver for ResolverClient {
         limit: u32,
         request_id: Option<&str>,
     ) -> Result<Vec<CatalogueCandidate>, ResolverError> {
+        if !(1..=500).contains(&query.chars().count()) {
+            return Err(ResolverError::InvalidQuery);
+        }
+
         if !(1..=25).contains(&limit) {
             return Err(ResolverError::InvalidLimit);
         }
 
-        let url = self
-            .base_url
-            .join("v1/catalogue/search")
-            .map_err(|_| ResolverError::InvalidUrl)?;
+        if request_id.is_some_and(|value| !(1..=128).contains(&value.chars().count())) {
+            return Err(ResolverError::InvalidRequestId);
+        }
 
         let body = CatalogueSearchRequest {
             query: query.to_owned(),
             limit: limit as i32,
         };
 
-        let mut request = self.http.post(url).json(&body);
-
-        if let Some(request_id) = request_id {
-            request = request.header("X-Request-ID", request_id);
-        }
-
-        let response = request.send().await.map_err(ResolverError::Request)?;
-
-        let status = response.status();
-
-        if !status.is_success() {
-            return Err(match status {
-                reqwest::StatusCode::BAD_REQUEST => ResolverError::InvalidRequest,
-                reqwest::StatusCode::SERVICE_UNAVAILABLE => ResolverError::ProviderUnavailable,
-                _ => ResolverError::UnexpectedStatus(status),
-            });
-        }
-
-        let response_dto = response
-            .json::<CatalogueSearchResponse>()
-            .await
-            .map_err(ResolverError::Request)?;
+        let response_dto = whio_resolver_api::apis::default_api::search_catalogue(
+            &self.transport,
+            body,
+            request_id,
+        )
+        .await
+        .map_err(map_search_error)?;
 
         response_dto
             .results
             .into_iter()
             .map(map_candidate)
             .collect()
+    }
+}
+
+fn map_search_error(error: TransportError<SearchCatalogueError>) -> ResolverError {
+    match error {
+        TransportError::Reqwest(error) => ResolverError::Request(error),
+        TransportError::Serde(error) => ResolverError::MalformedResponse(Box::new(error)),
+        TransportError::SerdePathToError(error) => {
+            ResolverError::MalformedResponse(Box::new(error))
+        }
+        TransportError::Io(error) => ResolverError::Transport(error),
+        TransportError::ResponseError(response) => match response.status {
+            reqwest::StatusCode::BAD_REQUEST => ResolverError::InvalidRequest,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR => ResolverError::Internal,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE => ResolverError::ProviderUnavailable,
+            status => ResolverError::UnexpectedStatus(status),
+        },
     }
 }
 

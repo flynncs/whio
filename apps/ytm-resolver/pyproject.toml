@@ -14,7 +14,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "datamodel-code-generator>=0.71.0",
-    "pyyaml>=6.0.3",
 ]
 
 [tool.datamodel-codegen]
