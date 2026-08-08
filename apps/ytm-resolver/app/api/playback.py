@@ -1,7 +1,6 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
 
 from app.generated.resolver_v1 import (
     PlaybackResolveRequest,
@@ -25,5 +24,5 @@ def get_playback() -> YouTubeMusicPlayback:
 def resolve_playback(
     body: PlaybackResolveRequest,
     playback: Annotated[YouTubeMusicPlayback, Depends(get_playback)],
-) -> PlaybackResolveResponse | JSONResponse:
+) -> PlaybackResolveResponse:
     return playback.resolve(body.source)

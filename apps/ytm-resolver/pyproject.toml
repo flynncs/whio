@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "fastapi[standard]>=0.140.7",
+    "requests>=2.34.2",
     "yt-dlp>=2026.7.4",
     "ytmusicapi>=1.12.1",
 ]

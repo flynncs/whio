@@ -1,8 +1,11 @@
 from collections.abc import Mapping
 from typing import Any
 
+from requests.exceptions import RequestException
 from ytmusicapi import YTMusic
+from ytmusicapi.exceptions import YTMusicServerError
 
+from app.errors import ProviderUnavailableError
 from app.generated.resolver_v1 import Artist, CatalogueCandidate, SourceIdentity
 
 
@@ -13,7 +16,12 @@ class YouTubeMusicCatalogue:
         self._client = client
 
     def search(self, query: str, limit: int) -> list[CatalogueCandidate]:
-        results = self._client.search(query, filter="songs", limit=limit)
+        try:
+            results = self._client.search(query, filter="songs", limit=limit)
+        except (YTMusicServerError, RequestException) as error:
+            raise ProviderUnavailableError(
+                "The provider is temporarily unavailable"
+            ) from error
         return [normalize_song_result(result) for result in results]
 
 
