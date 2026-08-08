@@ -3,6 +3,8 @@ use serde::Serialize;
 
 mod api;
 
+pub mod catalogue;
+
 #[derive(Serialize)]
 struct HealthResponse {
     status: &'static str,
