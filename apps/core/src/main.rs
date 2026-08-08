@@ -8,6 +8,7 @@ use config::Config;
 use whio_core::{
     AppState,
     catalogue::CatalogueService,
+    playback::PlaybackService,
     resolver::ResolverClient,
     tracks::{InMemoryTrackRepository, TrackRepository},
 };
@@ -52,13 +53,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let track_repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
 
-    let resolver = ResolverClient::new(
+    let resolver = Arc::new(ResolverClient::new(
         config.resolver_url,
         config.resolver_connect_timeout,
         config.resolver_total_timeout,
-    )?;
-    let catalogue = Arc::new(CatalogueService::new(Arc::new(resolver), track_repository));
-    let state = AppState::new(catalogue);
+    )?);
+
+    let catalogue = Arc::new(CatalogueService::new(
+        resolver.clone(),
+        track_repository.clone(),
+    ));
+    let playback = Arc::new(PlaybackService::new(
+        resolver.clone(),
+        track_repository.clone(),
+    ));
+
+    let state = AppState::new(catalogue, playback);
 
     axum::serve(listener, whio_core::router(state))
         .with_graceful_shutdown(shutdown_signal())

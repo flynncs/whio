@@ -14,9 +14,10 @@ use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 use whio_core::{
     catalogue::{CatalogueSearch, SearchLimit, SearchQuery},
+    playback::{PlaybackResolver, ValidationError as PlaybackValidationError},
     request::{RequestContext, RequestId},
     resolver::{CatalogueResolver, ResolverClient, ResolverError},
-    tracks::ValidationError,
+    tracks::{ProviderId, SourceIdentity, ValidationError as TrackValidationError},
 };
 
 #[derive(Debug)]
@@ -54,6 +55,14 @@ fn search(query: &str, limit: u32) -> CatalogueSearch {
 
 fn context() -> RequestContext {
     RequestContext::new(RequestId::new("request-123".to_owned()).unwrap())
+}
+
+fn source() -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        "source-123".to_owned(),
+    )
+    .unwrap()
 }
 
 async fn successful_search(
@@ -111,6 +120,61 @@ async fn negative_duration() -> impl IntoResponse {
             }]
         })),
     )
+}
+
+async fn successful_playback(
+    State(captured): State<Arc<Mutex<Option<CapturedRequest>>>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+
+    *captured.lock().unwrap() = Some(CapturedRequest { body, request_id });
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "url": "https://media.example.test/audio",
+            "headers": {"User-Agent": "whio-test"},
+            "expires_at": "2026-08-08T12:00:00+12:00",
+            "media": {
+                "content_type": "audio/webm",
+                "content_length_bytes": 1024,
+                "codec": "opus",
+                "bitrate_kbps": 128.5,
+                "duration_ms": 337250
+            }
+        })),
+    )
+}
+
+async fn negative_playback_duration() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "url": "https://media.example.test/audio",
+            "headers": {},
+            "media": {"duration_ms": -1}
+        })),
+    )
+}
+
+async fn playback_status(State(status): State<StatusCode>) -> StatusCode {
+    status
+}
+
+async fn resolve_playback_error(status: StatusCode) -> ResolverError {
+    let router = Router::new()
+        .route("/v1/playback/resolve", post(playback_status))
+        .with_state(status);
+    let (base_url, server) = spawn_server(router).await;
+    let result = client(base_url).resolve(&source(), &context()).await;
+    stop_server(server).await;
+
+    result.unwrap_err()
 }
 
 #[tokio::test]
@@ -176,7 +240,75 @@ async fn invalid_candidate_data_becomes_validation_error() {
     assert!(matches!(
         result,
         Err(ResolverError::InvalidResponse(
-            ValidationError::InvalidDuration
+            TrackValidationError::InvalidDuration
         ))
+    ));
+}
+
+#[tokio::test]
+async fn playback_serializes_maps_and_forwards_request_id() {
+    let captured = Arc::new(Mutex::new(None));
+    let router = Router::new()
+        .route("/v1/playback/resolve", post(successful_playback))
+        .with_state(captured.clone());
+    let (base_url, server) = spawn_server(router).await;
+    let result = client(base_url).resolve(&source(), &context()).await;
+    stop_server(server).await;
+
+    let playback = result.unwrap();
+    let (url, headers, expires_at, metadata) = playback.into_parts();
+    assert_eq!(url.as_url().as_str(), "https://media.example.test/audio");
+    assert_eq!(headers["User-Agent"], "whio-test");
+    assert_eq!(
+        expires_at.unwrap().to_rfc3339(),
+        "2026-08-08T00:00:00+00:00"
+    );
+    assert_eq!(metadata.duration_ms(), Some(337_250));
+
+    let captured = captured.lock().unwrap().take().unwrap();
+    assert_eq!(
+        captured.body,
+        json!({
+            "source": {
+                "provider_id": "youtube_music",
+                "external_id": "source-123"
+            }
+        })
+    );
+    assert_eq!(captured.request_id.as_deref(), Some("request-123"));
+}
+
+#[tokio::test]
+async fn invalid_playback_data_becomes_validation_error() {
+    let router = Router::new().route("/v1/playback/resolve", post(negative_playback_duration));
+    let (base_url, server) = spawn_server(router).await;
+    let result = client(base_url).resolve(&source(), &context()).await;
+    stop_server(server).await;
+
+    assert!(matches!(
+        result,
+        Err(ResolverError::InvalidPlaybackResponse(
+            PlaybackValidationError::InvalidDuration
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn playback_statuses_preserve_upstream_meaning() {
+    assert!(matches!(
+        resolve_playback_error(StatusCode::NOT_FOUND).await,
+        ResolverError::SourceNotFound
+    ));
+    assert!(matches!(
+        resolve_playback_error(StatusCode::UNPROCESSABLE_ENTITY).await,
+        ResolverError::UnsupportedProvider
+    ));
+    assert!(matches!(
+        resolve_playback_error(StatusCode::BAD_GATEWAY).await,
+        ResolverError::ResolutionFailed
+    ));
+    assert!(matches!(
+        resolve_playback_error(StatusCode::SERVICE_UNAVAILABLE).await,
+        ResolverError::ProviderUnavailable
     ));
 }

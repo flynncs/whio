@@ -14,6 +14,9 @@ pub enum ResolverError {
     #[error("resolver returned invalid catalogue data")]
     InvalidResponse(#[source] crate::tracks::ValidationError),
 
+    #[error("resolver returned invalid playback data")]
+    InvalidPlaybackResponse(#[source] crate::playback::ValidationError),
+
     #[error("resolver rejected the request")]
     InvalidRequest,
 
@@ -25,4 +28,13 @@ pub enum ResolverError {
 
     #[error("resolver returned an unexpected HTTP status: {0}")]
     UnexpectedStatus(reqwest::StatusCode),
+
+    #[error("resolver source was not found")]
+    SourceNotFound,
+
+    #[error("resolver does not support the provider")]
+    UnsupportedProvider,
+
+    #[error("resolver could not resolve playback")]
+    ResolutionFailed,
 }

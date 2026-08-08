@@ -1,17 +1,22 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use whio_resolver_api::{
-    apis::{
-        Error as TransportError, configuration::Configuration, default_api::SearchCatalogueError,
-    },
-    models::CatalogueSearchRequest,
-};
+use reqwest::StatusCode;
 
 use super::errors::ResolverError;
 use crate::{
     catalogue::{CatalogueCandidate, CatalogueResolver, CatalogueSearch},
+    playback::{PlayableMedia, PlaybackResolver},
     request::RequestContext,
+    tracks::SourceIdentity,
+};
+use whio_resolver_api::{
+    apis::{
+        Error as TransportError,
+        configuration::Configuration,
+        default_api::{ResolvePlaybackError, SearchCatalogueError},
+    },
+    models::{CatalogueSearchRequest, PlaybackResolveRequest, SourceIdentity as SourceIdentityDto},
 };
 
 pub struct ResolverClient {
@@ -68,6 +73,34 @@ impl CatalogueResolver for ResolverClient {
     }
 }
 
+#[async_trait]
+impl PlaybackResolver for ResolverClient {
+    async fn resolve(
+        &self,
+        source: &SourceIdentity,
+        context: &RequestContext,
+    ) -> Result<PlayableMedia, ResolverError> {
+        let source = SourceIdentityDto::new(
+            source.provider_id().as_str().to_owned(),
+            source.external_id().to_owned(),
+        );
+
+        let body = PlaybackResolveRequest::new(source);
+
+        let response = whio_resolver_api::apis::default_api::resolve_playback(
+            &self.transport,
+            body,
+            Some(context.request_id().as_str()),
+        )
+        .await
+        .map_err(map_playback_error)?;
+
+        response
+            .try_into()
+            .map_err(ResolverError::InvalidPlaybackResponse)
+    }
+}
+
 fn map_search_error(error: TransportError<SearchCatalogueError>) -> ResolverError {
     match error {
         TransportError::Reqwest(error) => ResolverError::Request(error),
@@ -80,6 +113,27 @@ fn map_search_error(error: TransportError<SearchCatalogueError>) -> ResolverErro
             reqwest::StatusCode::BAD_REQUEST => ResolverError::InvalidRequest,
             reqwest::StatusCode::INTERNAL_SERVER_ERROR => ResolverError::Internal,
             reqwest::StatusCode::SERVICE_UNAVAILABLE => ResolverError::ProviderUnavailable,
+            status => ResolverError::UnexpectedStatus(status),
+        },
+    }
+}
+
+fn map_playback_error(error: TransportError<ResolvePlaybackError>) -> ResolverError {
+    match error {
+        TransportError::Reqwest(error) => ResolverError::Request(error),
+        TransportError::Serde(error) => ResolverError::MalformedResponse(Box::new(error)),
+        TransportError::SerdePathToError(error) => {
+            ResolverError::MalformedResponse(Box::new(error))
+        }
+        TransportError::Io(error) => ResolverError::Transport(error),
+
+        TransportError::ResponseError(response) => match response.status {
+            StatusCode::BAD_REQUEST => ResolverError::InvalidRequest,
+            StatusCode::NOT_FOUND => ResolverError::SourceNotFound,
+            StatusCode::UNPROCESSABLE_ENTITY => ResolverError::UnsupportedProvider,
+            StatusCode::INTERNAL_SERVER_ERROR => ResolverError::Internal,
+            StatusCode::BAD_GATEWAY => ResolverError::ResolutionFailed,
+            StatusCode::SERVICE_UNAVAILABLE => ResolverError::ProviderUnavailable,
             status => ResolverError::UnexpectedStatus(status),
         },
     }

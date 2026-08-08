@@ -10,4 +10,10 @@ pub enum ValidationError {
 
     #[error("bitrate is invalid")]
     InvalidBitrate,
+
+    #[error("content length is invalid")]
+    InvalidContentLength,
+
+    #[error("duration is invalid")]
+    InvalidDuration,
 }
