@@ -6,8 +6,9 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 use whio_core::{
-    catalogue::{CatalogueCandidate, ProviderId, SourceIdentity, TrackMetadata},
+    catalogue::CatalogueCandidate,
     resolver::ResolverError,
+    tracks::{ProviderId, SourceIdentity, TrackMetadata},
 };
 
 mod support;

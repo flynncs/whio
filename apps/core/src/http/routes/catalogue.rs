@@ -6,9 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AppState,
-    catalogue::{CatalogueSearch, SearchLimit, SearchQuery, Track, ValidationError},
+    catalogue::{CatalogueSearch, SearchLimit, SearchQuery, ValidationError},
     http::errors::ApiError,
     request::RequestContext,
+    tracks::Track,
 };
 
 #[derive(Deserialize)]

@@ -12,7 +12,7 @@ pub enum ResolverError {
     Transport(#[source] std::io::Error),
 
     #[error("resolver returned invalid catalogue data")]
-    InvalidResponse(#[source] crate::catalogue::ValidationError),
+    InvalidResponse(#[source] crate::tracks::ValidationError),
 
     #[error("resolver rejected the request")]
     InvalidRequest,

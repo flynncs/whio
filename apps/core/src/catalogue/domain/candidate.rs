@@ -1,4 +1,4 @@
-use super::{SourceIdentity, TrackMetadata};
+use crate::tracks::{SourceIdentity, TrackMetadata};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CatalogueCandidate {

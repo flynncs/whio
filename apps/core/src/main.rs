@@ -5,7 +5,12 @@ use tokio::net::TcpListener;
 mod config;
 
 use config::Config;
-use whio_core::{AppState, catalogue::CatalogueService, resolver::ResolverClient};
+use whio_core::{
+    AppState,
+    catalogue::CatalogueService,
+    resolver::ResolverClient,
+    tracks::{InMemoryTrackRepository, TrackRepository},
+};
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -45,12 +50,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(address = %config.bind_address, "listening");
 
+    let track_repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+
     let resolver = ResolverClient::new(
         config.resolver_url,
         config.resolver_connect_timeout,
         config.resolver_total_timeout,
     )?;
-    let catalogue = Arc::new(CatalogueService::new(Arc::new(resolver)));
+    let catalogue = Arc::new(CatalogueService::new(Arc::new(resolver), track_repository));
     let state = AppState::new(catalogue);
 
     axum::serve(listener, whio_core::router(state))

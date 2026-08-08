@@ -13,9 +13,10 @@ use axum::{
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 use whio_core::{
-    catalogue::{CatalogueSearch, SearchLimit, SearchQuery, ValidationError},
+    catalogue::{CatalogueSearch, SearchLimit, SearchQuery},
     request::{RequestContext, RequestId},
     resolver::{CatalogueResolver, ResolverClient, ResolverError},
+    tracks::ValidationError,
 };
 
 #[derive(Debug)]

@@ -5,6 +5,7 @@ use axum::Router;
 pub mod catalogue;
 pub mod request;
 pub mod resolvers;
+pub mod tracks;
 pub use resolvers as resolver;
 
 use crate::catalogue::CatalogueService;

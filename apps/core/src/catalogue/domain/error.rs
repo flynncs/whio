@@ -14,10 +14,4 @@ pub enum ValidationError {
         min: u32,
         max: u32,
     },
-
-    #[error("provider id has an invalid format")]
-    InvalidProviderId,
-
-    #[error("duration_ms must not be negative")]
-    InvalidDuration,
 }

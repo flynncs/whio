@@ -1,7 +1,8 @@
 use whio_resolver_api::models::CatalogueCandidate as CatalogueCandidateDto;
 
-use crate::catalogue::{
-    CatalogueCandidate, ProviderId, SourceIdentity, TrackMetadata, ValidationError,
+use crate::{
+    catalogue::CatalogueCandidate,
+    tracks::{ProviderId, SourceIdentity, TrackMetadata, ValidationError},
 };
 
 impl TryFrom<CatalogueCandidateDto> for CatalogueCandidate {

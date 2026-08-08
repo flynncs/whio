@@ -10,6 +10,7 @@ use whio_core::{
     catalogue::{CatalogueCandidate, CatalogueResolver, CatalogueSearch, CatalogueService},
     request::RequestContext,
     resolver::ResolverError,
+    tracks::InMemoryTrackRepository,
 };
 
 struct StubResolver {
@@ -31,7 +32,10 @@ pub fn app(responses: Vec<Result<Vec<CatalogueCandidate>, ResolverError>>) -> Ro
     let resolver = Arc::new(StubResolver {
         responses: Mutex::new(responses.into()),
     });
-    let catalogue = Arc::new(CatalogueService::new(resolver));
+    let catalogue = Arc::new(CatalogueService::new(
+        resolver,
+        Arc::new(InMemoryTrackRepository::default()),
+    ));
 
     whio_core::router(AppState::new(catalogue))
 }
