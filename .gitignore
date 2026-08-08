@@ -4,7 +4,7 @@
 # Local development notes and experiment logs
 docs/sessions
 
-# Python virtual environments (including apps/backend/.venv)
+# Python virtual environments
 .venv/
 # Byte-compiled / optimized / DLL files
 __pycache__/
