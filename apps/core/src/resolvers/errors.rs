@@ -2,6 +2,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ResolverError {
+    #[error("resolver is disabled")]
+    Disabled,
+
     #[error("resolver request failed")]
     Request(#[source] reqwest::Error),
 

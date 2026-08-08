@@ -24,3 +24,7 @@ check for drift with:
 
 don't edit `apps/resolver-client-generated/` or
 `apps/ytm-resolver/app/generated/resolver_v1.py` by hand.
+
+## core config
+
+YTM is disabled by default. set `WHIO_YOUTUBE_ENABLED=true` to enable it.

@@ -4,12 +4,12 @@ use tokio::net::TcpListener;
 
 mod config;
 
-use config::Config;
+use config::{Config, YoutubeResolverConfig};
 use whio_core::{
     AppState,
-    catalogue::CatalogueService,
-    playback::PlaybackService,
-    resolver::ResolverClient,
+    catalogue::{CatalogueResolver, CatalogueService},
+    playback::{PlaybackResolver, PlaybackService},
+    resolver::{DisabledResolver, ResolverClient, ResolverError},
     tracks::{InMemoryTrackRepository, TrackRepository},
 };
 
@@ -47,32 +47,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(config.log_level)
         .init();
 
+    let state = build_state(&config)?;
     let listener = TcpListener::bind(config.bind_address).await?;
 
     tracing::info!(address = %config.bind_address, "listening");
-
-    let track_repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
-
-    let resolver = Arc::new(ResolverClient::new(
-        config.resolver_url,
-        config.resolver_connect_timeout,
-        config.resolver_total_timeout,
-    )?);
-
-    let catalogue = Arc::new(CatalogueService::new(
-        resolver.clone(),
-        track_repository.clone(),
-    ));
-    let playback = Arc::new(PlaybackService::new(
-        resolver.clone(),
-        track_repository.clone(),
-    ));
-
-    let state = AppState::new(catalogue, playback);
 
     axum::serve(listener, whio_core::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
     Ok(())
+}
+
+fn build_state(config: &Config) -> Result<AppState, ResolverError> {
+    let track_repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+
+    let (catalogue_resolver, playback_resolver): (
+        Arc<dyn CatalogueResolver>,
+        Arc<dyn PlaybackResolver>,
+    ) = match &config.youtube_resolver {
+        YoutubeResolverConfig::Disabled => {
+            let resolver = Arc::new(DisabledResolver);
+            (
+                resolver.clone() as Arc<dyn CatalogueResolver>,
+                resolver as Arc<dyn PlaybackResolver>,
+            )
+        }
+        YoutubeResolverConfig::Enabled {
+            url,
+            connect_timeout,
+            total_timeout,
+        } => {
+            let resolver = Arc::new(ResolverClient::new(
+                url.clone(),
+                *connect_timeout,
+                *total_timeout,
+            )?);
+            (
+                resolver.clone() as Arc<dyn CatalogueResolver>,
+                resolver as Arc<dyn PlaybackResolver>,
+            )
+        }
+    };
+
+    let catalogue = Arc::new(CatalogueService::new(
+        catalogue_resolver,
+        track_repository.clone(),
+    ));
+    let playback = Arc::new(PlaybackService::new(playback_resolver, track_repository));
+
+    Ok(AppState::new(catalogue, playback))
 }

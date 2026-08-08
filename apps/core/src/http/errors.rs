@@ -65,7 +65,8 @@ impl IntoResponse for ApiError {
             ApiError::Catalogue { context, error } => {
                 let (status, code, message) = match &error {
                     CatalogueError::Resolver(
-                        ResolverError::ProviderUnavailable
+                        ResolverError::Disabled
+                        | ResolverError::ProviderUnavailable
                         | ResolverError::Request(_)
                         | ResolverError::Transport(_),
                     ) => (
@@ -104,7 +105,8 @@ impl IntoResponse for ApiError {
                     ),
 
                     PlaybackError::Resolver(
-                        ResolverError::ProviderUnavailable
+                        ResolverError::Disabled
+                        | ResolverError::ProviderUnavailable
                         | ResolverError::Request(_)
                         | ResolverError::Transport(_),
                     ) => (
