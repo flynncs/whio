@@ -17,6 +17,9 @@ pub enum ValidationError {
 
     #[error("provider id has an invalid format")]
     InvalidProviderId,
+
+    #[error("duration_ms must not be negative")]
+    InvalidDuration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

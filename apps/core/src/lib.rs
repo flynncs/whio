@@ -4,6 +4,7 @@ use serde::Serialize;
 mod api;
 
 pub mod catalogue;
+pub mod resolver;
 
 #[derive(Serialize)]
 struct HealthResponse {
