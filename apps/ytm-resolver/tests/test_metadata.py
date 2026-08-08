@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -40,3 +41,13 @@ class MetadataRoutesTest(unittest.TestCase):
                 ],
             },
         )
+
+    @patch("app.api.catalogue.YTMusic")
+    def test_metadata_routes_do_not_start_youtube(self, ytmusic) -> None:
+        for path in ["/health/live", "/health/ready", "/v1/capabilities"]:
+            with self.subTest(path=path):
+                response = self.client.get(path)
+
+                self.assertEqual(response.status_code, 200)
+
+        ytmusic.assert_not_called()

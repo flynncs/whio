@@ -1,7 +1,7 @@
 [project]
 name = "ytm-resolver"
 version = "0.1.0"
-description = "Add your description here"
+description = "Optional YTM resolver for Whio"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
