@@ -13,7 +13,8 @@ use axum::{
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 use whio_core::{
-    catalogue::ValidationError,
+    catalogue::{CatalogueSearch, SearchLimit, SearchQuery, ValidationError},
+    request::{RequestContext, RequestId},
     resolver::{CatalogueResolver, ResolverClient, ResolverError},
 };
 
@@ -41,6 +42,17 @@ async fn stop_server(server: JoinHandle<()>) {
 
 fn client(base_url: reqwest::Url) -> ResolverClient {
     ResolverClient::new(base_url, Duration::from_secs(1), Duration::from_secs(2)).unwrap()
+}
+
+fn search(query: &str, limit: u32) -> CatalogueSearch {
+    CatalogueSearch::new(
+        SearchQuery::new(query.to_owned()).unwrap(),
+        SearchLimit::new(limit).unwrap(),
+    )
+}
+
+fn context() -> RequestContext {
+    RequestContext::new(RequestId::new("request-123".to_owned()).unwrap())
 }
 
 async fn successful_search(
@@ -107,9 +119,8 @@ async fn search_deserializes_maps_and_forwards_request_id() {
         .route("/v1/catalogue/search", post(successful_search))
         .with_state(captured.clone());
     let (base_url, server) = spawn_server(router).await;
-    let result = client(base_url)
-        .search("Instant Crush", 5, Some("request-123"))
-        .await;
+    let search = search("Instant Crush", 5);
+    let result = client(base_url).search(&search, &context()).await;
     stop_server(server).await;
 
     let candidates = result.unwrap();
@@ -132,7 +143,9 @@ async fn search_deserializes_maps_and_forwards_request_id() {
 async fn unavailable_resolver_becomes_provider_unavailable() {
     let router = Router::new().route("/v1/catalogue/search", post(unavailable));
     let (base_url, server) = spawn_server(router).await;
-    let result = client(base_url).search("query", 1, None).await;
+    let result = client(base_url)
+        .search(&search("query", 1), &context())
+        .await;
     stop_server(server).await;
 
     assert!(matches!(result, Err(ResolverError::ProviderUnavailable)));
@@ -142,7 +155,9 @@ async fn unavailable_resolver_becomes_provider_unavailable() {
 async fn malformed_success_response_becomes_malformed_response_error() {
     let router = Router::new().route("/v1/catalogue/search", post(malformed_response));
     let (base_url, server) = spawn_server(router).await;
-    let result = client(base_url).search("query", 1, None).await;
+    let result = client(base_url)
+        .search(&search("query", 1), &context())
+        .await;
     stop_server(server).await;
 
     assert!(matches!(result, Err(ResolverError::MalformedResponse(_))));
@@ -152,7 +167,9 @@ async fn malformed_success_response_becomes_malformed_response_error() {
 async fn invalid_candidate_data_becomes_validation_error() {
     let router = Router::new().route("/v1/catalogue/search", post(negative_duration));
     let (base_url, server) = spawn_server(router).await;
-    let result = client(base_url).search("query", 1, None).await;
+    let result = client(base_url)
+        .search(&search("query", 1), &context())
+        .await;
     stop_server(server).await;
 
     assert!(matches!(
@@ -161,29 +178,4 @@ async fn invalid_candidate_data_becomes_validation_error() {
             ValidationError::InvalidDuration
         ))
     ));
-}
-
-#[tokio::test]
-async fn invalid_limit_is_rejected_before_request() {
-    let base_url = "http://127.0.0.1:1/".parse().unwrap();
-    let result = client(base_url).search("query", 0, None).await;
-
-    assert!(matches!(result, Err(ResolverError::InvalidLimit)));
-}
-
-#[tokio::test]
-async fn invalid_query_is_rejected_before_request() {
-    let base_url = "http://127.0.0.1:1/".parse().unwrap();
-    let result = client(base_url).search("", 1, None).await;
-
-    assert!(matches!(result, Err(ResolverError::InvalidQuery)));
-}
-
-#[tokio::test]
-async fn invalid_request_id_is_rejected_before_request() {
-    let base_url = "http://127.0.0.1:1/".parse().unwrap();
-    let request_id = "x".repeat(129);
-    let result = client(base_url).search("query", 1, Some(&request_id)).await;
-
-    assert!(matches!(result, Err(ResolverError::InvalidRequestId)));
 }

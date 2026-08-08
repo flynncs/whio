@@ -4,7 +4,10 @@ use axum::{
 };
 use tower::ServiceExt;
 use uuid::Uuid;
-use whio_core::router;
+
+mod support;
+
+use support::app;
 
 #[tokio::test]
 async fn health_routes_return_their_status() {
@@ -12,7 +15,7 @@ async fn health_routes_return_their_status() {
         ("/health/live", r#"{"status":"ok"}"#),
         ("/health/ready", r#"{"status":"ready"}"#),
     ] {
-        let response = router()
+        let response = app(vec![])
             .oneshot(
                 Request::builder()
                     .uri(uri)
@@ -37,7 +40,7 @@ async fn health_routes_return_their_status() {
 
 #[tokio::test]
 async fn missing_request_id_is_created() {
-    let response = router()
+    let response = app(vec![])
         .oneshot(
             Request::builder()
                 .uri("/health/live")
@@ -58,8 +61,31 @@ async fn missing_request_id_is_created() {
 }
 
 #[tokio::test]
+async fn invalid_request_id_is_replaced() {
+    let response = app(vec![])
+        .oneshot(
+            Request::builder()
+                .uri("/health/live")
+                .header("x-request-id", "x".repeat(129))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap();
+
+    assert!(Uuid::parse_str(request_id).is_ok());
+}
+
+#[tokio::test]
 async fn not_found_returns_a_safe_error() {
-    let response = router()
+    let response = app(vec![])
         .oneshot(
             Request::builder()
                 .uri("/missing")

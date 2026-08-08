@@ -1,8 +1,13 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
+
+use reqwest::Url;
 
 pub(crate) struct Config {
     pub(crate) bind_address: SocketAddr,
     pub(crate) log_level: tracing::Level,
+    pub(crate) resolver_url: Url,
+    pub(crate) resolver_connect_timeout: Duration,
+    pub(crate) resolver_total_timeout: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -32,9 +37,22 @@ impl Config {
                 value: log_raw.clone(),
             })?;
 
+        let resolver_raw = std::env::var("WHIO_RESOLVER_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned());
+
+        let resolver_url = resolver_raw
+            .parse::<Url>()
+            .map_err(|_| ConfigError::Invalid {
+                name: "WHIO_RESOLVER_URL",
+                value: resolver_raw,
+            })?;
+
         Ok(Config {
             bind_address,
             log_level,
+            resolver_url,
+            resolver_connect_timeout: Duration::from_secs(2),
+            resolver_total_timeout: Duration::from_secs(10),
         })
     }
 }

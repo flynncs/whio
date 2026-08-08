@@ -5,12 +5,13 @@ use whio_resolver_api::{
     apis::{
         Error as TransportError, configuration::Configuration, default_api::SearchCatalogueError,
     },
-    models::{CatalogueCandidate as CatalogueCandidateDto, CatalogueSearchRequest},
+    models::CatalogueSearchRequest,
 };
 
 use super::errors::ResolverError;
-use crate::catalogue::{
-    CatalogueCandidate, CatalogueResolver, ProviderId, SourceIdentity, ValidationError,
+use crate::{
+    catalogue::{CatalogueCandidate, CatalogueResolver, CatalogueSearch},
+    request::RequestContext,
 };
 
 pub struct ResolverClient {
@@ -43,31 +44,18 @@ impl ResolverClient {
 impl CatalogueResolver for ResolverClient {
     async fn search(
         &self,
-        query: &str,
-        limit: u32,
-        request_id: Option<&str>,
+        search: &CatalogueSearch,
+        context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ResolverError> {
-        if !(1..=500).contains(&query.chars().count()) {
-            return Err(ResolverError::InvalidQuery);
-        }
-
-        if !(1..=25).contains(&limit) {
-            return Err(ResolverError::InvalidLimit);
-        }
-
-        if request_id.is_some_and(|value| !(1..=128).contains(&value.chars().count())) {
-            return Err(ResolverError::InvalidRequestId);
-        }
-
         let body = CatalogueSearchRequest {
-            query: query.to_owned(),
-            limit: limit as i32,
+            query: search.query().as_str().to_owned(),
+            limit: i32::from(search.limit().get()),
         };
 
         let response_dto = whio_resolver_api::apis::default_api::search_catalogue(
             &self.transport,
             body,
-            request_id,
+            Some(context.request_id().as_str()),
         )
         .await
         .map_err(map_search_error)?;
@@ -75,7 +63,7 @@ impl CatalogueResolver for ResolverClient {
         response_dto
             .results
             .into_iter()
-            .map(map_candidate)
+            .map(|candidate| candidate.try_into().map_err(ResolverError::InvalidResponse))
             .collect()
     }
 }
@@ -95,22 +83,4 @@ fn map_search_error(error: TransportError<SearchCatalogueError>) -> ResolverErro
             status => ResolverError::UnexpectedStatus(status),
         },
     }
-}
-
-fn map_candidate(candidate: CatalogueCandidateDto) -> Result<CatalogueCandidate, ResolverError> {
-    let provider_id =
-        ProviderId::new(candidate.source.provider_id).map_err(ResolverError::InvalidResponse)?;
-
-    let source = SourceIdentity::new(provider_id, candidate.source.external_id)
-        .map_err(ResolverError::InvalidResponse)?;
-
-    let duration_ms = candidate
-        .duration_ms
-        .flatten()
-        .map(u64::try_from)
-        .transpose()
-        .map_err(|_| ResolverError::InvalidResponse(ValidationError::InvalidDuration))?;
-
-    CatalogueCandidate::new(source, candidate.title, candidate.artists, duration_ms)
-        .map_err(ResolverError::InvalidResponse)
 }

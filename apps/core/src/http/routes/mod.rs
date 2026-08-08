@@ -1,10 +1,11 @@
 use axum::Extension;
 
 use super::errors::ApiError;
-use super::middleware::RequestId;
+use crate::request::RequestContext;
 
+pub(crate) mod catalogue;
 pub(crate) mod health;
 
-pub(crate) async fn not_found(Extension(request_id): Extension<RequestId>) -> ApiError {
-    ApiError::NotFound(request_id)
+pub(crate) async fn not_found(Extension(context): Extension<RequestContext>) -> ApiError {
+    ApiError::NotFound(context)
 }

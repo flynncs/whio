@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use tokio::net::TcpListener;
 
 mod config;
 
 use config::Config;
+use whio_core::{AppState, catalogue::CatalogueService, resolver::ResolverClient};
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -42,7 +45,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(address = %config.bind_address, "listening");
 
-    axum::serve(listener, whio_core::router())
+    let resolver = ResolverClient::new(
+        config.resolver_url,
+        config.resolver_connect_timeout,
+        config.resolver_total_timeout,
+    )?;
+    let catalogue = Arc::new(CatalogueService::new(Arc::new(resolver)));
+    let state = AppState::new(catalogue);
+
+    axum::serve(listener, whio_core::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
