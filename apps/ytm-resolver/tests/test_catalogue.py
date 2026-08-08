@@ -1,6 +1,10 @@
 import unittest
 from unittest.mock import Mock
 
+from requests.exceptions import RequestException
+from ytmusicapi.exceptions import YTMusicServerError
+
+from app.errors import ProviderUnavailableError
 from app.youtube.catalogue import (
     YouTubeMusicCatalogue,
     normalize_song_result,
@@ -9,6 +13,18 @@ from app.youtube.catalogue import (
 
 
 class YouTubeMusicCatalogueTest(unittest.TestCase):
+    def test_search_translates_provider_failures(self) -> None:
+        for failure in [
+            YTMusicServerError("private provider details"),
+            RequestException("private transport details"),
+        ]:
+            with self.subTest(failure=type(failure).__name__):
+                client = Mock()
+                client.search.side_effect = failure
+
+                with self.assertRaises(ProviderUnavailableError):
+                    YouTubeMusicCatalogue(client).search("Daft Punk", limit=5)
+
     def test_search_calls_youtube_music_and_normalizes_results(self) -> None:
         client = Mock()
         client.search.return_value = [

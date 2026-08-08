@@ -1,4 +1,5 @@
 from fastapi import Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.errors import (
@@ -53,3 +54,17 @@ async def resolver_exception_handler(request: Request, exc: Exception) -> JSONRe
         status_code=status,
         content=error.model_dump(mode="json"),
     )
+
+
+async def request_validation_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    assert isinstance(exc, RequestValidationError)
+
+    error = ErrorResponse(
+        code=ErrorCode.invalid_request,
+        message="The request is invalid",
+        request_id=request.state.request_id,
+    )
+
+    return JSONResponse(status_code=400, content=error.model_dump(mode="json"))
