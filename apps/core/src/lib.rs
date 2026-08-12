@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::Router;
 
 pub mod catalogue;
+pub(crate) mod media;
 pub mod request;
 pub mod resolvers;
 pub mod tracks;

@@ -61,6 +61,14 @@ impl PlayableMedia {
     ) {
         (self.url, self.headers, self.expires_at, self.metadata)
     }
+
+    pub fn url(&self) -> &PlaybackUrl {
+        &self.url
+    }
+
+    pub fn headers(&self) -> &HashMap<String, String> {
+        &self.headers
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
