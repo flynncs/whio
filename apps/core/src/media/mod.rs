@@ -2,5 +2,6 @@ mod http_client;
 mod ports;
 mod range;
 
-pub(crate) use ports::{FetchedRange, MediaFetcher, MediaInfo};
-pub(crate) use range::ByteRange;
+pub use http_client::HttpMediaFetcher;
+pub use ports::{FetchedRange, MediaFetchError, MediaFetcher, MediaInfo};
+pub use range::ByteRange;

@@ -14,6 +14,9 @@ use whio_core::{
     tracks::{InMemoryTrackRepository, SourceIdentity},
 };
 
+mod media;
+pub use media::playback_stream;
+
 struct StubResolver {
     responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ResolverError>>>,
 }
@@ -50,6 +53,7 @@ pub fn app(responses: Vec<Result<Vec<CatalogueCandidate>, ResolverError>>) -> Ro
         track_repository.clone(),
     ));
     let playback = Arc::new(PlaybackService::new(resolver, track_repository));
+    let playback_stream = playback_stream(Arc::clone(&playback));
 
-    whio_core::router(AppState::new(catalogue, playback))
+    whio_core::router(AppState::new(catalogue, playback, playback_stream))
 }

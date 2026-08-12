@@ -3,26 +3,35 @@ use std::sync::Arc;
 use axum::Router;
 
 pub mod catalogue;
-pub(crate) mod media;
+pub mod media;
 pub mod request;
 pub mod resolvers;
 pub mod tracks;
 pub use resolvers as resolver;
 pub mod playback;
+pub mod playback_stream;
 
-use crate::{catalogue::CatalogueService, playback::PlaybackService};
+use crate::{
+    catalogue::CatalogueService, playback::PlaybackService, playback_stream::PlaybackStreamService,
+};
 
 #[derive(Clone)]
 pub struct AppState {
     catalogue: Arc<CatalogueService>,
     playback: Arc<PlaybackService>,
+    playback_stream: Arc<PlaybackStreamService>,
 }
 
 impl AppState {
-    pub fn new(catalogue: Arc<CatalogueService>, playback: Arc<PlaybackService>) -> Self {
+    pub fn new(
+        catalogue: Arc<CatalogueService>,
+        playback: Arc<PlaybackService>,
+        playback_stream: Arc<PlaybackStreamService>,
+    ) -> Self {
         Self {
             catalogue,
             playback,
+            playback_stream,
         }
     }
 
@@ -32,6 +41,10 @@ impl AppState {
 
     pub(crate) fn playback(&self) -> &PlaybackService {
         &self.playback
+    }
+
+    pub(crate) fn playback_stream(&self) -> &PlaybackStreamService {
+        &self.playback_stream
     }
 }
 

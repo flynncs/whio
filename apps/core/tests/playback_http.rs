@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use axum::{
     Router,
     body::{Body, to_bytes},
-    http::{Request, StatusCode},
+    http::{Request, StatusCode, header},
 };
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -15,7 +15,9 @@ use tower::ServiceExt;
 use whio_core::{
     AppState,
     catalogue::{CatalogueCandidate, CatalogueResolver, CatalogueSearch, CatalogueService},
+    media::{ByteRange, FetchedRange, MediaFetchError, MediaFetcher, MediaInfo},
     playback::{MediaMetadata, PlayableMedia, PlaybackResolver, PlaybackService, PlaybackUrl},
+    playback_stream::PlaybackStreamService,
     request::RequestContext,
     resolver::ResolverError,
     tracks::{InMemoryTrackRepository, ProviderId, SourceIdentity, TrackId, TrackMetadata},
@@ -47,6 +49,31 @@ impl PlaybackResolver for StubResolver {
     ) -> Result<PlayableMedia, ResolverError> {
         *self.resolved_source.lock().unwrap() = Some(source.clone());
         Ok(self.playback.lock().unwrap().take().unwrap())
+    }
+}
+
+struct StubMediaFetcher {
+    bytes: Vec<u8>,
+}
+
+#[async_trait]
+impl MediaFetcher for StubMediaFetcher {
+    async fn probe(&self, _media: &PlayableMedia) -> Result<MediaInfo, MediaFetchError> {
+        Ok(MediaInfo {
+            content_length: self.bytes.len() as u64,
+            supports_ranges: true,
+        })
+    }
+
+    async fn fetch_range(
+        &self,
+        _media: &PlayableMedia,
+        range: &ByteRange,
+    ) -> Result<FetchedRange, MediaFetchError> {
+        Ok(FetchedRange {
+            bytes: self.bytes[range.start() as usize..=range.end() as usize].to_vec(),
+            range: range.clone(),
+        })
     }
 }
 
@@ -99,9 +126,15 @@ fn app() -> (Router, Arc<StubResolver>) {
         track_repository.clone(),
     ));
     let playback = Arc::new(PlaybackService::new(resolver.clone(), track_repository));
+    let playback_stream = Arc::new(PlaybackStreamService::new(
+        Arc::clone(&playback),
+        Arc::new(StubMediaFetcher {
+            bytes: b"0123456789".to_vec(),
+        }),
+    ));
 
     (
-        whio_core::router(AppState::new(catalogue, playback)),
+        whio_core::router(AppState::new(catalogue, playback, playback_stream)),
         resolver,
     )
 }
@@ -114,6 +147,19 @@ fn request(uri: &str, body: String) -> Request<Body> {
         .header("x-request-id", "request-123")
         .body(Body::from(body))
         .unwrap()
+}
+
+fn stream_request(uri: &str, range: Option<&str>) -> Request<Body> {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("x-request-id", "request-123");
+
+    if let Some(range) = range {
+        request = request.header(header::RANGE, range);
+    }
+
+    request.body(Body::empty()).unwrap()
 }
 
 async fn response_body(response: axum::response::Response) -> Value {
@@ -212,4 +258,86 @@ async fn invalid_track_id_returns_bad_request() {
         })
     );
     assert!(resolver.resolved_source.lock().unwrap().is_none());
+}
+
+async fn searched_track_id(app: &Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(request(
+            "/catalogue/search",
+            json!({"query": "Instant Crush", "limit": 5}).to_string(),
+        ))
+        .await
+        .unwrap();
+
+    response_body(response).await["results"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn stream_returns_full_media_without_a_range() {
+    let (app, _) = app();
+    let track_id = searched_track_id(&app).await;
+
+    let response = app
+        .oneshot(stream_request(
+            &format!("/playback/tracks/{track_id}/stream"),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+    assert_eq!(response.headers()[header::CONTENT_LENGTH], "10");
+    assert_eq!(
+        to_bytes(response.into_body(), 1024).await.unwrap(),
+        "0123456789"
+    );
+}
+
+#[tokio::test]
+async fn stream_returns_requested_partial_media() {
+    let (app, _) = app();
+    let track_id = searched_track_id(&app).await;
+
+    let response = app
+        .oneshot(stream_request(
+            &format!("/playback/tracks/{track_id}/stream"),
+            Some("bytes=2-5"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()[header::CONTENT_LENGTH], "4");
+    assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+    assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), "2345");
+}
+
+#[tokio::test]
+async fn stream_rejects_unsatisfiable_ranges() {
+    let (app, _) = app();
+    let track_id = searched_track_id(&app).await;
+
+    let response = app
+        .oneshot(stream_request(
+            &format!("/playback/tracks/{track_id}/stream"),
+            Some("bytes=10-"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */10");
+    assert_eq!(
+        response_body(response).await,
+        json!({
+            "code": "range_not_satisfiable",
+            "message": "The requested range is not satisfiable",
+            "request_id": "request-123"
+        })
+    );
 }

@@ -21,7 +21,7 @@ pub(crate) enum RangeError {
     Unsatisfiable,
 }
 
-pub(crate) fn parse_range_header(
+pub fn parse_range_header(
     header: Option<&str>,
     content_length: u64,
 ) -> Result<RangeRequest, RangeError> {

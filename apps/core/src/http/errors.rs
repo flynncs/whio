@@ -1,14 +1,16 @@
 use axum::{
     Json,
     extract::rejection::JsonRejection,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header::CONTENT_RANGE},
     response::{IntoResponse, Response as AxumResponse},
 };
 use serde::Serialize;
 
 use crate::{
     catalogue::{CatalogueError, ValidationError},
+    http::range::RangeError,
     playback::PlaybackError,
+    playback_stream::PlaybackStreamError,
     request::RequestContext,
     resolvers::ResolverError,
 };
@@ -41,6 +43,15 @@ pub(crate) enum ApiError {
     Playback {
         context: RequestContext,
         error: PlaybackError,
+    },
+    PlaybackStream {
+        context: RequestContext,
+        error: PlaybackStreamError,
+    },
+    Range {
+        context: RequestContext,
+        content_length: u64,
+        error: RangeError,
     },
 }
 
@@ -96,54 +107,116 @@ impl IntoResponse for ApiError {
 
                 error_response(status, code, message, context)
             }
-            ApiError::Playback { context, error } => {
-                let (status, code, message) = match &error {
-                    PlaybackError::TrackNotFound => (
-                        StatusCode::NOT_FOUND,
-                        "track_not_found",
-                        "The track was not found",
-                    ),
+            ApiError::Playback { context, error } => playback_error_response(error, context),
+            ApiError::PlaybackStream { context, error } => match error {
+                PlaybackStreamError::Playback(error) => playback_error_response(error, context),
+                PlaybackStreamError::Media(error) => {
+                    let (status, code, message) = media_error_details(&error);
 
-                    PlaybackError::Resolver(
-                        ResolverError::Disabled
-                        | ResolverError::ProviderUnavailable
-                        | ResolverError::Request(_)
-                        | ResolverError::Transport(_),
-                    ) => (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "playback_unavailable",
-                        "Playback is temporarily unavailable",
-                    ),
-
-                    PlaybackError::Resolver(_) => (
-                        StatusCode::BAD_GATEWAY,
-                        "resolver_failure",
-                        "The playback resolver failed",
-                    ),
-
-                    PlaybackError::Repository(_) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal_error",
-                        "An unexpected error occurred",
-                    ),
-                };
-
-                match &error {
-                    PlaybackError::TrackNotFound => tracing::debug!(
+                    tracing::error!(
                         error = %error,
                         request_id = context.request_id().as_str(),
-                        "playback track was not found"
-                    ),
-                    _ => tracing::error!(
-                        error = %error,
-                        request_id = context.request_id().as_str(),
-                        "playback resolution failed"
-                    ),
+                        "media stream failed"
+                    );
+
+                    error_response(status, code, message, context)
                 }
+            },
+            ApiError::Range {
+                context,
+                content_length,
+                error,
+            } => {
+                tracing::debug!(
+                    error = %error,
+                    request_id = context.request_id().as_str(),
+                    "invalid media range"
+                );
 
-                error_response(status, code, message, context)
+                let mut response = error_response(
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    "range_not_satisfiable",
+                    "The requested range is not satisfiable",
+                    context,
+                );
+                response.headers_mut().insert(
+                    CONTENT_RANGE,
+                    HeaderValue::from_str(&format!("bytes */{content_length}"))
+                        .expect("formatted content range is a valid header value"),
+                );
+                response
             }
         }
+    }
+}
+
+fn playback_error_response(error: PlaybackError, context: RequestContext) -> AxumResponse {
+    let (status, code, message) = playback_error_details(&error);
+
+    match &error {
+        PlaybackError::TrackNotFound => tracing::debug!(
+            error = %error,
+            request_id = context.request_id().as_str(),
+            "playback track was not found"
+        ),
+        _ => tracing::error!(
+            error = %error,
+            request_id = context.request_id().as_str(),
+            "playback resolution failed"
+        ),
+    }
+
+    error_response(status, code, message, context)
+}
+
+fn playback_error_details(error: &PlaybackError) -> (StatusCode, &'static str, &'static str) {
+    match error {
+        PlaybackError::TrackNotFound => (
+            StatusCode::NOT_FOUND,
+            "track_not_found",
+            "The track was not found",
+        ),
+        PlaybackError::Resolver(
+            ResolverError::Disabled
+            | ResolverError::ProviderUnavailable
+            | ResolverError::Request(_)
+            | ResolverError::Transport(_),
+        ) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "playback_unavailable",
+            "Playback is temporarily unavailable",
+        ),
+        PlaybackError::Resolver(_) => (
+            StatusCode::BAD_GATEWAY,
+            "resolver_failure",
+            "The playback resolver failed",
+        ),
+        PlaybackError::Repository(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "An unexpected error occurred",
+        ),
+    }
+}
+
+fn media_error_details(
+    error: &crate::media::MediaFetchError,
+) -> (StatusCode, &'static str, &'static str) {
+    match error {
+        crate::media::MediaFetchError::Request(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stream_unavailable",
+            "The stream is temporarily unavailable",
+        ),
+        crate::media::MediaFetchError::UnexpectedStatus(_)
+        | crate::media::MediaFetchError::MissingContentLength
+        | crate::media::MediaFetchError::InvalidContentRange
+        | crate::media::MediaFetchError::RangesUnsupported
+        | crate::media::MediaFetchError::LengthMismatch => (
+            StatusCode::BAD_GATEWAY,
+            "stream_failure",
+            "The upstream media response was invalid",
+        ),
     }
 }
 

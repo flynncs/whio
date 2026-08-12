@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+#[path = "support/media.rs"]
+mod media_support;
+use media_support::playback_stream;
+
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
@@ -28,9 +32,10 @@ fn app() -> (axum::Router, String) {
     let track_id = repository.get_or_create_id(source()).unwrap();
     let catalogue = Arc::new(CatalogueService::new(resolver.clone(), repository.clone()));
     let playback = Arc::new(PlaybackService::new(resolver, repository));
+    let playback_stream = playback_stream(Arc::clone(&playback));
 
     (
-        whio_core::router(AppState::new(catalogue, playback)),
+        whio_core::router(AppState::new(catalogue, playback, playback_stream)),
         track_id.to_string(),
     )
 }

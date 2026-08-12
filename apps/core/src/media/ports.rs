@@ -6,7 +6,7 @@ use crate::playback::PlayableMedia;
 use super::ByteRange;
 
 #[derive(Debug, Error)]
-pub(crate) enum MediaFetchError {
+pub enum MediaFetchError {
     #[error("media request failed")]
     Request(#[source] reqwest::Error),
 
@@ -26,18 +26,18 @@ pub(crate) enum MediaFetchError {
     LengthMismatch,
 }
 
-pub(crate) struct MediaInfo {
-    pub(crate) content_length: u64,
-    pub(crate) supports_ranges: bool,
+pub struct MediaInfo {
+    pub content_length: u64,
+    pub supports_ranges: bool,
 }
 
-pub(crate) struct FetchedRange {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) range: ByteRange,
+pub struct FetchedRange {
+    pub bytes: Vec<u8>,
+    pub range: ByteRange,
 }
 
 #[async_trait]
-pub(crate) trait MediaFetcher: Send + Sync {
+pub trait MediaFetcher: Send + Sync {
     async fn probe(&self, media: &PlayableMedia) -> Result<MediaInfo, MediaFetchError>;
 
     async fn fetch_range(

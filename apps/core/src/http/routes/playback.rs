@@ -2,14 +2,24 @@ use std::collections::HashMap;
 
 use axum::{
     Extension, Json,
-    extract::{State, rejection::JsonRejection},
+    body::Body,
+    extract::{Path, State, rejection::JsonRejection},
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE},
+    },
+    response::Response,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AppState,
-    http::errors::ApiError,
+    http::{
+        errors::ApiError,
+        range::{RangeError, RangeRequest, parse_range_header},
+    },
+    media::ByteRange,
     playback::{MediaMetadata, PlayableMedia},
     request::RequestContext,
     tracks::TrackId,
@@ -91,4 +101,96 @@ pub(crate) async fn resolve(
         })?;
 
     Ok(Json(playable_media.into()))
+}
+
+pub(crate) async fn stream(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    Path(track_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let track_id = track_id
+        .parse::<TrackId>()
+        .map_err(|err| ApiError::InvalidTrackId {
+            context: context.clone(),
+            error: err,
+        })?;
+
+    let prepared_playback = state
+        .playback_stream()
+        .prepare(&track_id, &context)
+        .await
+        .map_err(|error| ApiError::PlaybackStream {
+            context: context.clone(),
+            error,
+        })?;
+
+    let content_length = prepared_playback.info.content_length;
+
+    let header_range = headers
+        .get(RANGE)
+        .map(|value| value.to_str())
+        .transpose()
+        .map_err(|_| ApiError::Range {
+            context: context.clone(),
+            content_length,
+            error: RangeError::Malformed,
+        })?;
+
+    let range_request =
+        parse_range_header(header_range, content_length).map_err(|error| ApiError::Range {
+            context: context.clone(),
+            content_length,
+            error,
+        })?;
+
+    let range = match &range_request {
+        RangeRequest::Full => ByteRange {
+            start: 0,
+            end: content_length - 1,
+        },
+        RangeRequest::Partial(byte_range) => byte_range.clone(),
+    };
+
+    let fetched = state
+        .playback_stream()
+        .fetch_range(&prepared_playback, &range)
+        .await
+        .map_err(|error| ApiError::PlaybackStream {
+            context: context.clone(),
+            error,
+        })?;
+
+    let status = match range_request {
+        RangeRequest::Full => StatusCode::OK,
+        RangeRequest::Partial(_) => StatusCode::PARTIAL_CONTENT,
+    };
+
+    let fetched_length = fetched.bytes.len();
+    let mut response = Response::new(Body::from(fetched.bytes));
+
+    *response.status_mut() = status;
+
+    let response_headers = response.headers_mut();
+    response_headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    response_headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&fetched_length.to_string())
+            .expect("a byte length is a valid header value"),
+    );
+
+    if status == StatusCode::PARTIAL_CONTENT {
+        response_headers.insert(
+            CONTENT_RANGE,
+            HeaderValue::from_str(&format!(
+                "bytes {}-{}/{}",
+                fetched.range.start(),
+                fetched.range.end(),
+                content_length,
+            ))
+            .expect("a validated byte range is a valid header value"),
+        );
+    }
+
+    Ok(response)
 }

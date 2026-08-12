@@ -1,19 +1,23 @@
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ByteRange {
-    pub(crate) start: u64,
-    pub(crate) end: u64,
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ByteRange {
+    pub start: u64,
+    pub end: u64,
 }
 
 impl ByteRange {
-    pub(crate) fn start(&self) -> u64 {
+    pub fn start(&self) -> u64 {
         self.start
     }
 
-    pub(crate) fn end(&self) -> u64 {
+    pub fn end(&self) -> u64 {
         self.end
     }
 
-    pub(crate) fn len(&self) -> u64 {
+    pub fn is_empty(&self) -> bool {
+        self.start > self.end
+    }
+
+    pub fn len(&self) -> u64 {
         self.end - self.start + 1
     }
 }

@@ -8,7 +8,9 @@ use config::{Config, YoutubeResolverConfig};
 use whio_core::{
     AppState,
     catalogue::{CatalogueResolver, CatalogueService},
+    media::HttpMediaFetcher,
     playback::{PlaybackResolver, PlaybackService},
+    playback_stream::PlaybackStreamService,
     resolver::{DisabledResolver, ResolverClient, ResolverError},
     tracks::{InMemoryTrackRepository, TrackRepository},
 };
@@ -95,6 +97,8 @@ fn build_state(config: &Config) -> Result<AppState, ResolverError> {
         track_repository.clone(),
     ));
     let playback = Arc::new(PlaybackService::new(playback_resolver, track_repository));
+    let fetcher = Arc::new(HttpMediaFetcher::new(reqwest::Client::new()));
+    let playback_stream = Arc::new(PlaybackStreamService::new(Arc::clone(&playback), fetcher));
 
-    Ok(AppState::new(catalogue, playback))
+    Ok(AppState::new(catalogue, playback, playback_stream))
 }

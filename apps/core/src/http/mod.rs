@@ -16,6 +16,10 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/health/ready", get(routes::health::ready))
         .route("/catalogue/search", post(routes::catalogue::search))
         .route("/playback/resolve", post(routes::playback::resolve))
+        .route(
+            "/playback/tracks/{track_id}/stream",
+            get(routes::playback::stream),
+        )
         .fallback(routes::not_found)
         .layer(axum::middleware::from_fn(middleware::request_id))
         .with_state(state)
