@@ -3,8 +3,13 @@ use reqwest::{
     header::{CONTENT_RANGE, RANGE},
 };
 
+use tokio_stream::StreamExt;
+
 use crate::{
-    media::{ByteRange, FetchedRange, MediaFetcher, MediaInfo, ports::MediaFetchError},
+    media::{
+        ByteRange, MediaFetcher, MediaInfo,
+        ports::{MediaBody, MediaFetchError},
+    },
     playback::PlayableMedia,
 };
 
@@ -58,52 +63,29 @@ impl MediaFetcher for HttpMediaFetcher {
         }
     }
 
-    async fn fetch_range(
-        &self,
-        media: &PlayableMedia,
-        range: &ByteRange,
-    ) -> Result<FetchedRange, MediaFetchError> {
+    async fn open_continuous(&self, media: &PlayableMedia) -> Result<MediaBody, MediaFetchError> {
         let mut req = self.client.get(media.url().as_url().clone());
 
         for (name, val) in media.headers() {
             req = req.header(name, val);
         }
 
-        let resp = req
-            .header(RANGE, format!("bytes={}-{}", range.start(), range.end()))
-            .send()
-            .await
-            .map_err(MediaFetchError::Request)?;
+        let response = req.send().await.map_err(MediaFetchError::Request)?;
 
-        match resp.status() {
-            StatusCode::PARTIAL_CONTENT => {
-                let content_range = resp
-                    .headers()
-                    .get(CONTENT_RANGE)
-                    .ok_or(MediaFetchError::InvalidContentRange)?
-                    .to_str()
-                    .map_err(|_| MediaFetchError::InvalidContentRange)?;
-
-                let (parsed_range, _) = parse_content_range(content_range)?;
-
-                if parsed_range.start() != range.start() || parsed_range.end() != range.end() {
-                    return Err(MediaFetchError::LengthMismatch);
-                }
-
-                let bytes = resp.bytes().await.map_err(MediaFetchError::Request)?;
-
-                if bytes.len() as u64 != range.len() {
-                    return Err(MediaFetchError::LengthMismatch);
-                }
-
-                Ok(FetchedRange {
-                    bytes: bytes.to_vec(),
-                    range: parsed_range,
-                })
-            }
-            StatusCode::OK => return Err(MediaFetchError::RangesUnsupported),
-            status => return Err(MediaFetchError::UnexpectedStatus(status)),
+        if response.status() != StatusCode::OK {
+            return Err(MediaFetchError::UnexpectedStatus(response.status()));
         }
+
+        let content_length = response.content_length();
+
+        let chunks = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(MediaFetchError::Request));
+
+        Ok(MediaBody {
+            content_length,
+            chunks: Box::pin(chunks),
+        })
     }
 }
 

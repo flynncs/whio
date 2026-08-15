@@ -121,6 +121,19 @@ impl IntoResponse for ApiError {
 
                     error_response(status, code, message, context)
                 }
+                PlaybackStreamError::Spool => {
+                    tracing::error!(
+                        request_id = context.request_id().as_str(),
+                        "playback spool failed"
+                    );
+
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_error",
+                        "An unexpected error occurred",
+                        context,
+                    )
+                }
             },
             ApiError::Range {
                 context,
@@ -211,8 +224,7 @@ fn media_error_details(
         crate::media::MediaFetchError::UnexpectedStatus(_)
         | crate::media::MediaFetchError::MissingContentLength
         | crate::media::MediaFetchError::InvalidContentRange
-        | crate::media::MediaFetchError::RangesUnsupported
-        | crate::media::MediaFetchError::LengthMismatch => (
+        | crate::media::MediaFetchError::RangesUnsupported => (
             StatusCode::BAD_GATEWAY,
             "stream_failure",
             "The upstream media response was invalid",

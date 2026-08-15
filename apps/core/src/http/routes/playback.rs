@@ -152,22 +152,33 @@ pub(crate) async fn stream(
         RangeRequest::Partial(byte_range) => byte_range.clone(),
     };
 
-    let fetched = state
+    let response_length = range.len();
+
+    let status = match &range_request {
+        RangeRequest::Full => StatusCode::OK,
+        RangeRequest::Partial(_) => StatusCode::PARTIAL_CONTENT,
+    };
+
+    let content_range = match &range_request {
+        RangeRequest::Full => None,
+        RangeRequest::Partial(_) => Some(format!(
+            "bytes {}-{}/{}",
+            range.start(),
+            range.end(),
+            content_length
+        )),
+    };
+
+    let body_stream = state
         .playback_stream()
-        .fetch_range(&prepared_playback, &range)
+        .stream_range(prepared_playback, range)
         .await
         .map_err(|error| ApiError::PlaybackStream {
             context: context.clone(),
             error,
         })?;
 
-    let status = match range_request {
-        RangeRequest::Full => StatusCode::OK,
-        RangeRequest::Partial(_) => StatusCode::PARTIAL_CONTENT,
-    };
-
-    let fetched_length = fetched.bytes.len();
-    let mut response = Response::new(Body::from(fetched.bytes));
+    let mut response = Response::new(Body::from_stream(body_stream));
 
     *response.status_mut() = status;
 
@@ -175,22 +186,17 @@ pub(crate) async fn stream(
     response_headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     response_headers.insert(
         CONTENT_LENGTH,
-        HeaderValue::from_str(&fetched_length.to_string())
+        HeaderValue::from_str(&response_length.to_string())
             .expect("a byte length is a valid header value"),
     );
 
-    if status == StatusCode::PARTIAL_CONTENT {
+    if let Some(content_range) = content_range {
         response_headers.insert(
             CONTENT_RANGE,
-            HeaderValue::from_str(&format!(
-                "bytes {}-{}/{}",
-                fetched.range.start(),
-                fetched.range.end(),
-                content_length,
-            ))
-            .expect("a validated byte range is a valid header value"),
+            HeaderValue::from_str(&content_range)
+                .expect("a validated byte range is a valid header value"),
         );
-    }
+    };
 
     Ok(response)
 }

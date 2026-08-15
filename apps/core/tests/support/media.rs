@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use whio_core::{
-    media::{ByteRange, FetchedRange, MediaFetchError, MediaFetcher, MediaInfo},
+    media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
     playback::{PlayableMedia, PlaybackService},
     playback_stream::PlaybackStreamService,
 };
@@ -18,14 +19,10 @@ impl MediaFetcher for StubMediaFetcher {
         })
     }
 
-    async fn fetch_range(
-        &self,
-        _media: &PlayableMedia,
-        range: &ByteRange,
-    ) -> Result<FetchedRange, MediaFetchError> {
-        Ok(FetchedRange {
-            bytes: vec![0],
-            range: range.clone(),
+    async fn open_continuous(&self, _media: &PlayableMedia) -> Result<MediaBody, MediaFetchError> {
+        Ok(MediaBody {
+            content_length: Some(1),
+            chunks: Box::pin(tokio_stream::once(Ok(Bytes::from_static(&[0])))),
         })
     }
 }

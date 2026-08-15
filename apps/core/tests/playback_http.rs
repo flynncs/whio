@@ -9,13 +9,14 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
     AppState,
     catalogue::{CatalogueCandidate, CatalogueResolver, CatalogueSearch, CatalogueService},
-    media::{ByteRange, FetchedRange, MediaFetchError, MediaFetcher, MediaInfo},
+    media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
     playback::{MediaMetadata, PlayableMedia, PlaybackResolver, PlaybackService, PlaybackUrl},
     playback_stream::PlaybackStreamService,
     request::RequestContext,
@@ -65,14 +66,16 @@ impl MediaFetcher for StubMediaFetcher {
         })
     }
 
-    async fn fetch_range(
-        &self,
-        _media: &PlayableMedia,
-        range: &ByteRange,
-    ) -> Result<FetchedRange, MediaFetchError> {
-        Ok(FetchedRange {
-            bytes: self.bytes[range.start() as usize..=range.end() as usize].to_vec(),
-            range: range.clone(),
+    async fn open_continuous(&self, _media: &PlayableMedia) -> Result<MediaBody, MediaFetchError> {
+        let chunks = self
+            .bytes
+            .chunks(64 * 1024)
+            .map(|chunk| Ok::<_, MediaFetchError>(Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>();
+
+        Ok(MediaBody {
+            content_length: Some(self.bytes.len() as u64),
+            chunks: Box::pin(tokio_stream::iter(chunks)),
         })
     }
 }
@@ -114,6 +117,10 @@ fn playable_media() -> PlayableMedia {
 }
 
 fn app() -> (Router, Arc<StubResolver>) {
+    app_with_media_bytes(b"0123456789".to_vec())
+}
+
+fn app_with_media_bytes(bytes: Vec<u8>) -> (Router, Arc<StubResolver>) {
     let source = source();
     let resolver = Arc::new(StubResolver {
         candidate: candidate(source),
@@ -128,9 +135,7 @@ fn app() -> (Router, Arc<StubResolver>) {
     let playback = Arc::new(PlaybackService::new(resolver.clone(), track_repository));
     let playback_stream = Arc::new(PlaybackStreamService::new(
         Arc::clone(&playback),
-        Arc::new(StubMediaFetcher {
-            bytes: b"0123456789".to_vec(),
-        }),
+        Arc::new(StubMediaFetcher { bytes }),
     ));
 
     (
@@ -315,6 +320,76 @@ async fn stream_returns_requested_partial_media() {
     assert_eq!(response.headers()[header::CONTENT_LENGTH], "4");
     assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
     assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), "2345");
+}
+
+#[tokio::test]
+async fn stream_returns_exact_bytes_for_large_media() {
+    const TEST_CHUNK_SIZE: usize = 1024 * 1024;
+
+    let bytes = (0..TEST_CHUNK_SIZE + 17)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let expected = bytes.clone();
+    let (app, _) = app_with_media_bytes(bytes);
+    let track_id = searched_track_id(&app).await;
+
+    let response = app
+        .oneshot(stream_request(
+            &format!("/playback/tracks/{track_id}/stream"),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_LENGTH],
+        expected.len().to_string()
+    );
+    assert_eq!(
+        to_bytes(response.into_body(), expected.len())
+            .await
+            .unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn stream_returns_partial_bytes_for_large_media() {
+    const TEST_CHUNK_SIZE: u64 = 1024 * 1024;
+
+    let bytes = (0..TEST_CHUNK_SIZE * 2 + 17)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let start = TEST_CHUNK_SIZE - 5;
+    let end = TEST_CHUNK_SIZE + 10;
+    let expected = bytes[start as usize..=end as usize].to_vec();
+    let (app, _) = app_with_media_bytes(bytes.clone());
+    let track_id = searched_track_id(&app).await;
+
+    let response = app
+        .oneshot(stream_request(
+            &format!("/playback/tracks/{track_id}/stream"),
+            Some(&format!("bytes={start}-{end}")),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response.headers()[header::CONTENT_LENGTH],
+        expected.len().to_string()
+    );
+    assert_eq!(
+        response.headers()[header::CONTENT_RANGE],
+        format!("bytes {start}-{end}/{}", bytes.len())
+    );
+    assert_eq!(
+        to_bytes(response.into_body(), expected.len())
+            .await
+            .unwrap(),
+        expected
+    );
 }
 
 #[tokio::test]

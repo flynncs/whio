@@ -5,15 +5,16 @@ description = "Optional YTM resolver for Whio"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi[standard]>=0.140.7",
+    "fastapi[standard]>=0.141.1",
     "requests>=2.34.2",
-    "yt-dlp>=2026.7.4",
-    "ytmusicapi>=1.12.1",
+    "yt-dlp[default]>=2026.7.4",
+    "ytmusicapi>=1.12.2",
 ]
 
 [dependency-groups]
 dev = [
-    "datamodel-code-generator>=0.71.0",
+    "datamodel-code-generator>=0.72.4",
+    "httpx2>=2.10.0",
 ]
 
 [tool.datamodel-codegen]

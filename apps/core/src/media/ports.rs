@@ -1,9 +1,11 @@
+use std::pin::Pin;
+
 use async_trait::async_trait;
+use bytes::Bytes;
 use thiserror::Error;
+use tokio_stream::Stream;
 
 use crate::playback::PlayableMedia;
-
-use super::ByteRange;
 
 #[derive(Debug, Error)]
 pub enum MediaFetchError {
@@ -21,9 +23,6 @@ pub enum MediaFetchError {
 
     #[error("media source does not support byte ranges")]
     RangesUnsupported,
-
-    #[error("media response length did not match the requested range")]
-    LengthMismatch,
 }
 
 pub struct MediaInfo {
@@ -31,18 +30,16 @@ pub struct MediaInfo {
     pub supports_ranges: bool,
 }
 
-pub struct FetchedRange {
-    pub bytes: Vec<u8>,
-    pub range: ByteRange,
+pub type MediaByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, MediaFetchError>> + Send>>;
+
+pub struct MediaBody {
+    pub content_length: Option<u64>,
+    pub chunks: MediaByteStream,
 }
 
 #[async_trait]
 pub trait MediaFetcher: Send + Sync {
     async fn probe(&self, media: &PlayableMedia) -> Result<MediaInfo, MediaFetchError>;
 
-    async fn fetch_range(
-        &self,
-        media: &PlayableMedia,
-        range: &ByteRange,
-    ) -> Result<FetchedRange, MediaFetchError>;
+    async fn open_continuous(&self, media: &PlayableMedia) -> Result<MediaBody, MediaFetchError>;
 }
