@@ -28,3 +28,17 @@ don't edit `apps/resolver-client-generated/` or
 ## core config
 
 YTM is disabled by default. set `WHIO_YOUTUBE_ENABLED=true` to enable it.
+
+## docker
+
+```sh
+docker compose up -d
+```
+
+whio runs on `localhost:3000`.
+
+for development:
+
+```sh
+docker compose -f compose.dev.yaml up --build
+```

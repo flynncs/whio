@@ -1,0 +1,50 @@
+name: whio-dev
+
+services:
+  ytm-resolver:
+    build:
+      context: .
+      dockerfile: docker/ytm-resolver.Dockerfile
+      target: dev
+    volumes:
+      - .:/workspace
+      - ytm-resolver-venv:/opt/venv
+      - ytm-deno-cache:/var/cache/deno
+    ports:
+      - 127.0.0.1:8000:8000
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import socket; socket.create_connection(('127.0.0.1', 8000), timeout=2).close()
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 5
+
+  core:
+    build:
+      context: .
+      dockerfile: docker/core.Dockerfile
+      target: dev
+    depends_on:
+      ytm-resolver:
+        condition: service_healthy
+    environment:
+      WHIO_BIND_ADDRESS: 0.0.0.0:3000
+      WHIO_LOG_LEVEL: info
+      WHIO_YOUTUBE_ENABLED: "true"
+      WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - core-target:/workspace/apps/core/target
+    ports:
+      - 127.0.0.1:3000:3000
+
+volumes:
+  cargo-registry:
+  core-target:
+  ytm-deno-cache:
+  ytm-resolver-venv:

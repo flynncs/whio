@@ -1,0 +1,11 @@
+services:
+  ytm-resolver:
+    image: ghcr.io/flynncs/whio-ytm-resolver:latest
+
+  core:
+    image: ghcr.io/flynncs/whio-core:latest
+    environment:
+      WHIO_YOUTUBE_ENABLED: "true"
+      WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000
+    ports:
+      - 3000:3000

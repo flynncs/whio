@@ -5,8 +5,9 @@ description = "Optional YTM resolver for Whio"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi[standard]>=0.141.1",
+    "fastapi>=0.141.1",
     "requests>=2.34.2",
+    "uvicorn>=0.52.3",
     "yt-dlp[default]>=2026.7.4",
     "ytmusicapi>=1.12.2",
 ]
