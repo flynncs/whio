@@ -1,5 +1,6 @@
 import json
 import subprocess
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -41,6 +42,8 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
                 )
             )
 
+        self.assertEqual(run.call_count, 2)
+
     @patch("app.youtube.playback.subprocess.run")
     def test_resolve_translates_unavailable_yt_dlp(self, run) -> None:
         for failure in [
@@ -58,22 +61,30 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
                         )
                     )
 
+    @patch("app.youtube.playback.requests.get")
     @patch("app.youtube.playback.subprocess.run")
-    def test_resolve_calls_yt_dlp_and_maps_the_contract(self, run) -> None:
-        run.return_value = subprocess.CompletedProcess(
-            args=["yt-dlp"],
-            returncode=0,
-            stdout=json.dumps(
-                {
-                    "url": "https://media.example.test/audio",
-                    "http_headers": {"User-Agent": "test"},
-                    "acodec": "opus",
-                    "abr": 128.5,
-                    "duration": 337.25,
-                }
-            ),
-            stderr="",
-        )
+    def test_resolve_calls_yt_dlp_and_maps_the_contract(self, run, get) -> None:
+        both_started = threading.Barrier(2)
+
+        def resolve_format(*args, **kwargs):
+            both_started.wait(timeout=1)
+            return subprocess.CompletedProcess(
+                args=["yt-dlp"],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "url": "https://media.example.test/audio",
+                        "http_headers": {"User-Agent": "test"},
+                        "acodec": "opus",
+                        "abr": 128.5,
+                        "duration": 337.25,
+                    }
+                ),
+                stderr="",
+            )
+
+        run.side_effect = resolve_format
+        get.return_value.__enter__.return_value.status_code = 206
 
         resolved = YouTubeMusicPlayback().resolve(
             SourceIdentity(
@@ -82,21 +93,23 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
             )
         )
 
-        run.assert_called_once_with(
-            [
-                "yt-dlp",
-                "--ignore-config",
-                "--no-playlist",
-                "--format",
-                "bestaudio[acodec=opus]/bestaudio",
-                "--dump-single-json",
-                "https://www.youtube.com/watch?v=abc123",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30,
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(
+            {call.args[0][4] for call in run.call_args_list},
+            {"bestaudio[acodec=opus]", "bestaudio[ext=m4a]"},
         )
+        self.assertEqual(get.call_count, 2)
+        for call in get.call_args_list:
+            self.assertEqual(call.args[0], "https://media.example.test/audio")
+            self.assertEqual(
+                call.kwargs,
+                {
+                    "headers": {"User-Agent": "test", "Range": "bytes=0-"},
+                    "stream": True,
+                    "allow_redirects": True,
+                    "timeout": (5, 10),
+                },
+            )
         self.assertEqual(
             resolved.model_dump(mode="json"),
             {
@@ -112,3 +125,91 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
                 },
             },
         )
+
+    @patch("app.youtube.playback.requests.get")
+    @patch("app.youtube.playback.subprocess.run")
+    def test_resolve_falls_back_when_the_first_url_is_rejected(
+        self,
+        run,
+        get,
+    ) -> None:
+        def resolve_format(command, **kwargs):
+            is_opus = command[4] == "bestaudio[acodec=opus]"
+            return subprocess.CompletedProcess(
+                args=["yt-dlp"],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "url": (
+                            "https://media.example.test/opus"
+                            if is_opus
+                            else "https://media.example.test/aac"
+                        ),
+                        "acodec": "opus" if is_opus else "mp4a.40.2",
+                    }
+                ),
+                stderr="",
+            )
+
+        def validate_format(url, **kwargs):
+            response = unittest.mock.MagicMock()
+            response.__enter__.return_value.status_code = (
+                403 if url.endswith("/opus") else 206
+            )
+            return response
+
+        run.side_effect = resolve_format
+        get.side_effect = validate_format
+
+        resolved = YouTubeMusicPlayback().resolve(
+            SourceIdentity(
+                provider_id="youtube_music",
+                external_id="abc123",
+            )
+        )
+
+        self.assertEqual(str(resolved.url), "https://media.example.test/aac")
+        self.assertEqual(resolved.media.codec, "mp4a.40.2")
+        self.assertEqual(run.call_count, 2)
+
+    @patch("app.youtube.playback.time.sleep")
+    @patch("app.youtube.playback.requests.get")
+    @patch("app.youtube.playback.subprocess.run")
+    def test_resolve_retries_with_fresh_urls_after_a_rejected_pass(
+        self,
+        run,
+        get,
+        sleep,
+    ) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            args=["yt-dlp"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "url": "https://media.example.test/audio",
+                    "acodec": "opus",
+                }
+            ),
+            stderr="",
+        )
+
+        first = unittest.mock.MagicMock()
+        first.__enter__.return_value.status_code = 403
+        second = unittest.mock.MagicMock()
+        second.__enter__.return_value.status_code = 403
+        accepted = unittest.mock.MagicMock()
+        accepted.__enter__.return_value.status_code = 206
+        also_accepted = unittest.mock.MagicMock()
+        also_accepted.__enter__.return_value.status_code = 206
+        get.side_effect = [first, second, accepted, also_accepted]
+
+        resolved = YouTubeMusicPlayback().resolve(
+            SourceIdentity(
+                provider_id="youtube_music",
+                external_id="abc123",
+            )
+        )
+
+        self.assertEqual(str(resolved.url), "https://media.example.test/audio")
+        self.assertEqual(run.call_count, 4)
+        sleep.assert_called_once_with(0.2)

@@ -1,17 +1,9 @@
-use std::{
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
-
-use bytes::Bytes;
-use tokio::sync::mpsc;
-use tokio_stream::{Stream, wrappers::ReceiverStream};
+use std::sync::Arc;
 
 use crate::{
     media::{ByteRange, MediaFetchError, MediaFetcher, MediaInfo},
-    playback::{PlayableMedia, PlaybackError, PlaybackService},
-    playback_stream::ActiveSpool,
+    playback::{PlaybackError, PlaybackService},
+    playback_stream::{ActiveSpool, PlaybackByteStream},
     request::RequestContext,
     tracks::TrackId,
 };
@@ -29,8 +21,8 @@ pub enum PlaybackStreamError {
 }
 
 pub struct PreparedPlayback {
-    pub media: PlayableMedia,
     pub info: MediaInfo,
+    spool: Arc<ActiveSpool>,
 }
 
 pub struct PlaybackStreamService {
@@ -38,7 +30,7 @@ pub struct PlaybackStreamService {
     fetcher: Arc<dyn MediaFetcher>,
 }
 
-const BUFFERED_CHUNK_COUNT: usize = 4;
+const MAX_MEDIA_ATTEMPTS: usize = 3;
 
 impl PlaybackStreamService {
     pub fn new(playback: Arc<PlaybackService>, fetcher: Arc<dyn MediaFetcher>) -> Self {
@@ -50,9 +42,33 @@ impl PlaybackStreamService {
         track_id: &TrackId,
         context: &RequestContext,
     ) -> Result<PreparedPlayback, PlaybackStreamError> {
-        let media = self.playback.resolve(track_id, context).await?;
-        let info = self.fetcher.probe(&media).await?;
-        Ok(PreparedPlayback { media, info })
+        for attempt in 1..=MAX_MEDIA_ATTEMPTS {
+            let media = self.playback.resolve(track_id, context).await?;
+
+            let info = match self.fetcher.probe(&media).await {
+                Ok(info) => info,
+                Err(error) if attempt < MAX_MEDIA_ATTEMPTS && is_retryable(&error) => {
+                    tracing::warn!(attempt, error = %error, "media probe failed; resolving a fresh URL");
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+
+            let body = match self.fetcher.open_continuous(&media).await {
+                Ok(body) => body,
+                Err(error) if attempt < MAX_MEDIA_ATTEMPTS && is_retryable(&error) => {
+                    tracing::warn!(attempt, error = %error, "media open failed; resolving a fresh URL");
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+
+            let spool = ActiveSpool::start(&std::env::temp_dir(), body).await?;
+
+            return Ok(PreparedPlayback { info, spool });
+        }
+
+        unreachable!("the media attempt loop always returns on its final attempt")
     }
 
     pub async fn stream_range(
@@ -60,55 +76,23 @@ impl PlaybackStreamService {
         prepared: PreparedPlayback,
         range: ByteRange,
     ) -> Result<PlaybackByteStream, PlaybackStreamError> {
-        let body = self.fetcher.open_continuous(&prepared.media).await?;
+        let spool_id = prepared.spool.id();
+        let reader = prepared.spool.reader(range.start(), range.len()).await?;
 
-        let spool = ActiveSpool::start(&std::env::temp_dir(), body).await?;
-
-        let reader = spool.reader(range.start(), range.len()).await?;
-
-        let (sender, receiver) =
-            mpsc::channel::<Result<Bytes, PlaybackStreamError>>(BUFFERED_CHUNK_COUNT);
-
-        tokio::spawn(async move {
-            let mut reader = reader;
-
-            loop {
-                match reader.next_chunk().await {
-                    Ok(Some(bytes)) => {
-                        if sender.send(Ok(bytes)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(error) => {
-                        tracing::error!(error = %error, "playback response stream failed");
-                        let _ = sender.send(Err(error)).await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(PlaybackByteStream::new(receiver))
+        Ok(PlaybackByteStream::start(reader, spool_id, range))
     }
 }
 
-pub struct PlaybackByteStream {
-    inner: ReceiverStream<Result<Bytes, PlaybackStreamError>>,
-}
-
-impl PlaybackByteStream {
-    fn new(receiver: mpsc::Receiver<Result<Bytes, PlaybackStreamError>>) -> Self {
-        Self {
-            inner: ReceiverStream::new(receiver),
+fn is_retryable(error: &MediaFetchError) -> bool {
+    match error {
+        MediaFetchError::Request(error) => error.is_connect() || error.is_timeout(),
+        MediaFetchError::UnexpectedStatus(status) => {
+            *status == reqwest::StatusCode::FORBIDDEN
+                || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status.is_server_error()
         }
-    }
-}
-
-impl Stream for PlaybackByteStream {
-    type Item = Result<Bytes, PlaybackStreamError>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().inner).poll_next(cx)
+        MediaFetchError::MissingContentLength
+        | MediaFetchError::InvalidContentRange
+        | MediaFetchError::RangesUnsupported => false,
     }
 }
