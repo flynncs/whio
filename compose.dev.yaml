@@ -1,6 +1,22 @@
 name: whio-dev
 
 services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: whio
+      POSTGRES_USER: whio
+      POSTGRES_PASSWORD: whio-dev
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    ports:
+      - 127.0.0.1:5432:5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whio -d whio"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   ytm-resolver:
     build:
       context: .
@@ -29,10 +45,13 @@ services:
       dockerfile: docker/core.Dockerfile
       target: dev
     depends_on:
+      postgres:
+        condition: service_healthy
       ytm-resolver:
         condition: service_healthy
     environment:
       WHIO_BIND_ADDRESS: 0.0.0.0:3000
+      WHIO_DATABASE_URL: postgres://whio:whio-dev@postgres:5432/whio
       WHIO_LOG_LEVEL: info
       WHIO_YOUTUBE_ENABLED: "true"
       WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000
@@ -46,5 +65,6 @@ services:
 volumes:
   cargo-registry:
   core-target:
+  postgres-data:
   ytm-deno-cache:
   ytm-resolver-venv:

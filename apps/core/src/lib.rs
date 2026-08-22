@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::Router;
 
 pub mod catalogue;
+pub mod database;
 pub mod media;
 pub mod request;
 pub mod resolvers;
@@ -18,6 +19,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     catalogue: Arc<CatalogueService>,
+    database: Option<Arc<database::Database>>,
     playback: Arc<PlaybackService>,
     playback_stream: Arc<PlaybackStreamService>,
 }
@@ -30,9 +32,28 @@ impl AppState {
     ) -> Self {
         Self {
             catalogue,
+            database: None,
             playback,
             playback_stream,
         }
+    }
+
+    pub fn with_database(
+        catalogue: Arc<CatalogueService>,
+        playback: Arc<PlaybackService>,
+        playback_stream: Arc<PlaybackStreamService>,
+        database: Arc<database::Database>,
+    ) -> Self {
+        Self {
+            catalogue,
+            database: Some(database),
+            playback,
+            playback_stream,
+        }
+    }
+
+    pub(crate) fn database(&self) -> Option<&database::Database> {
+        self.database.as_deref()
     }
 
     pub(crate) fn catalogue(&self) -> &CatalogueService {

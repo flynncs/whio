@@ -1,11 +1,32 @@
 services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: whio
+      POSTGRES_USER: whio
+      POSTGRES_PASSWORD: whio-dev
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whio -d whio"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   ytm-resolver:
     image: ghcr.io/flynncs/whio-ytm-resolver:latest
 
   core:
     image: ghcr.io/flynncs/whio-core:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
+      WHIO_DATABASE_URL: postgres://whio:whio-dev@postgres:5432/whio
       WHIO_YOUTUBE_ENABLED: "true"
       WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000
     ports:
       - 3000:3000
+
+volumes:
+  postgres-data:

@@ -8,6 +8,7 @@ use config::{Config, YoutubeResolverConfig};
 use whio_core::{
     AppState,
     catalogue::{CatalogueResolver, CatalogueService},
+    database::Database,
     media::HttpMediaFetcher,
     playback::{PlaybackResolver, PlaybackService},
     playback_stream::PlaybackStreamService,
@@ -49,7 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(config.log_level)
         .init();
 
-    let state = build_state(&config)?;
+    let database = Arc::new(Database::connect(&config.database_url).await?);
+    let state = build_state(&config, database)?;
     let listener = TcpListener::bind(config.bind_address).await?;
 
     tracing::info!(address = %config.bind_address, "listening");
@@ -61,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn build_state(config: &Config) -> Result<AppState, ResolverError> {
+fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, ResolverError> {
     let track_repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
 
     let (catalogue_resolver, playback_resolver): (
@@ -100,5 +102,10 @@ fn build_state(config: &Config) -> Result<AppState, ResolverError> {
     let fetcher = Arc::new(HttpMediaFetcher::new(reqwest::Client::new()));
     let playback_stream = Arc::new(PlaybackStreamService::new(Arc::clone(&playback), fetcher));
 
-    Ok(AppState::new(catalogue, playback, playback_stream))
+    Ok(AppState::with_database(
+        catalogue,
+        playback,
+        playback_stream,
+        database,
+    ))
 }

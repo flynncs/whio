@@ -7,6 +7,7 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_YOUTUBE_CONNECT_TIMEOUT_SECONDS: u64 = 2;
 const DEFAULT_YOUTUBE_TOTAL_TIMEOUT_SECONDS: u64 = 35;
 
+const DATABASE_URL: &str = "WHIO_DATABASE_URL";
 const YOUTUBE_ENABLED: &str = "WHIO_YOUTUBE_ENABLED";
 const YOUTUBE_RESOLVER_URL: &str = "WHIO_YOUTUBE_RESOLVER_URL";
 const YOUTUBE_RESOLVER_CONNECT_TIMEOUT: &str = "WHIO_YOUTUBE_RESOLVER_CONNECT_TIMEOUT_SECONDS";
@@ -15,6 +16,7 @@ const YOUTUBE_RESOLVER_TOTAL_TIMEOUT: &str = "WHIO_YOUTUBE_RESOLVER_TOTAL_TIMEOU
 #[derive(Debug)]
 pub(crate) struct Config {
     pub(crate) bind_address: SocketAddr,
+    pub(crate) database_url: String,
     pub(crate) log_level: tracing::Level,
     pub(crate) youtube_resolver: YoutubeResolverConfig,
 }
@@ -38,8 +40,14 @@ pub(crate) enum ConfigError {
         reason: &'static str,
     },
 
-    #[error("missing required {name} when WHIO_YOUTUBE_ENABLED=true")]
+    #[error("missing required {name}")]
     Missing { name: &'static str },
+
+    #[error("invalid {name} ({reason})")]
+    InvalidDatabaseUrl {
+        name: &'static str,
+        reason: &'static str,
+    },
 }
 
 impl Config {
@@ -56,6 +64,25 @@ impl Config {
         let bind_address = bind_raw
             .parse()
             .map_err(|_| invalid("WHIO_BIND_ADDRESS", bind_raw, "must be a socket address"))?;
+
+        let database_raw = vars
+            .get(DATABASE_URL)
+            .ok_or(ConfigError::Missing { name: DATABASE_URL })?;
+        let database_url =
+            database_raw
+                .parse::<Url>()
+                .map_err(|_| ConfigError::InvalidDatabaseUrl {
+                    name: DATABASE_URL,
+                    reason: "must be a valid PostgreSQL URL",
+                })?;
+        if !matches!(database_url.scheme(), "postgres" | "postgresql")
+            || database_url.host_str().is_none()
+        {
+            return Err(ConfigError::InvalidDatabaseUrl {
+                name: DATABASE_URL,
+                reason: "must be a PostgreSQL URL with a host",
+            });
+        }
 
         let log_raw = vars
             .get("WHIO_LOG_LEVEL")
@@ -129,6 +156,7 @@ impl Config {
 
         Ok(Self {
             bind_address,
+            database_url: database_raw.to_owned(),
             log_level,
             youtube_resolver,
         })
@@ -170,11 +198,39 @@ mod tests {
     use super::*;
 
     fn parse_config(values: &[(&str, &str)]) -> Result<Config, ConfigError> {
-        let vars = values
+        let mut vars: HashMap<String, String> = values
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect();
+        vars.entry(DATABASE_URL.to_owned())
+            .or_insert_with(|| "postgres://whio:whio-dev@localhost/whio".to_owned());
         Config::from_map(&vars)
+    }
+
+    #[test]
+    fn database_configuration_is_required() {
+        let vars = HashMap::new();
+
+        assert!(matches!(
+            Config::from_map(&vars),
+            Err(ConfigError::Missing { name: DATABASE_URL })
+        ));
+    }
+
+    #[test]
+    fn database_configuration_requires_a_postgresql_url() {
+        for value in ["not a url", "http://localhost/whio", "postgres://"] {
+            let mut vars = HashMap::new();
+            vars.insert(DATABASE_URL.to_owned(), value.to_owned());
+
+            assert!(matches!(
+                Config::from_map(&vars),
+                Err(ConfigError::InvalidDatabaseUrl {
+                    name: DATABASE_URL,
+                    ..
+                }),
+            ));
+        }
     }
 
     #[test]
