@@ -2,7 +2,7 @@ import hashlib
 import logging
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import parse_qs, urlsplit
 
 import requests
@@ -129,23 +129,24 @@ def _resolve_audio(video_id: str) -> PlaybackResolveResponse:
 
     for resolution_pass in range(1, _RESOLUTION_PASSES + 1):
         retryable_failure = False
-        accepted: list[tuple[str, YtDlpAudioPayload]] = []
 
         logger.info(
             "resolving audio format candidates pass=%s candidates=%s",
             resolution_pass,
             len(_AUDIO_FORMATS),
         )
-        with ThreadPoolExecutor(
+        executor = ThreadPoolExecutor(
             max_workers=len(_AUDIO_FORMATS),
             thread_name_prefix="yt-dlp",
-        ) as executor:
-            futures = [
-                executor.submit(_resolve_candidate, video_id, audio_format)
-                for audio_format in _AUDIO_FORMATS
-            ]
+        )
+        futures = {
+            executor.submit(_resolve_candidate, video_id, audio_format): audio_format
+            for audio_format in _AUDIO_FORMATS
+        }
 
-            for audio_format, future in zip(_AUDIO_FORMATS, futures, strict=True):
+        try:
+            for future in as_completed(futures):
+                audio_format = futures[future]
                 try:
                     payload, status_code = future.result()
                 except subprocess.CalledProcessError as error:
@@ -184,8 +185,23 @@ def _resolve_audio(video_id: str) -> PlaybackResolveResponse:
                     payload
                 )
                 if status_code in (200, 206):
-                    accepted.append((audio_format, payload))
-                    continue
+                    logger.info(
+                        "selected audio format pass=%s candidate=%s format_id=%s "
+                        "container=%s codec=%s bitrate_kbps=%s media_host=%s "
+                        "client=%s cdn=%s expires=%s url_id=%s",
+                        resolution_pass,
+                        audio_format,
+                        payload.format_id,
+                        payload.ext,
+                        payload.acodec,
+                        payload.abr,
+                        media_host,
+                        client,
+                        cdn,
+                        expires,
+                        url_id,
+                    )
+                    return _playback_response(payload)
 
                 retryable_failure |= _is_retryable_status(status_code)
                 logger.warning(
@@ -206,27 +222,8 @@ def _resolve_audio(video_id: str) -> PlaybackResolveResponse:
                     expires,
                     url_id,
                 )
-
-        if accepted:
-            audio_format, payload = accepted[0]
-            media_host, client, cdn, expires, url_id = _media_url_log_fields(payload)
-            logger.info(
-                "selected audio format pass=%s candidate=%s format_id=%s "
-                "container=%s codec=%s bitrate_kbps=%s media_host=%s "
-                "client=%s cdn=%s expires=%s url_id=%s",
-                resolution_pass,
-                audio_format,
-                payload.format_id,
-                payload.ext,
-                payload.acodec,
-                payload.abr,
-                media_host,
-                client,
-                cdn,
-                expires,
-                url_id,
-            )
-            return _playback_response(payload)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         if resolution_pass < _RESOLUTION_PASSES and retryable_failure:
             logger.warning(

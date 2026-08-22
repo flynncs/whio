@@ -45,18 +45,18 @@ impl CatalogueService {
             .await
             .map_err(CatalogueError::Resolver)?;
 
-        let tracks = candidates
-            .into_iter()
-            .map(|candidate| {
-                let (source, metadata) = candidate.into_parts();
-                let track_id = self
-                    .track_repository
-                    .get_or_create_id(source)
-                    .map_err(CatalogueError::Repository)?;
+        let mut tracks = Vec::with_capacity(candidates.len());
 
-                Ok(Track::new(track_id, metadata))
-            })
-            .collect::<Result<Vec<_>, CatalogueError>>()?;
+        for candidate in candidates {
+            let (source, metadata) = candidate.into_parts();
+            let track = self
+                .track_repository
+                .get_or_create(source, metadata)
+                .await
+                .map_err(CatalogueError::Repository)?;
+
+            tracks.push(track);
+        }
 
         Ok(tracks)
     }
@@ -72,7 +72,7 @@ mod tests {
     use crate::{
         catalogue::{CatalogueCandidate, SearchLimit, SearchQuery},
         request::RequestId,
-        tracks::{InMemoryTrackRepository, ProviderId, SourceIdentity, TrackMetadata},
+        tracks::{InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata},
     };
 
     struct StubResolver {
@@ -81,18 +81,20 @@ mod tests {
 
     struct FailingTrackRepository;
 
+    #[async_trait]
     impl TrackRepository for FailingTrackRepository {
-        fn get_or_create_id(
+        async fn get_or_create(
             &self,
             _source: SourceIdentity,
-        ) -> Result<crate::tracks::TrackId, TrackRepositoryError> {
+            _metadata: TrackMetadata,
+        ) -> Result<Track, TrackRepositoryError> {
             Err(TrackRepositoryError::Unavailable)
         }
 
-        fn find_source(
+        async fn find_sources(
             &self,
             _track_id: &crate::tracks::TrackId,
-        ) -> Result<Option<SourceIdentity>, TrackRepositoryError> {
+        ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
             Err(TrackRepositoryError::Unavailable)
         }
     }
@@ -118,7 +120,8 @@ mod tests {
 
     fn candidate(external_id: &str, title: &str) -> CatalogueCandidate {
         let provider_id = ProviderId::new("youtube_music".to_owned()).unwrap();
-        let source = SourceIdentity::new(provider_id, external_id.to_owned()).unwrap();
+        let source =
+            SourceIdentity::new(provider_id, SourceScope::Global, external_id.to_owned()).unwrap();
         let metadata = TrackMetadata::new(
             title.to_owned(),
             vec!["Daft Punk".to_owned()],

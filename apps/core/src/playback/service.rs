@@ -42,8 +42,11 @@ impl PlaybackService {
     ) -> Result<PlayableMedia, PlaybackError> {
         let source = self
             .track_repository
-            .find_source(track_id)
+            .find_sources(track_id)
+            .await
             .map_err(PlaybackError::Repository)?
+            .into_iter()
+            .next()
             .ok_or(PlaybackError::TrackNotFound)?;
 
         self.resolver
@@ -63,7 +66,9 @@ mod tests {
     use crate::{
         playback::{MediaMetadata, PlaybackUrl},
         request::RequestId,
-        tracks::{InMemoryTrackRepository, ProviderId, SourceIdentity},
+        tracks::{
+            InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, Track, TrackMetadata,
+        },
     };
 
     struct StubResolver {
@@ -94,18 +99,20 @@ mod tests {
 
     struct FailingTrackRepository;
 
+    #[async_trait]
     impl TrackRepository for FailingTrackRepository {
-        fn get_or_create_id(
+        async fn get_or_create(
             &self,
             _source: SourceIdentity,
-        ) -> Result<TrackId, TrackRepositoryError> {
+            _metadata: TrackMetadata,
+        ) -> Result<Track, TrackRepositoryError> {
             Err(TrackRepositoryError::Unavailable)
         }
 
-        fn find_source(
+        async fn find_sources(
             &self,
             _track_id: &TrackId,
-        ) -> Result<Option<SourceIdentity>, TrackRepositoryError> {
+        ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
             Err(TrackRepositoryError::Unavailable)
         }
     }
@@ -113,9 +120,14 @@ mod tests {
     fn source() -> SourceIdentity {
         SourceIdentity::new(
             ProviderId::new("youtube_music".to_owned()).unwrap(),
+            SourceScope::Global,
             "source-123".to_owned(),
         )
         .unwrap()
+    }
+
+    fn track_metadata(title: &str) -> TrackMetadata {
+        TrackMetadata::new(title.to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
     }
 
     fn playable_media() -> PlayableMedia {
@@ -135,7 +147,12 @@ mod tests {
     async fn resolve_finds_source_and_returns_playable_media() {
         let repository = Arc::new(InMemoryTrackRepository::default());
         let source = source();
-        let track_id = repository.get_or_create_id(source.clone()).unwrap();
+        let track_id = repository
+            .get_or_create(source.clone(), track_metadata("Title"))
+            .await
+            .unwrap()
+            .id()
+            .clone();
         let expected = playable_media();
         let resolver = Arc::new(StubResolver::new(Ok(expected.clone())));
         let service = PlaybackService::new(resolver.clone(), repository);
@@ -176,7 +193,12 @@ mod tests {
     #[tokio::test]
     async fn resolve_preserves_resolver_errors() {
         let repository = Arc::new(InMemoryTrackRepository::default());
-        let track_id = repository.get_or_create_id(source()).unwrap();
+        let track_id = repository
+            .get_or_create(source(), track_metadata("Title"))
+            .await
+            .unwrap()
+            .id()
+            .clone();
         let resolver = StubResolver::new(Err(ResolverError::ProviderUnavailable));
         let service = PlaybackService::new(Arc::new(resolver), repository);
 

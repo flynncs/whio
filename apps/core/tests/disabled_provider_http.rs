@@ -15,21 +15,34 @@ use whio_core::{
     catalogue::CatalogueService,
     playback::PlaybackService,
     resolver::DisabledResolver,
-    tracks::{InMemoryTrackRepository, ProviderId, SourceIdentity, TrackRepository},
+    tracks::{
+        InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+        TrackRepository,
+    },
 };
 
 fn source() -> SourceIdentity {
     SourceIdentity::new(
         ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
         "source-123".to_owned(),
     )
     .unwrap()
 }
 
-fn app() -> (axum::Router, String) {
+fn metadata() -> TrackMetadata {
+    TrackMetadata::new("Title".to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
+}
+
+async fn app() -> (axum::Router, String) {
     let resolver = Arc::new(DisabledResolver);
     let repository = Arc::new(InMemoryTrackRepository::default());
-    let track_id = repository.get_or_create_id(source()).unwrap();
+    let track_id = repository
+        .get_or_create(source(), metadata())
+        .await
+        .unwrap()
+        .id()
+        .to_string();
     let catalogue = Arc::new(CatalogueService::new(resolver.clone(), repository.clone()));
     let playback = Arc::new(PlaybackService::new(resolver, repository));
     let playback_stream = playback_stream(Arc::clone(&playback));
@@ -57,7 +70,7 @@ async fn response_body(response: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn disabled_youtube_returns_a_safe_catalogue_error() {
-    let (app, _) = app();
+    let (app, _) = app().await;
     let response = app
         .oneshot(request(
             "POST",
@@ -80,7 +93,7 @@ async fn disabled_youtube_returns_a_safe_catalogue_error() {
 
 #[tokio::test]
 async fn disabled_youtube_returns_a_safe_playback_error() {
-    let (app, track_id) = app();
+    let (app, track_id) = app().await;
     let response = app
         .oneshot(request(
             "POST",

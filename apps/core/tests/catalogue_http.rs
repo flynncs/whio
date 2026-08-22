@@ -8,7 +8,7 @@ use uuid::Uuid;
 use whio_core::{
     catalogue::CatalogueCandidate,
     resolver::ResolverError,
-    tracks::{ProviderId, SourceIdentity, TrackMetadata},
+    tracks::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
 };
 
 mod support;
@@ -17,7 +17,8 @@ use support::app;
 
 fn candidate() -> CatalogueCandidate {
     let provider_id = ProviderId::new("youtube_music".to_owned()).unwrap();
-    let source = SourceIdentity::new(provider_id, "source-123".to_owned()).unwrap();
+    let source =
+        SourceIdentity::new(provider_id, SourceScope::Global, "source-123".to_owned()).unwrap();
     let metadata = TrackMetadata::new(
         "Instant Crush".to_owned(),
         vec!["Daft Punk".to_owned()],

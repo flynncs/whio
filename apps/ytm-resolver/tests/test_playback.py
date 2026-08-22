@@ -10,7 +10,7 @@ from app.errors import (
     UnsupportedProviderError,
 )
 from app.generated.resolver_v1 import SourceIdentity
-from app.youtube.playback import YouTubeMusicPlayback
+from app.youtube.playback import YouTubeMusicPlayback, YtDlpAudioPayload
 
 
 class YouTubeMusicPlaybackTest(unittest.TestCase):
@@ -98,7 +98,7 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
             {call.args[0][4] for call in run.call_args_list},
             {"bestaudio[acodec=opus]", "bestaudio[ext=m4a]"},
         )
-        self.assertEqual(get.call_count, 2)
+        self.assertGreaterEqual(get.call_count, 1)
         for call in get.call_args_list:
             self.assertEqual(call.args[0], "https://media.example.test/audio")
             self.assertEqual(
@@ -125,6 +125,60 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
                 },
             },
         )
+
+    @patch("app.youtube.playback._resolve_candidate")
+    def test_resolve_returns_when_the_first_candidate_succeeds(
+        self,
+        resolve_candidate,
+    ) -> None:
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+        slow_finished = threading.Event()
+        resolution_finished = threading.Event()
+        result = []
+        failures = []
+
+        payload = YtDlpAudioPayload(
+            url="https://media.example.test/audio",
+            acodec="opus",
+        )
+
+        def resolve_format(video_id, audio_format):
+            if audio_format == "bestaudio[acodec=opus]":
+                slow_started.set()
+                release_slow.wait(timeout=1)
+                slow_finished.set()
+            return payload, 206
+
+        def resolve() -> None:
+            try:
+                result.append(
+                    YouTubeMusicPlayback().resolve(
+                        SourceIdentity(
+                            provider_id="youtube_music",
+                            external_id="abc123",
+                        )
+                    )
+                )
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                resolution_finished.set()
+
+        resolve_candidate.side_effect = resolve_format
+        resolver_thread = threading.Thread(target=resolve)
+        resolver_thread.start()
+
+        try:
+            self.assertTrue(slow_started.wait(timeout=1))
+            self.assertTrue(resolution_finished.wait(timeout=1))
+            self.assertEqual(len(failures), 0)
+            self.assertEqual(str(result[0].url), "https://media.example.test/audio")
+        finally:
+            release_slow.set()
+            self.assertTrue(slow_finished.wait(timeout=1))
+            resolver_thread.join(timeout=1)
+            self.assertFalse(resolver_thread.is_alive())
 
     @patch("app.youtube.playback.requests.get")
     @patch("app.youtube.playback.subprocess.run")

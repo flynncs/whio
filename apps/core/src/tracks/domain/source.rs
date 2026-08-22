@@ -64,13 +64,24 @@ impl FromStr for ProviderId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SourceScope {
+    Global,
+    Named(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceIdentity {
     provider_id: ProviderId,
+    source_scope: SourceScope,
     external_id: String,
 }
 
 impl SourceIdentity {
-    pub fn new(provider_id: ProviderId, external_id: String) -> Result<Self, ValidationError> {
+    pub fn new(
+        provider_id: ProviderId,
+        source_scope: SourceScope,
+        external_id: String,
+    ) -> Result<Self, ValidationError> {
         if external_id.is_empty() {
             return Err(ValidationError::Empty {
                 field: "external_id",
@@ -85,6 +96,7 @@ impl SourceIdentity {
 
         Ok(Self {
             provider_id,
+            source_scope,
             external_id,
         })
     }
@@ -95,6 +107,10 @@ impl SourceIdentity {
 
     pub fn external_id(&self) -> &str {
         &self.external_id
+    }
+
+    pub fn source_scope(&self) -> &SourceScope {
+        &self.source_scope
     }
 }
 
@@ -128,17 +144,39 @@ mod tests {
         let provider_id = || ProviderId::new("youtube_music".to_owned()).unwrap();
 
         assert!(matches!(
-            SourceIdentity::new(provider_id(), String::new()),
+            SourceIdentity::new(provider_id(), SourceScope::Global, String::new()),
             Err(ValidationError::Empty {
                 field: "external_id"
             })
         ));
 
         assert!(matches!(
-            SourceIdentity::new(provider_id(), "x".repeat(513)),
+            SourceIdentity::new(provider_id(), SourceScope::Global, "x".repeat(513)),
             Err(ValidationError::TooLong {
                 field: "external_id"
             })
         ));
+    }
+
+    #[test]
+    fn source_scope_participates_in_identity() {
+        let provider_id = || ProviderId::new("youtube_music".to_owned()).unwrap();
+
+        let global =
+            SourceIdentity::new(provider_id(), SourceScope::Global, "source-123".to_owned())
+                .unwrap();
+        let scoped = SourceIdentity::new(
+            provider_id(),
+            SourceScope::Named("home-server".to_owned()),
+            "source-123".to_owned(),
+        )
+        .unwrap();
+
+        assert_ne!(global, scoped);
+        assert_eq!(global.source_scope(), &SourceScope::Global);
+        assert_eq!(
+            scoped.source_scope(),
+            &SourceScope::Named("home-server".to_owned())
+        );
     }
 }

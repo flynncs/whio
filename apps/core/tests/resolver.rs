@@ -17,7 +17,7 @@ use whio_core::{
     playback::{PlaybackResolver, ValidationError as PlaybackValidationError},
     request::{RequestContext, RequestId},
     resolver::{CatalogueResolver, ResolverClient, ResolverError},
-    tracks::{ProviderId, SourceIdentity, ValidationError as TrackValidationError},
+    tracks::{ProviderId, SourceIdentity, SourceScope, ValidationError as TrackValidationError},
 };
 
 #[derive(Debug)]
@@ -60,6 +60,7 @@ fn context() -> RequestContext {
 fn source() -> SourceIdentity {
     SourceIdentity::new(
         ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
         "source-123".to_owned(),
     )
     .unwrap()

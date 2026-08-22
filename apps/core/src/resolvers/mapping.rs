@@ -9,7 +9,7 @@ use crate::{
     playback::{
         MediaMetadata, PlayableMedia, PlaybackUrl, ValidationError as PlaybackValidationError,
     },
-    tracks::{ProviderId, SourceIdentity, TrackMetadata, ValidationError},
+    tracks::{ProviderId, SourceIdentity, SourceScope, TrackMetadata, ValidationError},
 };
 
 impl TryFrom<CatalogueCandidateDto> for CatalogueCandidate {
@@ -17,7 +17,11 @@ impl TryFrom<CatalogueCandidateDto> for CatalogueCandidate {
 
     fn try_from(candidate: CatalogueCandidateDto) -> Result<Self, Self::Error> {
         let provider_id = ProviderId::new(candidate.source.provider_id)?;
-        let source = SourceIdentity::new(provider_id, candidate.source.external_id)?;
+        let source = SourceIdentity::new(
+            provider_id,
+            SourceScope::Global,
+            candidate.source.external_id,
+        )?;
 
         let duration_ms = candidate
             .duration_ms

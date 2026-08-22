@@ -21,7 +21,9 @@ use whio_core::{
     playback_stream::PlaybackStreamService,
     request::RequestContext,
     resolver::ResolverError,
-    tracks::{InMemoryTrackRepository, ProviderId, SourceIdentity, TrackId, TrackMetadata},
+    tracks::{
+        InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackId, TrackMetadata,
+    },
 };
 
 struct StubResolver {
@@ -83,6 +85,7 @@ impl MediaFetcher for StubMediaFetcher {
 fn source() -> SourceIdentity {
     SourceIdentity::new(
         ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
         "source-123".to_owned(),
     )
     .unwrap()

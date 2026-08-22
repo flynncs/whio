@@ -1,3 +1,7 @@
+use async_trait::async_trait;
+
+use crate::tracks::{Track, TrackMetadata};
+
 use super::{SourceIdentity, TrackId};
 
 #[derive(Debug, thiserror::Error)]
@@ -6,11 +10,16 @@ pub enum TrackRepositoryError {
     Unavailable,
 }
 
+#[async_trait]
 pub trait TrackRepository: Send + Sync {
-    fn get_or_create_id(&self, source: SourceIdentity) -> Result<TrackId, TrackRepositoryError>;
+    async fn get_or_create(
+        &self,
+        source: SourceIdentity,
+        metadata: TrackMetadata,
+    ) -> Result<Track, TrackRepositoryError>;
 
-    fn find_source(
+    async fn find_sources(
         &self,
         track_id: &TrackId,
-    ) -> Result<Option<SourceIdentity>, TrackRepositoryError>;
+    ) -> Result<Vec<SourceIdentity>, TrackRepositoryError>;
 }
