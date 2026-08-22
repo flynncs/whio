@@ -8,6 +8,8 @@ use super::{SourceIdentity, TrackId};
 pub enum TrackRepositoryError {
     #[error("track repository is unavailable")]
     Unavailable,
+    #[error("track repository contained invalid data")]
+    InvalidData,
 }
 
 #[async_trait]

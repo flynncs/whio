@@ -36,6 +36,10 @@ impl Database {
         Ok(Self { pool })
     }
 
+    pub fn pool(&self) -> PgPool {
+        self.pool.clone()
+    }
+
     pub(crate) async fn check(&self) -> Result<(), DatabaseError> {
         sqlx::query("SELECT 1")
             .execute(&self.pool)

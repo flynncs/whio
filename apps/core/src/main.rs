@@ -13,7 +13,7 @@ use whio_core::{
     playback::{PlaybackResolver, PlaybackService},
     playback_stream::PlaybackStreamService,
     resolver::{DisabledResolver, ResolverClient, ResolverError},
-    tracks::{InMemoryTrackRepository, TrackRepository},
+    tracks::{PostgresTrackRepository, TrackRepository},
 };
 
 async fn shutdown_signal() {
@@ -64,7 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, ResolverError> {
-    let track_repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+    let track_repository: Arc<dyn TrackRepository> =
+        Arc::new(PostgresTrackRepository::new(database.pool()));
 
     let (catalogue_resolver, playback_resolver): (
         Arc<dyn CatalogueResolver>,
