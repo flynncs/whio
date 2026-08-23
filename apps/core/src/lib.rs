@@ -4,6 +4,7 @@ use axum::Router;
 
 pub mod catalogue;
 pub mod database;
+pub mod identity;
 pub mod media;
 pub mod request;
 pub mod resolvers;
