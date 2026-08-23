@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-#[path = "support/media.rs"]
-mod media_support;
-use media_support::playback_stream;
+mod support;
+
+use support::{credential_service, playback_stream, router};
 
 use axum::{
     body::{Body, to_bytes},
@@ -11,7 +11,6 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
-    AppState,
     catalogue::CatalogueService,
     playback::PlaybackService,
     resolver::DisabledResolver,
@@ -48,7 +47,7 @@ async fn app() -> (axum::Router, String) {
     let playback_stream = playback_stream(Arc::clone(&playback));
 
     (
-        whio_core::router(AppState::new(catalogue, playback, playback_stream)),
+        router(credential_service(), catalogue, playback, playback_stream),
         track_id.to_string(),
     )
 }

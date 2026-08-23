@@ -1,3 +1,6 @@
+// fixtures are a toolbox; each suite uses a subset
+#![allow(dead_code)]
+
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
@@ -8,14 +11,35 @@ use axum::Router;
 use whio_core::{
     AppState,
     catalogue::{CatalogueCandidate, CatalogueResolver, CatalogueSearch, CatalogueService},
+    identity::service::CredentialService,
     playback::{PlayableMedia, PlaybackResolver, PlaybackService},
+    playback_stream::PlaybackStreamService,
     request::RequestContext,
     resolver::ResolverError,
     tracks::{InMemoryTrackRepository, SourceIdentity},
 };
 
+pub mod credentials;
+pub use credentials::credential_service;
+
 mod media;
 pub use media::playback_stream;
+
+// the single place test suites assemble app state; new services are wired
+// here once instead of in every suite
+pub fn router(
+    credential: Arc<CredentialService>,
+    catalogue: Arc<CatalogueService>,
+    playback: Arc<PlaybackService>,
+    playback_stream: Arc<PlaybackStreamService>,
+) -> Router {
+    whio_core::router(AppState::new(
+        credential,
+        catalogue,
+        playback,
+        playback_stream,
+    ))
+}
 
 struct StubResolver {
     responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ResolverError>>>,
@@ -55,5 +79,5 @@ pub fn app(responses: Vec<Result<Vec<CatalogueCandidate>, ResolverError>>) -> Ro
     let playback = Arc::new(PlaybackService::new(resolver, track_repository));
     let playback_stream = playback_stream(Arc::clone(&playback));
 
-    whio_core::router(AppState::new(catalogue, playback, playback_stream))
+    router(credential_service(), catalogue, playback, playback_stream)
 }

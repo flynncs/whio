@@ -27,19 +27,15 @@ don't edit `apps/resolver-client-generated/` or
 
 ## core config
 
-`WHIO_DATABASE_URL` is required. Core connects to PostgreSQL and runs the
-embedded migrations before it binds its HTTP listener. If the database is
-unavailable or migrations are incompatible, Core exits without serving
-requests.
+- `WHIO_DATABASE_URL`: required. postgres url. embedded migrations run before core binds.
+- `WHIO_CREDENTIAL_KEY`: required. base64 of 32 random bytes (`openssl rand -base64 32`). encrypts client credential secrets at rest.
+- `WHIO_BIND_ADDRESS`: defaults to `127.0.0.1:3000`
+- `WHIO_LOG_LEVEL`: defaults to `info`
+- `WHIO_YOUTUBE_ENABLED`: off by default
+- `WHIO_YOUTUBE_RESOLVER_URL`, `WHIO_YOUTUBE_RESOLVER_CONNECT_TIMEOUT_SECONDS`, `WHIO_YOUTUBE_RESOLVER_TOTAL_TIMEOUT_SECONDS`: resolver target and budgets when youtube is enabled
 
-For the local Compose setup, the value is configured automatically. When
-running Core directly against the development database, use:
-
-```text
-WHIO_DATABASE_URL=postgres://whio:whio-dev@localhost:5432/whio
-```
-
-YTM is disabled by default. set `WHIO_YOUTUBE_ENABLED=true` to enable it.
+local compose sets everything except the credential key, which lives in a
+gitignored `.env` next to the compose files (`openssl rand -base64 32`).
 
 ## docker
 

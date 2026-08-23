@@ -9,6 +9,10 @@ use whio_core::{
     AppState,
     catalogue::{CatalogueResolver, CatalogueService},
     database::Database,
+    identity::{
+        postgres::PostgresCredentialRepository, repository::CredentialRepository,
+        service::CredentialService,
+    },
     media::HttpMediaFetcher,
     playback::{PlaybackResolver, PlaybackService},
     playback_stream::PlaybackStreamService,
@@ -66,6 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, ResolverError> {
     let track_repository: Arc<dyn TrackRepository> =
         Arc::new(PostgresTrackRepository::new(database.pool()));
+    let credential_repository: Arc<dyn CredentialRepository> =
+        Arc::new(PostgresCredentialRepository::new(database.pool()));
 
     let (catalogue_resolver, playback_resolver): (
         Arc<dyn CatalogueResolver>,
@@ -95,6 +101,10 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Res
         }
     };
 
+    let credential = Arc::new(CredentialService::new(
+        credential_repository,
+        config.credential_key.clone(),
+    ));
     let catalogue = Arc::new(CatalogueService::new(
         catalogue_resolver,
         track_repository.clone(),
@@ -104,6 +114,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Res
     let playback_stream = Arc::new(PlaybackStreamService::new(Arc::clone(&playback), fetcher));
 
     Ok(AppState::with_database(
+        credential,
         catalogue,
         playback,
         playback_stream,

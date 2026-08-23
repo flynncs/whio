@@ -4,6 +4,8 @@ use std::{
 };
 
 use async_trait::async_trait;
+mod support;
+
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -12,9 +14,9 @@ use axum::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
+use support::{credential_service, router};
 use tower::ServiceExt;
 use whio_core::{
-    AppState,
     catalogue::{CatalogueCandidate, CatalogueResolver, CatalogueSearch, CatalogueService},
     media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
     playback::{MediaMetadata, PlayableMedia, PlaybackResolver, PlaybackService, PlaybackUrl},
@@ -142,7 +144,7 @@ fn app_with_media_bytes(bytes: Vec<u8>) -> (Router, Arc<StubResolver>) {
     ));
 
     (
-        whio_core::router(AppState::new(catalogue, playback, playback_stream)),
+        router(credential_service(), catalogue, playback, playback_stream),
         resolver,
     )
 }

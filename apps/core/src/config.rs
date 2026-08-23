@@ -1,6 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use reqwest::Url;
+use whio_core::identity::secrets;
 
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:3000";
 const DEFAULT_LOG_LEVEL: &str = "info";
@@ -8,6 +9,7 @@ const DEFAULT_YOUTUBE_CONNECT_TIMEOUT_SECONDS: u64 = 2;
 const DEFAULT_YOUTUBE_TOTAL_TIMEOUT_SECONDS: u64 = 35;
 
 const DATABASE_URL: &str = "WHIO_DATABASE_URL";
+const CREDENTIAL_KEY: &str = "WHIO_CREDENTIAL_KEY";
 const YOUTUBE_ENABLED: &str = "WHIO_YOUTUBE_ENABLED";
 const YOUTUBE_RESOLVER_URL: &str = "WHIO_YOUTUBE_RESOLVER_URL";
 const YOUTUBE_RESOLVER_CONNECT_TIMEOUT: &str = "WHIO_YOUTUBE_RESOLVER_CONNECT_TIMEOUT_SECONDS";
@@ -17,6 +19,7 @@ const YOUTUBE_RESOLVER_TOTAL_TIMEOUT: &str = "WHIO_YOUTUBE_RESOLVER_TOTAL_TIMEOU
 pub(crate) struct Config {
     pub(crate) bind_address: SocketAddr,
     pub(crate) database_url: String,
+    pub(crate) credential_key: secrets::CredentialKey,
     pub(crate) log_level: tracing::Level,
     pub(crate) youtube_resolver: YoutubeResolverConfig,
 }
@@ -83,6 +86,22 @@ impl Config {
                 reason: "must be a PostgreSQL URL with a host",
             });
         }
+
+        let credential_key_raw = vars.get(CREDENTIAL_KEY).ok_or(ConfigError::Missing {
+            name: CREDENTIAL_KEY,
+        })?;
+        let credential_key =
+            secrets::CredentialKey::from_base64(credential_key_raw).map_err(|err| {
+                ConfigError::Invalid {
+                    name: CREDENTIAL_KEY,
+                    value: credential_key_raw.to_owned(),
+                    reason: match err {
+                        secrets::SecretError::InvalidKeyLength => "must decode to exactly 32 bytes",
+                        secrets::SecretError::InvalidKeyEncoding => "must be valid base64",
+                        _ => "invalid credential key",
+                    },
+                }
+            })?;
 
         let log_raw = vars
             .get("WHIO_LOG_LEVEL")
@@ -158,6 +177,7 @@ impl Config {
             bind_address,
             database_url: database_raw.to_owned(),
             log_level,
+            credential_key,
             youtube_resolver,
         })
     }
@@ -204,6 +224,9 @@ mod tests {
             .collect();
         vars.entry(DATABASE_URL.to_owned())
             .or_insert_with(|| "postgres://whio:whio-dev@localhost/whio".to_owned());
+        // base64 of 32 zero bytes
+        vars.entry(CREDENTIAL_KEY.to_owned())
+            .or_insert_with(|| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned());
         Config::from_map(&vars)
     }
 
@@ -214,6 +237,40 @@ mod tests {
         assert!(matches!(
             Config::from_map(&vars),
             Err(ConfigError::Missing { name: DATABASE_URL })
+        ));
+    }
+
+    #[test]
+    fn credential_key_configuration_is_required() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            DATABASE_URL.to_owned(),
+            "postgres://whio:whio-dev@localhost/whio".to_owned(),
+        );
+
+        assert!(matches!(
+            Config::from_map(&vars),
+            Err(ConfigError::Missing {
+                name: CREDENTIAL_KEY
+            })
+        ));
+    }
+
+    #[test]
+    fn credential_key_must_decode_to_32_bytes() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            DATABASE_URL.to_owned(),
+            "postgres://whio:whio-dev@localhost/whio".to_owned(),
+        );
+        vars.insert(CREDENTIAL_KEY.to_owned(), "tooshort".to_owned());
+
+        assert!(matches!(
+            Config::from_map(&vars),
+            Err(ConfigError::Invalid {
+                name: CREDENTIAL_KEY,
+                ..
+            })
         ));
     }
 

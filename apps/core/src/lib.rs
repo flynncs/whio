@@ -14,12 +14,14 @@ pub mod playback;
 pub mod playback_stream;
 
 use crate::{
-    catalogue::CatalogueService, playback::PlaybackService, playback_stream::PlaybackStreamService,
+    catalogue::CatalogueService, identity::service::CredentialService, playback::PlaybackService,
+    playback_stream::PlaybackStreamService,
 };
 
 #[derive(Clone)]
 pub struct AppState {
     catalogue: Arc<CatalogueService>,
+    credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
     playback: Arc<PlaybackService>,
     playback_stream: Arc<PlaybackStreamService>,
@@ -27,11 +29,13 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(
+        credential: Arc<CredentialService>,
         catalogue: Arc<CatalogueService>,
         playback: Arc<PlaybackService>,
         playback_stream: Arc<PlaybackStreamService>,
     ) -> Self {
         Self {
+            credential,
             catalogue,
             database: None,
             playback,
@@ -40,12 +44,14 @@ impl AppState {
     }
 
     pub fn with_database(
+        credential: Arc<CredentialService>,
         catalogue: Arc<CatalogueService>,
         playback: Arc<PlaybackService>,
         playback_stream: Arc<PlaybackStreamService>,
         database: Arc<database::Database>,
     ) -> Self {
         Self {
+            credential,
             catalogue,
             database: Some(database),
             playback,
@@ -59,6 +65,11 @@ impl AppState {
 
     pub(crate) fn catalogue(&self) -> &CatalogueService {
         &self.catalogue
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn credential(&self) -> &CredentialService {
+        &self.credential
     }
 
     pub(crate) fn playback(&self) -> &PlaybackService {

@@ -45,7 +45,10 @@ sqlx = { version = "0.8.6", default-features = false, features = [
 async-trait = "0.1.92"
 aws-lc-rs = "1"
 base64 = "0.22"
+hex = "0.4"
+md-5 = "0.10"
 sha2 = "0.10"
+subtle = "2"
 whio-resolver-api = { path = "../resolver-client-generated", default-features = false, features = [
     "rustls",
 ] }

@@ -52,6 +52,7 @@ services:
     environment:
       WHIO_BIND_ADDRESS: 0.0.0.0:3000
       WHIO_DATABASE_URL: postgres://whio:whio-dev@postgres:5432/whio
+      WHIO_CREDENTIAL_KEY: ${WHIO_CREDENTIAL_KEY:?set WHIO_CREDENTIAL_KEY in .env (openssl rand -base64 32)}
       WHIO_LOG_LEVEL: info
       WHIO_YOUTUBE_ENABLED: "true"
       WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000

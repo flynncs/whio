@@ -1,3 +1,5 @@
+use std::fmt;
+
 use aws_lc_rs::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
@@ -31,9 +33,15 @@ pub enum SecretError {
     DecryptionFailed,
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct CredentialKey {
     bytes: [u8; KEY_LEN],
+}
+
+impl fmt::Debug for CredentialKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialKey").finish_non_exhaustive()
+    }
 }
 
 impl CredentialKey {

@@ -1,3 +1,6 @@
+// fixtures are a toolbox; each suite uses a subset
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
