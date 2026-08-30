@@ -67,7 +67,6 @@ impl AppState {
         &self.catalogue
     }
 
-    #[allow(dead_code)]
     pub(crate) fn credential(&self) -> &CredentialService {
         &self.credential
     }

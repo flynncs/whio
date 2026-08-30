@@ -1,0 +1,3 @@
+source: github.com/opensubsonic/open-subsonic-api
+commit: bed1688a7b0afe9f528a3dc1400a46ab7961b280 (2026-08-07, "docs: add EdgeSonic to the server list")
+copied unmodified from openapi/

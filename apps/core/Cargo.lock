@@ -2882,6 +2882,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "form_urlencoded",
  "hex",
  "md-5",
  "reqwest",
@@ -2899,6 +2900,7 @@ dependencies = [
  "url",
  "uuid",
  "whio-resolver-api",
+ "whio-subsonic-api",
 ]
 
 [[package]]
@@ -2913,6 +2915,16 @@ dependencies = [
  "serde_repr",
  "serde_with",
  "url",
+]
+
+[[package]]
+name = "whio-subsonic-api"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "serde_repr",
 ]
 
 [[package]]

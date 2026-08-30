@@ -1,5 +1,5 @@
 // fixtures are a toolbox; each suite uses a subset
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 use std::{
     collections::VecDeque,
@@ -20,7 +20,10 @@ use whio_core::{
 };
 
 pub mod credentials;
-pub use credentials::credential_service;
+pub use credentials::{
+    credential_service, credential_service_with_known_api_key,
+    credential_service_with_known_app_password,
+};
 
 mod media;
 pub use media::playback_stream;

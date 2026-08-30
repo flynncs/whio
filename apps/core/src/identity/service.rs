@@ -10,6 +10,7 @@ use super::domain::Principal;
 use super::repository::{CredentialRepository, CredentialStoreError};
 use super::secrets::CredentialKey;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresentedAuth {
     Password {
         username: String,
@@ -88,7 +89,7 @@ impl CredentialService {
     async fn authenticate_app_password(
         &self,
         username: &str,
-        matches: &dyn Fn(&str) -> bool,
+        matches: &(dyn Fn(&str) -> bool + Send + Sync),
     ) -> Result<Principal, AuthError> {
         let user = self.repository.find_user_by_username(username).await?;
         let Some(user) = user else {

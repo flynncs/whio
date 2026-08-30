@@ -1,0 +1,2 @@
+# vendored contract files must stay byte-identical to upstream
+contracts/subsonic/** -text

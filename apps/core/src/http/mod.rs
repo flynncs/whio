@@ -1,7 +1,9 @@
 mod errors;
 mod middleware;
 mod range;
+mod raw_query;
 mod routes;
+mod subsonic;
 
 use axum::{
     Router,
@@ -20,6 +22,7 @@ pub(crate) fn router(state: AppState) -> Router {
             "/playback/tracks/{track_id}/stream",
             get(routes::playback::stream),
         )
+        .nest("/rest", routes::rest::router())
         .fallback(routes::not_found)
         .layer(axum::middleware::from_fn(middleware::request_id))
         .with_state(state)
