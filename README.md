@@ -45,6 +45,14 @@ docker compose up -d
 
 whio runs on `localhost:3000`.
 
+## cli
+
+```sh
+cargo run --manifest-path apps/core/Cargo.toml --bin whio-cli -- create-user flynn "flynn"
+cargo run --manifest-path apps/core/Cargo.toml --bin whio-cli -- mint-app-password flynn feishin
+cargo run --manifest-path apps/core/Cargo.toml --bin whio-cli -- revoke <credential-id>
+```
+
 for development:
 
 ```sh

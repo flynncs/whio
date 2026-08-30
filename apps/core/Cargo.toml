@@ -3,6 +3,7 @@ name = "whio-core"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97.1"
+default-run = "whio-api"
 
 [features]
 postgres-integration = []
@@ -10,6 +11,10 @@ postgres-integration = []
 [[bin]]
 name = "whio-api"
 path = "src/main.rs"
+
+[[bin]]
+name = "whio-cli"
+path = "src/bin/whio-cli.rs"
 
 [dependencies]
 axum = "0.8.9"
