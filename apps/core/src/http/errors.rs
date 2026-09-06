@@ -212,7 +212,7 @@ fn playback_error_details(error: &PlaybackError) -> (StatusCode, &'static str, &
     }
 }
 
-fn media_error_details(
+pub(crate) fn media_error_details(
     error: &crate::media::MediaFetchError,
 ) -> (StatusCode, &'static str, &'static str) {
     match error {

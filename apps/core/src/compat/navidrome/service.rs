@@ -35,68 +35,30 @@ impl From<Track> for Song {
     }
 }
 
-fn filter_q(filter: Option<&str>) -> String {
-    let Some(raw) = filter else {
-        return String::new();
-    };
-    let Some(key) = raw.find("\"q\"") else {
-        return String::new();
-    };
-    let Some(colon) = raw[key + 3..].find(':') else {
-        return String::new();
-    };
-    let mut chars = raw[key + 3 + colon + 1..].trim_start().chars();
-    if chars.next() != Some('"') {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut escaped = false;
-    for c in chars {
-        if escaped {
-            out.push(c);
-            escaped = false;
-        } else if c == '\\' {
-            escaped = true;
-        } else if c == '"' {
-            break;
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-fn result_limit(range: Option<&str>) -> u32 {
-    const DEFAULT: u32 = 25;
-    let Some(count) = range.and_then(|raw| {
-        let inner = raw.trim().strip_prefix('[')?.strip_suffix(']')?;
-        let (start, end) = inner.split_once(',')?;
-        let (start, end): (u32, u32) = (start.trim().parse().ok()?, end.trim().parse().ok()?);
-        end.checked_sub(start)?.checked_add(1)
-    }) else {
-        return DEFAULT;
-    };
-    count.clamp(1, 25)
-}
-
 pub(crate) async fn search_songs(
     catalogue: &CatalogueService,
     key: &CredentialKey,
     context: &RequestContext,
     token: &str,
-    filter: Option<&str>,
-    range: Option<&str>,
+    title: Option<&str>,
+    start: Option<u32>,
+    end: Option<u32>,
 ) -> Result<Vec<Song>, SongError> {
     if session::verify(token, key).is_none() {
         return Err(SongError::Unauthorized);
     }
 
-    let q = filter_q(filter);
+    let q = title.unwrap_or("").trim();
     if q.is_empty() {
         return Ok(Vec::new());
     }
 
-    let search = match (SearchQuery::new(q), SearchLimit::new(result_limit(range))) {
+    let limit = match (start, end) {
+        (Some(start), Some(end)) => end.saturating_sub(start).saturating_add(1).clamp(1, 25),
+        _ => 25,
+    };
+
+    let search = match (SearchQuery::new(q.to_owned()), SearchLimit::new(limit)) {
         (Ok(query), Ok(limit)) => CatalogueSearch::new(query, limit),
         _ => return Err(SongError::InvalidSearch),
     };
@@ -189,14 +151,14 @@ mod tests {
     #[tokio::test]
     async fn forged_token_never_reaches_the_resolver() {
         let catalogue = catalogue(vec![]);
-        let result = search_songs(&catalogue, &key(), &context(), "forged", None, None).await;
+        let result = search_songs(&catalogue, &key(), &context(), "forged", None, None, None).await;
         assert!(matches!(result, Err(SongError::Unauthorized)));
     }
 
     #[tokio::test]
-    async fn empty_filter_returns_empty_without_calling_the_resolver() {
+    async fn empty_title_returns_empty_without_calling_the_resolver() {
         let catalogue = catalogue(vec![]);
-        let result = search_songs(&catalogue, &key(), &context(), &token(), None, None).await;
+        let result = search_songs(&catalogue, &key(), &context(), &token(), None, None, None).await;
         assert!(matches!(result, Ok(songs) if songs.is_empty()));
     }
 
@@ -208,8 +170,9 @@ mod tests {
             &key(),
             &context(),
             &token(),
-            Some(r#"{"q":"song"}"#),
-            Some("[0,9]"),
+            Some("song"),
+            Some(0),
+            Some(9),
         )
         .await
         .expect("search succeeds");
@@ -219,6 +182,24 @@ mod tests {
         assert_eq!(songs[0].artist, "a, b");
         assert_eq!(songs[0].duration, 180.0);
         assert!(!songs[0].id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn range_beyond_the_catalogue_cap_is_clamped_not_rejected() {
+        let catalogue = catalogue(vec![Ok(vec![candidate()])]);
+        let songs = search_songs(
+            &catalogue,
+            &key(),
+            &context(),
+            &token(),
+            Some("song"),
+            Some(0),
+            Some(100),
+        )
+        .await
+        .expect("search succeeds");
+
+        assert_eq!(songs.len(), 1);
     }
 
     #[test]
@@ -236,24 +217,5 @@ mod tests {
         assert_eq!(song.artist, "a, b");
         assert_eq!(song.duration, 180.0);
         assert!(!song.id.is_empty());
-    }
-
-    #[test]
-    fn filter_q_reads_the_query_value() {
-        assert_eq!(filter_q(None), "");
-        assert_eq!(filter_q(Some("garbage")), "");
-        assert_eq!(filter_q(Some(r#"{"q":"daft punk"}"#)), "daft punk");
-        assert_eq!(filter_q(Some(r#"{"q":"a\"b"}"#)), r#"a"b"#);
-        assert_eq!(filter_q(Some(r#"{"other":1}"#)), "");
-        assert_eq!(filter_q(Some(r#"{"q":42}"#)), "");
-    }
-
-    #[test]
-    fn result_limit_follows_the_range() {
-        assert_eq!(result_limit(None), 25);
-        assert_eq!(result_limit(Some("[0,24]")), 25);
-        assert_eq!(result_limit(Some("[0,9]")), 10);
-        assert_eq!(result_limit(Some("[0,999]")), 25);
-        assert_eq!(result_limit(Some("garbage")), 25);
     }
 }

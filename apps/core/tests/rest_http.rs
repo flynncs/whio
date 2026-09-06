@@ -70,7 +70,7 @@ fn failure(code: u16) -> Value {
 async fn ping_without_auth_params_reports_missing_parameter() {
     let response = get(
         app(support::credential_service()),
-        "/rest/ping?v=1.16.1&c=test-client",
+        "/rest/ping.view?v=1.16.1&c=test-client",
     )
     .await;
 
@@ -81,7 +81,7 @@ async fn ping_without_auth_params_reports_missing_parameter() {
 async fn ping_without_any_mechanism_reports_missing_parameter() {
     let response = get(
         app(support::credential_service()),
-        "/rest/ping?u=flynn&v=1.16.1&c=test-client",
+        "/rest/ping.view?u=flynn&v=1.16.1&c=test-client",
     )
     .await;
 
@@ -92,7 +92,7 @@ async fn ping_without_any_mechanism_reports_missing_parameter() {
 async fn ping_with_half_a_token_pair_reports_missing_parameter() {
     let response = get(
         app(support::credential_service()),
-        "/rest/ping?u=flynn&v=1.16.1&c=test-client&t=abc123",
+        "/rest/ping.view?u=flynn&v=1.16.1&c=test-client&t=abc123",
     )
     .await;
 
@@ -103,7 +103,7 @@ async fn ping_with_half_a_token_pair_reports_missing_parameter() {
 async fn ping_with_conflicting_mechanisms_reports_code_43() {
     let response = get(
         app(support::credential_service()),
-        "/rest/ping?u=flynn&v=1.16.1&c=test-client&p=whio_one&apiKey=whio_two",
+        "/rest/ping.view?u=flynn&v=1.16.1&c=test-client&p=whio_one&apiKey=whio_two",
     )
     .await;
 
@@ -116,7 +116,7 @@ async fn ping_with_unknown_api_key_is_indistinguishable_from_wrong_password() {
     let unknown = generate_app_secret();
     let response = get(
         app(service),
-        &format!("/rest/ping?u=flynn&v=1.16.1&c=test-client&apiKey={unknown}"),
+        &format!("/rest/ping.view?u=flynn&v=1.16.1&c=test-client&apiKey={unknown}"),
     )
     .await;
 
@@ -128,7 +128,7 @@ async fn ping_with_known_api_key_succeeds() {
     let (service, secret) = credential_service_with_known_api_key();
     let response = get(
         app(service),
-        &format!("/rest/ping?u=flynn&v=1.16.1&c=test-client&apiKey={secret}"),
+        &format!("/rest/ping.view?u=flynn&v=1.16.1&c=test-client&apiKey={secret}"),
     )
     .await;
 
@@ -162,7 +162,7 @@ async fn ping_accepts_salted_token_of_a_stored_app_password() {
 
     let response = get(
         app(service),
-        &format!("/rest/ping?u=flynn&v=1.16.1&c=test-client&t={token}&s={salt}"),
+        &format!("/rest/ping.view?u=flynn&v=1.16.1&c=test-client&t={token}&s={salt}"),
     )
     .await;
 
@@ -180,7 +180,7 @@ async fn ping_accepts_enc_prefixed_password() {
 
     let response = get(
         app(service),
-        &format!("/rest/ping?u=flynn&v=1.16.1&c=test-client&p=enc:{hex_encoded}"),
+        &format!("/rest/ping.view?u=flynn&v=1.16.1&c=test-client&p=enc:{hex_encoded}"),
     )
     .await;
 
@@ -191,7 +191,7 @@ async fn ping_accepts_enc_prefixed_password() {
 async fn open_subsonic_extensions_requires_authentication() {
     let response = get(
         app(support::credential_service()),
-        "/rest/getOpenSubsonicExtensions",
+        "/rest/getOpenSubsonicExtensions.view",
     )
     .await;
 
@@ -203,7 +203,9 @@ async fn open_subsonic_extensions_returns_an_empty_list() {
     let (service, secret) = credential_service_with_known_api_key();
     let response = get(
         app(service),
-        &format!("/rest/getOpenSubsonicExtensions?u=flynn&v=1.16.1&c=test-client&apiKey={secret}"),
+        &format!(
+            "/rest/getOpenSubsonicExtensions.view?u=flynn&v=1.16.1&c=test-client&apiKey={secret}"
+        ),
     )
     .await;
 
@@ -228,7 +230,7 @@ async fn unknown_rest_endpoints_answer_with_a_subsonic_envelope_not_product_json
     // must speak subsonic even there
     let response = get(
         app(support::credential_service()),
-        "/rest/getArtists?u=flynn&v=1.16.1&c=test-client&apiKey=whio_whatever",
+        "/rest/getArtists.view?u=flynn&v=1.16.1&c=test-client&apiKey=whio_whatever",
     )
     .await;
 

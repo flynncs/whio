@@ -21,6 +21,7 @@ use crate::{
     },
     media::ByteRange,
     playback::{MediaMetadata, PlayableMedia},
+    playback_stream::PlaybackStreamError,
     request::RequestContext,
     tracks::TrackId,
 };
@@ -103,27 +104,30 @@ pub(crate) async fn resolve(
     Ok(Json(playable_media.into()))
 }
 
-pub(crate) async fn stream(
-    State(state): State<AppState>,
-    Extension(context): Extension<RequestContext>,
-    Path(track_id): Path<String>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let track_id = track_id
+pub(crate) enum StreamFailure {
+    InvalidId(uuid::Error),
+    Stream(PlaybackStreamError),
+    Range {
+        content_length: u64,
+        error: RangeError,
+    },
+}
+
+pub(crate) async fn stream_response(
+    state: &AppState,
+    context: &RequestContext,
+    raw_id: &str,
+    headers: &HeaderMap,
+) -> Result<Response, StreamFailure> {
+    let track_id = raw_id
         .parse::<TrackId>()
-        .map_err(|err| ApiError::InvalidTrackId {
-            context: context.clone(),
-            error: err,
-        })?;
+        .map_err(StreamFailure::InvalidId)?;
 
     let prepared_playback = state
         .playback_stream()
-        .prepare(&track_id, &context)
+        .prepare(&track_id, context)
         .await
-        .map_err(|error| ApiError::PlaybackStream {
-            context: context.clone(),
-            error,
-        })?;
+        .map_err(StreamFailure::Stream)?;
 
     let content_length = prepared_playback.info.content_length;
 
@@ -131,15 +135,13 @@ pub(crate) async fn stream(
         .get(RANGE)
         .map(|value| value.to_str())
         .transpose()
-        .map_err(|_| ApiError::Range {
-            context: context.clone(),
+        .map_err(|_| StreamFailure::Range {
             content_length,
             error: RangeError::Malformed,
         })?;
 
     let range_request =
-        parse_range_header(header_range, content_length).map_err(|error| ApiError::Range {
-            context: context.clone(),
+        parse_range_header(header_range, content_length).map_err(|error| StreamFailure::Range {
             content_length,
             error,
         })?;
@@ -173,10 +175,7 @@ pub(crate) async fn stream(
         .playback_stream()
         .stream_range(prepared_playback, range)
         .await
-        .map_err(|error| ApiError::PlaybackStream {
-            context: context.clone(),
-            error,
-        })?;
+        .map_err(StreamFailure::Stream)?;
 
     let mut response = Response::new(Body::from_stream(body_stream));
 
@@ -199,4 +198,32 @@ pub(crate) async fn stream(
     };
 
     Ok(response)
+}
+
+pub(crate) async fn stream(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    Path(track_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    stream_response(&state, &context, &track_id, &headers)
+        .await
+        .map_err(|failure| match failure {
+            StreamFailure::InvalidId(error) => ApiError::InvalidTrackId {
+                context: context.clone(),
+                error,
+            },
+            StreamFailure::Stream(error) => ApiError::PlaybackStream {
+                context: context.clone(),
+                error,
+            },
+            StreamFailure::Range {
+                content_length,
+                error,
+            } => ApiError::Range {
+                context: context.clone(),
+                content_length,
+                error,
+            },
+        })
 }

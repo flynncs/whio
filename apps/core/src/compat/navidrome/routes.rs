@@ -18,19 +18,40 @@ pub(crate) async fn song_list(
     State(state): State<AppState>,
     Extension(context): Extension<RequestContext>,
     token: NdToken,
-    Query(query): Query<SongListQuery>,
+    query: Result<Query<SongListQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => {
+            return errors::error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Invalid search parameters.",
+            );
+        }
+    };
     match service::search_songs(
         state.catalogue(),
         state.credential().key(),
         &context,
         &token.0,
-        query.filter.as_deref(),
-        query.range.as_deref(),
+        query.title.as_deref(),
+        query.start,
+        query.end,
     )
     .await
     {
-        Ok(songs) => Json(songs).into_response(),
+        Ok(songs) => {
+            let mut response = Json(&songs).into_response();
+            response.headers_mut().insert(
+                "x-total-count",
+                songs
+                    .len()
+                    .to_string()
+                    .parse()
+                    .expect("a count is a valid header value"),
+            );
+            response
+        }
         Err(SongError::Unauthorized) => {
             errors::error(StatusCode::UNAUTHORIZED, "Not authenticated")
         }

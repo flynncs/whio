@@ -1,9 +1,8 @@
-mod errors;
+pub(crate) mod errors;
 mod middleware;
 mod range;
-mod raw_query;
-mod routes;
-mod subsonic;
+pub(crate) mod raw_query;
+pub(crate) mod routes;
 
 use axum::{
     Router,
@@ -23,14 +22,14 @@ pub(crate) fn router(state: AppState) -> Router {
             "/playback/tracks/{track_id}/stream",
             get(routes::playback::stream),
         )
-        .nest("/rest", routes::rest::router())
+        .nest("/rest", compat::subsonic::router())
         .nest(
             "/compat/subsonic/rest",
-            routes::rest::router().layer(from_fn(compat::cors)),
+            compat::subsonic::router().layer(from_fn(compat::cors)),
         )
         .nest(
             "/compat/navidrome/rest",
-            routes::rest::router().layer(from_fn(compat::cors)),
+            compat::subsonic::router().layer(from_fn(compat::cors)),
         )
         .nest(
             "/compat/navidrome",

@@ -1,4 +1,5 @@
 pub(crate) mod navidrome;
+pub(crate) mod subsonic;
 
 use axum::{
     body::Body,

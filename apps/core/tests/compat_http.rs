@@ -47,7 +47,7 @@ async fn ping_answers_under_both_compat_roots() {
     for root in ["/compat/navidrome/rest", "/compat/subsonic/rest"] {
         let body = get(
             app(service.clone()),
-            &format!("{root}/ping?u=flynn&v=1.16.1&c=test-client&p={secret}"),
+            &format!("{root}/ping.view?u=flynn&v=1.16.1&c=test-client&p={secret}"),
         )
         .await;
         assert_eq!(
@@ -96,7 +96,9 @@ async fn login_with_known_app_password_returns_nd_payload() {
     let token = body["subsonicToken"].as_str().unwrap();
     let ping = get(
         app,
-        &format!("/compat/navidrome/rest/ping?u=flynn&v=1.16.1&c=test-client&t={token}&s={salt}"),
+        &format!(
+            "/compat/navidrome/rest/ping.view?u=flynn&v=1.16.1&c=test-client&t={token}&s={salt}"
+        ),
     )
     .await;
     assert_eq!(ping["subsonic-response"]["status"], json!("ok"));
@@ -122,7 +124,11 @@ async fn login_with_wrong_password_is_indistinguishable_from_unknown_user() {
     }
 }
 
-async fn get_authed(app: axum::Router, uri: &str, token: &str) -> (StatusCode, Value) {
+async fn get_authed(
+    app: axum::Router,
+    uri: &str,
+    token: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
     let request = Request::builder()
         .method("GET")
         .uri(uri)
@@ -133,8 +139,9 @@ async fn get_authed(app: axum::Router, uri: &str, token: &str) -> (StatusCode, V
 
     let response = app.oneshot(request).await.unwrap();
     let status = response.status();
+    let headers = response.headers().clone();
     let body = to_bytes(response.into_body(), 8192).await.unwrap();
-    (status, serde_json::from_slice(&body).unwrap())
+    (status, headers, serde_json::from_slice(&body).unwrap())
 }
 
 #[tokio::test]
@@ -150,7 +157,7 @@ async fn song_list_rejects_missing_and_forged_tokens() {
     let response = app(service.clone()).oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    let (status, body) = get_authed(app(service), "/compat/navidrome/api/song", "forged").await;
+    let (status, _, body) = get_authed(app(service), "/compat/navidrome/api/song", "forged").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, json!({"error": "Not authenticated"}));
 }
@@ -180,9 +187,9 @@ async fn song_list_returns_mapped_tracks_for_a_login_token() {
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
 
-    let (status, body) = get_authed(
+    let (status, headers, body) = get_authed(
         app.clone(),
-        "/compat/navidrome/api/song?filter=%7B%22q%22%3A%22song%22%7D",
+        "/compat/navidrome/api/song?title=song&_start=0&_end=9",
         token,
     )
     .await;
@@ -192,8 +199,9 @@ async fn song_list_returns_mapped_tracks_for_a_login_token() {
     assert_eq!(body[0]["artist"], json!("artist"));
     assert_eq!(body[0]["duration"], json!(200.0));
     assert!(body[0]["id"].as_str().is_some_and(|v| !v.is_empty()));
+    assert_eq!(headers["x-total-count"], "1");
 
-    let (status, body) = get_authed(app, "/compat/navidrome/api/song", token).await;
+    let (status, _, body) = get_authed(app, "/compat/navidrome/api/song", token).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]));
 }
@@ -222,4 +230,31 @@ async fn compat_answers_cors_preflight() {
             "uri: {uri}"
         );
     }
+}
+
+#[tokio::test]
+async fn real_client_view_suffix_reaches_handlers() {
+    let (service, secret) = credential_service_with_known_app_password();
+    let app = app(service);
+
+    let ping = get(
+        app.clone(),
+        &format!("/compat/navidrome/rest/ping.view?u=flynn&v=1.13.0&c=Feishin&p={secret}"),
+    )
+    .await;
+    assert_eq!(ping["subsonic-response"]["status"], json!("ok"));
+
+    let user = get(
+        app,
+        &format!(
+            "/compat/navidrome/rest/getUser.view?u=flynn&v=1.13.0&c=Feishin&p={secret}&username=flynn"
+        ),
+    )
+    .await;
+    assert_eq!(user["subsonic-response"]["status"], json!("ok"));
+    assert_eq!(
+        user["subsonic-response"]["user"]["username"],
+        json!("flynn")
+    );
+    assert_eq!(user["subsonic-response"]["user"]["streamRole"], json!(true));
 }

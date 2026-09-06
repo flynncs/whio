@@ -20,8 +20,11 @@ pub(crate) struct AuthPayload {
 
 #[derive(Deserialize)]
 pub(crate) struct SongListQuery {
-    pub(crate) filter: Option<String>,
-    pub(crate) range: Option<String>,
+    pub(crate) title: Option<String>,
+    #[serde(rename = "_start")]
+    pub(crate) start: Option<u32>,
+    #[serde(rename = "_end")]
+    pub(crate) end: Option<u32>,
 }
 
 #[derive(Serialize)]
