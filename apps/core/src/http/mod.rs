@@ -10,7 +10,8 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::AppState;
+use crate::{AppState, compat};
+use axum::middleware::from_fn;
 
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
@@ -23,6 +24,18 @@ pub(crate) fn router(state: AppState) -> Router {
             get(routes::playback::stream),
         )
         .nest("/rest", routes::rest::router())
+        .nest(
+            "/compat/subsonic/rest",
+            routes::rest::router().layer(from_fn(compat::cors)),
+        )
+        .nest(
+            "/compat/navidrome/rest",
+            routes::rest::router().layer(from_fn(compat::cors)),
+        )
+        .nest(
+            "/compat/navidrome",
+            compat::navidrome::router().layer(from_fn(compat::cors)),
+        )
         .fallback(routes::not_found)
         .layer(axum::middleware::from_fn(middleware::request_id))
         .with_state(state)

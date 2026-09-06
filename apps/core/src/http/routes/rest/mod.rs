@@ -9,8 +9,11 @@ use whio_subsonic_api::models;
 
 use crate::{
     AppState,
-    http::subsonic::{self, SubsonicAuth},
-    identity::service::AuthError,
+    http::{
+        raw_query::RawQuery,
+        subsonic::{self, SubsonicAuth, SubsonicError},
+    },
+    identity::{domain::Principal, service::AuthError},
     request::RequestContext,
 };
 
@@ -19,6 +22,7 @@ use crate::{
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/ping", get(ping).post(ping))
+        .route("/getUser", get(get_user).post(get_user))
         .route(
             "/getOpenSubsonicExtensions",
             get(get_open_subsonic_extensions).post(get_open_subsonic_extensions),
@@ -35,8 +39,53 @@ pub(crate) async fn ping(
     auth: SubsonicAuth,
 ) -> Response {
     match authenticate(&state, &context, auth).await {
-        Ok(()) => Json(subsonic::ok_envelope()).into_response(),
+        Ok(_) => Json(subsonic::ok_envelope()).into_response(),
         Err(response) => response,
+    }
+}
+
+pub(crate) async fn get_user(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(name) = query.get("username") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+    match state.credential().find_user(name).await {
+        Ok(Some(user)) if user.id == principal.user_id => {
+            Json(subsonic::user_envelope(&user.username)).into_response()
+        }
+        Ok(_) => Json(subsonic::failed_envelope(
+            models::error::Code::Variant70,
+            "User not found.",
+        ))
+        .into_response(),
+        Err(AuthError::Storage(error)) => {
+            tracing::error!(
+                error = %error,
+                request_id = context.request_id().as_str(),
+                "credential storage failed"
+            );
+
+            let mut response = Json(subsonic::failed_envelope(
+                models::error::Code::Variant0,
+                "Internal error.",
+            ))
+            .into_response();
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        }
+        Err(AuthError::InvalidCredentials) => Json(subsonic::failed_envelope(
+            models::error::Code::Variant40,
+            "Wrong username or password.",
+        ))
+        .into_response(),
     }
 }
 
@@ -46,7 +95,7 @@ pub(crate) async fn get_open_subsonic_extensions(
     auth: SubsonicAuth,
 ) -> Response {
     match authenticate(&state, &context, auth).await {
-        Ok(()) => Json(subsonic::extensions_envelope()).into_response(),
+        Ok(_) => Json(subsonic::extensions_envelope()).into_response(),
         Err(response) => response,
     }
 }
@@ -55,9 +104,9 @@ async fn authenticate(
     state: &AppState,
     context: &RequestContext,
     auth: SubsonicAuth,
-) -> Result<(), Response> {
+) -> Result<Principal, Response> {
     match state.credential().authenticate(&auth.0).await {
-        Ok(_) => Ok(()),
+        Ok(principal) => Ok(principal),
         Err(AuthError::InvalidCredentials) => Err(Json(subsonic::failed_envelope(
             models::error::Code::Variant40,
             "Wrong username or password.",

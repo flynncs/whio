@@ -181,6 +181,41 @@ pub(crate) fn extensions_envelope() -> models::GetOpenSubsonicExtensionsResponse
     }
 }
 
+pub(crate) fn user_envelope(username: &str) -> models::GetUserResponse {
+    models::GetUserResponse {
+        subsonic_response: Some(Box::new(
+            models::GetUserResponseSubsonicResponse::GetUserSuccessResponse(Box::new(
+                models::GetUserSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_user_success_response::Status::Ok,
+                    user: Box::new(models::User {
+                        username: username.to_owned(),
+                        scrobbling_enabled: false,
+                        max_bit_rate: None,
+                        admin_role: false,
+                        settings_role: false,
+                        download_role: false,
+                        upload_role: false,
+                        playlist_role: false,
+                        cover_art_role: false,
+                        comment_role: false,
+                        podcast_role: false,
+                        stream_role: true,
+                        jukebox_role: false,
+                        share_role: false,
+                        video_conversion_role: false,
+                        avatar_last_changed: None,
+                        folder: None,
+                    }),
+                },
+            )),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

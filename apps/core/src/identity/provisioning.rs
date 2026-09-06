@@ -94,10 +94,10 @@ pub async fn revoke_credential(pool: &PgPool, id: Uuid) -> Result<bool, Provisio
 }
 
 fn map_database_error(error: sqlx::Error) -> ProvisioningError {
-    if let sqlx::Error::Database(database_error) = &error {
-        if database_error.code().as_deref() == Some("23505") {
-            return ProvisioningError::UserAlreadyExists;
-        }
+    if let sqlx::Error::Database(database_error) = &error
+        && database_error.code().as_deref() == Some("23505")
+    {
+        return ProvisioningError::UserAlreadyExists;
     }
 
     ProvisioningError::Database(error)

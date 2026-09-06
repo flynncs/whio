@@ -4,6 +4,7 @@ use md5::{Digest, Md5};
 use subtle::ConstantTimeEq;
 use tracing::warn;
 
+use crate::identity::domain::User;
 use crate::identity::secrets::{decrypt_secret, lookup_digest};
 
 use super::domain::Principal;
@@ -120,6 +121,17 @@ impl CredentialService {
         }
 
         Err(AuthError::InvalidCredentials)
+    }
+
+    pub(crate) fn key(&self) -> &CredentialKey {
+        &self.key
+    }
+
+    pub(crate) async fn find_user(&self, username: &str) -> Result<Option<User>, AuthError> {
+        self.repository
+            .find_user_by_username(username)
+            .await
+            .map_err(AuthError::Storage)
     }
 }
 

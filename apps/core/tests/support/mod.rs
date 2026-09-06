@@ -70,7 +70,13 @@ impl PlaybackResolver for StubResolver {
     }
 }
 
-pub fn app(responses: Vec<Result<Vec<CatalogueCandidate>, ResolverError>>) -> Router {
+pub fn services(
+    responses: Vec<Result<Vec<CatalogueCandidate>, ResolverError>>,
+) -> (
+    Arc<CatalogueService>,
+    Arc<PlaybackService>,
+    Arc<PlaybackStreamService>,
+) {
     let resolver = Arc::new(StubResolver {
         responses: Mutex::new(responses.into()),
     });
@@ -81,6 +87,11 @@ pub fn app(responses: Vec<Result<Vec<CatalogueCandidate>, ResolverError>>) -> Ro
     ));
     let playback = Arc::new(PlaybackService::new(resolver, track_repository));
     let playback_stream = playback_stream(Arc::clone(&playback));
+    (catalogue, playback, playback_stream)
+}
+
+pub fn app(responses: Vec<Result<Vec<CatalogueCandidate>, ResolverError>>) -> Router {
+    let (catalogue, playback, playback_stream) = services(responses);
 
     router(credential_service(), catalogue, playback, playback_stream)
 }
