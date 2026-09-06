@@ -48,10 +48,13 @@ whio runs on `localhost:3000`.
 ## cli
 
 ```sh
-cargo run --manifest-path apps/core/Cargo.toml --bin whio-cli -- create-user flynn "flynn"
-cargo run --manifest-path apps/core/Cargo.toml --bin whio-cli -- mint-app-password flynn feishin
-cargo run --manifest-path apps/core/Cargo.toml --bin whio-cli -- revoke <credential-id>
+cargo install --path apps/core --bin whio-cli
+whio-cli create-user flynn "flynn"
+whio-cli mint-app-password flynn feishin
+whio-cli revoke <credential-id>
 ```
+
+reads `.env` in the repo root; flags override it. reinstall after cli changes.
 
 for development:
 
