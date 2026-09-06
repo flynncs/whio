@@ -2,6 +2,7 @@ mod auth;
 mod dto;
 mod errors;
 mod routes;
+mod service;
 mod session;
 
 use axum::{

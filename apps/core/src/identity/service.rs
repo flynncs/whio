@@ -133,6 +133,15 @@ impl CredentialService {
             .await
             .map_err(AuthError::Storage)
     }
+
+    pub(crate) async fn visible_user(
+        &self,
+        viewer: &Principal,
+        username: &str,
+    ) -> Result<Option<User>, CredentialStoreError> {
+        let user = self.repository.find_user_by_username(username).await?;
+        Ok(user.filter(|user| user.id == viewer.user_id))
+    }
 }
 
 fn token_matches(password: &str, salt: &str, token_hex: &str) -> bool {
@@ -449,5 +458,41 @@ mod tests {
             .await;
 
         assert_eq!(result, Err(AuthError::InvalidCredentials));
+    }
+    #[tokio::test]
+    async fn visible_user_returns_the_viewer() {
+        let fixture = fixture();
+        let viewer = Principal {
+            user_id: fixture.user_id,
+        };
+
+        let user = fixture
+            .service
+            .visible_user(&viewer, "flynn")
+            .await
+            .expect("storage succeeds");
+        assert_eq!(user.map(|user| user.username), Some("flynn".to_string()));
+    }
+
+    #[tokio::test]
+    async fn visible_user_hides_other_and_unknown_users() {
+        let fixture = fixture();
+        fixture.repository.insert_user(User {
+            id: UserId::from_uuid(Uuid::now_v7()),
+            username: "other".to_string(),
+            display_name: "Other".to_string(),
+        });
+        let viewer = Principal {
+            user_id: fixture.user_id,
+        };
+
+        for username in ["other", "nobody"] {
+            let user = fixture
+                .service
+                .visible_user(&viewer, username)
+                .await
+                .expect("storage succeeds");
+            assert!(user.is_none(), "username: {username}");
+        }
     }
 }

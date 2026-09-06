@@ -57,16 +57,14 @@ pub(crate) async fn get_user(
     let Some(name) = query.get("username") else {
         return SubsonicError::MissingParameter.into_response();
     };
-    match state.credential().find_user(name).await {
-        Ok(Some(user)) if user.id == principal.user_id => {
-            Json(subsonic::user_envelope(&user.username)).into_response()
-        }
-        Ok(_) => Json(subsonic::failed_envelope(
+    match state.credential().visible_user(&principal, name).await {
+        Ok(Some(user)) => Json(subsonic::user_envelope(&user.username)).into_response(),
+        Ok(None) => Json(subsonic::failed_envelope(
             models::error::Code::Variant70,
             "User not found.",
         ))
         .into_response(),
-        Err(AuthError::Storage(error)) => {
+        Err(error) => {
             tracing::error!(
                 error = %error,
                 request_id = context.request_id().as_str(),
@@ -81,11 +79,6 @@ pub(crate) async fn get_user(
             *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
             response
         }
-        Err(AuthError::InvalidCredentials) => Json(subsonic::failed_envelope(
-            models::error::Code::Variant40,
-            "Wrong username or password.",
-        ))
-        .into_response(),
     }
 }
 
