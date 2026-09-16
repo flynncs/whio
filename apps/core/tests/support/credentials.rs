@@ -17,37 +17,64 @@ use whio_core::identity::{
     service::CredentialService,
 };
 
-// http tests do not exercise authentication yet; nothing resolves
-struct NoCredentialStore;
+pub const TEST_USERNAME: &str = "test-user";
+pub const TEST_PASSWORD: &str = "whio-test-password";
+pub const NATIVE_AUTH_QUERY: &str = "?u=test-user&v=1.16.1&c=integration-test&p=whio-test-password";
+
+pub fn credential_service() -> Arc<CredentialService> {
+    let key =
+        CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).expect("valid test key");
+    let store = Arc::new(MemoryCredentialStore::new());
+    let user_id = UserId::from_uuid(Uuid::now_v7());
+    store.insert_user(User {
+        id: user_id,
+        username: TEST_USERNAME.to_owned(),
+        display_name: "Integration Test".to_owned(),
+    });
+    store.insert_app_password(&key, TEST_PASSWORD, user_id);
+    Arc::new(CredentialService::new(store, key))
+}
+
+pub fn credential_service_with_storage_failure() -> Arc<CredentialService> {
+    let key =
+        CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).expect("valid test key");
+    Arc::new(CredentialService::new(
+        Arc::new(UnavailableCredentialStore),
+        key,
+    ))
+}
+
+struct UnavailableCredentialStore;
 
 #[async_trait]
-impl CredentialRepository for NoCredentialStore {
+impl CredentialRepository for UnavailableCredentialStore {
     async fn find_user_by_username(
         &self,
         _username: &str,
     ) -> Result<Option<User>, CredentialStoreError> {
-        Ok(None)
+        Err(CredentialStoreError::Unavailable)
     }
 
     async fn find_active_api_key_by_digest(
         &self,
         _digest: [u8; 32],
     ) -> Result<Option<ApiKeyCredential>, CredentialStoreError> {
-        Ok(None)
+        Err(CredentialStoreError::Unavailable)
     }
 
     async fn list_active_app_passwords(
         &self,
         _user_id: UserId,
     ) -> Result<Vec<AppPasswordCredential>, CredentialStoreError> {
-        Ok(Vec::new())
+        Err(CredentialStoreError::Unavailable)
     }
-}
 
-pub fn credential_service() -> Arc<CredentialService> {
-    let key =
-        CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).expect("valid test key");
-    Arc::new(CredentialService::new(Arc::new(NoCredentialStore), key))
+    async fn find_active_app_password(
+        &self,
+        _credential_id: Uuid,
+    ) -> Result<Option<AppPasswordCredential>, CredentialStoreError> {
+        Err(CredentialStoreError::Unavailable)
+    }
 }
 
 pub struct MemoryCredentialStore {
@@ -140,6 +167,19 @@ impl CredentialRepository for MemoryCredentialStore {
             .filter(|credential| credential.user_id == user_id)
             .cloned()
             .collect())
+    }
+
+    async fn find_active_app_password(
+        &self,
+        credential_id: Uuid,
+    ) -> Result<Option<AppPasswordCredential>, CredentialStoreError> {
+        Ok(self
+            .app_passwords
+            .lock()
+            .expect("app passwords lock")
+            .iter()
+            .find(|credential| credential.id == credential_id)
+            .cloned())
     }
 }
 

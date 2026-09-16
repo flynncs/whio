@@ -10,14 +10,15 @@ use tokio_stream::{Stream, wrappers::ReceiverStream};
 use uuid::Uuid;
 
 use crate::{
+    delivery::{TransferStats, spool_read::SpoolReader},
     media::ByteRange,
-    playback_stream::{PlaybackStreamError, TransferStats, spool_read::SpoolReader},
+    playback::DeliveryError,
 };
 
 const BUFFERED_CHUNK_COUNT: usize = 4;
 
 pub struct PlaybackByteStream {
-    inner: ReceiverStream<Result<Bytes, PlaybackStreamError>>,
+    inner: ReceiverStream<Result<Bytes, DeliveryError>>,
 }
 
 impl PlaybackByteStream {
@@ -34,7 +35,7 @@ impl PlaybackByteStream {
 
 async fn send(
     mut reader: SpoolReader,
-    sender: mpsc::Sender<Result<Bytes, PlaybackStreamError>>,
+    sender: mpsc::Sender<Result<Bytes, DeliveryError>>,
     spool_id: Uuid,
     range: ByteRange,
 ) {
@@ -42,7 +43,11 @@ async fn send(
     let mut delivered_bytes = 0;
 
     let outcome = loop {
-        match reader.next_chunk().await {
+        let chunk = tokio::select! {
+            chunk = reader.next_chunk() => chunk,
+            _ = sender.closed() => break "client_disconnected",
+        };
+        match chunk {
             Ok(Some(bytes)) => {
                 let chunk_bytes = bytes.len() as u64;
                 if sender.send(Ok(bytes)).await.is_err() {
@@ -76,7 +81,7 @@ async fn send(
 }
 
 impl Stream for PlaybackByteStream {
-    type Item = Result<Bytes, PlaybackStreamError>;
+    type Item = Result<Bytes, DeliveryError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.get_mut().inner).poll_next(cx)

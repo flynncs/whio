@@ -27,4 +27,9 @@ pub trait CredentialRepository: Send + Sync {
         &self,
         user_id: UserId,
     ) -> Result<Vec<AppPasswordCredential>, CredentialStoreError>;
+
+    async fn find_active_app_password(
+        &self,
+        credential_id: uuid::Uuid,
+    ) -> Result<Option<AppPasswordCredential>, CredentialStoreError>;
 }

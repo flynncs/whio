@@ -4,11 +4,12 @@ use bytes::Bytes;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use crate::playback_stream::{PlaybackStreamError, spool_status::SpoolStatus};
+use crate::{delivery::spool_status::SpoolStatus, playback::DeliveryError};
 
 pub struct SpoolReader {
     file: tokio::fs::File,
     updates: tokio::sync::watch::Receiver<SpoolStatus>,
+    _spool: std::sync::Arc<super::ActiveSpool>,
     offset: u64,
     remaining: u64,
 }
@@ -17,23 +18,25 @@ impl SpoolReader {
     pub async fn new(
         mut file: tokio::fs::File,
         updates: tokio::sync::watch::Receiver<SpoolStatus>,
+        spool: std::sync::Arc<super::ActiveSpool>,
         offset: u64,
         remaining: u64,
-    ) -> Result<Self, PlaybackStreamError> {
+    ) -> Result<Self, DeliveryError> {
         file.seek(SeekFrom::Start(offset)).await.map_err(|error| {
             tracing::error!(error = %error, "playback spool seek failed");
-            PlaybackStreamError::Spool
+            DeliveryError::Spool
         })?;
 
         Ok(Self {
             file,
             updates,
+            _spool: spool,
             offset,
             remaining,
         })
     }
 
-    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, PlaybackStreamError> {
+    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, DeliveryError> {
         loop {
             let status = self.updates.borrow_and_update().clone();
 
@@ -55,7 +58,7 @@ impl SpoolReader {
                 let mut buffer = vec![0u8; read_size];
                 let count = self.file.read(&mut buffer).await.map_err(|error| {
                     tracing::error!(error = %error,  "playback spool read failed");
-                    PlaybackStreamError::Spool
+                    DeliveryError::Spool
                 })?;
 
                 if count == 0 {
@@ -69,7 +72,7 @@ impl SpoolReader {
                             "playback spool reached EOF before the requested bytes were available"
                         );
 
-                        return Err(PlaybackStreamError::Spool);
+                        return Err(DeliveryError::Spool);
                     }
 
                     self.wait_for_update().await?;
@@ -92,7 +95,7 @@ impl SpoolReader {
                     available,
                     "playback spool completed before the requested range was available"
                 );
-                return Err(PlaybackStreamError::Spool);
+                return Err(DeliveryError::Spool);
             }
 
             if failed {
@@ -102,14 +105,14 @@ impl SpoolReader {
                     available,
                     "playback spool failed before the requested range was available"
                 );
-                return Err(PlaybackStreamError::Spool);
+                return Err(DeliveryError::Spool);
             }
 
             self.wait_for_update().await?;
         }
     }
 
-    async fn wait_for_update(&mut self) -> Result<(), PlaybackStreamError> {
+    async fn wait_for_update(&mut self) -> Result<(), DeliveryError> {
         if self.updates.changed().await.is_ok() {
             return Ok(());
         }
@@ -118,14 +121,14 @@ impl SpoolReader {
             SpoolStatus::Complete { .. } => Ok(()),
             SpoolStatus::Failed { available } => {
                 tracing::error!(available, "playback spool failed while reader was waiting");
-                Err(PlaybackStreamError::Spool)
+                Err(DeliveryError::Spool)
             }
             SpoolStatus::Downloading { available } => {
                 tracing::error!(
                     available,
                     "playback spool stopped updating while reader was waiting"
                 );
-                Err(PlaybackStreamError::Spool)
+                Err(DeliveryError::Spool)
             }
         }
     }
@@ -138,6 +141,22 @@ mod tests {
     use tokio::{fs, io::AsyncWriteExt, sync::watch};
 
     use super::*;
+
+    async fn keepalive_spool() -> std::sync::Arc<crate::delivery::ActiveSpool> {
+        use crate::media::MediaBody;
+
+        let sessions = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = sessions.try_acquire_owned().unwrap();
+        let body = MediaBody {
+            content_length: Some(0),
+            chunks: Box::pin(tokio_stream::iter(Vec::<
+                Result<bytes::Bytes, crate::media::MediaFetchError>,
+            >::new())),
+        };
+        crate::delivery::ActiveSpool::start(&std::env::temp_dir(), body, permit)
+            .await
+            .unwrap()
+    }
 
     fn test_path() -> std::path::PathBuf {
         let suffix = SystemTime::now()
@@ -158,7 +177,10 @@ mod tests {
 
         let reader_file = fs::File::open(&path).await.unwrap();
         let (_, updates) = watch::channel(SpoolStatus::Complete { length: 10 });
-        let mut reader = SpoolReader::new(reader_file, updates, 2, 4).await.unwrap();
+        let spool = keepalive_spool().await;
+        let mut reader = SpoolReader::new(reader_file, updates, spool, 2, 4)
+            .await
+            .unwrap();
 
         assert_eq!(
             reader.next_chunk().await.unwrap().unwrap(),

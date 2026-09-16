@@ -1,55 +1,53 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+// the HTTP resolver client is gone; this suite pins the DTO mapping and
+// disabled-adapter behavior it used to cover instead
+use std::collections::HashMap;
 
-use axum::{
-    Json, Router,
-    extract::State,
-    http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
-    routing::post,
-};
-use serde_json::{Value, json};
-use tokio::{net::TcpListener, task::JoinHandle};
 use whio_core::{
-    catalogue::{CatalogueSearch, SearchLimit, SearchQuery},
-    playback::{PlaybackResolver, ValidationError as PlaybackValidationError},
+    catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch, SearchLimit, SearchQuery},
+    playback::{
+        PlayableMedia, PlaybackProvider, PlaybackSource, ValidationError as PlaybackValidationError,
+    },
+    providers::ProviderError,
+    providers::YtmAdapter,
     request::{RequestContext, RequestId},
-    resolver::{CatalogueResolver, ResolverClient, ResolverError},
     tracks::{ProviderId, SourceIdentity, SourceScope, ValidationError as TrackValidationError},
 };
+use whio_resolver_api::models::{
+    CatalogueCandidate as CatalogueCandidateDto, MediaMetadata as MediaMetadataDto,
+    PlaybackResolveResponse as PlaybackResolveResponseDto, SourceIdentity as SourceIdentityDto,
+};
 
-#[derive(Debug)]
-struct CapturedRequest {
-    body: Value,
-    request_id: Option<String>,
+fn candidate_dto() -> CatalogueCandidateDto {
+    CatalogueCandidateDto {
+        source: Box::new(SourceIdentityDto::new(
+            "example_music".to_owned(),
+            "example-source-id".to_owned(),
+        )),
+        title: "Instant Crush".to_owned(),
+        artists: vec!["Daft Punk".to_owned()],
+        duration_ms: Some(Some(337_000)),
+    }
 }
 
-async fn spawn_server(router: Router) -> (reqwest::Url, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-
-    let base_url = format!("http://{address}/").parse().unwrap();
-    (base_url, server)
+fn playback_dto() -> PlaybackResolveResponseDto {
+    PlaybackResolveResponseDto {
+        url: "https://media.example.test/audio".to_owned(),
+        headers: HashMap::from([("User-Agent".to_owned(), "whio-test".to_owned())]),
+        expires_at: Some(Some("2026-08-08T12:00:00+12:00".parse().unwrap())),
+        media: Box::new(MediaMetadataDto {
+            content_type: Some(Some("audio/webm".to_owned())),
+            content_length_bytes: Some(Some(1_024)),
+            codec: Some(Some("opus".to_owned())),
+            bitrate_kbps: Some(Some(128.5)),
+            duration_ms: Some(Some(337_250)),
+        }),
+    }
 }
 
-async fn stop_server(server: JoinHandle<()>) {
-    server.abort();
-    let _ = server.await;
-}
-
-fn client(base_url: reqwest::Url) -> ResolverClient {
-    ResolverClient::new(base_url, Duration::from_secs(1), Duration::from_secs(2)).unwrap()
-}
-
-fn search(query: &str, limit: u32) -> CatalogueSearch {
+fn search() -> CatalogueSearch {
     CatalogueSearch::new(
-        SearchQuery::new(query.to_owned()).unwrap(),
-        SearchLimit::new(limit).unwrap(),
+        SearchQuery::new("Instant Crush".to_owned()).unwrap(),
+        SearchLimit::new(5).unwrap(),
     )
 }
 
@@ -57,207 +55,45 @@ fn context() -> RequestContext {
     RequestContext::new(RequestId::new("request-123".to_owned()).unwrap())
 }
 
-fn source() -> SourceIdentity {
-    SourceIdentity::new(
-        ProviderId::new("youtube_music".to_owned()).unwrap(),
-        SourceScope::Global,
-        "source-123".to_owned(),
+fn playback_source() -> PlaybackSource {
+    PlaybackSource::from_identity(
+        SourceIdentity::new(
+            ProviderId::new("youtube_music".to_owned()).unwrap(),
+            SourceScope::Global,
+            "source-123".to_owned(),
+        )
+        .unwrap(),
     )
     .unwrap()
 }
 
-async fn successful_search(
-    State(captured): State<Arc<Mutex<Option<CapturedRequest>>>>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> impl IntoResponse {
-    let request_id = headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+#[test]
+fn valid_candidate_dto_maps_to_domain_candidate() {
+    let candidate = CatalogueCandidate::try_from(candidate_dto()).unwrap();
 
-    *captured.lock().unwrap() = Some(CapturedRequest { body, request_id });
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "results": [{
-                "source": {
-                    "provider_id": "example_music",
-                    "external_id": "example-source-id"
-                },
-                "title": "Instant Crush",
-                "artists": ["Daft Punk"],
-                "duration_ms": 337000
-            }]
-        })),
-    )
+    assert_eq!(candidate.source().provider_id().as_str(), "example_music");
+    assert_eq!(candidate.source().external_id(), "example-source-id");
+    assert_eq!(candidate.title(), "Instant Crush");
+    assert_eq!(candidate.artists(), ["Daft Punk"]);
+    assert_eq!(candidate.duration_ms(), Some(337_000));
 }
 
-async fn unavailable() -> impl IntoResponse {
-    StatusCode::SERVICE_UNAVAILABLE
-}
-
-async fn malformed_response() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        "{not-json",
-    )
-}
-
-async fn negative_duration() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(json!({
-            "results": [{
-                "source": {
-                    "provider_id": "example_music",
-                    "external_id": "example-source-id"
-                },
-                "title": "Instant Crush",
-                "artists": ["Daft Punk"],
-                "duration_ms": -1
-            }]
-        })),
-    )
-}
-
-async fn successful_playback(
-    State(captured): State<Arc<Mutex<Option<CapturedRequest>>>>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> impl IntoResponse {
-    let request_id = headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-
-    *captured.lock().unwrap() = Some(CapturedRequest { body, request_id });
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "url": "https://media.example.test/audio",
-            "headers": {"User-Agent": "whio-test"},
-            "expires_at": "2026-08-08T12:00:00+12:00",
-            "media": {
-                "content_type": "audio/webm",
-                "content_length_bytes": 1024,
-                "codec": "opus",
-                "bitrate_kbps": 128.5,
-                "duration_ms": 337250
-            }
-        })),
-    )
-}
-
-async fn negative_playback_duration() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(json!({
-            "url": "https://media.example.test/audio",
-            "headers": {},
-            "media": {"duration_ms": -1}
-        })),
-    )
-}
-
-async fn playback_status(State(status): State<StatusCode>) -> StatusCode {
-    status
-}
-
-async fn resolve_playback_error(status: StatusCode) -> ResolverError {
-    let router = Router::new()
-        .route("/v1/playback/resolve", post(playback_status))
-        .with_state(status);
-    let (base_url, server) = spawn_server(router).await;
-    let result = client(base_url).resolve(&source(), &context()).await;
-    stop_server(server).await;
-
-    result.unwrap_err()
-}
-
-#[tokio::test]
-async fn search_deserializes_maps_and_forwards_request_id() {
-    let captured = Arc::new(Mutex::new(None));
-    let router = Router::new()
-        .route("/v1/catalogue/search", post(successful_search))
-        .with_state(captured.clone());
-    let (base_url, server) = spawn_server(router).await;
-    let search = search("Instant Crush", 5);
-    let result = client(base_url).search(&search, &context()).await;
-    stop_server(server).await;
-
-    let candidates = result.unwrap();
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(
-        candidates[0].source().provider_id().as_str(),
-        "example_music"
-    );
-    assert_eq!(candidates[0].source().external_id(), "example-source-id");
-    assert_eq!(candidates[0].title(), "Instant Crush");
-    assert_eq!(candidates[0].artists(), ["Daft Punk"]);
-    assert_eq!(candidates[0].duration_ms(), Some(337_000));
-
-    let captured = captured.lock().unwrap().take().unwrap();
-    assert_eq!(captured.body, json!({"query": "Instant Crush", "limit": 5}));
-    assert_eq!(captured.request_id.as_deref(), Some("request-123"));
-}
-
-#[tokio::test]
-async fn unavailable_resolver_becomes_provider_unavailable() {
-    let router = Router::new().route("/v1/catalogue/search", post(unavailable));
-    let (base_url, server) = spawn_server(router).await;
-    let result = client(base_url)
-        .search(&search("query", 1), &context())
-        .await;
-    stop_server(server).await;
-
-    assert!(matches!(result, Err(ResolverError::ProviderUnavailable)));
-}
-
-#[tokio::test]
-async fn malformed_success_response_becomes_malformed_response_error() {
-    let router = Router::new().route("/v1/catalogue/search", post(malformed_response));
-    let (base_url, server) = spawn_server(router).await;
-    let result = client(base_url)
-        .search(&search("query", 1), &context())
-        .await;
-    stop_server(server).await;
-
-    assert!(matches!(result, Err(ResolverError::MalformedResponse(_))));
-}
-
-#[tokio::test]
-async fn invalid_candidate_data_becomes_validation_error() {
-    let router = Router::new().route("/v1/catalogue/search", post(negative_duration));
-    let (base_url, server) = spawn_server(router).await;
-    let result = client(base_url)
-        .search(&search("query", 1), &context())
-        .await;
-    stop_server(server).await;
+#[test]
+fn invalid_candidate_dto_is_rejected() {
+    let mut dto = candidate_dto();
+    dto.duration_ms = Some(Some(-1));
 
     assert!(matches!(
-        result,
-        Err(ResolverError::InvalidResponse(
-            TrackValidationError::InvalidDuration
-        ))
+        CatalogueCandidate::try_from(dto),
+        Err(TrackValidationError::InvalidDuration)
     ));
 }
 
-#[tokio::test]
-async fn playback_serializes_maps_and_forwards_request_id() {
-    let captured = Arc::new(Mutex::new(None));
-    let router = Router::new()
-        .route("/v1/playback/resolve", post(successful_playback))
-        .with_state(captured.clone());
-    let (base_url, server) = spawn_server(router).await;
-    let result = client(base_url).resolve(&source(), &context()).await;
-    stop_server(server).await;
-
-    let playback = result.unwrap();
+#[test]
+fn valid_playback_dto_maps_to_domain_media() {
+    let playback = PlayableMedia::try_from(playback_dto()).unwrap();
     let (url, headers, expires_at, metadata) = playback.into_parts();
+
     assert_eq!(url.as_url().as_str(), "https://media.example.test/audio");
     assert_eq!(headers["User-Agent"], "whio-test");
     assert_eq!(
@@ -265,51 +101,35 @@ async fn playback_serializes_maps_and_forwards_request_id() {
         "2026-08-08T00:00:00+00:00"
     );
     assert_eq!(metadata.duration_ms(), Some(337_250));
-
-    let captured = captured.lock().unwrap().take().unwrap();
-    assert_eq!(
-        captured.body,
-        json!({
-            "source": {
-                "provider_id": "youtube_music",
-                "external_id": "source-123"
-            }
-        })
-    );
-    assert_eq!(captured.request_id.as_deref(), Some("request-123"));
 }
 
-#[tokio::test]
-async fn invalid_playback_data_becomes_validation_error() {
-    let router = Router::new().route("/v1/playback/resolve", post(negative_playback_duration));
-    let (base_url, server) = spawn_server(router).await;
-    let result = client(base_url).resolve(&source(), &context()).await;
-    stop_server(server).await;
+#[test]
+fn invalid_playback_dto_is_rejected() {
+    let mut dto = playback_dto();
+    dto.media.duration_ms = Some(Some(-1));
 
     assert!(matches!(
-        result,
-        Err(ResolverError::InvalidPlaybackResponse(
-            PlaybackValidationError::InvalidDuration
-        ))
+        PlayableMedia::try_from(dto),
+        Err(PlaybackValidationError::InvalidDuration)
     ));
 }
 
 #[tokio::test]
-async fn playback_statuses_preserve_upstream_meaning() {
+async fn disabled_adapter_search_reports_disabled() {
+    let adapter = YtmAdapter::disabled();
+
     assert!(matches!(
-        resolve_playback_error(StatusCode::NOT_FOUND).await,
-        ResolverError::SourceNotFound
+        adapter.search(&search(), None, &context()).await,
+        Err(ProviderError::Disabled)
     ));
+}
+
+#[tokio::test]
+async fn disabled_adapter_resolve_reports_disabled() {
+    let adapter = YtmAdapter::disabled();
+
     assert!(matches!(
-        resolve_playback_error(StatusCode::UNPROCESSABLE_ENTITY).await,
-        ResolverError::UnsupportedProvider
-    ));
-    assert!(matches!(
-        resolve_playback_error(StatusCode::BAD_GATEWAY).await,
-        ResolverError::ResolutionFailed
-    ));
-    assert!(matches!(
-        resolve_playback_error(StatusCode::SERVICE_UNAVAILABLE).await,
-        ResolverError::ProviderUnavailable
+        adapter.resolve(&playback_source(), None, &context()).await,
+        Err(ProviderError::Disabled)
     ));
 }

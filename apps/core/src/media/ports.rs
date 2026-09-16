@@ -23,11 +23,16 @@ pub enum MediaFetchError {
 
     #[error("media source does not support byte ranges")]
     RangesUnsupported,
+
+    #[error("media destination is not allowed")]
+    DisallowedDestination,
 }
 
+#[derive(Debug)]
 pub struct MediaInfo {
     pub content_length: u64,
     pub supports_ranges: bool,
+    pub content_type: Option<String>,
 }
 
 pub type MediaByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, MediaFetchError>> + Send>>;

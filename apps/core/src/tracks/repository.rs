@@ -24,4 +24,6 @@ pub trait TrackRepository: Send + Sync {
         &self,
         track_id: &TrackId,
     ) -> Result<Vec<SourceIdentity>, TrackRepositoryError>;
+
+    async fn find_track(&self, track_id: &TrackId) -> Result<Option<Track>, TrackRepositoryError>;
 }

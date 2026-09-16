@@ -90,6 +90,47 @@ impl TrackRepository for PostgresTrackRepository {
             })
             .collect()
     }
+
+    async fn find_track(&self, track_id: &TrackId) -> Result<Option<Track>, TrackRepositoryError> {
+        let row: Option<(String, Option<i64>)> = sqlx::query_as(
+            r#"SELECT title, duration_ms
+            FROM tracks
+            WHERE id = $1
+            "#,
+        )
+        .bind(track_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        let Some((title, duration_ms)) = row else {
+            return Ok(None);
+        };
+
+        let artists: Vec<String> = sqlx::query_scalar(
+            r#"SELECT name
+            FROM track_artist_credits
+            WHERE track_id = $1
+            ORDER BY position
+            "#,
+        )
+        .bind(track_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        let duration_ms = duration_ms
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| TrackRepositoryError::InvalidData)?;
+        let metadata = TrackMetadata::new(title, artists, duration_ms)
+            .map_err(|_| TrackRepositoryError::InvalidData)?;
+
+        Ok(Some(Track::new(
+            TrackId::from_uuid(*track_id.as_uuid()),
+            metadata,
+        )))
+    }
 }
 
 async fn find_track_id_by_source_for_update(

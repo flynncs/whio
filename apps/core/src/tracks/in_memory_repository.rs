@@ -75,6 +75,18 @@ impl TrackRepository for InMemoryTrackRepository {
             .map(|entry| entry.sources.clone())
             .unwrap_or_default())
     }
+
+    async fn find_track(&self, track_id: &TrackId) -> Result<Option<Track>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes
+            .by_track_id
+            .get(track_id)
+            .map(|entry| entry.track.clone()))
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +132,30 @@ mod tests {
         assert_eq!(
             repository.find_sources(first_track.id()).await.unwrap(),
             vec![first_source]
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_returns_a_stored_track_by_id() {
+        let repository = InMemoryTrackRepository::default();
+        let stored = repository
+            .get_or_create(source("source-a"), metadata("First"))
+            .await
+            .unwrap();
+
+        let found = repository
+            .find_track(stored.id())
+            .await
+            .unwrap()
+            .expect("stored track is found");
+
+        assert_eq!(found, stored);
+        assert!(
+            repository
+                .find_track(&TrackId::new())
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 

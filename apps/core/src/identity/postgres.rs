@@ -88,4 +88,28 @@ impl CredentialRepository for PostgresCredentialRepository {
             })
             .collect())
     }
+    async fn find_active_app_password(
+        &self,
+        credential_id: uuid::Uuid,
+    ) -> Result<Option<AppPasswordCredential>, CredentialStoreError> {
+        let row = sqlx::query_as::<_, (Uuid, Uuid, Vec<u8>)>(
+            r#"
+            SELECT id, user_id, encrypted_secret
+            FROM subsonic_app_passwords
+            WHERE id = $1 AND revoked_at IS NULL
+            "#,
+        )
+        .bind(credential_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| CredentialStoreError::Unavailable)?;
+
+        Ok(
+            row.map(|(id, user_id, encrypted_secret)| AppPasswordCredential {
+                id,
+                user_id: UserId::from_uuid(user_id),
+                encrypted_secret,
+            }),
+        )
+    }
 }

@@ -8,11 +8,9 @@ use serde::Serialize;
 
 use crate::{
     catalogue::{CatalogueError, ValidationError},
-    http::range::RangeError,
-    playback::PlaybackError,
-    playback_stream::PlaybackStreamError,
+    playback::{DeliveryError, PlaybackError},
+    providers::ProviderError,
     request::RequestContext,
-    resolvers::ResolverError,
 };
 
 #[derive(Serialize)]
@@ -40,18 +38,9 @@ pub(crate) enum ApiError {
         context: RequestContext,
         error: CatalogueError,
     },
-    Playback {
-        context: RequestContext,
-        error: PlaybackError,
-    },
     PlaybackStream {
         context: RequestContext,
-        error: PlaybackStreamError,
-    },
-    Range {
-        context: RequestContext,
-        content_length: u64,
-        error: RangeError,
+        error: PlaybackError,
     },
 }
 
@@ -75,27 +64,27 @@ impl IntoResponse for ApiError {
             }
             ApiError::Catalogue { context, error } => {
                 let (status, code, message) = match &error {
-                    CatalogueError::Resolver(
-                        ResolverError::Disabled
-                        | ResolverError::ProviderUnavailable
-                        | ResolverError::Request(_)
-                        | ResolverError::Transport(_),
+                    CatalogueError::Provider(
+                        ProviderError::Disabled
+                        | ProviderError::ProviderUnavailable
+                        | ProviderError::Request(_),
                     ) => (
                         StatusCode::SERVICE_UNAVAILABLE,
                         "catalogue_unavailable",
                         "The catalogue is temporarily unavailable",
                     ),
 
-                    CatalogueError::Resolver(_) => (
-                        StatusCode::BAD_GATEWAY,
-                        "resolver_failure",
-                        "The catalogue resolver failed",
-                    ),
-
-                    CatalogueError::Repository(_) => (
+                    CatalogueError::Provider(ProviderError::Access)
+                    | CatalogueError::Repository(_) => (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "internal_error",
                         "An unexpected error occurred",
+                    ),
+
+                    CatalogueError::Provider(_) => (
+                        StatusCode::BAD_GATEWAY,
+                        "resolver_failure",
+                        "The catalogue resolver failed",
                     ),
                 };
 
@@ -107,10 +96,31 @@ impl IntoResponse for ApiError {
 
                 error_response(status, code, message, context)
             }
-            ApiError::Playback { context, error } => playback_error_response(error, context),
             ApiError::PlaybackStream { context, error } => match error {
-                PlaybackStreamError::Playback(error) => playback_error_response(error, context),
-                PlaybackStreamError::Media(error) => {
+                PlaybackError::Delivery(DeliveryError::Range {
+                    content_length,
+                    error,
+                }) => {
+                    tracing::debug!(
+                        error = %error,
+                        request_id = context.request_id().as_str(),
+                        "invalid media range"
+                    );
+
+                    let mut response = error_response(
+                        StatusCode::RANGE_NOT_SATISFIABLE,
+                        "range_not_satisfiable",
+                        "The requested range is not satisfiable",
+                        context,
+                    );
+                    response.headers_mut().insert(
+                        CONTENT_RANGE,
+                        HeaderValue::from_str(&format!("bytes */{content_length}"))
+                            .expect("formatted content range is a valid header value"),
+                    );
+                    response
+                }
+                PlaybackError::Delivery(DeliveryError::Media(error)) => {
                     let (status, code, message) = media_error_details(&error);
 
                     tracing::error!(
@@ -121,44 +131,8 @@ impl IntoResponse for ApiError {
 
                     error_response(status, code, message, context)
                 }
-                PlaybackStreamError::Spool => {
-                    tracing::error!(
-                        request_id = context.request_id().as_str(),
-                        "playback spool failed"
-                    );
-
-                    error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal_error",
-                        "An unexpected error occurred",
-                        context,
-                    )
-                }
+                error => playback_error_response(error, context),
             },
-            ApiError::Range {
-                context,
-                content_length,
-                error,
-            } => {
-                tracing::debug!(
-                    error = %error,
-                    request_id = context.request_id().as_str(),
-                    "invalid media range"
-                );
-
-                let mut response = error_response(
-                    StatusCode::RANGE_NOT_SATISFIABLE,
-                    "range_not_satisfiable",
-                    "The requested range is not satisfiable",
-                    context,
-                );
-                response.headers_mut().insert(
-                    CONTENT_RANGE,
-                    HeaderValue::from_str(&format!("bytes */{content_length}"))
-                        .expect("formatted content range is a valid header value"),
-                );
-                response
-            }
         }
     }
 }
@@ -184,30 +158,42 @@ fn playback_error_response(error: PlaybackError, context: RequestContext) -> Axu
 
 fn playback_error_details(error: &PlaybackError) -> (StatusCode, &'static str, &'static str) {
     match error {
-        PlaybackError::TrackNotFound => (
+        PlaybackError::TrackNotFound
+        | PlaybackError::SourceNotFound
+        | PlaybackError::Delivery(DeliveryError::UpstreamNotFound) => (
             StatusCode::NOT_FOUND,
             "track_not_found",
             "The track was not found",
         ),
-        PlaybackError::Resolver(
-            ResolverError::Disabled
-            | ResolverError::ProviderUnavailable
-            | ResolverError::Request(_)
-            | ResolverError::Transport(_),
+        PlaybackError::CredentialsStale
+        | PlaybackError::Unavailable
+        | PlaybackError::Delivery(
+            DeliveryError::UpstreamUnauthorized
+            | DeliveryError::UpstreamUnavailable
+            | DeliveryError::Overloaded,
         ) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "playback_unavailable",
             "Playback is temporarily unavailable",
         ),
-        PlaybackError::Resolver(_) => (
+        PlaybackError::Repository(_)
+        | PlaybackError::Provider(ProviderError::Access)
+        | PlaybackError::Delivery(DeliveryError::Spool) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "An unexpected error occurred",
+        ),
+        PlaybackError::Provider(_) => (
             StatusCode::BAD_GATEWAY,
             "resolver_failure",
             "The playback resolver failed",
         ),
-        PlaybackError::Repository(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "An unexpected error occurred",
+        // range and media failures are mapped by the caller, which adds the
+        // status-specific headers and detail.
+        PlaybackError::Delivery(DeliveryError::Range { .. } | DeliveryError::Media(_)) => (
+            StatusCode::BAD_GATEWAY,
+            "stream_failure",
+            "The upstream media response was invalid",
         ),
     }
 }
@@ -222,6 +208,7 @@ pub(crate) fn media_error_details(
             "The stream is temporarily unavailable",
         ),
         crate::media::MediaFetchError::UnexpectedStatus(_)
+        | crate::media::MediaFetchError::DisallowedDestination
         | crate::media::MediaFetchError::MissingContentLength
         | crate::media::MediaFetchError::InvalidContentRange
         | crate::media::MediaFetchError::RangesUnsupported => (
@@ -279,7 +266,7 @@ mod tests {
     #[tokio::test]
     async fn playback_errors_have_safe_public_responses() {
         assert_error(
-            ApiError::Playback {
+            ApiError::PlaybackStream {
                 context: context(),
                 error: PlaybackError::TrackNotFound,
             },
@@ -293,23 +280,23 @@ mod tests {
         .await;
 
         assert_error(
-            ApiError::Playback {
+            ApiError::PlaybackStream {
                 context: context(),
-                error: PlaybackError::Resolver(ResolverError::SourceNotFound),
+                error: PlaybackError::SourceNotFound,
             },
-            StatusCode::BAD_GATEWAY,
+            StatusCode::NOT_FOUND,
             json!({
-                "code": "resolver_failure",
-                "message": "The playback resolver failed",
+                "code": "track_not_found",
+                "message": "The track was not found",
                 "request_id": "request-123"
             }),
         )
         .await;
 
         assert_error(
-            ApiError::Playback {
+            ApiError::PlaybackStream {
                 context: context(),
-                error: PlaybackError::Resolver(ResolverError::ProviderUnavailable),
+                error: PlaybackError::Unavailable,
             },
             StatusCode::SERVICE_UNAVAILABLE,
             json!({
@@ -321,7 +308,7 @@ mod tests {
         .await;
 
         assert_error(
-            ApiError::Playback {
+            ApiError::PlaybackStream {
                 context: context(),
                 error: PlaybackError::Repository(TrackRepositoryError::Unavailable),
             },

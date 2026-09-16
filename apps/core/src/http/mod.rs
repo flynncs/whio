@@ -1,6 +1,8 @@
+pub(crate) mod auth;
 pub(crate) mod errors;
 mod middleware;
-mod range;
+pub(crate) mod query_auth;
+pub(crate) mod range;
 pub(crate) mod raw_query;
 pub(crate) mod routes;
 
@@ -17,7 +19,6 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/health/live", get(routes::health::live))
         .route("/health/ready", get(routes::health::ready))
         .route("/catalogue/search", post(routes::catalogue::search))
-        .route("/playback/resolve", post(routes::playback::resolve))
         .route(
             "/playback/tracks/{track_id}/stream",
             get(routes::playback::stream),

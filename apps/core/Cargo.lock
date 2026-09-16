@@ -2885,6 +2885,7 @@ dependencies = [
  "form_urlencoded",
  "hex",
  "md-5",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
@@ -2899,8 +2900,22 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "whio-navidrome-connector-api",
  "whio-resolver-api",
  "whio-subsonic-api",
+]
+
+[[package]]
+name = "whio-navidrome-connector-api"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_repr",
+ "serde_with",
+ "url",
 ]
 
 [[package]]

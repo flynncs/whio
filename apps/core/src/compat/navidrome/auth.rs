@@ -7,11 +7,7 @@ use axum::{
 };
 use md5::{Digest, Md5};
 
-use crate::{
-    AppState,
-    identity::service::{AuthError, PresentedAuth},
-    request::RequestContext,
-};
+use crate::{AppState, identity::service::AuthError, request::RequestContext};
 
 use super::{
     dto::{AuthPayload, LoginBody},
@@ -42,15 +38,13 @@ pub(crate) async fn login(
     Extension(context): Extension<RequestContext>,
     Json(body): Json<LoginBody>,
 ) -> Response {
-    let presented = PresentedAuth::Password {
-        username: body.username.clone(),
-        password: body.password.clone(),
-    };
-
-    let result = state.credential().authenticate(&presented).await;
+    let result = state
+        .credential()
+        .authenticate_password(&body.username, &body.password)
+        .await;
 
     match result {
-        Ok(principal) => {
+        Ok((principal, credential_id)) => {
             let user = match state.credential().find_user(&body.username).await {
                 Ok(Some(user)) => user,
                 Ok(None) => {
@@ -80,7 +74,7 @@ pub(crate) async fn login(
                 name: user.display_name,
                 username: user.username,
                 is_admin: false,
-                token: session::mint(principal.user_id, state.credential().key()),
+                token: session::mint(principal.user_id, credential_id, state.credential().key()),
                 subsonic_salt: salt,
                 subsonic_token: token,
             })

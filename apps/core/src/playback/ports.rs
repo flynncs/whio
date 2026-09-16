@@ -1,15 +1,38 @@
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::{
-    playback::PlayableMedia, request::RequestContext, resolvers::ResolverError,
-    tracks::SourceIdentity,
+    playback::{DeliveryError, DeliveryResult, PlaybackSource, ResolvedPlayback},
+    providers::ProviderError,
+    request::RequestContext,
+    tracks::ProviderKind,
 };
 
 #[async_trait]
-pub trait PlaybackResolver: Send + Sync {
+pub trait PlaybackProvider: Send + Sync {
+    fn kind(&self) -> ProviderKind;
+
     async fn resolve(
         &self,
-        source: &SourceIdentity,
+        source: &PlaybackSource,
+        user: Option<&Uuid>,
         context: &RequestContext,
-    ) -> Result<PlayableMedia, ResolverError>;
+    ) -> Result<Option<ResolvedPlayback>, ProviderError>;
+
+    async fn credential_rejected(
+        &self,
+        _source: &PlaybackSource,
+        _user: Option<&Uuid>,
+    ) -> ProviderError {
+        ProviderError::ProviderUnavailable
+    }
+}
+
+#[async_trait]
+pub trait PlaybackDelivery: Send + Sync {
+    async fn deliver(
+        &self,
+        resolved: &ResolvedPlayback,
+        client_range: Option<String>,
+    ) -> Result<DeliveryResult, DeliveryError>;
 }

@@ -2,7 +2,9 @@ use thiserror::Error;
 use whio_subsonic_api::models;
 
 use crate::{
-    catalogue::{CatalogueError, CatalogueSearch, CatalogueService, SearchLimit, SearchQuery},
+    catalogue::{
+        CatalogueError, CatalogueSearch, CatalogueService, SearchLimit, SearchOffset, SearchQuery,
+    },
     request::RequestContext,
     tracks::Track,
 };
@@ -32,8 +34,10 @@ pub(crate) fn child_from_track(track: &Track) -> models::Child {
 pub(crate) async fn search_songs(
     catalogue: &CatalogueService,
     context: &RequestContext,
+    user: Option<&uuid::Uuid>,
     query: &str,
     count: Option<&str>,
+    offset: Option<&str>,
 ) -> Result<Vec<models::Child>, SearchError> {
     if query.is_empty() {
         return Ok(Vec::new());
@@ -46,17 +50,31 @@ pub(crate) async fn search_songs(
             .trim()
             .parse::<u32>()
             .map_err(|_| SearchError::InvalidSearch)?,
+    }
+    .min(25);
+    let offset = match offset {
+        None => 0,
+        Some(raw) => raw
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| SearchError::InvalidSearch)?,
     };
 
-    let search = match (SearchQuery::new(query.to_owned()), SearchLimit::new(limit)) {
-        (Ok(query), Ok(limit)) => CatalogueSearch::new(query, limit),
+    let search = match (
+        SearchQuery::new(query.to_owned()),
+        SearchLimit::new(limit),
+        SearchOffset::new(offset),
+    ) {
+        (Ok(query), Ok(limit), Ok(offset)) => {
+            CatalogueSearch::new_with_offset(query, limit, offset)
+        }
         _ => return Err(SearchError::InvalidSearch),
     };
 
     catalogue
-        .search(&search, context)
+        .search(&search, user, context)
         .await
-        .map(|tracks| tracks.iter().map(child_from_track).collect())
+        .map(|outcome| outcome.tracks.iter().map(child_from_track).collect())
         .map_err(SearchError::Catalogue)
 }
 
@@ -64,9 +82,10 @@ pub(crate) async fn search_songs(
 mod tests {
     use super::*;
     use crate::{
-        catalogue::{CatalogueCandidate, CatalogueResolver},
+        catalogue::{CatalogueCandidate, CatalogueProvider},
+        providers::ProviderError,
+        providers::{NavidromeAdapter, UpstreamTransport},
         request::{RequestContext, RequestId},
-        resolver::ResolverError,
         tracks::{InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata},
     };
     use async_trait::async_trait;
@@ -74,18 +93,20 @@ mod tests {
         collections::VecDeque,
         sync::{Arc, Mutex},
     };
+    use uuid::Uuid;
 
-    struct StubResolver {
-        responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ResolverError>>>,
+    struct StubCatalogue {
+        responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ProviderError>>>,
     }
 
     #[async_trait]
-    impl CatalogueResolver for StubResolver {
+    impl CatalogueProvider for StubCatalogue {
         async fn search(
             &self,
             _search: &CatalogueSearch,
+            _user: Option<&Uuid>,
             _context: &RequestContext,
-        ) -> Result<Vec<CatalogueCandidate>, ResolverError> {
+        ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
             self.responses
                 .lock()
                 .expect("responses lock")
@@ -95,12 +116,42 @@ mod tests {
     }
 
     fn catalogue(
-        responses: Vec<Result<Vec<CatalogueCandidate>, ResolverError>>,
+        responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>,
     ) -> CatalogueService {
-        let resolver = Arc::new(StubResolver {
+        let stub = Arc::new(StubCatalogue {
             responses: Mutex::new(responses.into()),
         });
-        CatalogueService::new(resolver, Arc::new(InMemoryTrackRepository::default()))
+        CatalogueService::with_providers(
+            Arc::new(InMemoryTrackRepository::default()),
+            vec![stub as Arc<dyn CatalogueProvider>],
+        )
+    }
+
+    struct PagedCatalogue {
+        total: u32,
+    }
+
+    #[async_trait]
+    impl CatalogueProvider for PagedCatalogue {
+        async fn search(
+            &self,
+            search: &CatalogueSearch,
+            _user: Option<&Uuid>,
+            _context: &RequestContext,
+        ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+            let start = search.offset().get();
+            let end = start
+                .saturating_add(u32::from(search.limit().get()))
+                .min(self.total);
+            Ok((start..end).map(candidate_with_index).collect())
+        }
+    }
+
+    fn paged_catalogue(total: u32) -> CatalogueService {
+        CatalogueService::with_providers(
+            Arc::new(InMemoryTrackRepository::default()),
+            vec![Arc::new(PagedCatalogue { total }) as Arc<dyn CatalogueProvider>],
+        )
     }
 
     fn context() -> RequestContext {
@@ -120,33 +171,164 @@ mod tests {
         )
     }
 
+    fn candidate_with_index(index: u32) -> CatalogueCandidate {
+        CatalogueCandidate::new(
+            SourceIdentity::new(
+                ProviderId::new("youtube".to_owned()).expect("valid provider"),
+                SourceScope::Global,
+                format!("vid-{index}"),
+            )
+            .expect("valid source"),
+            TrackMetadata::new(
+                format!("song-{index}"),
+                vec!["artist".to_owned()],
+                Some(200_000),
+            )
+            .expect("valid metadata"),
+        )
+    }
+
     #[tokio::test]
-    async fn tracks_map_to_children() {
-        let catalogue = catalogue(vec![Ok(vec![candidate()])]);
-        let children = search_songs(&catalogue, &context(), "song", Some("10"))
+    async fn search_maps_tracks_sequences_sources_and_short_circuits_empty() {
+        let service = catalogue(vec![Ok(vec![candidate()])]);
+        let children = search_songs(&service, &context(), None, "song", Some("10"), None)
             .await
             .expect("search succeeds");
-
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].title, "song");
         assert_eq!(children[0].artist.as_deref(), Some("artist"));
         assert_eq!(children[0].duration, Some(200));
         assert!(!children[0].id.is_empty());
-    }
 
-    #[tokio::test]
-    async fn empty_query_returns_empty_without_calling_the_resolver() {
-        let catalogue = catalogue(vec![]);
-        let children = search_songs(&catalogue, &context(), "", None)
+        let children = search_songs(&catalogue(vec![]), &context(), None, "", None, None)
             .await
             .expect("search succeeds");
         assert!(children.is_empty());
+
+        use crate::identity::{
+            secrets::CredentialKey,
+            upstream::{MemoryUpstreamLinkStore, UpstreamLinkStore},
+        };
+        let key = CredentialKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .expect("valid key");
+        let user = Uuid::now_v7();
+        let store = MemoryUpstreamLinkStore::new();
+        store.insert_link(
+            &key,
+            user,
+            Uuid::now_v7(),
+            "https://music.example.test",
+            "friend",
+            "password",
+        );
+        let stub = Arc::new(StubCatalogue {
+            responses: Mutex::new(vec![Ok(vec![candidate()])].into()),
+        });
+        let catalogue = CatalogueService::with_providers(
+            Arc::new(InMemoryTrackRepository::default()),
+            vec![
+                Arc::new(NavidromeAdapter::new(
+                    Arc::new(store) as Arc<dyn UpstreamLinkStore>,
+                    key,
+                    Arc::new(StubUpstream) as Arc<dyn UpstreamTransport>,
+                )) as Arc<dyn CatalogueProvider>,
+                stub as Arc<dyn CatalogueProvider>,
+            ],
+        );
+        let children = search_songs(
+            &catalogue,
+            &context(),
+            Some(&user),
+            "song",
+            Some("10"),
+            None,
+        )
+        .await
+        .expect("linked search succeeds");
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].title, "Upstream Song");
+        assert_eq!(children[1].title, "song");
+    }
+
+    struct StubUpstream;
+
+    #[async_trait]
+    impl UpstreamTransport for StubUpstream {
+        async fn search(
+            &self,
+            _target: &crate::providers::UpstreamTarget,
+            _search: &CatalogueSearch,
+            _context: &RequestContext,
+        ) -> Result<Vec<crate::providers::UpstreamCandidate>, crate::providers::UpstreamError>
+        {
+            Ok(vec![crate::providers::UpstreamCandidate {
+                external_id: "nd-1".to_owned(),
+                title: "Upstream Song".to_owned(),
+                artists: vec!["Artist".to_owned()],
+                duration_ms: Some(200_000),
+            }])
+        }
+
+        async fn resolve(
+            &self,
+            _target: &crate::providers::UpstreamTarget,
+            _external_id: &str,
+            _context: &RequestContext,
+        ) -> Result<String, crate::providers::UpstreamError> {
+            Err(crate::providers::UpstreamError::Unavailable)
+        }
     }
 
     #[tokio::test]
-    async fn unparseable_count_is_rejected() {
-        let catalogue = catalogue(vec![]);
-        let result = search_songs(&catalogue, &context(), "song", Some("many")).await;
+    async fn paging_caps_slices_and_rejects() {
+        let result = search_songs(
+            &catalogue(vec![]),
+            &context(),
+            None,
+            "song",
+            Some("many"),
+            None,
+        )
+        .await;
         assert!(matches!(result, Err(SearchError::InvalidSearch)));
+
+        let result = search_songs(
+            &catalogue(vec![]),
+            &context(),
+            None,
+            "song",
+            None,
+            Some("1001"),
+        )
+        .await;
+        assert!(matches!(result, Err(SearchError::InvalidSearch)));
+
+        let service = paged_catalogue(25);
+        async fn songs(
+            catalogue: &CatalogueService,
+            context: &RequestContext,
+            count: &str,
+            offset: &str,
+        ) -> Vec<whio_subsonic_api::models::Child> {
+            search_songs(catalogue, context, None, "song", Some(count), Some(offset))
+                .await
+                .expect("page succeeds")
+        }
+        let context = context();
+        let first = songs(&service, &context, "10", "0").await;
+        let second = songs(&service, &context, "10", "10").await;
+        let third = songs(&service, &context, "10", "20").await;
+        let bounded = songs(&service, &context, "10", "25").await;
+        assert_eq!(first.len(), 10);
+        assert_eq!(first[0].title, "song-0");
+        assert_eq!(second[0].title, "song-10");
+        assert_eq!(third.len(), 5);
+        assert!(bounded.is_empty());
+
+        let service = paged_catalogue(25);
+        let songs = search_songs(&service, &context, None, "song", Some("100"), None)
+            .await
+            .expect("search succeeds");
+        assert_eq!(songs.len(), 25);
     }
 }

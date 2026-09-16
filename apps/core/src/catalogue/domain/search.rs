@@ -42,15 +42,47 @@ impl SearchLimit {
     }
 }
 
+pub const MAX_SEARCH_OFFSET: u32 = 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SearchOffset(u32);
+
+impl SearchOffset {
+    pub fn new(value: u32) -> Result<Self, ValidationError> {
+        if value > MAX_SEARCH_OFFSET {
+            return Err(ValidationError::OutOfRange {
+                field: "offset",
+                min: 0,
+                max: MAX_SEARCH_OFFSET,
+            });
+        }
+
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogueSearch {
     query: SearchQuery,
     limit: SearchLimit,
+    offset: SearchOffset,
 }
 
 impl CatalogueSearch {
     pub fn new(query: SearchQuery, limit: SearchLimit) -> Self {
-        Self { query, limit }
+        Self::new_with_offset(query, limit, SearchOffset::default())
+    }
+
+    pub fn new_with_offset(query: SearchQuery, limit: SearchLimit, offset: SearchOffset) -> Self {
+        Self {
+            query,
+            limit,
+            offset,
+        }
     }
 
     pub fn query(&self) -> &SearchQuery {
@@ -59,6 +91,10 @@ impl CatalogueSearch {
 
     pub fn limit(&self) -> SearchLimit {
         self.limit
+    }
+
+    pub fn offset(&self) -> SearchOffset {
+        self.offset
     }
 }
 
@@ -108,5 +144,26 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn search_offset_accepts_the_bounded_window() {
+        assert_eq!(SearchOffset::new(0).unwrap().get(), 0);
+        assert_eq!(
+            SearchOffset::new(MAX_SEARCH_OFFSET).unwrap().get(),
+            MAX_SEARCH_OFFSET
+        );
+    }
+
+    #[test]
+    fn search_offset_rejects_unbounded_requests() {
+        assert!(matches!(
+            SearchOffset::new(MAX_SEARCH_OFFSET + 1),
+            Err(ValidationError::OutOfRange {
+                field: "offset",
+                min: 0,
+                max: MAX_SEARCH_OFFSET,
+            })
+        ));
     }
 }

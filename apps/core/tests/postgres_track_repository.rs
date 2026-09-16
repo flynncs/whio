@@ -169,3 +169,31 @@ async fn malformed_stored_scope_is_rejected(pool: PgPool) {
 
     assert!(matches!(error, TrackRepositoryError::InvalidData));
 }
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn stored_track_round_trips_through_find_track(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let stored = repository
+        .get_or_create(
+            source("detail-source"),
+            metadata("Detail title", &["First", "Second"], Some(3_000)),
+        )
+        .await
+        .unwrap();
+
+    let found = repository
+        .find_track(stored.id())
+        .await
+        .unwrap()
+        .expect("stored track is found");
+
+    assert_eq!(found, stored);
+    assert!(
+        repository
+            .find_track(&TrackId::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

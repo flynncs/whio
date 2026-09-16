@@ -9,20 +9,24 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
-    catalogue::CatalogueService, playback::PlaybackService, resolver::DisabledResolver,
+    catalogue::CatalogueService,
+    playback::{PlaybackProvider, PlaybackService},
+    providers::YtmAdapter,
     tracks::InMemoryTrackRepository,
 };
 
-use support::{credential_service_with_known_app_password, playback_stream, router};
+use support::{credential_service_with_known_app_password, delivery, router};
 
 fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
-    let resolver = Arc::new(DisabledResolver);
     let repository = Arc::new(InMemoryTrackRepository::default());
-    let catalogue = Arc::new(CatalogueService::new(resolver.clone(), repository.clone()));
-    let playback = Arc::new(PlaybackService::new(resolver, repository));
-    let stream = playback_stream(Arc::clone(&playback));
+    let catalogue = Arc::new(CatalogueService::new(repository.clone()));
+    let playback = Arc::new(PlaybackService::new(
+        repository,
+        vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
+        delivery(),
+    ));
 
-    router(credential, catalogue, playback, stream)
+    router(credential, catalogue, playback)
 }
 
 async fn get(app: axum::Router, uri: &str) -> Value {
@@ -181,9 +185,8 @@ async fn song_list_returns_mapped_tracks_for_a_login_token() {
         TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
-    let (catalogue, playback, stream) = services(vec![Ok(vec![candidate])]);
-    let app = router(service.clone(), catalogue, playback, stream);
-
+    let (catalogue, playback) = services(vec![Ok(vec![candidate])]);
+    let app = router(service.clone(), catalogue, playback);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
 
@@ -204,6 +207,71 @@ async fn song_list_returns_mapped_tracks_for_a_login_token() {
     let (status, _, body) = get_authed(app, "/compat/navidrome/api/song", token).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]));
+}
+
+#[tokio::test]
+async fn song_detail_returns_the_searched_song() {
+    use support::services;
+    use whio_core::{
+        catalogue::CatalogueCandidate,
+        tracks::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+    };
+
+    let (service, secret) = credential_service_with_known_app_password();
+    let candidate = CatalogueCandidate::new(
+        SourceIdentity::new(
+            ProviderId::new("youtube".to_owned()).expect("valid provider"),
+            SourceScope::Global,
+            "vid-1".to_owned(),
+        )
+        .expect("valid source"),
+        TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
+            .expect("valid metadata"),
+    );
+    let (catalogue, playback) = services(vec![Ok(vec![candidate])]);
+    let app = router(service.clone(), catalogue, playback);
+    let (_, login) = post_login(app.clone(), "flynn", &secret).await;
+    let token = login["token"].as_str().unwrap();
+
+    let (status, _, body) = get_authed(
+        app.clone(),
+        "/compat/navidrome/api/song?title=song&_start=0&_end=9",
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = body[0]["id"].as_str().unwrap();
+
+    let (status, _, body) = get_authed(
+        app.clone(),
+        &format!("/compat/navidrome/api/song/{id}"),
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["id"], json!(id));
+    assert_eq!(body["title"], json!("song"));
+    assert_eq!(body["artist"], json!("artist"));
+    assert_eq!(body["duration"], json!(200.0));
+
+    let (status, _, body) = get_authed(
+        app.clone(),
+        "/compat/navidrome/api/song/01a07482-0f2d-7511-a4da-ac170d6f97bd",
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({"error": "Not found."}));
+
+    let (status, _, body) =
+        get_authed(app.clone(), "/compat/navidrome/api/song/not-a-uuid", token).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({"error": "Not found."}));
+
+    let (status, _, body) =
+        get_authed(app, &format!("/compat/navidrome/api/song/{id}"), "forged").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, json!({"error": "Not authenticated"}));
 }
 
 #[tokio::test]

@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AppState,
-    catalogue::{CatalogueSearch, SearchLimit, SearchQuery, ValidationError},
+    catalogue::{CatalogueSearch, SearchLimit, SearchOffset, SearchQuery, ValidationError},
+    http::auth::AuthenticatedPrincipal,
     http::errors::ApiError,
     request::RequestContext,
     tracks::Track,
@@ -16,15 +17,18 @@ use crate::{
 pub(crate) struct SearchRequest {
     query: String,
     limit: u32,
+    #[serde(default)]
+    offset: u32,
 }
 
 impl TryFrom<SearchRequest> for CatalogueSearch {
     type Error = ValidationError;
 
     fn try_from(value: SearchRequest) -> Result<Self, Self::Error> {
-        Ok(Self::new(
+        Ok(Self::new_with_offset(
             SearchQuery::new(value.query)?,
             SearchLimit::new(value.limit)?,
+            SearchOffset::new(value.offset)?,
         ))
     }
 }
@@ -59,6 +63,7 @@ impl From<Track> for TrackResponse {
 pub(crate) async fn search(
     State(state): State<AppState>,
     Extension(context): Extension<RequestContext>,
+    AuthenticatedPrincipal(principal): AuthenticatedPrincipal,
     payload: Result<Json<SearchRequest>, JsonRejection>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let Json(request) = payload.map_err(|error| ApiError::MalformedRequest {
@@ -71,9 +76,11 @@ pub(crate) async fn search(
         error,
     })?;
 
+    let user_uuid = principal.user_id.as_uuid();
+
     let tracks = state
         .catalogue()
-        .search(&search, &context)
+        .search(&search, Some(&user_uuid), &context)
         .await
         .map_err(|error| ApiError::Catalogue {
             context: context.clone(),
@@ -81,6 +88,6 @@ pub(crate) async fn search(
         })?;
 
     Ok(Json(SearchResponse {
-        results: tracks.into_iter().map(Into::into).collect(),
+        results: tracks.tracks.into_iter().map(Into::into).collect(),
     }))
 }

@@ -56,19 +56,16 @@ impl CredentialService {
                 username,
                 token,
                 salt,
-            } => {
-                self.authenticate_app_password(username, &|candidate_password| {
+            } => self
+                .authenticate_app_password(username, &|candidate_password| {
                     token_matches(candidate_password, salt, token)
                 })
                 .await
-            }
-            PresentedAuth::Password { username, password } => {
-                let expected = password.as_bytes().to_vec();
-                self.authenticate_app_password(username, &|candidate_password| {
-                    constant_time_eq(candidate_password.as_bytes(), &expected)
-                })
+                .map(|(principal, _)| principal),
+            PresentedAuth::Password { username, password } => self
+                .authenticate_password(username, password)
                 .await
-            }
+                .map(|(principal, _)| principal),
         }
     }
 
@@ -87,11 +84,31 @@ impl CredentialService {
         }
     }
 
+    pub async fn authenticate_password(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<(Principal, uuid::Uuid), AuthError> {
+        let expected = password.as_bytes().to_vec();
+        self.authenticate_app_password(username, &|candidate_password| {
+            constant_time_eq(candidate_password.as_bytes(), &expected)
+        })
+        .await
+    }
+
+    pub async fn app_password_active(&self, credential_id: uuid::Uuid) -> Result<bool, AuthError> {
+        self.repository
+            .find_active_app_password(credential_id)
+            .await
+            .map(|credential| credential.is_some())
+            .map_err(AuthError::Storage)
+    }
+
     async fn authenticate_app_password(
         &self,
         username: &str,
         matches: &(dyn Fn(&str) -> bool + Send + Sync),
-    ) -> Result<Principal, AuthError> {
+    ) -> Result<(Principal, uuid::Uuid), AuthError> {
         let user = self.repository.find_user_by_username(username).await?;
         let Some(user) = user else {
             return Err(AuthError::InvalidCredentials);
@@ -116,7 +133,7 @@ impl CredentialService {
             };
 
             if matches(&candidate) {
-                return Ok(Principal { user_id: user.id });
+                return Ok((Principal { user_id: user.id }, credential.id));
             }
         }
 
@@ -258,6 +275,19 @@ mod tests {
                 .filter(|credential| credential.user_id == user_id)
                 .cloned()
                 .collect())
+        }
+
+        async fn find_active_app_password(
+            &self,
+            credential_id: Uuid,
+        ) -> Result<Option<AppPasswordCredential>, CredentialStoreError> {
+            Ok(self
+                .app_passwords
+                .lock()
+                .expect("app passwords lock")
+                .iter()
+                .find(|credential| credential.id == credential_id)
+                .cloned())
         }
     }
 

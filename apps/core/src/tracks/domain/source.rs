@@ -53,6 +53,20 @@ impl ProviderId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn kind(&self) -> Option<ProviderKind> {
+        match self.as_str() {
+            "navidrome" => Some(ProviderKind::Navidrome),
+            "youtube_music" => Some(ProviderKind::YoutubeMusic),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderKind {
+    Navidrome,
+    YoutubeMusic,
 }
 
 impl FromStr for ProviderId {

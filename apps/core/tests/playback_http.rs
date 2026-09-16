@@ -1,7 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
+
+use parking_lot::Mutex;
 
 use async_trait::async_trait;
 mod support;
@@ -14,46 +13,60 @@ use axum::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
-use support::{credential_service, router};
+use support::{NATIVE_AUTH_QUERY, credential_service, router};
 use tower::ServiceExt;
+use uuid::Uuid;
 use whio_core::{
-    catalogue::{CatalogueCandidate, CatalogueResolver, CatalogueSearch, CatalogueService},
+    catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch, CatalogueService},
+    delivery::StreamDelivery,
     media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
-    playback::{MediaMetadata, PlayableMedia, PlaybackResolver, PlaybackService, PlaybackUrl},
-    playback_stream::PlaybackStreamService,
+    playback::{
+        DeliveryStrategy, MediaMetadata, PlayableMedia, PlaybackProvider, PlaybackService,
+        PlaybackSource, PlaybackUrl, ResolvedPlayback,
+    },
+    providers::ProviderError,
     request::RequestContext,
-    resolver::ResolverError,
     tracks::{
-        InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackId, TrackMetadata,
+        InMemoryTrackRepository, ProviderId, ProviderKind, SourceIdentity, SourceScope, TrackId,
+        TrackMetadata,
     },
 };
 
-struct StubResolver {
+struct StubProvider {
     candidate: CatalogueCandidate,
     playback: Mutex<Option<PlayableMedia>>,
-    resolved_source: Mutex<Option<SourceIdentity>>,
+    resolved_source: Mutex<Option<PlaybackSource>>,
 }
 
 #[async_trait]
-impl CatalogueResolver for StubResolver {
+impl CatalogueProvider for StubProvider {
     async fn search(
         &self,
         _search: &CatalogueSearch,
+        _user: Option<&Uuid>,
         _context: &RequestContext,
-    ) -> Result<Vec<CatalogueCandidate>, ResolverError> {
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         Ok(vec![self.candidate.clone()])
     }
 }
 
 #[async_trait]
-impl PlaybackResolver for StubResolver {
+impl PlaybackProvider for StubProvider {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::YoutubeMusic
+    }
+
     async fn resolve(
         &self,
-        source: &SourceIdentity,
+        source: &PlaybackSource,
+        _user: Option<&Uuid>,
         _context: &RequestContext,
-    ) -> Result<PlayableMedia, ResolverError> {
-        *self.resolved_source.lock().unwrap() = Some(source.clone());
-        Ok(self.playback.lock().unwrap().take().unwrap())
+    ) -> Result<Option<ResolvedPlayback>, ProviderError> {
+        *self.resolved_source.lock() = Some(source.clone());
+        Ok(self.playback.lock().take().map(|media| ResolvedPlayback {
+            media,
+            strategy: DeliveryStrategy::Spool,
+        }))
     }
 }
 
@@ -67,6 +80,7 @@ impl MediaFetcher for StubMediaFetcher {
         Ok(MediaInfo {
             content_length: self.bytes.len() as u64,
             supports_ranges: true,
+            content_type: Some("audio/mpeg".to_owned()),
         })
     }
 
@@ -121,38 +135,40 @@ fn playable_media() -> PlayableMedia {
     )
 }
 
-fn app() -> (Router, Arc<StubResolver>) {
+fn app() -> (Router, Arc<StubProvider>) {
     app_with_media_bytes(b"0123456789".to_vec())
 }
 
-fn app_with_media_bytes(bytes: Vec<u8>) -> (Router, Arc<StubResolver>) {
+fn app_with_media_bytes(bytes: Vec<u8>) -> (Router, Arc<StubProvider>) {
     let source = source();
-    let resolver = Arc::new(StubResolver {
+    let provider = Arc::new(StubProvider {
         candidate: candidate(source),
         playback: Mutex::new(Some(playable_media())),
         resolved_source: Mutex::new(None),
     });
     let track_repository = Arc::new(InMemoryTrackRepository::default());
-    let catalogue = Arc::new(CatalogueService::new(
-        resolver.clone(),
+    let catalogue = Arc::new(CatalogueService::with_providers(
         track_repository.clone(),
+        vec![provider.clone() as Arc<dyn CatalogueProvider>],
     ));
-    let playback = Arc::new(PlaybackService::new(resolver.clone(), track_repository));
-    let playback_stream = Arc::new(PlaybackStreamService::new(
-        Arc::clone(&playback),
-        Arc::new(StubMediaFetcher { bytes }),
+    let playback = Arc::new(PlaybackService::new(
+        track_repository,
+        vec![provider.clone() as Arc<dyn PlaybackProvider>],
+        Arc::new(StreamDelivery::new(
+            Arc::new(StubMediaFetcher { bytes }),
+            std::env::temp_dir(),
+            whio_core::delivery::DEFAULT_MAX_SESSIONS,
+            reqwest::Client::new(),
+        )),
     ));
 
-    (
-        router(credential_service(), catalogue, playback, playback_stream),
-        resolver,
-    )
+    (router(credential_service(), catalogue, playback), provider)
 }
 
 fn request(uri: &str, body: String) -> Request<Body> {
     Request::builder()
         .method("POST")
-        .uri(uri)
+        .uri(format!("{uri}{NATIVE_AUTH_QUERY}"))
         .header("content-type", "application/json")
         .header("x-request-id", "request-123")
         .body(Body::from(body))
@@ -162,7 +178,7 @@ fn request(uri: &str, body: String) -> Request<Body> {
 fn stream_request(uri: &str, range: Option<&str>) -> Request<Body> {
     let mut request = Request::builder()
         .method("GET")
-        .uri(uri)
+        .uri(format!("{uri}{NATIVE_AUTH_QUERY}"))
         .header("x-request-id", "request-123");
 
     if let Some(range) = range {
@@ -172,65 +188,27 @@ fn stream_request(uri: &str, range: Option<&str>) -> Request<Body> {
     request.body(Body::empty()).unwrap()
 }
 
+fn unauthenticated_stream_request(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("x-request-id", "request-123")
+        .body(Body::empty())
+        .unwrap()
+}
+
 async fn response_body(response: axum::response::Response) -> Value {
     let body = to_bytes(response.into_body(), 8192).await.unwrap();
     serde_json::from_slice(&body).unwrap()
 }
 
 #[tokio::test]
-async fn searched_track_resolves_to_playable_media() {
-    let (app, resolver) = app();
-    let search_response = app
-        .clone()
-        .oneshot(request(
-            "/catalogue/search",
-            json!({"query": "Instant Crush", "limit": 5}).to_string(),
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(search_response.status(), StatusCode::OK);
-    let search_body = response_body(search_response).await;
-    let track_id = search_body["results"][0]["id"].as_str().unwrap();
-
-    let playback_response = app
-        .oneshot(request(
-            "/playback/resolve",
-            json!({"track_id": track_id}).to_string(),
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(playback_response.status(), StatusCode::OK);
-    assert_eq!(playback_response.headers()["x-request-id"], "request-123");
-    assert_eq!(
-        response_body(playback_response).await,
-        json!({
-            "url": "https://media.example.test/audio",
-            "headers": {"User-Agent": "whio-test"},
-            "expires_at": "2026-08-08T00:00:00Z",
-            "media": {
-                "content_type": "audio/webm",
-                "content_length_bytes": 1024,
-                "codec": "opus",
-                "bitrate_kbps": 128.5,
-                "duration_ms": 337250
-            }
-        })
-    );
-    assert_eq!(
-        resolver.resolved_source.lock().unwrap().as_ref(),
-        Some(&source())
-    );
-}
-
-#[tokio::test]
 async fn unknown_track_id_returns_not_found() {
     let (app, resolver) = app();
     let response = app
-        .oneshot(request(
-            "/playback/resolve",
-            json!({"track_id": TrackId::new().to_string()}).to_string(),
+        .oneshot(stream_request(
+            &format!("/playback/tracks/{}/stream", TrackId::new()),
+            None,
         ))
         .await
         .unwrap();
@@ -244,16 +222,29 @@ async fn unknown_track_id_returns_not_found() {
             "request_id": "request-123"
         })
     );
-    assert!(resolver.resolved_source.lock().unwrap().is_none());
+    assert!(resolver.resolved_source.lock().is_none());
+}
+
+#[tokio::test]
+async fn stream_requires_authentication() {
+    let (app, _) = app();
+    let response = app
+        .oneshot(unauthenticated_stream_request(
+            "/playback/tracks/not-a-track-id/stream",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn invalid_track_id_returns_bad_request() {
     let (app, resolver) = app();
     let response = app
-        .oneshot(request(
-            "/playback/resolve",
-            json!({"track_id": "not-a-track-id"}).to_string(),
+        .oneshot(stream_request(
+            "/playback/tracks/not-a-track-id/stream",
+            None,
         ))
         .await
         .unwrap();
@@ -267,7 +258,7 @@ async fn invalid_track_id_returns_bad_request() {
             "request_id": "request-123"
         })
     );
-    assert!(resolver.resolved_source.lock().unwrap().is_none());
+    assert!(resolver.resolved_source.lock().is_none());
 }
 
 async fn searched_track_id(app: &Router) -> String {

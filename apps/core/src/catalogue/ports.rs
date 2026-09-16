@@ -1,13 +1,15 @@
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use super::domain::{CatalogueCandidate, CatalogueSearch};
-use crate::{request::RequestContext, resolvers::ResolverError};
+use crate::{providers::ProviderError, request::RequestContext};
 
 #[async_trait]
-pub trait CatalogueResolver: Send + Sync {
+pub trait CatalogueProvider: Send + Sync {
     async fn search(
         &self,
         search: &CatalogueSearch,
+        user: Option<&Uuid>,
         context: &RequestContext,
-    ) -> Result<Vec<CatalogueCandidate>, ResolverError>;
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError>;
 }

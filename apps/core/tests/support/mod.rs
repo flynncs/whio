@@ -8,25 +8,25 @@ use std::{
 
 use async_trait::async_trait;
 use axum::Router;
+use uuid::Uuid;
 use whio_core::{
     AppState,
-    catalogue::{CatalogueCandidate, CatalogueResolver, CatalogueSearch, CatalogueService},
+    catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch, CatalogueService},
     identity::service::CredentialService,
-    playback::{PlayableMedia, PlaybackResolver, PlaybackService},
-    playback_stream::PlaybackStreamService,
+    playback::{PlaybackProvider, PlaybackService, PlaybackSource, ResolvedPlayback},
+    providers::ProviderError,
     request::RequestContext,
-    resolver::ResolverError,
-    tracks::{InMemoryTrackRepository, SourceIdentity},
+    tracks::{InMemoryTrackRepository, ProviderKind},
 };
 
 pub mod credentials;
 pub use credentials::{
-    credential_service, credential_service_with_known_api_key,
-    credential_service_with_known_app_password,
+    NATIVE_AUTH_QUERY, credential_service, credential_service_with_known_api_key,
+    credential_service_with_known_app_password, credential_service_with_storage_failure,
 };
 
 mod media;
-pub use media::playback_stream;
+pub use media::delivery;
 
 // the single place test suites assemble app state; new services are wired
 // here once instead of in every suite
@@ -34,64 +34,63 @@ pub fn router(
     credential: Arc<CredentialService>,
     catalogue: Arc<CatalogueService>,
     playback: Arc<PlaybackService>,
-    playback_stream: Arc<PlaybackStreamService>,
 ) -> Router {
-    whio_core::router(AppState::new(
-        credential,
-        catalogue,
-        playback,
-        playback_stream,
-    ))
+    whio_core::router(AppState::new(credential, catalogue, playback))
 }
 
-struct StubResolver {
-    responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ResolverError>>>,
+struct StubProvider {
+    responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ProviderError>>>,
 }
 
 #[async_trait]
-impl CatalogueResolver for StubResolver {
+impl CatalogueProvider for StubProvider {
     async fn search(
         &self,
         _search: &CatalogueSearch,
+        _user: Option<&Uuid>,
         _context: &RequestContext,
-    ) -> Result<Vec<CatalogueCandidate>, ResolverError> {
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         self.responses.lock().unwrap().pop_front().unwrap()
     }
 }
 
 #[async_trait]
-impl PlaybackResolver for StubResolver {
+impl PlaybackProvider for StubProvider {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::YoutubeMusic
+    }
+
     async fn resolve(
         &self,
-        _source: &SourceIdentity,
+        _source: &PlaybackSource,
+        _user: Option<&Uuid>,
         _context: &RequestContext,
-    ) -> Result<PlayableMedia, ResolverError> {
-        Err(ResolverError::Internal)
+    ) -> Result<Option<ResolvedPlayback>, ProviderError> {
+        Ok(None)
     }
 }
 
 pub fn services(
-    responses: Vec<Result<Vec<CatalogueCandidate>, ResolverError>>,
-) -> (
-    Arc<CatalogueService>,
-    Arc<PlaybackService>,
-    Arc<PlaybackStreamService>,
-) {
-    let resolver = Arc::new(StubResolver {
+    responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>,
+) -> (Arc<CatalogueService>, Arc<PlaybackService>) {
+    let provider = Arc::new(StubProvider {
         responses: Mutex::new(responses.into()),
     });
     let track_repository = Arc::new(InMemoryTrackRepository::default());
-    let catalogue = Arc::new(CatalogueService::new(
-        resolver.clone(),
+    let catalogue = Arc::new(CatalogueService::with_providers(
         track_repository.clone(),
+        vec![provider.clone() as Arc<dyn CatalogueProvider>],
     ));
-    let playback = Arc::new(PlaybackService::new(resolver, track_repository));
-    let playback_stream = playback_stream(Arc::clone(&playback));
-    (catalogue, playback, playback_stream)
+    let playback = Arc::new(PlaybackService::new(
+        track_repository,
+        vec![provider as Arc<dyn PlaybackProvider>],
+        delivery(),
+    ));
+    (catalogue, playback)
 }
 
-pub fn app(responses: Vec<Result<Vec<CatalogueCandidate>, ResolverError>>) -> Router {
-    let (catalogue, playback, playback_stream) = services(responses);
+pub fn app(responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>) -> Router {
+    let (catalogue, playback) = services(responses);
 
-    router(credential_service(), catalogue, playback, playback_stream)
+    router(credential_service(), catalogue, playback)
 }

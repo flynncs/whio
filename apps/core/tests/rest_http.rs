@@ -3,8 +3,8 @@ use std::sync::Arc;
 mod support;
 
 use support::{
-    credential_service_with_known_api_key, credential_service_with_known_app_password,
-    playback_stream, router,
+    credential_service_with_known_api_key, credential_service_with_known_app_password, delivery,
+    router,
 };
 
 use axum::{
@@ -15,18 +15,23 @@ use md5::{Digest, Md5};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
-    catalogue::CatalogueService, identity::secrets::generate_app_secret, playback::PlaybackService,
-    resolver::DisabledResolver, tracks::InMemoryTrackRepository,
+    catalogue::CatalogueService,
+    identity::secrets::generate_app_secret,
+    playback::{PlaybackProvider, PlaybackService},
+    providers::YtmAdapter,
+    tracks::InMemoryTrackRepository,
 };
 
 fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
-    let resolver = Arc::new(DisabledResolver);
     let repository = Arc::new(InMemoryTrackRepository::default());
-    let catalogue = Arc::new(CatalogueService::new(resolver.clone(), repository.clone()));
-    let playback = Arc::new(PlaybackService::new(resolver, repository));
-    let stream = playback_stream(Arc::clone(&playback));
+    let catalogue = Arc::new(CatalogueService::new(repository.clone()));
+    let playback = Arc::new(PlaybackService::new(
+        repository,
+        vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
+        delivery(),
+    ));
 
-    router(credential, catalogue, playback, stream)
+    router(credential, catalogue, playback)
 }
 
 async fn get(app: axum::Router, uri: &str) -> Value {

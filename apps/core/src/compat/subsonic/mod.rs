@@ -11,16 +11,16 @@ use axum::{
 };
 use whio_subsonic_api::models;
 
-use super::super::http::routes::playback::StreamFailure;
 use crate::{
     AppState,
     http::{errors::media_error_details, raw_query::RawQuery},
     identity::{domain::Principal, service::AuthError},
-    playback::PlaybackError,
-    playback_stream::PlaybackStreamError,
+    playback::{DeliveryError, PlaybackError},
+    providers::ProviderError,
     request::RequestContext,
 };
-use auth::{SubsonicAuth, SubsonicError};
+pub(crate) use auth::SubsonicAuth;
+use auth::SubsonicError;
 use envelope::{
     extensions_envelope, failed_envelope, ok_envelope, search3_envelope, user_envelope,
 };
@@ -96,13 +96,24 @@ pub(crate) async fn search3(
     auth: SubsonicAuth,
     query: RawQuery,
 ) -> Response {
-    if let Err(response) = authenticate(&state, &context, auth).await {
-        return response;
-    }
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
     let Some(q) = query.get("query") else {
         return SubsonicError::MissingParameter.into_response();
     };
-    match service::search_songs(state.catalogue(), &context, q, query.get("songCount")).await {
+    let user_uuid = principal.user_id.as_uuid();
+    match service::search_songs(
+        state.catalogue(),
+        &context,
+        Some(&user_uuid),
+        q,
+        query.get("songCount"),
+        query.get("songOffset"),
+    )
+    .await
+    {
         Ok(songs) => Json(search3_envelope(songs)).into_response(),
         Err(service::SearchError::InvalidSearch) => {
             let mut response = Json(failed_envelope(
@@ -138,25 +149,80 @@ pub(crate) async fn stream(
     query: RawQuery,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = authenticate(&state, &context, auth).await {
-        return response;
-    }
+    use crate::{delivery::into_response, tracks::TrackId};
+
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
     let Some(id) = query.get("id") else {
         return SubsonicError::MissingParameter.into_response();
     };
-    match crate::http::routes::playback::stream_response(&state, &context, id, &headers).await {
-        Ok(response) => response,
-        Err(StreamFailure::InvalidId(_)) => {
-            let mut response = Json(failed_envelope(
-                models::error::Code::Variant0,
-                "Invalid track ID.",
-            ))
-            .into_response();
-            *response.status_mut() = StatusCode::BAD_REQUEST;
-            response
-        }
-        Err(StreamFailure::Stream(error)) => stream_failure_response(&context, error),
-        Err(StreamFailure::Range { content_length, .. }) => {
+    let Ok(track_id) = id.parse::<TrackId>() else {
+        let mut response = Json(failed_envelope(
+            models::error::Code::Variant0,
+            "Invalid track ID.",
+        ))
+        .into_response();
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        return response;
+    };
+
+    let user_uuid = principal.user_id.as_uuid();
+    let client_range = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+
+    match state
+        .playback()
+        .stream(&track_id, Some(&user_uuid), &context, client_range)
+        .await
+    {
+        Ok(delivery) => into_response(delivery),
+        Err(error) => stream_failure_response(&context, error),
+    }
+}
+
+fn stream_failure_response(context: &RequestContext, error: PlaybackError) -> Response {
+    let (status, code, message) = match &error {
+        PlaybackError::TrackNotFound
+        | PlaybackError::SourceNotFound
+        | PlaybackError::Delivery(DeliveryError::UpstreamNotFound) => (
+            StatusCode::NOT_FOUND,
+            models::error::Code::Variant70,
+            "Track was not found.",
+        ),
+        PlaybackError::CredentialsStale
+        | PlaybackError::Delivery(DeliveryError::UpstreamUnauthorized) => (
+            StatusCode::UNAUTHORIZED,
+            models::error::Code::Variant40,
+            "Upstream credentials have expired.",
+        ),
+        PlaybackError::Unavailable
+        | PlaybackError::Delivery(DeliveryError::UpstreamUnavailable) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            models::error::Code::Variant0,
+            "Playback is temporarily unavailable.",
+        ),
+        PlaybackError::Repository(_)
+        | PlaybackError::Provider(ProviderError::Access)
+        | PlaybackError::Delivery(DeliveryError::Spool) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            models::error::Code::Variant0,
+            "Internal error.",
+        ),
+        PlaybackError::Provider(_) => (
+            StatusCode::BAD_GATEWAY,
+            models::error::Code::Variant0,
+            "The playback resolver failed.",
+        ),
+        PlaybackError::Delivery(DeliveryError::Overloaded) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            models::error::Code::Variant0,
+            "The server is busy.",
+        ),
+        PlaybackError::Delivery(DeliveryError::Range { content_length, .. }) => {
             let mut response = Json(failed_envelope(
                 models::error::Code::Variant0,
                 "The requested range is not satisfiable.",
@@ -168,37 +234,12 @@ pub(crate) async fn stream(
                 HeaderValue::from_str(&format!("bytes */{content_length}"))
                     .expect("formatted content range is a valid header value"),
             );
-            response
+            return response;
         }
-    }
-}
-
-fn stream_failure_response(context: &RequestContext, error: PlaybackStreamError) -> Response {
-    let (status, code, message) = match &error {
-        PlaybackStreamError::Playback(PlaybackError::TrackNotFound) => (
-            StatusCode::NOT_FOUND,
-            models::error::Code::Variant70,
-            "The track was not found.",
-        ),
-        PlaybackStreamError::Playback(PlaybackError::Resolver(_)) => (
-            StatusCode::BAD_GATEWAY,
-            models::error::Code::Variant0,
-            "The playback resolver failed.",
-        ),
-        PlaybackStreamError::Playback(PlaybackError::Repository(_)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            models::error::Code::Variant0,
-            "Internal error.",
-        ),
-        PlaybackStreamError::Media(media) => {
+        PlaybackError::Delivery(DeliveryError::Media(media)) => {
             let (status, _, message) = media_error_details(media);
             (status, models::error::Code::Variant0, message)
         }
-        PlaybackStreamError::Spool => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            models::error::Code::Variant0,
-            "Internal error.",
-        ),
     };
     match status {
         StatusCode::NOT_FOUND => tracing::debug!(error = %error, "playback track was not found"),

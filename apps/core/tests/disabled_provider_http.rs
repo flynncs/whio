@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 mod support;
 
-use support::{credential_service, playback_stream, router};
+use support::{NATIVE_AUTH_QUERY, credential_service, delivery, router};
 
 use axum::{
     body::{Body, to_bytes},
@@ -11,9 +11,9 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
-    catalogue::CatalogueService,
-    playback::PlaybackService,
-    resolver::DisabledResolver,
+    catalogue::{CatalogueProvider, CatalogueService},
+    playback::{PlaybackProvider, PlaybackService},
+    providers::YtmAdapter,
     tracks::{
         InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
         TrackRepository,
@@ -34,7 +34,6 @@ fn metadata() -> TrackMetadata {
 }
 
 async fn app() -> (axum::Router, String) {
-    let resolver = Arc::new(DisabledResolver);
     let repository = Arc::new(InMemoryTrackRepository::default());
     let track_id = repository
         .get_or_create(source(), metadata())
@@ -42,12 +41,20 @@ async fn app() -> (axum::Router, String) {
         .unwrap()
         .id()
         .to_string();
-    let catalogue = Arc::new(CatalogueService::new(resolver.clone(), repository.clone()));
-    let playback = Arc::new(PlaybackService::new(resolver, repository));
-    let playback_stream = playback_stream(Arc::clone(&playback));
+    // a disabled adapter surfaces `ProviderError::Disabled` for both
+    // catalogue and playback, which the HTTP layer maps to 503s
+    let catalogue = Arc::new(CatalogueService::with_providers(
+        repository.clone(),
+        vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn CatalogueProvider>],
+    ));
+    let playback = Arc::new(PlaybackService::new(
+        repository,
+        vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
+        delivery(),
+    ));
 
     (
-        router(credential_service(), catalogue, playback, playback_stream),
+        router(credential_service(), catalogue, playback),
         track_id.to_string(),
     )
 }
@@ -55,7 +62,7 @@ async fn app() -> (axum::Router, String) {
 fn request(method: &str, uri: &str, body: &str) -> Request<Body> {
     Request::builder()
         .method(method)
-        .uri(uri)
+        .uri(format!("{uri}{NATIVE_AUTH_QUERY}"))
         .header("content-type", "application/json")
         .header("x-request-id", "request-123")
         .body(Body::from(body.to_owned()))
@@ -95,9 +102,9 @@ async fn disabled_youtube_returns_a_safe_playback_error() {
     let (app, track_id) = app().await;
     let response = app
         .oneshot(request(
-            "POST",
-            "/playback/resolve",
-            &json!({"track_id": track_id}).to_string(),
+            "GET",
+            &format!("/playback/tracks/{track_id}/stream"),
+            "",
         ))
         .await
         .unwrap();

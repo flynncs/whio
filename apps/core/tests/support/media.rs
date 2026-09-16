@@ -6,9 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use whio_core::{
+    delivery::StreamDelivery,
     media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
-    playback::{PlayableMedia, PlaybackService},
-    playback_stream::PlaybackStreamService,
+    playback::PlayableMedia,
 };
 
 struct StubMediaFetcher;
@@ -19,6 +19,7 @@ impl MediaFetcher for StubMediaFetcher {
         Ok(MediaInfo {
             content_length: 1,
             supports_ranges: true,
+            content_type: Some("audio/mpeg".to_owned()),
         })
     }
 
@@ -30,9 +31,11 @@ impl MediaFetcher for StubMediaFetcher {
     }
 }
 
-pub fn playback_stream(playback: Arc<PlaybackService>) -> Arc<PlaybackStreamService> {
-    Arc::new(PlaybackStreamService::new(
-        playback,
+pub fn delivery() -> Arc<StreamDelivery> {
+    Arc::new(StreamDelivery::new(
         Arc::new(StubMediaFetcher),
+        std::env::temp_dir(),
+        whio_core::delivery::DEFAULT_MAX_SESSIONS,
+        reqwest::Client::new(),
     ))
 }

@@ -5,18 +5,16 @@ use axum::Router;
 pub mod catalogue;
 pub mod compat;
 pub mod database;
+pub mod delivery;
 pub mod identity;
 pub mod media;
-pub mod request;
-pub mod resolvers;
-pub mod tracks;
-pub use resolvers as resolver;
 pub mod playback;
-pub mod playback_stream;
+pub mod providers;
+pub mod request;
+pub mod tracks;
 
 use crate::{
     catalogue::CatalogueService, identity::service::CredentialService, playback::PlaybackService,
-    playback_stream::PlaybackStreamService,
 };
 
 #[derive(Clone)]
@@ -25,7 +23,6 @@ pub struct AppState {
     credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
     playback: Arc<PlaybackService>,
-    playback_stream: Arc<PlaybackStreamService>,
 }
 
 impl AppState {
@@ -33,14 +30,12 @@ impl AppState {
         credential: Arc<CredentialService>,
         catalogue: Arc<CatalogueService>,
         playback: Arc<PlaybackService>,
-        playback_stream: Arc<PlaybackStreamService>,
     ) -> Self {
         Self {
             credential,
             catalogue,
             database: None,
             playback,
-            playback_stream,
         }
     }
 
@@ -48,7 +43,6 @@ impl AppState {
         credential: Arc<CredentialService>,
         catalogue: Arc<CatalogueService>,
         playback: Arc<PlaybackService>,
-        playback_stream: Arc<PlaybackStreamService>,
         database: Arc<database::Database>,
     ) -> Self {
         Self {
@@ -56,7 +50,6 @@ impl AppState {
             catalogue,
             database: Some(database),
             playback,
-            playback_stream,
         }
     }
 
@@ -74,10 +67,6 @@ impl AppState {
 
     pub(crate) fn playback(&self) -> &PlaybackService {
         &self.playback
-    }
-
-    pub(crate) fn playback_stream(&self) -> &PlaybackStreamService {
-        &self.playback_stream
     }
 }
 

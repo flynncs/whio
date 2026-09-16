@@ -1,6 +1,6 @@
 use reqwest::{
     StatusCode,
-    header::{CONTENT_RANGE, RANGE},
+    header::{CONTENT_RANGE, CONTENT_TYPE, RANGE},
 };
 
 use tokio_stream::StreamExt;
@@ -8,6 +8,7 @@ use tokio_stream::StreamExt;
 use crate::{
     media::{
         ByteRange, MediaFetcher, MediaInfo,
+        policy::{self},
         ports::{MediaBody, MediaFetchError},
     },
     playback::PlayableMedia,
@@ -15,17 +16,45 @@ use crate::{
 
 pub struct HttpMediaFetcher {
     client: reqwest::Client,
+    destination: DestinationPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DestinationPolicy {
+    Any,
+    HostSuffix(&'static str),
 }
 
 impl HttpMediaFetcher {
     pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            destination: DestinationPolicy::Any,
+        }
+    }
+
+    pub fn with_allowed_host_suffix(client: reqwest::Client, suffix: &'static str) -> Self {
+        Self {
+            client,
+            destination: DestinationPolicy::HostSuffix(suffix),
+        }
+    }
+
+    fn validate_destination(&self, media: &PlayableMedia) -> Result<(), MediaFetchError> {
+        if let DestinationPolicy::HostSuffix(suffix) = self.destination
+            && !policy::is_allowed_suffix_url(media.url().as_url(), suffix)
+        {
+            return Err(MediaFetchError::DisallowedDestination);
+        }
+
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl MediaFetcher for HttpMediaFetcher {
     async fn probe(&self, media: &PlayableMedia) -> Result<MediaInfo, MediaFetchError> {
+        self.validate_destination(media)?;
         let mut req = self.client.get(media.url().as_url().clone());
 
         for (name, val) in media.headers() {
@@ -56,6 +85,12 @@ impl MediaFetcher for HttpMediaFetcher {
                 return Ok(MediaInfo {
                     content_length: length,
                     supports_ranges: true,
+                    content_type: resp
+                        .headers()
+                        .get(CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned),
                 });
             }
             StatusCode::OK => return Err(MediaFetchError::RangesUnsupported),
@@ -64,6 +99,7 @@ impl MediaFetcher for HttpMediaFetcher {
     }
 
     async fn open_continuous(&self, media: &PlayableMedia) -> Result<MediaBody, MediaFetchError> {
+        self.validate_destination(media)?;
         let mut req = self.client.get(media.url().as_url().clone());
 
         for (name, val) in media.headers() {
@@ -212,6 +248,71 @@ mod tests {
         assert_eq!(bytes, b"test");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn stalled_body_fails_within_the_read_budget() {
+        use std::time::Duration;
+
+        async fn stall() -> Response {
+            let pending =
+                tokio_stream::pending::<Result<axum::body::Bytes, std::convert::Infallible>>();
+            Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_RANGE, "bytes 0-3/4")
+                .header(header::CONTENT_LENGTH, "4")
+                .body(Body::from_stream(pending))
+                .unwrap()
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/media", get(stall)))
+                .await
+                .unwrap();
+        });
+
+        let media = PlayableMedia::new(
+            PlaybackUrl::new(format!("http://{address}/media")).unwrap(),
+            HashMap::new(),
+            None,
+            MediaMetadata::new(None, None, None, None, None).unwrap(),
+        );
+        let fetcher = HttpMediaFetcher::new(
+            reqwest::Client::builder()
+                .read_timeout(Duration::from_millis(200))
+                .build()
+                .unwrap(),
+        );
+
+        let started = std::time::Instant::now();
+        let body = fetcher.open_continuous(&media).await.unwrap();
+        let error = body
+            .chunks
+            .collect::<Result<Vec<_>, _>>()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, MediaFetchError::Request(_)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn production_fetcher_rejects_a_disallowed_initial_destination() {
+        let media = PlayableMedia::new(
+            PlaybackUrl::new("http://127.0.0.1:9/audio".to_owned()).unwrap(),
+            HashMap::new(),
+            None,
+            MediaMetadata::new(None, None, None, None, None).unwrap(),
+        );
+        let fetcher =
+            HttpMediaFetcher::with_allowed_host_suffix(reqwest::Client::new(), "media.example");
+
+        let error = fetcher.probe(&media).await.unwrap_err();
+        assert!(matches!(error, MediaFetchError::DisallowedDestination));
     }
 
     #[test]

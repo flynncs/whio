@@ -7,13 +7,13 @@ use tower::ServiceExt;
 use uuid::Uuid;
 use whio_core::{
     catalogue::CatalogueCandidate,
-    resolver::ResolverError,
+    providers::ProviderError,
     tracks::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
 };
 
 mod support;
 
-use support::app;
+use support::{NATIVE_AUTH_QUERY, app, credential_service_with_storage_failure, router, services};
 
 fn candidate() -> CatalogueCandidate {
     let provider_id = ProviderId::new("youtube_music".to_owned()).unwrap();
@@ -32,11 +32,56 @@ fn candidate() -> CatalogueCandidate {
 fn request(body: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
+        .uri(format!("/catalogue/search{NATIVE_AUTH_QUERY}"))
+        .header("content-type", "application/json")
+        .header("x-request-id", "request-123")
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+
+fn unauthenticated_request(body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
         .uri("/catalogue/search")
         .header("content-type", "application/json")
         .header("x-request-id", "request-123")
         .body(Body::from(body.to_owned()))
         .unwrap()
+}
+
+#[tokio::test]
+async fn search_requires_authentication() {
+    let response = app(vec![])
+        .oneshot(unauthenticated_request(
+            r#"{"query":"Daft Punk","limit":5}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn credential_storage_failure_is_a_server_error() {
+    let (catalogue, playback) = services(vec![]);
+    let response = router(
+        credential_service_with_storage_failure(),
+        catalogue,
+        playback,
+    )
+    .oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(format!("/catalogue/search{NATIVE_AUTH_QUERY}"))
+            .header("content-type", "application/json")
+            .header("x-request-id", "request-123")
+            .body(Body::from(r#"{"query":"Daft Punk","limit":5}"#))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[tokio::test]
@@ -78,7 +123,7 @@ async fn malformed_and_invalid_requests_share_the_public_error_shape() {
 
 #[tokio::test]
 async fn unavailable_resolver_returns_service_unavailable() {
-    let response = app(vec![Err(ResolverError::ProviderUnavailable)])
+    let response = app(vec![Err(ProviderError::ProviderUnavailable)])
         .oneshot(request(r#"{"query":"Daft Punk","limit":5}"#))
         .await
         .unwrap();

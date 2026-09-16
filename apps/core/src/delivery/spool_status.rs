@@ -19,8 +19,18 @@ pub async fn download_to_file(
     let mut available: u64 = 0;
 
     while let Some(result) = body.chunks.next().await {
+        if updates.receiver_count() == 0 {
+            return;
+        }
         match result {
             Ok(bytes) => {
+                if expected_length
+                    .is_none_or(|maximum| available.saturating_add(bytes.len() as u64) > maximum)
+                {
+                    tracing::error!(available, "playback spool exceeded its reserved length");
+                    updates.send_replace(SpoolStatus::Failed { available });
+                    return;
+                }
                 if let Err(error) = file.write_all(&bytes).await {
                     tracing::error!(
                         error = %error,

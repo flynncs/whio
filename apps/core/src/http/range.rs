@@ -7,7 +7,7 @@ pub(crate) enum RangeRequest {
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub(crate) enum RangeError {
+pub enum RangeError {
     #[error("range unit is not bytes")]
     InvalidUnit,
 
