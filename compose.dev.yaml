@@ -38,7 +38,26 @@ services:
       timeout: 3s
       start_period: 5s
       retries: 5
-
+  nd-connector:
+    build:
+      context: .
+      dockerfile: docker/navidrome-connector.Dockerfile
+      target: dev
+    environment:
+      WHIO_ND_CONNECTOR_BIND_ADDRESS: 0.0.0.0:3001
+      WHIO_ND_CONNECTOR_LOG_LEVEL: info
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - nd-connector-target:/workspace/apps/navidrome-connector/target
+    ports:
+      - 127.0.0.1:3001:3001
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3001'"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 5
   core:
     build:
       context: .
@@ -56,6 +75,7 @@ services:
       WHIO_LOG_LEVEL: info
       WHIO_YOUTUBE_ENABLED: "true"
       WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000
+      WHIO_UPSTREAM_CONNECTOR_URL: http://nd-connector:3001
     volumes:
       - .:/workspace
       - cargo-registry:/usr/local/cargo/registry
@@ -66,6 +86,7 @@ services:
 volumes:
   cargo-registry:
   core-target:
+  nd-connector-target:
   postgres-data:
   ytm-deno-cache:
   ytm-resolver-venv:

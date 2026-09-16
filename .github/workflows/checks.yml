@@ -1,0 +1,110 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path apps/core/Cargo.toml --all -- --check
+
+      - name: Lint core
+        run: cargo clippy --locked --manifest-path apps/core/Cargo.toml --all-targets -- -D warnings
+
+      - name: Lint connector
+        run: cargo clippy --locked --manifest-path apps/navidrome-connector/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test core
+        run: cargo test --locked --manifest-path apps/core/Cargo.toml
+
+      - name: Test connector
+        run: cargo test --locked --manifest-path apps/navidrome-connector/Cargo.toml
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: whio
+          POSTGRES_USER: whio
+          POSTGRES_PASSWORD: whio-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U whio -d whio"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Fetch pinned openapi-generator
+        run: |
+          curl -sSL -o /tmp/openapi-generator-cli.jar \
+            https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/7.24.0/openapi-generator-cli-7.24.0.jar
+
+      - name: Check connector contract drift
+        env:
+          OPENAPI_GENERATOR_JAR: /tmp/openapi-generator-cli.jar
+        run: ./tools/generate-nd-connector-contract.sh --check
+
+      - name: Check resolver contract drift
+        env:
+          OPENAPI_GENERATOR_JAR: /tmp/openapi-generator-cli.jar
+        run: ./tools/generate-resolver-contract.sh --check
+
+      - name: Check subsonic types drift
+        env:
+          OPENAPI_GENERATOR_JAR: /tmp/openapi-generator-cli.jar
+        run: ./tools/generate-subsonic-types.sh --check
+
+      - name: Test PostgreSQL integration suites
+        env:
+          DATABASE_URL: postgres://whio:whio-test@localhost:5432/whio
+        run: >-
+          cargo test --locked --manifest-path apps/core/Cargo.toml
+          --features postgres-integration --tests -- --ignored
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Test ytm-resolver
+        working-directory: apps/ytm-resolver
+        run: uv run --with pytest --python 3.14 python -m pytest tests -q

@@ -33,6 +33,9 @@ don't edit `apps/resolver-client-generated/` or
 - `WHIO_LOG_LEVEL`: defaults to `info`
 - `WHIO_YOUTUBE_ENABLED`: off by default
 - `WHIO_YOUTUBE_RESOLVER_URL`, `WHIO_YOUTUBE_RESOLVER_CONNECT_TIMEOUT_SECONDS`, `WHIO_YOUTUBE_RESOLVER_TOTAL_TIMEOUT_SECONDS`: resolver target and budgets when youtube is enabled
+- `WHIO_UPSTREAM_CONNECTOR_URL`, `WHIO_UPSTREAM_CONNECTOR_CONNECT_TIMEOUT_SECONDS`, `WHIO_UPSTREAM_CONNECTOR_TOTAL_TIMEOUT_SECONDS`: Navidrome connector target and budgets
+- `WHIO_PLAYBACK_MAX_SESSIONS`: defaults to `16`. concurrent spool playbacks before overload
+- `WHIO_SPOOL_DIR`: defaults to the system temp dir. stale `whio-*.part` files are purged at startup
 
 local compose sets everything except the credential key, which lives in a
 gitignored `.env` next to the compose files (`openssl rand -base64 32`).
@@ -55,14 +58,3 @@ whio-cli revoke <credential-id>
 ```
 
 reads `.env` in the repo root; flags override it. reinstall after cli changes.
-
-for development:
-
-```sh
-docker compose -f compose.dev.yaml up --build
-```
-
-The development Compose setup starts PostgreSQL 18 with a persistent
-`postgres-data` volume and exposes it on `localhost:5432`. Core uses the
-`postgres` service hostname inside Compose. The initial Core-owned migration
-is in `apps/core/migrations/0001_track_identity.sql`.
