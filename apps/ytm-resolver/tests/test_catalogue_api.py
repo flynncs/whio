@@ -5,7 +5,12 @@ from fastapi.testclient import TestClient
 
 from app.api.catalogue import get_catalogue
 from app.errors import ProviderUnavailableError
-from app.generated.resolver_v1 import Artist, CatalogueCandidate, SourceIdentity
+from app.generated.resolver_v1 import (
+    Artist,
+    CatalogueCandidate,
+    CatalogueSearchResponse,
+    SourceIdentity,
+)
 from app.main import app
 from app.youtube.catalogue import YouTubeMusicCatalogue
 
@@ -13,7 +18,7 @@ from app.youtube.catalogue import YouTubeMusicCatalogue
 class CatalogueRoutesTest(unittest.TestCase):
     def setUp(self) -> None:
         self.catalogue = Mock(spec=YouTubeMusicCatalogue)
-        self.catalogue.search.return_value = [
+        self.catalogue.search.return_value = CatalogueSearchResponse(results=[
             CatalogueCandidate(
                 source=SourceIdentity(
                     provider_id="youtube_music",
@@ -23,7 +28,7 @@ class CatalogueRoutesTest(unittest.TestCase):
                 artists=[Artist("Daft Punk")],
                 duration_ms=337000,
             )
-        ]
+        ])
         app.dependency_overrides[get_catalogue] = lambda: self.catalogue
         self.client = TestClient(app)
 
@@ -37,7 +42,7 @@ class CatalogueRoutesTest(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.catalogue.search.assert_called_once_with("Daft Punk", 5)
+        self.catalogue.search.assert_called_once_with("Daft Punk", 5, 0)
         self.assertEqual(
             response.json(),
             {
@@ -77,3 +82,16 @@ class CatalogueRoutesTest(unittest.TestCase):
             },
         )
         self.assertNotIn("private provider details", response.text)
+
+    def test_search_passes_offset_and_rejects_out_of_bounds_offsets(self) -> None:
+        response = self.client.post(
+            "/v1/catalogue/search", json={"query": "songs", "limit": 5, "offset": 25}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.catalogue.search.assert_called_once_with("songs", 5, 25)
+        for offset in [-1, 1001]:
+            response = self.client.post(
+                "/v1/catalogue/search",
+                json={"query": "songs", "limit": 5, "offset": offset},
+            )
+            self.assertEqual(response.status_code, 400)

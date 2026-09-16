@@ -65,6 +65,7 @@ class CatalogueSearchRequest(BaseModel):
     )
     query: str = Field(..., max_length=500, min_length=1)
     limit: int = Field(..., ge=1, le=25)
+    offset: int = Field(0, ge=0, le=1000)
 
 
 class Artist(RootModel[str]):
@@ -128,6 +129,12 @@ class CapabilitiesResponse(BaseModel):
 class CatalogueSearchResponse(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
+    )
+    next_offset: int | None = Field(
+        None,
+        description='Next upstream offset, before filtering results. Absent when the bounded search is exhausted.',
+        ge=1,
+        le=1000,
     )
     results: list[CatalogueCandidate]
 

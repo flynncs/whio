@@ -13,12 +13,18 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CatalogueSearchResponse {
+    /// Next upstream offset, before filtering results. Absent when the bounded search is exhausted.
+    #[serde(rename = "next_offset", skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<i32>,
     #[serde(rename = "results")]
     pub results: Vec<models::CatalogueCandidate>,
 }
 
 impl CatalogueSearchResponse {
     pub fn new(results: Vec<models::CatalogueCandidate>) -> CatalogueSearchResponse {
-        CatalogueSearchResponse { results }
+        CatalogueSearchResponse {
+            next_offset: None,
+            results,
+        }
     }
 }

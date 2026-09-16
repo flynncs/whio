@@ -17,11 +17,13 @@ def get_catalogue() -> YouTubeMusicCatalogue:
     return YouTubeMusicCatalogue(YTMusic())
 
 
-@catalogue_router.post("/search", response_model=CatalogueSearchResponse)
+@catalogue_router.post(
+    "/search",
+    response_model=CatalogueSearchResponse,
+    response_model_exclude_none=True,
+)
 def search_catalogue(
     request: CatalogueSearchRequest,
     catalogue: Annotated[YouTubeMusicCatalogue, Depends(get_catalogue)],
 ) -> CatalogueSearchResponse:
-    results = catalogue.search(request.query, request.limit)
-
-    return CatalogueSearchResponse(results=results)
+    return catalogue.search(request.query, request.limit, request.offset)

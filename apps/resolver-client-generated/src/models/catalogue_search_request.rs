@@ -17,10 +17,16 @@ pub struct CatalogueSearchRequest {
     pub query: String,
     #[serde(rename = "limit")]
     pub limit: i32,
+    #[serde(rename = "offset", skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i32>,
 }
 
 impl CatalogueSearchRequest {
     pub fn new(query: String, limit: i32) -> CatalogueSearchRequest {
-        CatalogueSearchRequest { query, limit }
+        CatalogueSearchRequest {
+            query,
+            limit,
+            offset: None,
+        }
     }
 }

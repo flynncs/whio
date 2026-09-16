@@ -226,6 +226,7 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
         self.assertEqual(resolved.media.codec, "mp4a.40.2")
         self.assertEqual(run.call_count, 2)
 
+    @patch("app.youtube.playback._AUDIO_FORMATS", ("bestaudio",))
     @patch("app.youtube.playback.time.sleep")
     @patch("app.youtube.playback.requests.get")
     @patch("app.youtube.playback.subprocess.run")
@@ -247,15 +248,11 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
             stderr="",
         )
 
-        first = unittest.mock.MagicMock()
-        first.__enter__.return_value.status_code = 403
-        second = unittest.mock.MagicMock()
-        second.__enter__.return_value.status_code = 403
+        rejected = unittest.mock.MagicMock()
+        rejected.__enter__.return_value.status_code = 403
         accepted = unittest.mock.MagicMock()
         accepted.__enter__.return_value.status_code = 206
-        also_accepted = unittest.mock.MagicMock()
-        also_accepted.__enter__.return_value.status_code = 206
-        get.side_effect = [first, second, accepted, also_accepted]
+        get.side_effect = [rejected, accepted]
 
         resolved = YouTubeMusicPlayback().resolve(
             SourceIdentity(
@@ -265,5 +262,5 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
         )
 
         self.assertEqual(str(resolved.url), "https://media.example.test/audio")
-        self.assertEqual(run.call_count, 4)
+        self.assertEqual(run.call_count, 2)
         sleep.assert_called_once_with(0.2)

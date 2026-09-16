@@ -41,7 +41,7 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
             "Daft Punk", filter="songs", limit=5
         )
         self.assertEqual(
-            results[0].model_dump(mode="json"),
+            results.results[0].model_dump(mode="json"),
             {
                 "source": {
                     "provider_id": "youtube_music",
@@ -60,6 +60,34 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
         ]:
             with self.subTest(value=value):
                 self.assertEqual(parse_duration_ms(value), expected)
+
+    def test_search_pages_beyond_twenty_five_and_trims_upstream_overfetch(self) -> None:
+        client = Mock()
+        client.search.return_value = [
+            {"videoId": str(i), "title": f"Song {i}", "artists": [{"name": "Artist"}]}
+            for i in range(60)
+        ]
+        page = YouTubeMusicCatalogue(client).search("songs", limit=25, offset=25)
+        self.assertEqual(
+            [song.source.external_id for song in page.results],
+            [str(i) for i in range(25, 50)],
+        )
+        self.assertEqual(page.next_offset, 50)
+        client.search.assert_called_once_with("songs", filter="songs", limit=50)
+
+        last = YouTubeMusicCatalogue(client).search("songs", limit=25, offset=50)
+        self.assertEqual(len(last.results), 10)
+        self.assertIsNone(last.next_offset)
+
+    def test_search_stops_at_the_offset_bound(self) -> None:
+        client = Mock()
+        client.search.return_value = [
+            {"videoId": str(i), "title": "Song", "artists": [{"name": "Artist"}]}
+            for i in range(1050)
+        ]
+        page = YouTubeMusicCatalogue(client).search("songs", limit=25, offset=1000)
+        self.assertEqual(len(page.results), 25)
+        self.assertIsNone(page.next_offset)
 
     def test_parse_duration_returns_none_for_missing_or_invalid_values(self) -> None:
         for value in [None, "", "unknown"]:

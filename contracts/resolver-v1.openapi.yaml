@@ -380,6 +380,11 @@ components:
           type: integer
           minimum: 1
           maximum: 25
+        offset:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          default: 0
 
     CatalogueSearchResponse:
       type: object
@@ -387,6 +392,11 @@ components:
       required:
         - results
       properties:
+        next_offset:
+          type: integer
+          minimum: 1
+          maximum: 1000
+          description: Next upstream offset, before filtering results. Absent when the bounded search is exhausted.
         results:
           type: array
           items:

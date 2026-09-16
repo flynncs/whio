@@ -6,7 +6,12 @@ from ytmusicapi import YTMusic
 from ytmusicapi.exceptions import YTMusicServerError
 
 from app.errors import ProviderUnavailableError
-from app.generated.resolver_v1 import Artist, CatalogueCandidate, SourceIdentity
+from app.generated.resolver_v1 import (
+    Artist,
+    CatalogueCandidate,
+    CatalogueSearchResponse,
+    SourceIdentity,
+)
 
 
 class YouTubeMusicCatalogue:
@@ -15,14 +20,20 @@ class YouTubeMusicCatalogue:
     def __init__(self, client: YTMusic) -> None:
         self._client = client
 
-    def search(self, query: str, limit: int) -> list[CatalogueCandidate]:
+    def search(
+        self, query: str, limit: int, offset: int = 0
+    ) -> CatalogueSearchResponse:
         try:
-            results = self._client.search(query, filter="songs", limit=limit)
+            results = self._client.search(query, filter="songs", limit=offset + limit)
         except (YTMusicServerError, RequestException) as error:
             raise ProviderUnavailableError(
                 "The provider is temporarily unavailable"
             ) from error
-        return [normalize_song_result(result) for result in results]
+        end = offset + limit
+        return CatalogueSearchResponse(
+            results=[normalize_song_result(result) for result in results[offset:end]],
+            next_offset=end if len(results) >= end and end <= 1000 else None,
+        )
 
 
 def normalize_song_result(result: Mapping[str, Any]) -> CatalogueCandidate:
