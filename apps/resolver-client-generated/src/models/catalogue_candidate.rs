@@ -26,6 +26,21 @@ pub struct CatalogueCandidate {
         skip_serializing_if = "Option::is_none"
     )]
     pub duration_ms: Option<Option<i32>>,
+    #[serde(
+        rename = "album",
+        default,
+        with = "::serde_with::rust::double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub album: Option<Option<String>>,
+    /// Public artwork URL that the core fetches and proxies to clients.
+    #[serde(
+        rename = "artwork_url",
+        default,
+        with = "::serde_with::rust::double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub artwork_url: Option<Option<String>>,
 }
 
 impl CatalogueCandidate {
@@ -39,6 +54,8 @@ impl CatalogueCandidate {
             title,
             artists,
             duration_ms: None,
+            album: None,
+            artwork_url: None,
         }
     }
 }

@@ -44,7 +44,30 @@ def normalize_song_result(result: Mapping[str, Any]) -> CatalogueCandidate:
         title=result["title"],
         artists=[Artist(artist["name"]) for artist in result.get("artists", [])],
         duration_ms=parse_duration_ms(result.get("duration")),
+        album=parse_album(result.get("album")),
+        artwork_url=parse_artwork_url(result.get("thumbnails")),
     )
+
+
+def parse_album(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        name = value.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return None
+
+
+def parse_artwork_url(thumbnails: Any) -> str | None:
+    """the largest thumbnail is the last entry in ytmusicapi's ordering."""
+    if not isinstance(thumbnails, list):
+        return None
+
+    for thumbnail in reversed(thumbnails):
+        if isinstance(thumbnail, Mapping):
+            url = thumbnail.get("url")
+            if isinstance(url, str) and url:
+                return url
+    return None
 
 
 def parse_duration_ms(value: str | None) -> int | None:

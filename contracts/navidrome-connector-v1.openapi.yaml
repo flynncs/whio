@@ -177,6 +177,52 @@ paths:
           $ref: "#/components/responses/UpstreamBadResponse"
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
+  /v1/playback/artwork:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: resolveArtwork
+      summary: Resolve an upstream cover-art id into a fetchable image URL
+      description: |
+        Token auth in the query, like the stream URL. The connector returns the
+        URL and the caller fetches the bytes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArtworkResolveRequest"
+            example:
+              base_url: https://music.example.test
+              username: friend
+              password: example-password
+              artwork_id: example-cover-art-id
+      responses:
+        "200":
+          description: A fetchable cover-art URL
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolveResponse"
+              example:
+                url: https://music.example.test/rest/getCoverArt.view?u=friend&t=example&s=example&v=1.16.1&c=whio-nd-connector&id=example-cover-art-id
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/UpstreamAuthFailed"
+        "403":
+          $ref: "#/components/responses/UpstreamForbidden"
+        "404":
+          $ref: "#/components/responses/SourceNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/UpstreamBadResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
   /v1/admin/servers/verify:
     parameters:
       - $ref: "#/components/parameters/RequestId"
@@ -604,6 +650,19 @@ components:
             - integer
             - "null"
           minimum: 0
+        album:
+          type:
+            - string
+            - "null"
+          minLength: 1
+          maxLength: 500
+        artwork_id:
+          type:
+            - string
+            - "null"
+          minLength: 1
+          maxLength: 512
+          description: The upstream cover-art id, resolved through resolveArtwork.
 
     ResolveRequest:
       type: object
@@ -639,6 +698,30 @@ components:
           type: string
           format: uri
           maxLength: 2048
+
+    ArtworkResolveRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - base_url
+        - username
+        - password
+        - artwork_id
+      properties:
+        base_url:
+          $ref: "#/components/schemas/BaseUrl"
+        username:
+          type: string
+          minLength: 1
+          maxLength: 200
+        password:
+          type: string
+          minLength: 1
+          maxLength: 500
+        artwork_id:
+          type: string
+          minLength: 1
+          maxLength: 512
 
     ErrorCode:
       type: string

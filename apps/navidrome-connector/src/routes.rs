@@ -87,6 +87,10 @@ struct SearchResult {
     title: String,
     artists: Vec<String>,
     duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    album: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artwork_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -95,6 +99,14 @@ struct ResolveRequest {
     username: String,
     password: String,
     external_id: String,
+}
+
+#[derive(Deserialize)]
+struct ArtworkResolveRequest {
+    base_url: String,
+    username: String,
+    password: String,
+    artwork_id: String,
 }
 
 #[derive(Serialize)]
@@ -120,6 +132,7 @@ async fn capabilities() -> impl IntoResponse {
                 "upstream.credentials.verify",
                 "catalogue.search",
                 "playback.resolve",
+                "artwork.resolve",
             ],
         }],
     })
@@ -231,6 +244,8 @@ async fn search(
                     title: song.title,
                     artists: vec![song.artist],
                     duration_ms: song.duration_ms,
+                    album: song.album,
+                    artwork_id: song.artwork_id,
                 })
                 .collect(),
         })
@@ -275,6 +290,39 @@ async fn resolve(
     }
 }
 
+async fn resolve_artwork(
+    Extension(request_id): Extension<RequestId>,
+    Extension(client): Extension<reqwest::Client>,
+    body: Result<Json<ArtworkResolveRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(request) = match body {
+        Ok(body) => body,
+        Err(_) => return ConnectorError::InvalidRequest.response(&request_id),
+    };
+    if request.artwork_id.trim().is_empty() {
+        return ConnectorError::InvalidRequest.response(&request_id);
+    }
+
+    match subsonic::resolve_artwork_url(
+        &client,
+        &request.base_url,
+        &request.username,
+        &request.password,
+        &request.artwork_id,
+    )
+    .await
+    {
+        Ok(url) => Json(ResolveResponse { url }).into_response(),
+        Err(error) => {
+            tracing::warn!(
+                request_id = request_id.0.as_str(),
+                "upstream artwork resolve failed"
+            );
+            error.response(&request_id)
+        }
+    }
+}
+
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -291,6 +339,7 @@ pub(crate) fn router() -> Router {
         .route("/v1/admin/servers/verify", post(verify))
         .route("/v1/catalogue/search", post(search))
         .route("/v1/playback/resolve", post(resolve))
+        .route("/v1/playback/artwork", post(resolve_artwork))
         .fallback(not_found)
         .layer(Extension(http_client()))
         .layer(middleware::from_fn(request_id::middleware))
@@ -410,7 +459,8 @@ mod tests {
                 "upstream.users.list",
                 "upstream.credentials.verify",
                 "catalogue.search",
-                "playback.resolve"
+                "playback.resolve",
+                "artwork.resolve"
             ])
         );
     }
@@ -689,6 +739,64 @@ mod tests {
         assert_eq!(body["code"], "source_not_found");
 
         let (status, body) = post_resolve(resolve("")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn artwork_returns_probed_cover_art_url() {
+        use axum::{extract::Query, routing::get as route_get};
+        use std::collections::HashMap;
+
+        async fn stub(Query(params): Query<HashMap<String, String>>) -> Response {
+            match params.get("id").map(String::as_str) {
+                Some("gone") => StatusCode::NOT_FOUND.into_response(),
+                _ => (StatusCode::OK, "image-bytes").into_response(),
+            }
+        }
+
+        let upstream = Router::new().route("/rest/getCoverArt.view", route_get(stub));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await });
+        let base_url = format!("http://{address}");
+
+        let post_artwork = |id: &str| {
+            let body = serde_json::json!({
+                "base_url": base_url,
+                "username": "friend",
+                "password": "password",
+                "artwork_id": id,
+            });
+            async move {
+                let request = Request::builder()
+                    .method("POST")
+                    .uri("/v1/playback/artwork")
+                    .header("content-type", "application/json")
+                    .header("x-request-id", "request-123")
+                    .body(Body::from(body.to_string()))
+                    .unwrap();
+                let response = router().oneshot(request).await.unwrap();
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), 8192).await.unwrap();
+                (
+                    status,
+                    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                )
+            }
+        };
+
+        let (status, body) = post_artwork("cover-1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["url"].as_str().is_some_and(|url| {
+            url.contains("/rest/getCoverArt.view") && url.contains("id=cover-1")
+        }));
+
+        let (status, body) = post_artwork("gone").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "source_not_found");
+
+        let (status, body) = post_artwork("").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["code"], "invalid_request");
     }

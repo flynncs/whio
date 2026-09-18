@@ -1,3 +1,5 @@
+pub mod artwork_resolve_request;
+pub use self::artwork_resolve_request::ArtworkResolveRequest;
 pub mod capabilities_response;
 pub use self::capabilities_response::CapabilitiesResponse;
 pub mod contract_version;

@@ -80,6 +80,11 @@ class CatalogueCandidate(BaseModel):
     title: str = Field(..., max_length=500, min_length=1)
     artists: list[Artist] = Field(..., min_length=1)
     duration_ms: int | None = Field(None, ge=0)
+    album: str | None = Field(None, max_length=500, min_length=1)
+    artwork_url: AnyUrl | None = Field(
+        None,
+        description='Public artwork URL that the core fetches and proxies to clients.',
+    )
 
 
 class PlaybackResolveRequest(BaseModel):

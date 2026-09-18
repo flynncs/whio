@@ -65,6 +65,10 @@ struct Song {
     artists: Option<Vec<Artist>>,
     #[serde(default)]
     duration: Option<u64>,
+    #[serde(default)]
+    album: Option<String>,
+    #[serde(rename = "coverArt", default)]
+    cover_art: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -205,6 +209,28 @@ pub(crate) async fn resolve_stream_url(
     password: &str,
     external_id: &str,
 ) -> Result<String, ConnectorError> {
+    let url = media_url(base_url, username, password, "stream.view", external_id)?;
+    probe_media_url(client, url).await
+}
+
+pub(crate) async fn resolve_artwork_url(
+    client: &reqwest::Client,
+    base_url: &str,
+    username: &str,
+    password: &str,
+    artwork_id: &str,
+) -> Result<String, ConnectorError> {
+    let url = media_url(base_url, username, password, "getCoverArt.view", artwork_id)?;
+    probe_media_url(client, url).await
+}
+
+fn media_url(
+    base_url: &str,
+    username: &str,
+    password: &str,
+    view: &str,
+    external_id: &str,
+) -> Result<String, ConnectorError> {
     let Some(base_url) = normalize_base_url(base_url) else {
         return Err(ConnectorError::InvalidRequest);
     };
@@ -214,8 +240,12 @@ pub(crate) async fn resolve_stream_url(
     let query = form_urlencoded::Serializer::new(String::new())
         .extend_pairs(params)
         .finish();
-    let url = format!("{base_url}/rest/stream.view?{query}");
+    Ok(format!("{base_url}/rest/{view}?{query}"))
+}
 
+/// token auth lives in the query, so the caller can fetch the URL directly. the
+/// connector only proves the URL answers before handing it over.
+async fn probe_media_url(client: &reqwest::Client, url: String) -> Result<String, ConnectorError> {
     let probe = client
         .get(&url)
         .header("Range", "bytes=0-0")
@@ -251,6 +281,8 @@ pub(crate) struct UpstreamSong {
     pub(crate) title: String,
     pub(crate) artist: String,
     pub(crate) duration_ms: Option<u64>,
+    pub(crate) album: Option<String>,
+    pub(crate) artwork_id: Option<String>,
 }
 
 fn song_artist(song: &Song) -> Option<String> {
@@ -297,6 +329,8 @@ fn parse_songs(body: &str, offset: u32, limit: u32) -> Result<SongPage, Connecto
             title: song.title,
             artist,
             duration_ms: song.duration.map(|seconds| seconds.saturating_mul(1000)),
+            album: song.album.filter(|album| !album.trim().is_empty()),
+            artwork_id: song.cover_art.filter(|id| !id.trim().is_empty()),
         });
     }
     if skipped > 0 {
@@ -354,12 +388,16 @@ mod tests {
                     title: "Fish & Chips".to_owned(),
                     artist: "A <B>".to_owned(),
                     duration_ms: Some(237_000),
+                    album: Some("X".to_owned()),
+                    artwork_id: None,
                 },
                 UpstreamSong {
                     id: "nodur".to_owned(),
                     title: "T".to_owned(),
                     artist: "A".to_owned(),
                     duration_ms: None,
+                    album: None,
+                    artwork_id: None,
                 },
             ]
         );
@@ -375,6 +413,8 @@ mod tests {
                 title: "T".to_owned(),
                 artist: "A, B".to_owned(),
                 duration_ms: Some(10_000),
+                album: None,
+                artwork_id: None,
             }]
         );
     }

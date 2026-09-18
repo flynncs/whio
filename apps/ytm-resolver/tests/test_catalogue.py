@@ -41,7 +41,7 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
             "Daft Punk", filter="songs", limit=5
         )
         self.assertEqual(
-            results.results[0].model_dump(mode="json"),
+            results.results[0].model_dump(mode="json", exclude_none=True),
             {
                 "source": {
                     "provider_id": "youtube_music",
@@ -52,6 +52,45 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
                 "duration_ms": 337000,
             },
         )
+
+    def test_search_keeps_album_and_largest_artwork(self) -> None:
+        client = Mock()
+        client.search.return_value = [
+            {
+                "videoId": "abc123",
+                "title": "Instant Crush",
+                "artists": [{"name": "Daft Punk"}],
+                "album": {"name": "Random Access Memories", "id": "album-1"},
+                "thumbnails": [
+                    {"url": "https://art.test/small.jpg", "width": 60, "height": 60},
+                    {"url": "https://art.test/large.jpg", "width": 544, "height": 544},
+                ],
+            }
+        ]
+
+        results = YouTubeMusicCatalogue(client).search("Daft Punk", limit=5)
+
+        self.assertEqual(results.results[0].album, "Random Access Memories")
+        self.assertEqual(
+            str(results.results[0].artwork_url), "https://art.test/large.jpg"
+        )
+
+    def test_search_drops_missing_album_and_artwork(self) -> None:
+        client = Mock()
+        client.search.return_value = [
+            {
+                "videoId": "abc123",
+                "title": "Instant Crush",
+                "artists": [{"name": "Daft Punk"}],
+                "album": None,
+                "thumbnails": [],
+            }
+        ]
+
+        results = YouTubeMusicCatalogue(client).search("Daft Punk", limit=5)
+
+        self.assertIsNone(results.results[0].album)
+        self.assertIsNone(results.results[0].artwork_url)
 
     def test_parse_duration_returns_milliseconds(self) -> None:
         for value, expected in [

@@ -115,6 +115,8 @@ paths:
                     artists:
                       - Daft Punk
                     duration_ms: 337000
+                    album: Random Access Memories
+                    artwork_url: https://art.example.test/random-access-memories.jpg
         "400":
           $ref: "#/components/responses/BadRequest"
         "500":
@@ -428,6 +430,18 @@ components:
             - integer
             - "null"
           minimum: 0
+        album:
+          type:
+            - string
+            - "null"
+          minLength: 1
+          maxLength: 500
+        artwork_url:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: Public artwork URL that the core fetches and proxies to clients.
 
     PlaybackResolveRequest:
       type: object

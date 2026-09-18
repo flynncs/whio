@@ -26,6 +26,21 @@ pub struct UpstreamCandidate {
         skip_serializing_if = "Option::is_none"
     )]
     pub duration_ms: Option<Option<i32>>,
+    #[serde(
+        rename = "album",
+        default,
+        with = "::serde_with::rust::double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub album: Option<Option<String>>,
+    /// The upstream cover-art id, resolved through resolveArtwork.
+    #[serde(
+        rename = "artwork_id",
+        default,
+        with = "::serde_with::rust::double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub artwork_id: Option<Option<String>>,
 }
 
 impl UpstreamCandidate {
@@ -35,6 +50,8 @@ impl UpstreamCandidate {
             title,
             artists,
             duration_ms: None,
+            album: None,
+            artwork_id: None,
         }
     }
 }
