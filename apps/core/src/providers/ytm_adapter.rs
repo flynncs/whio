@@ -96,7 +96,9 @@ impl PlaybackProvider for YtmAdapter {
         _user: Option<&Uuid>,
         context: &RequestContext,
     ) -> Result<Option<ResolvedPlayback>, ProviderError> {
-        let PlaybackSource::Youtube(source) = source;
+        let PlaybackSource::Youtube(source) = source else {
+            return Ok(None);
+        };
         let Some(transport) = self.transport.as_ref() else {
             return Err(ProviderError::Disabled);
         };
@@ -114,7 +116,7 @@ impl PlaybackProvider for YtmAdapter {
         let media: PlayableMedia = response
             .try_into()
             .map_err(ProviderError::InvalidPlaybackData)?;
-        Ok(Some(ResolvedPlayback {
+        Ok(Some(ResolvedPlayback::Remote {
             media,
             strategy: DeliveryStrategy::Spool,
         }))

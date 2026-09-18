@@ -30,6 +30,9 @@ pub enum DeliveryError {
     #[error("playback spool failed")]
     Spool,
 
+    #[error("local media could not be read")]
+    Local(#[source] std::io::Error),
+
     #[error("client range was not satisfiable")]
     Range {
         content_length: u64,
@@ -43,8 +46,8 @@ pub enum DeliveryError {
 
 impl DeliveryError {
     /// a failed attempt may try the next eligible source. matches the previous
-    /// behaviour: direct and media failures fall back; spool, range and overload
-    /// end the request.
+    /// behaviour: direct, media and local failures fall back; spool, range and
+    /// overload end the request.
     pub fn allows_fallback(&self) -> bool {
         !matches!(self, Self::Spool | Self::Range { .. } | Self::Overloaded)
     }

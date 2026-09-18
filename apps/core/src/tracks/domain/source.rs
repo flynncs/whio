@@ -56,6 +56,7 @@ impl ProviderId {
 
     pub fn kind(&self) -> Option<ProviderKind> {
         match self.as_str() {
+            "local" => Some(ProviderKind::Local),
             "youtube_music" => Some(ProviderKind::YoutubeMusic),
             _ => None,
         }
@@ -69,6 +70,7 @@ impl ProviderId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
+    Local,
     YoutubeMusic,
 }
 
@@ -77,7 +79,8 @@ impl ProviderKind {
     /// several providers.
     pub fn precedence(self) -> u8 {
         match self {
-            Self::YoutubeMusic => 0,
+            Self::Local => 0,
+            Self::YoutubeMusic => 1,
         }
     }
 }
@@ -164,6 +167,19 @@ mod tests {
                 field: "provider_id"
             })
         ));
+    }
+
+    #[test]
+    fn the_local_provider_is_recognised_and_outranks_remote_ones() {
+        let local = ProviderId::new("local".to_owned()).unwrap();
+        let youtube = ProviderId::new("youtube_music".to_owned()).unwrap();
+        let unknown = ProviderId::new("somewhere_else".to_owned()).unwrap();
+
+        assert_eq!(local.kind(), Some(ProviderKind::Local));
+        assert_eq!(youtube.kind(), Some(ProviderKind::YoutubeMusic));
+        assert_eq!(unknown.kind(), None);
+        assert!(local.precedence() < youtube.precedence());
+        assert!(youtube.precedence() < unknown.precedence());
     }
 
     #[test]

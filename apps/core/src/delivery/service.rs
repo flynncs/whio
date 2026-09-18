@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Semaphore;
 
-use super::{direct, session, spool::SpoolStrategy};
+use super::{direct, local, session, spool::SpoolStrategy};
 use crate::{
     media::MediaFetcher,
     playback::{
@@ -53,15 +53,12 @@ impl PlaybackDelivery for StreamDelivery {
             .clone()
             .try_acquire_owned()
             .map_err(|_| DeliveryError::Overloaded)?;
-        let mut delivery = match resolved.strategy {
-            DeliveryStrategy::Direct => {
-                direct::relay(&self.http, &resolved.media, client_range).await?
-            }
-            DeliveryStrategy::Spool => {
-                self.spool
-                    .open(&resolved.media, client_range.as_deref())
-                    .await?
-            }
+        let mut delivery = match resolved {
+            ResolvedPlayback::Remote { media, strategy } => match strategy {
+                DeliveryStrategy::Direct => direct::relay(&self.http, media, client_range).await?,
+                DeliveryStrategy::Spool => self.spool.open(media, client_range.as_deref()).await?,
+            },
+            ResolvedPlayback::Local(media) => local::serve(media, client_range).await?,
         };
         // the permit travels with the response body, so a session is only
         // released once the client has finished with it.
@@ -81,7 +78,7 @@ mod tests {
     use super::*;
     use crate::{
         media::{MediaBody, MediaFetchError, MediaInfo},
-        playback::{MediaMetadata, PlayableMedia, PlaybackUrl},
+        playback::{LocalMedia, MediaMetadata, PlayableMedia, PlaybackUrl},
     };
 
     struct StubFetcher {
@@ -144,7 +141,7 @@ mod tests {
     }
 
     fn resolved(url: &str, strategy: DeliveryStrategy) -> ResolvedPlayback {
-        ResolvedPlayback {
+        ResolvedPlayback::Remote {
             media: media(url),
             strategy,
         }
@@ -308,5 +305,30 @@ mod tests {
                 Err(error) => panic!("released session must deliver: {error:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_local_target_is_served_from_disk_without_a_fetcher() {
+        let path =
+            std::env::temp_dir().join(format!("whio-delivery-local-{}", uuid::Uuid::now_v7()));
+        tokio::fs::write(&path, b"0123456789").await.unwrap();
+        let media = LocalMedia::new(path.clone(), 10, Some("audio/flac".to_owned())).unwrap();
+        let delivery = delivery(Arc::new(HangingFetcher), 16);
+
+        let result = delivery
+            .deliver(
+                &ResolvedPlayback::Local(media),
+                Some("bytes=2-4".to_owned()),
+            )
+            .await
+            .unwrap();
+
+        let (status, headers, bytes) = body_bytes(result).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(headers["content-range"], "bytes 2-4/10");
+        assert_eq!(headers["content-type"], "audio/flac");
+        assert_eq!(bytes, b"234");
+
+        tokio::fs::remove_file(path).await.unwrap();
     }
 }

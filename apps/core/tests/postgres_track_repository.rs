@@ -6,8 +6,8 @@ use sqlx::PgPool;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 use whio_core::tracks::{
-    ArtworkRef, PostgresTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackId,
-    TrackMetadata, TrackRepository, TrackRepositoryError,
+    ArtworkRef, PostgresTrackRepository, ProviderId, SourceFileFacts, SourceIdentity, SourceScope,
+    TrackId, TrackMetadata, TrackRepository, TrackRepositoryError,
 };
 
 fn source(external_id: &str) -> SourceIdentity {
@@ -240,5 +240,46 @@ async fn album_refreshes_within_a_provider_and_artwork_follows_its_source(pool: 
     assert_eq!(
         artwork,
         ArtworkRef::url("https://art.test/ytm.jpg".to_owned()).unwrap()
+    );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn source_file_facts_round_trip_for_a_local_file(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let source = SourceIdentity::new(
+        ProviderId::new("local".to_owned()).unwrap(),
+        SourceScope::Named("/tank/data/media/music".to_owned()),
+        "11111111-2222-3333-4444-555555555555".to_owned(),
+    )
+    .unwrap();
+    repository
+        .get_or_create(source.clone(), metadata("Song", &["Artist"], Some(1_000)))
+        .await
+        .unwrap();
+
+    let facts = SourceFileFacts {
+        path: Some("Artist/Album/01.flac".to_owned()),
+        size_bytes: 42,
+        modified_at: Some("2026-09-19T00:00:00Z".parse().unwrap()),
+        missing_at: None,
+        content_type: Some("audio/flac".to_owned()),
+        suffix: Some("flac".to_owned()),
+    };
+    repository
+        .set_source_file_facts(&source, &facts)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository.find_source_file_facts(&source).await.unwrap(),
+        Some(facts.clone())
+    );
+    assert_eq!(
+        repository
+            .list_scanned_paths(source.provider_id(), source.source_scope())
+            .await
+            .unwrap(),
+        vec![(source, facts)]
     );
 }

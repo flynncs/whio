@@ -5,6 +5,9 @@ pub enum ValidationError {
     #[error("playback URL is invalid")]
     InvalidUrl,
 
+    #[error("local media path is invalid")]
+    InvalidPath,
+
     #[error("{field} must not be empty")]
     Empty { field: &'static str },
 

@@ -3,7 +3,9 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
-    playback::{DeliveryError, DeliveryResult, PlayableMedia, PlaybackDelivery, PlaybackSource},
+    playback::{
+        DeliveryError, DeliveryResult, LocalMedia, PlayableMedia, PlaybackDelivery, PlaybackSource,
+    },
     providers::ProviderError,
     request::RequestContext,
     tracks::{ArtworkRef, ProviderKind, TrackId, TrackRepository, TrackRepositoryError},
@@ -70,9 +72,13 @@ pub enum ArtworkLocation {
     Public(String),
 }
 
-pub struct ResolvedPlayback {
-    pub media: PlayableMedia,
-    pub strategy: DeliveryStrategy,
+#[derive(Debug)]
+pub enum ResolvedPlayback {
+    Remote {
+        media: PlayableMedia,
+        strategy: DeliveryStrategy,
+    },
+    Local(LocalMedia),
 }
 
 const MAX_MEDIA_ATTEMPTS: usize = 3;
@@ -283,7 +289,7 @@ mod tests {
                 .pop_front()
                 .expect("unexpected resolve call")
                 .map(|media| {
-                    Some(ResolvedPlayback {
+                    Some(ResolvedPlayback::Remote {
                         media,
                         strategy: DeliveryStrategy::Direct,
                     })
@@ -453,7 +459,10 @@ mod tests {
         let mut error = PlaybackError::TrackNotFound;
         for source in service.candidates(track).await? {
             match service.resolve_source(&source, None, context).await {
-                Ok(Some(resolved)) => return Ok(resolved.media),
+                Ok(Some(ResolvedPlayback::Remote { media, .. })) => return Ok(media),
+                Ok(Some(ResolvedPlayback::Local(_))) => {
+                    unreachable!("the queue provider resolves remote media")
+                }
                 Ok(None) => {}
                 Err(failure) => error = failure,
             }

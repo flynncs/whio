@@ -193,7 +193,7 @@ fn playback_error_details(error: &PlaybackError) -> (StatusCode, &'static str, &
         ),
         PlaybackError::Repository(_)
         | PlaybackError::Provider(ProviderError::Access)
-        | PlaybackError::Delivery(DeliveryError::Spool) => (
+        | PlaybackError::Delivery(DeliveryError::Spool | DeliveryError::Local(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
             "An unexpected error occurred",

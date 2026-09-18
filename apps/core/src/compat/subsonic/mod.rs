@@ -254,7 +254,7 @@ fn stream_failure_response(context: &RequestContext, error: PlaybackError) -> Re
         ),
         PlaybackError::Repository(_)
         | PlaybackError::Provider(ProviderError::Access)
-        | PlaybackError::Delivery(DeliveryError::Spool) => (
+        | PlaybackError::Delivery(DeliveryError::Spool | DeliveryError::Local(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             models::error::Code::Variant0,
             "Internal error.",

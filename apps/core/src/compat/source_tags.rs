@@ -46,6 +46,7 @@ impl SourceTags {
 
 fn shorthand(kind: ProviderKind) -> &'static str {
     match kind {
+        ProviderKind::Local => "LOCAL",
         ProviderKind::YoutubeMusic => "YTM",
     }
 }
@@ -119,6 +120,25 @@ mod tests {
         assert_eq!(
             SourceTags::ArtistPrefix.artist(&artists(), &[source("somewhere_else")]),
             "Daft Punk"
+        );
+    }
+
+    #[test]
+    fn a_local_source_is_marked_and_can_join_a_remote_one() {
+        let local = SourceIdentity::new(
+            ProviderId::new("local".to_owned()).unwrap(),
+            SourceScope::Named("/tank/data/media/music".to_owned()),
+            "recording-1".to_owned(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            SourceTags::ArtistPrefix.artist(&artists(), std::slice::from_ref(&local)),
+            "[LOCAL] Daft Punk"
+        );
+        assert_eq!(
+            SourceTags::ArtistPrefix.artist(&artists(), &[local, source("youtube_music")]),
+            "[LOCAL/YTM] Daft Punk"
         );
     }
 }

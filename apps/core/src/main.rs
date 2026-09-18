@@ -16,7 +16,7 @@ use whio_core::{
     },
     media::{self, HttpMediaFetcher},
     playback::{PlaybackProvider, PlaybackService},
-    providers::{ProviderError, YtmAdapter},
+    providers::{LocalPlaybackProvider, ProviderError, YtmAdapter},
     tracks::{PostgresTrackRepository, TrackRepository},
 };
 
@@ -119,9 +119,13 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         )
         .with_spool_limits(config.max_spool_bytes, config.spool_budget_bytes),
     );
+    let local = Arc::new(LocalPlaybackProvider::new(track_repository.clone()));
     let playback = Arc::new(PlaybackService::new(
         track_repository,
-        vec![ytm as Arc<dyn PlaybackProvider>],
+        vec![
+            local as Arc<dyn PlaybackProvider>,
+            ytm as Arc<dyn PlaybackProvider>,
+        ],
         delivery,
     ));
 

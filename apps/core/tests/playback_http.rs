@@ -63,10 +63,14 @@ impl PlaybackProvider for StubProvider {
         _context: &RequestContext,
     ) -> Result<Option<ResolvedPlayback>, ProviderError> {
         *self.resolved_source.lock() = Some(source.clone());
-        Ok(self.playback.lock().take().map(|media| ResolvedPlayback {
-            media,
-            strategy: DeliveryStrategy::Spool,
-        }))
+        Ok(self
+            .playback
+            .lock()
+            .take()
+            .map(|media| ResolvedPlayback::Remote {
+                media,
+                strategy: DeliveryStrategy::Spool,
+            }))
     }
 }
 

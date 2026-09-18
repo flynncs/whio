@@ -1,4 +1,5 @@
 mod direct;
+mod local;
 mod response_stream;
 mod service;
 mod session;

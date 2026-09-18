@@ -72,6 +72,49 @@ impl PlayableMedia {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct LocalMedia {
+    path: std::path::PathBuf,
+    content_length: u64,
+    content_type: Option<String>,
+}
+
+impl LocalMedia {
+    pub fn new(
+        path: std::path::PathBuf,
+        content_length: u64,
+        content_type: Option<String>,
+    ) -> Result<Self, ValidationError> {
+        if !path.is_absolute() {
+            return Err(ValidationError::InvalidPath);
+        }
+
+        if content_type.as_deref().is_some_and(str::is_empty) {
+            return Err(ValidationError::Empty {
+                field: "content_type",
+            });
+        }
+
+        Ok(Self {
+            path,
+            content_length,
+            content_type,
+        })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub fn content_length(&self) -> u64 {
+        self.content_length
+    }
+
+    pub fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct MediaMetadata {
     content_type: Option<String>,
     content_length_bytes: Option<u64>,
