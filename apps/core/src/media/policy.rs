@@ -9,8 +9,17 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const STALLED_READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_REDIRECTS: usize = 10;
 
-/// Hosts that may serve public provider artwork.
-pub const ARTWORK_HOST_SUFFIXES: &[&str] = &["googleusercontent.com", "ytimg.com"];
+/// Default hosts that may serve provider media and public artwork. Both are
+/// configuration (`WHIO_YOUTUBE_MEDIA_SUFFIX`, `WHIO_ARTWORK_HOST_SUFFIXES`).
+pub const DEFAULT_YOUTUBE_MEDIA_SUFFIX: &str = "googlevideo.com";
+pub const DEFAULT_ARTWORK_HOST_SUFFIXES: &[&str] = &["googleusercontent.com", "ytimg.com"];
+
+pub fn default_artwork_host_suffixes() -> Vec<String> {
+    DEFAULT_ARTWORK_HOST_SUFFIXES
+        .iter()
+        .map(|suffix| (*suffix).to_owned())
+        .collect()
+}
 
 pub fn client(redirect: Policy) -> reqwest::Client {
     client_with(redirect, CONNECT_TIMEOUT, STALLED_READ_TIMEOUT)
@@ -44,13 +53,13 @@ pub fn same_origin_redirect_policy() -> Policy {
     })
 }
 
-pub fn host_suffix_redirect_policy(suffix: &'static str) -> Policy {
+pub fn host_suffix_redirect_policy(suffixes: Vec<String>) -> Policy {
     Policy::custom(move |attempt: Attempt| {
         if attempt.previous().len() > MAX_REDIRECTS {
             return attempt.stop();
         }
 
-        if is_allowed_suffix_url(attempt.url(), suffix) {
+        if is_allowed_suffix_urls(attempt.url(), &suffixes) {
             attempt.follow()
         } else {
             attempt.stop()
@@ -67,22 +76,26 @@ pub fn is_registered_media_url(base: &Url, candidate: &Url) -> bool {
         && candidate.password().is_none()
 }
 
-pub fn is_allowed_artwork_url(url: &Url) -> bool {
-    ARTWORK_HOST_SUFFIXES
+pub fn is_allowed_artwork_url(url: &Url, suffixes: &[String]) -> bool {
+    is_allowed_suffix_urls(url, suffixes)
+}
+
+pub fn is_allowed_suffix_urls(url: &Url, suffixes: &[String]) -> bool {
+    suffixes
         .iter()
         .any(|suffix| is_allowed_suffix_url(url, suffix))
 }
 
 /// artwork follows redirects within its own origin and across the allowed
 /// artwork hosts.
-pub fn artwork_redirect_policy() -> Policy {
-    Policy::custom(|attempt: Attempt| {
+pub fn artwork_redirect_policy(suffixes: Vec<String>) -> Policy {
+    Policy::custom(move |attempt: Attempt| {
         if attempt.previous().len() > MAX_REDIRECTS {
             return attempt.stop();
         }
 
         let first = attempt.previous().first().unwrap_or(attempt.url());
-        if same_origin(first, attempt.url()) || is_allowed_artwork_url(attempt.url()) {
+        if same_origin(first, attempt.url()) || is_allowed_suffix_urls(attempt.url(), &suffixes) {
             attempt.follow()
         } else {
             attempt.stop()
@@ -157,13 +170,18 @@ mod tests {
 
     #[test]
     fn artwork_hosts_are_restricted_to_https_suffixes() {
+        let suffixes = default_artwork_host_suffixes();
+
         for host in [
             "googleusercontent.com",
             "lh3.googleusercontent.com",
             "i.ytimg.com",
         ] {
             let url = Url::parse(&format!("https://{host}/cover.jpg")).unwrap();
-            assert!(is_allowed_artwork_url(&url), "accepted host: {host}");
+            assert!(
+                is_allowed_artwork_url(&url, &suffixes),
+                "accepted host: {host}"
+            );
         }
 
         for value in [
@@ -172,8 +190,23 @@ mod tests {
             "https://googleusercontent.com.evil.example/cover.jpg",
         ] {
             let url = Url::parse(value).unwrap();
-            assert!(!is_allowed_artwork_url(&url), "rejected url: {value}");
+            assert!(
+                !is_allowed_artwork_url(&url, &suffixes),
+                "rejected url: {value}"
+            );
         }
+    }
+
+    #[test]
+    fn configured_suffixes_replace_the_defaults() {
+        let local = vec!["127.0.0.1".to_owned()];
+        let url = Url::parse("https://127.0.0.1/cover.jpg").unwrap();
+
+        assert!(is_allowed_artwork_url(&url, &local));
+        assert!(!is_allowed_artwork_url(
+            &url,
+            &default_artwork_host_suffixes()
+        ));
     }
 
     #[test]

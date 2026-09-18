@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     AppState,
     media::{self, MediaFetchError},
-    playback::PlaybackError,
+    playback::{ArtworkLocation, PlaybackError},
     request::RequestContext,
     tracks::TrackId,
 };
@@ -49,7 +49,7 @@ pub(crate) async fn load(
         .parse::<TrackId>()
         .map_err(ArtworkFailure::InvalidId)?;
 
-    let Some(url) = state
+    let Some(location) = state
         .playback()
         .artwork(&track_id, Some(user), context)
         .await
@@ -58,8 +58,17 @@ pub(crate) async fn load(
         return Ok(None);
     };
 
-    let url = reqwest::Url::parse(&url)
-        .map_err(|_| ArtworkFailure::Fetch(MediaFetchError::DisallowedDestination))?;
+    let url = match location {
+        ArtworkLocation::Registered(url) => parse(&url)?,
+        ArtworkLocation::Public(url) => {
+            let url = parse(&url)?;
+            if !media::is_allowed_artwork_url(&url, state.artwork_host_suffixes()) {
+                return Ok(None);
+            }
+            url
+        }
+    };
+
     let (content_type, bytes) = media::fetch_artwork(state.artwork_client(), &url)
         .await
         .map_err(ArtworkFailure::Fetch)?;
@@ -68,4 +77,9 @@ pub(crate) async fn load(
         content_type,
         bytes,
     }))
+}
+
+fn parse(url: &str) -> Result<reqwest::Url, ArtworkFailure> {
+    reqwest::Url::parse(url)
+        .map_err(|_| ArtworkFailure::Fetch(MediaFetchError::DisallowedDestination))
 }

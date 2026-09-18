@@ -36,6 +36,8 @@ don't edit `apps/resolver-client-generated/` or
 - `WHIO_UPSTREAM_CONNECTOR_URL`, `WHIO_UPSTREAM_CONNECTOR_CONNECT_TIMEOUT_SECONDS`, `WHIO_UPSTREAM_CONNECTOR_TOTAL_TIMEOUT_SECONDS`: Navidrome connector target and budgets
 - `WHIO_PLAYBACK_MAX_SESSIONS`: defaults to `16`. concurrent spool playbacks before overload
 - `WHIO_SPOOL_DIR`: defaults to the system temp dir. stale `whio-*.part` files are purged at startup
+- `WHIO_YOUTUBE_MEDIA_SUFFIX`: defaults to `googlevideo.com`. host suffix accepted for resolved YouTube media
+- `WHIO_ARTWORK_HOST_SUFFIXES`: comma-separated, defaults to `googleusercontent.com,ytimg.com`. public artwork hosts core will fetch and proxy
 
 local compose sets everything except the credential key, which lives in a
 gitignored `.env` next to the compose files (`openssl rand -base64 32`).

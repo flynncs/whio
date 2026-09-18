@@ -22,6 +22,10 @@ const SPOOL_DIR: &str = "WHIO_SPOOL_DIR";
 const DEFAULT_MAX_PLAYBACK_SESSIONS: usize = 16;
 const UPSTREAM_CONNECTOR_CONNECT_TIMEOUT: &str = "WHIO_UPSTREAM_CONNECTOR_CONNECT_TIMEOUT_SECONDS";
 const UPSTREAM_CONNECTOR_TOTAL_TIMEOUT: &str = "WHIO_UPSTREAM_CONNECTOR_TOTAL_TIMEOUT_SECONDS";
+const YOUTUBE_MEDIA_SUFFIX: &str = "WHIO_YOUTUBE_MEDIA_SUFFIX";
+const ARTWORK_HOST_SUFFIXES: &str = "WHIO_ARTWORK_HOST_SUFFIXES";
+
+const DEFAULT_YOUTUBE_MEDIA_SUFFIX: &str = whio_core::media::DEFAULT_YOUTUBE_MEDIA_SUFFIX;
 
 #[derive(Debug)]
 pub(crate) struct Config {
@@ -35,6 +39,8 @@ pub(crate) struct Config {
     pub(crate) max_playback_sessions: usize,
     pub(crate) max_spool_bytes: u64,
     pub(crate) spool_budget_bytes: u64,
+    pub(crate) youtube_media_suffix: String,
+    pub(crate) artwork_host_suffixes: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -297,6 +303,20 @@ impl Config {
             ));
         }
 
+        let youtube_media_suffix = vars
+            .get(YOUTUBE_MEDIA_SUFFIX)
+            .map(|raw| raw.trim().to_ascii_lowercase())
+            .filter(|raw| !raw.is_empty())
+            .unwrap_or_else(|| DEFAULT_YOUTUBE_MEDIA_SUFFIX.to_owned());
+
+        let default_artwork_suffixes = whio_core::media::DEFAULT_ARTWORK_HOST_SUFFIXES.join(",");
+        let artwork_host_suffixes = parse_suffixes(
+            vars.get(ARTWORK_HOST_SUFFIXES)
+                .map(String::as_str)
+                .unwrap_or(&default_artwork_suffixes),
+            ARTWORK_HOST_SUFFIXES,
+        )?;
+
         Ok(Self {
             bind_address,
             database_url: database_raw.to_owned(),
@@ -308,6 +328,8 @@ impl Config {
             max_playback_sessions,
             max_spool_bytes,
             spool_budget_bytes,
+            youtube_media_suffix,
+            artwork_host_suffixes,
         })
     }
 }
@@ -342,6 +364,21 @@ fn invalid(name: &'static str, value: &str, reason: &'static str) -> ConfigError
     }
 }
 
+/// host suffixes are matched case-insensitively and must list at least one entry.
+fn parse_suffixes(raw: &str, name: &'static str) -> Result<Vec<String>, ConfigError> {
+    let suffixes: Vec<String> = raw
+        .split(',')
+        .map(|suffix| suffix.trim().to_ascii_lowercase())
+        .filter(|suffix| !suffix.is_empty())
+        .collect();
+
+    if suffixes.is_empty() {
+        return Err(invalid(name, raw, "must list at least one host suffix"));
+    }
+
+    Ok(suffixes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +394,35 @@ mod tests {
         vars.entry(CREDENTIAL_KEY.to_owned())
             .or_insert_with(|| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned());
         Config::from_map(&vars)
+    }
+
+    #[test]
+    fn media_suffixes_default_and_accept_overrides() {
+        let config = parse_config(&[]).unwrap();
+        assert_eq!(config.youtube_media_suffix, "googlevideo.com");
+        assert_eq!(
+            config.artwork_host_suffixes,
+            vec!["googleusercontent.com", "ytimg.com"]
+        );
+
+        let config = parse_config(&[
+            (YOUTUBE_MEDIA_SUFFIX, "Example.COM"),
+            (ARTWORK_HOST_SUFFIXES, " cdn.example , art.example "),
+        ])
+        .unwrap();
+        assert_eq!(config.youtube_media_suffix, "example.com");
+        assert_eq!(
+            config.artwork_host_suffixes,
+            vec!["cdn.example", "art.example"]
+        );
+
+        assert!(matches!(
+            parse_config(&[(ARTWORK_HOST_SUFFIXES, " , ")]),
+            Err(ConfigError::Invalid {
+                name: ARTWORK_HOST_SUFFIXES,
+                ..
+            })
+        ));
     }
 
     #[test]

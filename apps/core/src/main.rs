@@ -24,8 +24,6 @@ use whio_core::{
     tracks::{PostgresTrackRepository, TrackRepository},
 };
 
-const YOUTUBE_MEDIA_SUFFIX: &str = "googlevideo.com";
-
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -118,9 +116,12 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             Arc::clone(&ytm) as Arc<dyn CatalogueProvider>,
         ],
     ));
-    let fetcher = Arc::new(HttpMediaFetcher::with_allowed_host_suffix(
-        media::client(media::host_suffix_redirect_policy(YOUTUBE_MEDIA_SUFFIX)),
-        YOUTUBE_MEDIA_SUFFIX,
+    let youtube_media_suffixes = vec![config.youtube_media_suffix.clone()];
+    let fetcher = Arc::new(HttpMediaFetcher::with_allowed_host_suffixes(
+        media::client(media::host_suffix_redirect_policy(
+            youtube_media_suffixes.clone(),
+        )),
+        youtube_media_suffixes,
     ));
     let delivery = Arc::new(
         StreamDelivery::new(
@@ -140,7 +141,8 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         delivery,
     ));
 
-    Ok(AppState::with_database(
-        credential, catalogue, playback, database,
-    ))
+    Ok(
+        AppState::with_database(credential, catalogue, playback, database)
+            .with_artwork_host_suffixes(config.artwork_host_suffixes.clone()),
+    )
 }

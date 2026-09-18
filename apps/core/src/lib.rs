@@ -24,6 +24,7 @@ pub struct AppState {
     database: Option<Arc<database::Database>>,
     playback: Arc<PlaybackService>,
     artwork_client: reqwest::Client,
+    artwork_host_suffixes: Vec<String>,
 }
 
 impl AppState {
@@ -32,13 +33,7 @@ impl AppState {
         catalogue: Arc<CatalogueService>,
         playback: Arc<PlaybackService>,
     ) -> Self {
-        Self {
-            credential,
-            catalogue,
-            database: None,
-            playback,
-            artwork_client: media::client(media::artwork_redirect_policy()),
-        }
+        Self::build(credential, catalogue, playback, None)
     }
 
     pub fn with_database(
@@ -47,12 +42,33 @@ impl AppState {
         playback: Arc<PlaybackService>,
         database: Arc<database::Database>,
     ) -> Self {
+        Self::build(credential, catalogue, playback, Some(database))
+    }
+
+    /// host suffixes accepted for public provider artwork. replaces the default
+    /// set for both validation and redirects.
+    pub fn with_artwork_host_suffixes(mut self, suffixes: Vec<String>) -> Self {
+        self.artwork_client = media::client(media::artwork_redirect_policy(suffixes.clone()));
+        self.artwork_host_suffixes = suffixes;
+        self
+    }
+
+    fn build(
+        credential: Arc<CredentialService>,
+        catalogue: Arc<CatalogueService>,
+        playback: Arc<PlaybackService>,
+        database: Option<Arc<database::Database>>,
+    ) -> Self {
+        let artwork_host_suffixes = media::default_artwork_host_suffixes();
         Self {
             credential,
             catalogue,
-            database: Some(database),
+            database,
             playback,
-            artwork_client: media::client(media::artwork_redirect_policy()),
+            artwork_client: media::client(media::artwork_redirect_policy(
+                artwork_host_suffixes.clone(),
+            )),
+            artwork_host_suffixes,
         }
     }
 
@@ -74,6 +90,10 @@ impl AppState {
 
     pub(crate) fn artwork_client(&self) -> &reqwest::Client {
         &self.artwork_client
+    }
+
+    pub(crate) fn artwork_host_suffixes(&self) -> &[String] {
+        &self.artwork_host_suffixes
     }
 }
 

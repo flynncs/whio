@@ -3,7 +3,6 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
-    media,
     playback::{DeliveryError, DeliveryResult, PlayableMedia, PlaybackDelivery, PlaybackSource},
     providers::ProviderError,
     request::RequestContext,
@@ -64,6 +63,13 @@ pub enum DeliveryStrategy {
     Spool,
 }
 
+pub enum ArtworkLocation {
+    /// validated against the registered upstream origin that produced it.
+    Registered(String),
+    /// a public URL that must be validated against the artwork host suffixes.
+    Public(String),
+}
+
 pub struct ResolvedPlayback {
     pub media: PlayableMedia,
     pub strategy: DeliveryStrategy,
@@ -110,15 +116,15 @@ impl PlaybackService {
         Ok(candidates)
     }
 
-    /// the fetchable URL for a track's cover art. public artwork is validated
-    /// against the allowed hosts; upstream artwork is resolved through its
-    /// adapter against the registered origin.
+    /// where a track's cover art lives. a public URL still needs host
+    /// validation; a registered URL was already validated against the origin it
+    /// was registered under.
     pub async fn artwork(
         &self,
         track_id: &TrackId,
         user: Option<&Uuid>,
         context: &RequestContext,
-    ) -> Result<Option<String>, PlaybackError> {
+    ) -> Result<Option<ArtworkLocation>, PlaybackError> {
         let Some((source, artwork)) = self
             .track_repository
             .find_artwork(track_id)
@@ -129,10 +135,7 @@ impl PlaybackService {
         };
 
         match &artwork {
-            ArtworkRef::Url(url) => Ok(reqwest::Url::parse(url)
-                .ok()
-                .filter(media::is_allowed_artwork_url)
-                .map(|url| url.to_string())),
+            ArtworkRef::Url(url) => Ok(Some(ArtworkLocation::Public(url.clone()))),
             ArtworkRef::Upstream(_) => {
                 let Some(source) = PlaybackSource::from_identity(source) else {
                     return Ok(None);
@@ -144,6 +147,7 @@ impl PlaybackService {
                     .resolve_artwork(&source, &artwork, user, context)
                     .await
                     .map_err(PlaybackError::Provider)
+                    .map(|url| url.map(ArtworkLocation::Registered))
             }
         }
     }

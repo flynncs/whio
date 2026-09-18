@@ -60,10 +60,10 @@ pub async fn fetch_artwork(
     Ok((content_type, bytes))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DestinationPolicy {
     Any,
-    HostSuffix(&'static str),
+    HostSuffixes(Vec<String>),
 }
 
 impl HttpMediaFetcher {
@@ -74,16 +74,16 @@ impl HttpMediaFetcher {
         }
     }
 
-    pub fn with_allowed_host_suffix(client: reqwest::Client, suffix: &'static str) -> Self {
+    pub fn with_allowed_host_suffixes(client: reqwest::Client, suffixes: Vec<String>) -> Self {
         Self {
             client,
-            destination: DestinationPolicy::HostSuffix(suffix),
+            destination: DestinationPolicy::HostSuffixes(suffixes),
         }
     }
 
     fn validate_destination(&self, media: &PlayableMedia) -> Result<(), MediaFetchError> {
-        if let DestinationPolicy::HostSuffix(suffix) = self.destination
-            && !policy::is_allowed_suffix_url(media.url().as_url(), suffix)
+        if let DestinationPolicy::HostSuffixes(suffixes) = &self.destination
+            && !policy::is_allowed_suffix_urls(media.url().as_url(), suffixes)
         {
             return Err(MediaFetchError::DisallowedDestination);
         }
@@ -349,8 +349,10 @@ mod tests {
             None,
             MediaMetadata::new(None, None, None, None, None).unwrap(),
         );
-        let fetcher =
-            HttpMediaFetcher::with_allowed_host_suffix(reqwest::Client::new(), "media.example");
+        let fetcher = HttpMediaFetcher::with_allowed_host_suffixes(
+            reqwest::Client::new(),
+            vec!["media.example".to_owned()],
+        );
 
         let error = fetcher.probe(&media).await.unwrap_err();
         assert!(matches!(error, MediaFetchError::DisallowedDestination));
