@@ -4,8 +4,8 @@ mod postgres_repository;
 mod repository;
 
 pub use domain::{
-    ProviderId, ProviderKind, SourceIdentity, SourceScope, Track, TrackId, TrackMetadata,
-    ValidationError,
+    ArtworkRef, ProviderId, ProviderKind, SourceIdentity, SourceScope, Track, TrackId,
+    TrackMetadata, ValidationError,
 };
 pub use in_memory_repository::InMemoryTrackRepository;
 pub use postgres_repository::PostgresTrackRepository;

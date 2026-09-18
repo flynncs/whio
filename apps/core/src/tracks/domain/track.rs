@@ -75,6 +75,10 @@ impl Track {
         self.metadata.duration_ms()
     }
 
+    pub fn album(&self) -> Option<&str> {
+        self.metadata.album()
+    }
+
     pub fn into_parts(self) -> (TrackId, TrackMetadata) {
         (self.id, self.metadata)
     }

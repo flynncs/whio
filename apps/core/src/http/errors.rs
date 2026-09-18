@@ -42,6 +42,10 @@ pub(crate) enum ApiError {
         context: RequestContext,
         error: PlaybackError,
     },
+    Artwork {
+        context: RequestContext,
+        error: crate::media::MediaFetchError,
+    },
 }
 
 impl IntoResponse for ApiError {
@@ -133,6 +137,17 @@ impl IntoResponse for ApiError {
                 }
                 error => playback_error_response(error, context),
             },
+            ApiError::Artwork { context, error } => {
+                let (status, code, message) = media_error_details(&error);
+
+                tracing::error!(
+                    error = %error,
+                    request_id = context.request_id().as_str(),
+                    "artwork fetch failed"
+                );
+
+                error_response(status, code, message, context)
+            }
         }
     }
 }
@@ -211,6 +226,7 @@ pub(crate) fn media_error_details(
         | crate::media::MediaFetchError::DisallowedDestination
         | crate::media::MediaFetchError::MissingContentLength
         | crate::media::MediaFetchError::InvalidContentRange
+        | crate::media::MediaFetchError::ResponseTooLarge
         | crate::media::MediaFetchError::RangesUnsupported => (
             StatusCode::BAD_GATEWAY,
             "stream_failure",

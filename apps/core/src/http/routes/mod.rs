@@ -3,6 +3,7 @@ use axum::Extension;
 use super::errors::ApiError;
 use crate::request::RequestContext;
 
+pub(crate) mod artwork;
 pub(crate) mod catalogue;
 pub(crate) mod health;
 pub(crate) mod playback;

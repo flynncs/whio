@@ -14,7 +14,7 @@ use crate::{
 pub const DEFAULT_MAX_SESSIONS: usize = 16;
 
 /// direct proxy and bounded spool delivery. owns bytes, ranges, session limits
-/// and cancellation, and knows nothing about sources, providers or credentials.
+/// and cancellation.
 pub struct StreamDelivery {
     spool: SpoolStrategy,
     sessions: Arc<Semaphore>,

@@ -7,7 +7,7 @@ use whio_navidrome_connector_api::{
     apis::{
         Error as TransportError, configuration::Configuration, default_api::SearchCatalogueError,
     },
-    models::{ResolveRequest, SearchRequest},
+    models::{ArtworkResolveRequest, ResolveRequest, SearchRequest},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,8 @@ pub struct UpstreamCandidate {
     pub title: String,
     pub artists: Vec<String>,
     pub duration_ms: Option<u64>,
+    pub album: Option<String>,
+    pub artwork_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Error)]
@@ -55,6 +57,15 @@ pub trait UpstreamTransport: Send + Sync {
         external_id: &str,
         context: &RequestContext,
     ) -> Result<String, UpstreamError>;
+
+    async fn resolve_artwork(
+        &self,
+        _target: &UpstreamTarget,
+        _artwork_id: &str,
+        _context: &RequestContext,
+    ) -> Result<String, UpstreamError> {
+        Err(UpstreamError::Unavailable)
+    }
 }
 
 pub struct ConnectorUpstreamTransport {
@@ -119,6 +130,14 @@ impl UpstreamTransport for ConnectorUpstreamTransport {
                     .duration_ms
                     .flatten()
                     .and_then(|ms| u64::try_from(ms).ok());
+                let album = candidate
+                    .album
+                    .flatten()
+                    .filter(|album| !album.trim().is_empty());
+                let artwork_id = candidate
+                    .artwork_id
+                    .flatten()
+                    .filter(|id| !id.trim().is_empty());
                 TrackMetadata::new(candidate.title, candidate.artists, duration_ms)
                     .ok()
                     .map(|metadata| UpstreamCandidate {
@@ -126,6 +145,8 @@ impl UpstreamTransport for ConnectorUpstreamTransport {
                         title: metadata.title().to_owned(),
                         artists: metadata.artists().to_owned(),
                         duration_ms: metadata.duration_ms(),
+                        album,
+                        artwork_id,
                     })
             })
             .collect())
@@ -150,21 +171,50 @@ impl UpstreamTransport for ConnectorUpstreamTransport {
             Some(context.request_id().as_str()),
         )
         .await
-        .map_err(|error| match error {
-            TransportError::Reqwest(_) | TransportError::Io(_) => UpstreamError::Unavailable,
-            TransportError::Serde(_) | TransportError::SerdePathToError(_) => {
-                UpstreamError::InvalidResponse
-            }
-            TransportError::ResponseError(response) => match response.status {
-                reqwest::StatusCode::UNAUTHORIZED => UpstreamError::Auth,
-                reqwest::StatusCode::FORBIDDEN => UpstreamError::Forbidden,
-                reqwest::StatusCode::BAD_REQUEST => UpstreamError::InvalidRequest,
-                reqwest::StatusCode::NOT_FOUND => UpstreamError::NotFound,
-                _ => UpstreamError::Unavailable,
-            },
-        })?;
+        .map_err(map_resolve_error)?;
 
         Ok(response.url)
+    }
+
+    async fn resolve_artwork(
+        &self,
+        target: &UpstreamTarget,
+        artwork_id: &str,
+        context: &RequestContext,
+    ) -> Result<String, UpstreamError> {
+        let body = ArtworkResolveRequest::new(
+            target.base_url.clone(),
+            target.username.clone(),
+            target.password.clone(),
+            artwork_id.to_owned(),
+        );
+
+        let response = whio_navidrome_connector_api::apis::default_api::resolve_artwork(
+            &self.transport,
+            body,
+            Some(context.request_id().as_str()),
+        )
+        .await
+        .map_err(map_resolve_error)?;
+
+        Ok(response.url)
+    }
+}
+
+/// resolve and resolve-artwork share one status mapping.
+fn map_resolve_error<T>(error: TransportError<T>) -> UpstreamError {
+    match error {
+        TransportError::Reqwest(_) | TransportError::Io(_) => UpstreamError::Unavailable,
+        TransportError::Serde(_) | TransportError::SerdePathToError(_) => {
+            UpstreamError::InvalidResponse
+        }
+        TransportError::ResponseError(response) => match response.status {
+            reqwest::StatusCode::UNAUTHORIZED => UpstreamError::Auth,
+            reqwest::StatusCode::FORBIDDEN => UpstreamError::Forbidden,
+            reqwest::StatusCode::BAD_REQUEST => UpstreamError::InvalidRequest,
+            reqwest::StatusCode::NOT_FOUND => UpstreamError::NotFound,
+            _ => UpstreamError::Unavailable,
+        },
     }
 }
 

@@ -27,6 +27,9 @@ pub enum ProviderError {
     #[error("provider returned invalid playback data")]
     InvalidPlaybackData(#[source] PlaybackValidationError),
 
+    #[error("provider returned an invalid artwork URL")]
+    InvalidArtwork,
+
     #[error("provider rejected the request")]
     InvalidRequest,
 

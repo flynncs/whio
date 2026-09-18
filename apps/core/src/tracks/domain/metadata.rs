@@ -5,6 +5,7 @@ pub struct TrackMetadata {
     title: String,
     artists: Vec<String>,
     duration_ms: Option<u64>,
+    album: Option<String>,
 }
 
 impl TrackMetadata {
@@ -39,7 +40,24 @@ impl TrackMetadata {
             title,
             artists,
             duration_ms,
+            album: None,
         })
+    }
+
+    pub fn with_album(mut self, album: Option<String>) -> Result<Self, ValidationError> {
+        let album = album.and_then(|album| {
+            let album = album.trim();
+            (!album.is_empty()).then(|| album.to_owned())
+        });
+
+        if let Some(album) = &album
+            && album.chars().count() > 500
+        {
+            return Err(ValidationError::TooLong { field: "album" });
+        }
+
+        self.album = album;
+        Ok(self)
     }
 
     pub fn title(&self) -> &str {
@@ -52,6 +70,10 @@ impl TrackMetadata {
 
     pub fn duration_ms(&self) -> Option<u64> {
         self.duration_ms
+    }
+
+    pub fn album(&self) -> Option<&str> {
+        self.album.as_deref()
     }
 
     pub fn into_parts(self) -> (String, Vec<String>, Option<u64>) {
@@ -75,6 +97,24 @@ mod tests {
         assert_eq!(metadata.title(), "Instant Crush");
         assert_eq!(metadata.artists(), ["Daft Punk"]);
         assert_eq!(metadata.duration_ms(), Some(337_000));
+        assert_eq!(metadata.album(), None);
+    }
+
+    #[test]
+    fn metadata_trims_and_bounds_album() {
+        let metadata = TrackMetadata::new("Title".to_owned(), vec!["Artist".to_owned()], None)
+            .unwrap()
+            .with_album(Some("  Discovery  ".to_owned()))
+            .unwrap();
+        assert_eq!(metadata.album(), Some("Discovery"));
+
+        let blank = metadata.clone().with_album(Some("   ".to_owned())).unwrap();
+        assert_eq!(blank.album(), None);
+
+        assert!(matches!(
+            metadata.with_album(Some("a".repeat(501))),
+            Err(ValidationError::TooLong { field: "album" })
+        ));
     }
 
     #[test]

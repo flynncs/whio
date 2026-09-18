@@ -9,6 +9,9 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const STALLED_READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_REDIRECTS: usize = 10;
 
+/// Hosts that may serve public provider artwork.
+pub const ARTWORK_HOST_SUFFIXES: &[&str] = &["googleusercontent.com", "ytimg.com"];
+
 pub fn client(redirect: Policy) -> reqwest::Client {
     client_with(redirect, CONNECT_TIMEOUT, STALLED_READ_TIMEOUT)
 }
@@ -62,6 +65,29 @@ pub fn is_registered_media_url(base: &Url, candidate: &Url) -> bool {
         && base.password().is_none()
         && candidate.username().is_empty()
         && candidate.password().is_none()
+}
+
+pub fn is_allowed_artwork_url(url: &Url) -> bool {
+    ARTWORK_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| is_allowed_suffix_url(url, suffix))
+}
+
+/// artwork follows redirects within its own origin and across the allowed
+/// artwork hosts.
+pub fn artwork_redirect_policy() -> Policy {
+    Policy::custom(|attempt: Attempt| {
+        if attempt.previous().len() > MAX_REDIRECTS {
+            return attempt.stop();
+        }
+
+        let first = attempt.previous().first().unwrap_or(attempt.url());
+        if same_origin(first, attempt.url()) || is_allowed_artwork_url(attempt.url()) {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
 }
 
 /// `suffix` must already be lowercase; DNS names are case-insensitive.
@@ -126,6 +152,27 @@ mod tests {
                 !is_allowed_suffix_url(&url, "media.example"),
                 "accepted disallowed URL: {value}"
             );
+        }
+    }
+
+    #[test]
+    fn artwork_hosts_are_restricted_to_https_suffixes() {
+        for host in [
+            "googleusercontent.com",
+            "lh3.googleusercontent.com",
+            "i.ytimg.com",
+        ] {
+            let url = Url::parse(&format!("https://{host}/cover.jpg")).unwrap();
+            assert!(is_allowed_artwork_url(&url), "accepted host: {host}");
+        }
+
+        for value in [
+            "http://lh3.googleusercontent.com/cover.jpg",
+            "https://evil.example/cover.jpg",
+            "https://googleusercontent.com.evil.example/cover.jpg",
+        ] {
+            let url = Url::parse(value).unwrap();
+            assert!(!is_allowed_artwork_url(&url), "rejected url: {value}");
         }
     }
 

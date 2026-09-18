@@ -23,6 +23,10 @@ pub(crate) fn router(state: AppState) -> Router {
             "/playback/tracks/{track_id}/stream",
             get(routes::playback::stream),
         )
+        .route(
+            "/playback/tracks/{track_id}/artwork",
+            get(routes::playback::artwork),
+        )
         .nest("/rest", compat::subsonic::router())
         .nest(
             "/compat/subsonic/rest",

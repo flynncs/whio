@@ -12,7 +12,7 @@ pub struct DeliveryResult {
     pub body: Body,
 }
 
-/// delivery-only failures. no provider, credential or repository concepts.
+/// failures raised while moving bytes: upstream media, spool and resource limits.
 #[derive(Debug, thiserror::Error)]
 pub enum DeliveryError {
     #[error("upstream media was not found")]
@@ -43,7 +43,8 @@ pub enum DeliveryError {
 
 impl DeliveryError {
     /// a failed attempt may try the next eligible source. matches the previous
-    /// behaviour: direct and media failures fall back, spool/range/overload do not.
+    /// behaviour: direct and media failures fall back; spool, range and overload
+    /// end the request.
     pub fn allows_fallback(&self) -> bool {
         !matches!(self, Self::Spool | Self::Range { .. } | Self::Overloaded)
     }

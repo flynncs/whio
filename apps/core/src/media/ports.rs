@@ -26,6 +26,9 @@ pub enum MediaFetchError {
 
     #[error("media destination is not allowed")]
     DisallowedDestination,
+
+    #[error("media response was too large")]
+    ResponseTooLarge,
 }
 
 #[derive(Debug)]

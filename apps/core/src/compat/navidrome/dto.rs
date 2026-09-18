@@ -33,6 +33,8 @@ pub(crate) struct Song {
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) artist: String,
+    pub(crate) album: Option<String>,
+    pub(crate) cover_art: Option<String>,
     pub(crate) duration: f32,
 }
 

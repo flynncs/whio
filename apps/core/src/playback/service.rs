@@ -3,10 +3,11 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
+    media,
     playback::{DeliveryError, DeliveryResult, PlayableMedia, PlaybackDelivery, PlaybackSource},
     providers::ProviderError,
     request::RequestContext,
-    tracks::{ProviderKind, TrackId, TrackRepository, TrackRepositoryError},
+    tracks::{ArtworkRef, ProviderKind, TrackId, TrackRepository, TrackRepositoryError},
 };
 
 use super::PlaybackProvider;
@@ -109,6 +110,44 @@ impl PlaybackService {
         Ok(candidates)
     }
 
+    /// the fetchable URL for a track's cover art. public artwork is validated
+    /// against the allowed hosts; upstream artwork is resolved through its
+    /// adapter against the registered origin.
+    pub async fn artwork(
+        &self,
+        track_id: &TrackId,
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> Result<Option<String>, PlaybackError> {
+        let Some((source, artwork)) = self
+            .track_repository
+            .find_artwork(track_id)
+            .await
+            .map_err(PlaybackError::Repository)?
+        else {
+            return Ok(None);
+        };
+
+        match &artwork {
+            ArtworkRef::Url(url) => Ok(reqwest::Url::parse(url)
+                .ok()
+                .filter(media::is_allowed_artwork_url)
+                .map(|url| url.to_string())),
+            ArtworkRef::Upstream(_) => {
+                let Some(source) = PlaybackSource::from_identity(source) else {
+                    return Ok(None);
+                };
+                let Some(provider) = self.providers.get(&source.kind()) else {
+                    return Ok(None);
+                };
+                provider
+                    .resolve_artwork(&source, &artwork, user, context)
+                    .await
+                    .map_err(PlaybackError::Provider)
+            }
+        }
+    }
+
     pub async fn resolve_source(
         &self,
         source: &PlaybackSource,
@@ -125,7 +164,7 @@ impl PlaybackService {
     }
 
     /// select eligible sources in preference order and deliver the first one
-    /// that answers. retry and fallback decisions belong here, not in delivery.
+    /// that answers, retrying and falling back as needed.
     pub async fn stream(
         &self,
         track_id: &TrackId,

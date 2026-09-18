@@ -18,7 +18,7 @@ use crate::{
     },
     providers::ProviderError,
     request::RequestContext,
-    tracks::{ProviderId, ProviderKind, SourceIdentity, SourceScope, TrackMetadata},
+    tracks::{ArtworkRef, ProviderId, ProviderKind, SourceIdentity, SourceScope, TrackMetadata},
 };
 
 pub struct NavidromeAdapter {
@@ -94,10 +94,14 @@ impl CatalogueProvider for NavidromeAdapter {
                 };
                 let Ok(metadata) =
                     TrackMetadata::new(candidate.title, candidate.artists, candidate.duration_ms)
+                        .and_then(|metadata| metadata.with_album(candidate.album))
                 else {
                     continue;
                 };
-                candidates.push(CatalogueCandidate::new(source, metadata));
+                let artwork = candidate
+                    .artwork_id
+                    .and_then(|artwork_id| ArtworkRef::upstream(artwork_id).ok());
+                candidates.push(CatalogueCandidate::new(source, metadata).with_artwork(artwork));
             }
         }
         Ok(candidates)
@@ -149,6 +153,57 @@ impl PlaybackProvider for NavidromeAdapter {
                     media,
                     strategy: DeliveryStrategy::Direct,
                 }))
+            }
+            Err(UpstreamError::Auth) => Err(self.rejected(source, user).await),
+            Err(UpstreamError::NotFound) => Err(ProviderError::SourceNotFound),
+            Err(_) => Err(ProviderError::ProviderUnavailable),
+        }
+    }
+
+    async fn resolve_artwork(
+        &self,
+        source: &PlaybackSource,
+        artwork: &ArtworkRef,
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> Result<Option<String>, ProviderError> {
+        let PlaybackSource::Navidrome(source) = source else {
+            return Ok(None);
+        };
+        let ArtworkRef::Upstream(artwork_id) = artwork else {
+            return Ok(None);
+        };
+        let Some(user) = user else {
+            return Ok(None);
+        };
+        let Some(link) = self
+            .links
+            .link_for_server(user, source.server_id())
+            .await
+            .map_err(access)?
+        else {
+            return Ok(None);
+        };
+        let password =
+            decrypt_password(&self.key, link.link_id, &link.encrypted_password).map_err(access)?;
+        let target = UpstreamTarget {
+            base_url: link.base_url.clone(),
+            username: link.username.clone(),
+            password,
+        };
+        match self
+            .transport
+            .resolve_artwork(&target, artwork_id, context)
+            .await
+        {
+            Ok(url) => {
+                let url = reqwest::Url::parse(&url).map_err(|_| ProviderError::InvalidArtwork)?;
+                let base = reqwest::Url::parse(&target.base_url)
+                    .map_err(|_| ProviderError::InvalidArtwork)?;
+                if !is_registered_media_url(&base, &url) {
+                    return Err(ProviderError::InvalidArtwork);
+                }
+                Ok(Some(url.to_string()))
             }
             Err(UpstreamError::Auth) => Err(self.rejected(source, user).await),
             Err(UpstreamError::NotFound) => Err(ProviderError::SourceNotFound),

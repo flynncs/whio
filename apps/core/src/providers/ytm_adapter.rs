@@ -156,8 +156,7 @@ fn map_playback_error(error: TransportError<ResolvePlaybackError>) -> ProviderEr
     }
 }
 
-/// Resolver wire DTOs become validated application models here, so nothing
-/// outside this adapter sees a generated type.
+/// Resolver wire DTOs become validated application models at this boundary.
 mod mapping {
     use chrono::Utc;
     use whio_resolver_api::models::{
@@ -170,7 +169,9 @@ mod mapping {
         playback::{
             MediaMetadata, PlayableMedia, PlaybackUrl, ValidationError as PlaybackValidationError,
         },
-        tracks::{ProviderId, SourceIdentity, SourceScope, TrackMetadata, ValidationError},
+        tracks::{
+            ArtworkRef, ProviderId, SourceIdentity, SourceScope, TrackMetadata, ValidationError,
+        },
     };
 
     impl TryFrom<CatalogueCandidateDto> for CatalogueCandidate {
@@ -191,9 +192,14 @@ mod mapping {
                 .transpose()
                 .map_err(|_| ValidationError::InvalidDuration)?;
 
-            let metadata = TrackMetadata::new(candidate.title, candidate.artists, duration_ms)?;
+            let metadata = TrackMetadata::new(candidate.title, candidate.artists, duration_ms)?
+                .with_album(candidate.album.flatten())?;
+            let artwork = candidate
+                .artwork_url
+                .flatten()
+                .and_then(|url| ArtworkRef::url(url).ok());
 
-            Ok(CatalogueCandidate::new(source, metadata))
+            Ok(CatalogueCandidate::new(source, metadata).with_artwork(artwork))
         }
     }
 
@@ -293,6 +299,8 @@ mod mapping {
                 title: "Instant Crush".to_owned(),
                 artists: vec!["Daft Punk".to_owned()],
                 duration_ms: Some(Some(337_000)),
+                album: None,
+                artwork_url: None,
             }
         }
 
@@ -320,6 +328,21 @@ mod mapping {
             assert_eq!(candidate.title(), "Instant Crush");
             assert_eq!(candidate.artists(), ["Daft Punk"]);
             assert_eq!(candidate.duration_ms(), Some(337_000));
+        }
+
+        #[test]
+        fn dto_album_and_artwork_reach_the_candidate() {
+            let mut dto = candidate();
+            dto.album = Some(Some("Random Access Memories".to_owned()));
+            dto.artwork_url = Some(Some("https://art.test/ram.jpg".to_owned()));
+
+            let candidate = CatalogueCandidate::try_from(dto).unwrap();
+
+            assert_eq!(candidate.album(), Some("Random Access Memories"));
+            assert_eq!(
+                candidate.artwork(),
+                Some(&ArtworkRef::url("https://art.test/ram.jpg".to_owned()).unwrap())
+            );
         }
 
         #[test]

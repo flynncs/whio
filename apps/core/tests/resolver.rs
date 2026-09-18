@@ -26,6 +26,8 @@ fn candidate_dto() -> CatalogueCandidateDto {
         title: "Instant Crush".to_owned(),
         artists: vec!["Daft Punk".to_owned()],
         duration_ms: Some(Some(337_000)),
+        album: None,
+        artwork_url: None,
     }
 }
 

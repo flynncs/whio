@@ -23,6 +23,7 @@ pub struct AppState {
     credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
     playback: Arc<PlaybackService>,
+    artwork_client: reqwest::Client,
 }
 
 impl AppState {
@@ -36,6 +37,7 @@ impl AppState {
             catalogue,
             database: None,
             playback,
+            artwork_client: media::client(media::artwork_redirect_policy()),
         }
     }
 
@@ -50,6 +52,7 @@ impl AppState {
             catalogue,
             database: Some(database),
             playback,
+            artwork_client: media::client(media::artwork_redirect_policy()),
         }
     }
 
@@ -67,6 +70,10 @@ impl AppState {
 
     pub(crate) fn playback(&self) -> &PlaybackService {
         &self.playback
+    }
+
+    pub(crate) fn artwork_client(&self) -> &reqwest::Client {
+        &self.artwork_client
     }
 }
 

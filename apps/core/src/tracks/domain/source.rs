@@ -61,12 +61,28 @@ impl ProviderId {
             _ => None,
         }
     }
+
+    /// ranks this provider for metadata merges. unrecognised providers sit last.
+    pub fn precedence(&self) -> u8 {
+        self.kind().map_or(u8::MAX, ProviderKind::precedence)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
     Navidrome,
     YoutubeMusic,
+}
+
+impl ProviderKind {
+    /// lower values outrank higher ones when the same track arrives through
+    /// several providers.
+    pub fn precedence(self) -> u8 {
+        match self {
+            Self::Navidrome => 0,
+            Self::YoutubeMusic => 1,
+        }
+    }
 }
 
 impl FromStr for ProviderId {

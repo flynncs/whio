@@ -2,19 +2,21 @@ use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 
-use crate::tracks::{Track, TrackMetadata};
+use crate::tracks::{ArtworkRef, ProviderId, Track, TrackMetadata};
 
 use super::{SourceIdentity, TrackId, TrackRepository, TrackRepositoryError};
 
 struct TrackEntry {
     track: Track,
     sources: Vec<SourceIdentity>,
+    album_source: Option<String>,
 }
 
 #[derive(Default)]
 struct TrackIndexes {
     by_source: HashMap<SourceIdentity, TrackId>,
     by_track_id: HashMap<TrackId, TrackEntry>,
+    artwork_by_source: HashMap<SourceIdentity, ArtworkRef>,
 }
 
 #[derive(Default)]
@@ -40,18 +42,31 @@ impl TrackRepository for InMemoryTrackRepository {
                 .get_mut(&track_id)
                 .ok_or(TrackRepositoryError::Unavailable)?;
 
-            // latest observation wins
+            let album = merged_album(source.provider_id(), metadata.album(), entry);
+            if album.changed {
+                entry.album_source = Some(source.provider_id().as_str().to_owned());
+            }
+
+            // latest observation wins for display metadata; the album follows
+            // provider precedence.
+            let metadata = metadata
+                .with_album(album.value)
+                .map_err(|_| TrackRepositoryError::InvalidData)?;
             entry.track = Track::new(track_id.clone(), metadata);
 
             return Ok(entry.track.clone());
         }
 
         let track_id = TrackId::new();
+        let album_source = metadata
+            .album()
+            .map(|_| source.provider_id().as_str().to_owned());
 
         let track = Track::new(track_id.clone(), metadata);
         let entry = TrackEntry {
             track: track.clone(),
             sources: vec![source.clone()],
+            album_source,
         };
 
         indexes.by_source.insert(source, track_id.clone());
@@ -87,16 +102,101 @@ impl TrackRepository for InMemoryTrackRepository {
             .get(track_id)
             .map(|entry| entry.track.clone()))
     }
+
+    async fn set_source_artwork(
+        &self,
+        source: &SourceIdentity,
+        artwork: &ArtworkRef,
+    ) -> Result<(), TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        indexes
+            .artwork_by_source
+            .insert(source.clone(), artwork.clone());
+        Ok(())
+    }
+
+    async fn find_artwork(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        let Some(entry) = indexes.by_track_id.get(track_id) else {
+            return Ok(None);
+        };
+
+        Ok(entry
+            .sources
+            .iter()
+            .filter_map(|source| {
+                indexes
+                    .artwork_by_source
+                    .get(source)
+                    .map(|artwork| (source, artwork))
+            })
+            .min_by_key(|(source, _)| source.provider_id().precedence())
+            .map(|(source, artwork)| (source.clone(), artwork.clone())))
+    }
+}
+
+struct MergedAlbum {
+    value: Option<String>,
+    changed: bool,
+}
+
+fn merged_album(
+    incoming_provider: &ProviderId,
+    incoming: Option<&str>,
+    entry: &TrackEntry,
+) -> MergedAlbum {
+    let Some(incoming) = incoming else {
+        return MergedAlbum {
+            value: entry.track.metadata().album().map(str::to_owned),
+            changed: false,
+        };
+    };
+
+    let existing_rank = entry
+        .album_source
+        .as_deref()
+        .and_then(|source| ProviderId::new(source.to_owned()).ok())
+        .map(|provider| provider.precedence());
+
+    let current = entry.track.metadata().album().map(str::to_owned);
+
+    // a higher-precedence provider replaces the album; within one provider the
+    // fresher observation wins.
+    match current {
+        Some(current)
+            if existing_rank.is_some_and(|rank| rank < incoming_provider.precedence()) =>
+        {
+            MergedAlbum {
+                value: Some(current),
+                changed: false,
+            }
+        }
+        _ => MergedAlbum {
+            value: Some(incoming.to_owned()),
+            changed: true,
+        },
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracks::{ProviderId, SourceScope, TrackMetadata};
+    use crate::tracks::{ProviderKind, SourceScope, TrackMetadata};
 
-    fn source(external_id: &str) -> SourceIdentity {
+    fn source(provider: &str, external_id: &str) -> SourceIdentity {
         SourceIdentity::new(
-            ProviderId::new("youtube_music".to_owned()).unwrap(),
+            ProviderId::new(provider.to_owned()).unwrap(),
             SourceScope::Global,
             external_id.to_owned(),
         )
@@ -110,8 +210,8 @@ mod tests {
     #[tokio::test]
     async fn repository_maintains_stable_bidirectional_mappings() {
         let repository = InMemoryTrackRepository::default();
-        let first_source = source("source-a");
-        let second_source = source("source-b");
+        let first_source = source("youtube_music", "source-a");
+        let second_source = source("youtube_music", "source-b");
 
         let first_track = repository
             .get_or_create(first_source.clone(), metadata("First"))
@@ -139,7 +239,7 @@ mod tests {
     async fn repository_returns_a_stored_track_by_id() {
         let repository = InMemoryTrackRepository::default();
         let stored = repository
-            .get_or_create(source("source-a"), metadata("First"))
+            .get_or_create(source("youtube_music", "source-a"), metadata("First"))
             .await
             .unwrap();
 
@@ -170,5 +270,115 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn album_is_stored_and_refreshed_within_a_provider() {
+        let repository = InMemoryTrackRepository::default();
+        let youtube = source("youtube_music", "vid-1");
+
+        let first = repository
+            .get_or_create(
+                youtube.clone(),
+                metadata("Song")
+                    .with_album(Some("First".to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.album(), Some("First"));
+
+        let refreshed = repository
+            .get_or_create(
+                youtube,
+                metadata("Song")
+                    .with_album(Some("Corrected".to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(refreshed.id(), first.id());
+        assert_eq!(refreshed.album(), Some("Corrected"));
+
+        let stored = repository
+            .find_track(first.id())
+            .await
+            .unwrap()
+            .expect("stored track is found");
+        assert_eq!(stored.album(), Some("Corrected"));
+    }
+
+    #[test]
+    fn album_merge_follows_provider_precedence() {
+        let upstream = ProviderId::new("navidrome".to_owned()).unwrap();
+        let fallback = ProviderId::new("youtube_music".to_owned()).unwrap();
+
+        let entry = |album_source: &str| TrackEntry {
+            track: Track::new(
+                TrackId::new(),
+                metadata("Song")
+                    .with_album(Some("Authoritative".to_owned()))
+                    .unwrap(),
+            ),
+            sources: vec![],
+            album_source: Some(album_source.to_owned()),
+        };
+
+        // a lower-precedence provider keeps the stored album
+        let merged = merged_album(&fallback, Some("Wrong"), &entry("navidrome"));
+        assert_eq!(merged.value, Some("Authoritative".to_owned()));
+        assert!(!merged.changed);
+
+        // a higher-precedence provider replaces it
+        let merged = merged_album(&upstream, Some("Remastered"), &entry("youtube_music"));
+        assert_eq!(merged.value, Some("Remastered".to_owned()));
+        assert!(merged.changed);
+    }
+
+    #[tokio::test]
+    async fn artwork_resolves_by_source_precedence() {
+        let repository = InMemoryTrackRepository::default();
+        let upstream = source("navidrome", "song-1");
+        let fallback = source("youtube_music", "vid-1");
+
+        let track = repository
+            .get_or_create(upstream.clone(), metadata("Song"))
+            .await
+            .unwrap();
+
+        // a track grows sources through correlation; the test attaches one
+        // directly so both artwork tiers are present.
+        {
+            let mut indexes = repository.indexes.lock().unwrap();
+            let entry = indexes
+                .by_track_id
+                .get_mut(track.id())
+                .expect("track is indexed");
+            entry.sources.push(fallback.clone());
+        }
+
+        repository
+            .set_source_artwork(
+                &fallback,
+                &ArtworkRef::url("https://art.test/ytm.jpg".to_owned()).unwrap(),
+            )
+            .await
+            .unwrap();
+        repository
+            .set_source_artwork(
+                &upstream,
+                &ArtworkRef::upstream("cover-1".to_owned()).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let (owner, artwork) = repository
+            .find_artwork(track.id())
+            .await
+            .unwrap()
+            .expect("artwork is stored");
+        assert_eq!(owner.provider_id().kind(), Some(ProviderKind::Navidrome));
+        assert_eq!(artwork, ArtworkRef::upstream("cover-1".to_owned()).unwrap());
     }
 }

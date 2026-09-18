@@ -65,3 +65,26 @@ pub(crate) async fn stream(
             },
         })
 }
+
+pub(crate) async fn artwork(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    principal: AuthenticatedPrincipal,
+    Path(track_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let user_uuid = principal.0.user_id.as_uuid();
+
+    match super::artwork::load(&state, &context, &track_id, &user_uuid).await {
+        Ok(Some(artwork)) => Ok(artwork.into_response()),
+        Ok(None) => Err(ApiError::NotFound(context)),
+        Err(super::artwork::ArtworkFailure::InvalidId(error)) => {
+            Err(ApiError::InvalidTrackId { context, error })
+        }
+        Err(super::artwork::ArtworkFailure::Playback(error)) => {
+            Err(ApiError::PlaybackStream { context, error })
+        }
+        Err(super::artwork::ArtworkFailure::Fetch(error)) => {
+            Err(ApiError::Artwork { context, error })
+        }
+    }
+}

@@ -31,6 +31,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/getUser.view", get(get_user).post(get_user))
         .route("/search3.view", get(search3).post(search3))
         .route("/stream.view", get(stream))
+        .route("/getCoverArt.view", get(get_cover_art))
         .route(
             "/getOpenSubsonicExtensions.view",
             get(get_open_subsonic_extensions).post(get_open_subsonic_extensions),
@@ -181,6 +182,51 @@ pub(crate) async fn stream(
     {
         Ok(delivery) => into_response(delivery),
         Err(error) => stream_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_cover_art(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    use crate::http::routes::artwork;
+
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(id) = query.get("id") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+
+    let user_uuid = principal.user_id.as_uuid();
+
+    match artwork::load(&state, &context, id, &user_uuid).await {
+        Ok(Some(artwork)) => artwork.into_response(),
+        Ok(None) => {
+            let mut response = Json(failed_envelope(
+                models::error::Code::Variant70,
+                "Cover art was not found.",
+            ))
+            .into_response();
+            *response.status_mut() = StatusCode::NOT_FOUND;
+            response
+        }
+        Err(_) => {
+            tracing::warn!(
+                request_id = context.request_id().as_str(),
+                "cover art fetch failed"
+            );
+            let mut response = Json(failed_envelope(
+                models::error::Code::Variant0,
+                "Internal error.",
+            ))
+            .into_response();
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        }
     }
 }
 

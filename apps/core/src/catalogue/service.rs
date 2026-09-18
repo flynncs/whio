@@ -221,13 +221,22 @@ async fn materialize(
 ) -> Result<Vec<Track>, CatalogueError> {
     let mut tracks = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        let (source, metadata) = candidate.into_parts();
-        tracks.push(
-            repository
-                .get_or_create(source, metadata)
-                .await
-                .map_err(CatalogueError::Repository)?,
-        );
+        let source = candidate.source().clone();
+        let artwork = candidate.artwork().cloned();
+        let metadata = candidate.metadata().clone();
+
+        let track = repository
+            .get_or_create(source.clone(), metadata)
+            .await
+            .map_err(CatalogueError::Repository)?;
+
+        if let Some(artwork) = artwork
+            && let Err(error) = repository.set_source_artwork(&source, &artwork).await
+        {
+            tracing::warn!(%error, "artwork could not be stored");
+        }
+
+        tracks.push(track);
     }
     Ok(tracks)
 }
@@ -398,6 +407,8 @@ mod tests {
             title: "Upstream Song".to_owned(),
             artists: vec!["Artist".to_owned()],
             duration_ms: Some(200_000),
+            album: None,
+            artwork_id: None,
         }
     }
 

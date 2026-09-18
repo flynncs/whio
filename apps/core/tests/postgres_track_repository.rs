@@ -6,8 +6,8 @@ use sqlx::PgPool;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 use whio_core::tracks::{
-    PostgresTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackId, TrackMetadata,
-    TrackRepository, TrackRepositoryError,
+    ArtworkRef, PostgresTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackId,
+    TrackMetadata, TrackRepository, TrackRepositoryError,
 };
 
 fn source(external_id: &str) -> SourceIdentity {
@@ -196,4 +196,84 @@ async fn stored_track_round_trips_through_find_track(pool: PgPool) {
             .unwrap()
             .is_none()
     );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn album_precedence_and_artwork_follow_the_owning_source(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let fallback = source("precedence-source");
+    let upstream = SourceIdentity::new(
+        ProviderId::new("navidrome".to_owned()).unwrap(),
+        SourceScope::Named("test-installation".to_owned()),
+        "nd-precedence-source".to_owned(),
+    )
+    .unwrap();
+
+    let with_album = |album: &str| {
+        metadata("Song", &["Artist"], None)
+            .with_album(Some(album.to_owned()))
+            .unwrap()
+    };
+
+    // the fallback provider discovers the track first
+    let track = repository
+        .get_or_create(fallback.clone(), with_album("Provisional"))
+        .await
+        .unwrap();
+
+    // correlation attaches the upstream source to the same track
+    sqlx::query(
+        r#"
+        INSERT INTO track_sources (id, track_id, provider_id, source_scope, external_id)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(track.id().as_uuid())
+    .bind("navidrome")
+    .bind("named:test-installation")
+    .bind("nd-precedence-source")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // the higher-precedence provider replaces the album
+    let merged = repository
+        .get_or_create(upstream.clone(), with_album("Authoritative"))
+        .await
+        .unwrap();
+    assert_eq!(merged.id(), track.id());
+    assert_eq!(merged.album(), Some("Authoritative"));
+
+    // a later lower-precedence observation cannot clobber it
+    let merged = repository
+        .get_or_create(fallback.clone(), with_album("Wrong"))
+        .await
+        .unwrap();
+    assert_eq!(merged.album(), Some("Authoritative"));
+
+    // artwork resolves through the upstream source
+    repository
+        .set_source_artwork(
+            &fallback,
+            &ArtworkRef::url("https://art.test/ytm.jpg".to_owned()).unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_source_artwork(
+            &upstream,
+            &ArtworkRef::upstream("cover-1".to_owned()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let (owner, artwork) = repository
+        .find_artwork(track.id())
+        .await
+        .unwrap()
+        .expect("artwork is stored");
+    assert_eq!(owner.provider_id().as_str(), "navidrome");
+    assert_eq!(artwork, ArtworkRef::upstream("cover-1".to_owned()).unwrap());
 }

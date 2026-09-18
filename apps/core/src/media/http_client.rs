@@ -19,6 +19,47 @@ pub struct HttpMediaFetcher {
     destination: DestinationPolicy,
 }
 
+/// artwork is bounded well below the audio spool budget: providers serve small
+/// images and anything larger is not cover art.
+pub const MAX_ARTWORK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// fetch one artwork image. the caller has already validated the destination.
+pub async fn fetch_artwork(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+) -> Result<(String, bytes::Bytes), MediaFetchError> {
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(MediaFetchError::Request)?;
+
+    if !response.status().is_success() {
+        return Err(MediaFetchError::UnexpectedStatus(response.status()));
+    }
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARTWORK_BYTES)
+    {
+        return Err(MediaFetchError::ResponseTooLarge);
+    }
+
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+
+    let bytes = response.bytes().await.map_err(MediaFetchError::Request)?;
+    if bytes.len() as u64 > MAX_ARTWORK_BYTES {
+        return Err(MediaFetchError::ResponseTooLarge);
+    }
+
+    Ok((content_type, bytes))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DestinationPolicy {
     Any,

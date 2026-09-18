@@ -38,6 +38,8 @@ impl From<Track> for Song {
             id: track.id().to_string(),
             title: track.title().to_owned(),
             artist: track.artists().join(", "),
+            album: track.album().map(str::to_owned),
+            cover_art: Some(track.id().to_string()),
             duration: track
                 .duration_ms()
                 .map(|ms| ms as f32 / 1000.0)
@@ -489,6 +491,8 @@ mod tests {
                 title: "Upstream Song".to_owned(),
                 artists: vec!["Artist".to_owned()],
                 duration_ms: Some(200_000),
+                album: None,
+                artwork_id: None,
             }])
         }
 
@@ -559,17 +563,25 @@ mod tests {
 
     #[test]
     fn track_maps_to_song() {
-        let song = Song::from(Track::new(
+        let track = Track::new(
             TrackId::new(),
             TrackMetadata::new(
                 "title".to_owned(),
                 vec!["a".to_owned(), "b".to_owned()],
                 Some(180_000),
             )
-            .expect("valid metadata"),
-        ));
+            .expect("valid metadata")
+            .with_album(Some("album".to_owned()))
+            .expect("valid album"),
+        );
+        let id = track.id().to_string();
+
+        let song = Song::from(track);
+
         assert_eq!(song.title, "title");
         assert_eq!(song.artist, "a, b");
+        assert_eq!(song.album.as_deref(), Some("album"));
+        assert_eq!(song.cover_art.as_deref(), Some(id.as_str()));
         assert_eq!(song.duration, 180.0);
         assert!(!song.id.is_empty());
     }

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::tracks::{Track, TrackMetadata};
+use crate::tracks::{ArtworkRef, Track, TrackMetadata};
 
 use super::{SourceIdentity, TrackId};
 
@@ -26,4 +26,23 @@ pub trait TrackRepository: Send + Sync {
     ) -> Result<Vec<SourceIdentity>, TrackRepositoryError>;
 
     async fn find_track(&self, track_id: &TrackId) -> Result<Option<Track>, TrackRepositoryError>;
+
+    /// record where one source keeps its cover art. repositories without
+    /// artwork storage accept and discard it.
+    async fn set_source_artwork(
+        &self,
+        _source: &SourceIdentity,
+        _artwork: &ArtworkRef,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    /// the highest-precedence artwork among a track's sources, with the source
+    /// that owns it so callers know how to resolve it.
+    async fn find_artwork(
+        &self,
+        _track_id: &TrackId,
+    ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+        Ok(None)
+    }
 }

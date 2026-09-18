@@ -24,6 +24,8 @@ pub(crate) fn child_from_track(track: &Track) -> models::Child {
         title: track.title().to_owned(),
         is_dir: false,
         artist: Some(track.artists().join(", ")),
+        album: track.album().map(str::to_owned),
+        cover_art: Some(track.id().to_string()),
         duration: track.duration_ms().map(|ms| (ms / 1000) as i32),
         r#type: Some(models::GenericMediaType::Music),
         media_type: Some(models::MediaType::Song),
@@ -266,6 +268,8 @@ mod tests {
                 title: "Upstream Song".to_owned(),
                 artists: vec!["Artist".to_owned()],
                 duration_ms: Some(200_000),
+                album: None,
+                artwork_id: None,
             }])
         }
 
@@ -330,5 +334,22 @@ mod tests {
             .await
             .expect("search succeeds");
         assert_eq!(songs.len(), 25);
+    }
+
+    #[test]
+    fn child_carries_album_and_cover_art() {
+        let track = crate::tracks::Track::new(
+            crate::tracks::TrackId::new(),
+            TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
+                .expect("valid metadata")
+                .with_album(Some("album".to_owned()))
+                .expect("valid album"),
+        );
+        let id = track.id().to_string();
+
+        let child = child_from_track(&track);
+
+        assert_eq!(child.album.as_deref(), Some("album"));
+        assert_eq!(child.cover_art.as_deref(), Some(id.as_str()));
     }
 }

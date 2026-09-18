@@ -54,10 +54,7 @@ impl PlaybackSource {
     }
 
     pub(crate) fn rank(&self) -> u8 {
-        match self {
-            Self::Navidrome(_) => 0,
-            Self::Youtube(_) => 1,
-        }
+        self.kind().precedence()
     }
 
     pub(crate) fn compare(left: &Self, right: &Self) -> Ordering {
