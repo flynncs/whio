@@ -23,8 +23,6 @@ COPY apps/core/src ./apps/core/src
 COPY apps/core/migrations ./apps/core/migrations
 COPY apps/resolver-client-generated/Cargo.toml ./apps/resolver-client-generated/
 COPY apps/resolver-client-generated/src ./apps/resolver-client-generated/src
-COPY apps/navidrome-connector-client-generated/Cargo.toml ./apps/navidrome-connector-client-generated/
-COPY apps/navidrome-connector-client-generated/src ./apps/navidrome-connector-client-generated/src
 COPY apps/subsonic-types-generated/Cargo.toml ./apps/subsonic-types-generated/
 COPY apps/subsonic-types-generated/src ./apps/subsonic-types-generated/src
 

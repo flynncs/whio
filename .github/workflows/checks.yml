@@ -26,14 +26,8 @@ jobs:
       - name: Lint core
         run: cargo clippy --locked --manifest-path apps/core/Cargo.toml --all-targets -- -D warnings
 
-      - name: Lint connector
-        run: cargo clippy --locked --manifest-path apps/navidrome-connector/Cargo.toml --all-targets -- -D warnings
-
       - name: Test core
         run: cargo test --locked --manifest-path apps/core/Cargo.toml
-
-      - name: Test connector
-        run: cargo test --locked --manifest-path apps/navidrome-connector/Cargo.toml
 
   postgres:
     runs-on: ubuntu-latest
@@ -73,11 +67,6 @@ jobs:
         run: |
           curl -sSL -o /tmp/openapi-generator-cli.jar \
             https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/7.24.0/openapi-generator-cli-7.24.0.jar
-
-      - name: Check connector contract drift
-        env:
-          OPENAPI_GENERATOR_JAR: /tmp/openapi-generator-cli.jar
-        run: ./tools/generate-nd-connector-contract.sh --check
 
       - name: Check resolver contract drift
         env:

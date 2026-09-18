@@ -57,7 +57,6 @@ impl SourceTags {
 /// the client-facing shorthand for one provider.
 fn shorthand(kind: ProviderKind) -> &'static str {
     match kind {
-        ProviderKind::Navidrome => "ND",
         ProviderKind::YoutubeMusic => "YTM",
     }
 }
@@ -94,7 +93,7 @@ mod tests {
     #[test]
     fn off_leaves_the_artist_untouched() {
         assert_eq!(
-            SourceTags::Off.artist(&artists(), &[source("navidrome")]),
+            SourceTags::Off.artist(&artists(), &[source("youtube_music")]),
             "Daft Punk"
         );
     }
@@ -104,23 +103,15 @@ mod tests {
         let tags = SourceTags::ArtistPrefix;
 
         assert_eq!(
-            tags.artist(&artists(), &[source("navidrome")]),
-            "[ND] Daft Punk"
-        );
-        assert_eq!(
             tags.artist(&artists(), &[source("youtube_music")]),
             "[YTM] Daft Punk"
         );
         assert_eq!(
             tags.artist(
                 &artists(),
-                &[
-                    source("navidrome"),
-                    source("youtube_music"),
-                    source("navidrome"),
-                ]
+                &[source("youtube_music"), source("youtube_music")]
             ),
-            "[ND/YTM] Daft Punk"
+            "[YTM] Daft Punk"
         );
     }
 

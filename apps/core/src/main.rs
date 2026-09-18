@@ -4,7 +4,7 @@ use tokio::net::TcpListener;
 
 mod config;
 
-use config::{Config, UpstreamConnectorConfig, YoutubeResolverConfig};
+use config::{Config, YoutubeResolverConfig};
 use whio_core::{
     AppState,
     catalogue::{CatalogueProvider, CatalogueService},
@@ -12,15 +12,11 @@ use whio_core::{
     delivery::{StreamDelivery, media_client},
     identity::{
         postgres::PostgresCredentialRepository, repository::CredentialRepository,
-        service::CredentialService, upstream::PgUpstreamLinkStore,
+        service::CredentialService,
     },
     media::{self, HttpMediaFetcher},
     playback::{PlaybackProvider, PlaybackService},
-    providers::ProviderError,
-    providers::{
-        ConnectorUpstreamTransport, NavidromeAdapter, NoUpstreamSources, UpstreamTransport,
-        YtmAdapter,
-    },
+    providers::{ProviderError, YtmAdapter},
     tracks::{PostgresTrackRepository, TrackRepository},
 };
 
@@ -87,34 +83,13 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         } => YtmAdapter::new(url.clone(), *connect_timeout, *total_timeout)?,
     });
 
-    let transport: Arc<dyn UpstreamTransport> = match &config.upstream_connector {
-        UpstreamConnectorConfig::Disabled => Arc::new(NoUpstreamSources),
-        UpstreamConnectorConfig::Enabled {
-            url,
-            connect_timeout,
-            total_timeout,
-        } => Arc::new(
-            ConnectorUpstreamTransport::new(url.clone(), *connect_timeout, *total_timeout)
-                .map_err(|_| ProviderError::Internal)?,
-        ),
-    };
-    let links = Arc::new(PgUpstreamLinkStore::new(database.pool()));
-    let navidrome = Arc::new(NavidromeAdapter::new(
-        links,
-        config.credential_key.clone(),
-        Arc::clone(&transport),
-    ));
-
     let credential = Arc::new(CredentialService::new(
         credential_repository,
         config.credential_key.clone(),
     ));
     let catalogue = Arc::new(CatalogueService::with_providers(
         track_repository.clone(),
-        vec![
-            navidrome.clone() as Arc<dyn CatalogueProvider>,
-            Arc::clone(&ytm) as Arc<dyn CatalogueProvider>,
-        ],
+        vec![Arc::clone(&ytm) as Arc<dyn CatalogueProvider>],
     ));
     let youtube_media_suffixes = vec![config.youtube_media_suffix.clone()];
     let fetcher = Arc::new(HttpMediaFetcher::with_allowed_host_suffixes(
@@ -134,10 +109,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
     );
     let playback = Arc::new(PlaybackService::new(
         track_repository,
-        vec![
-            navidrome as Arc<dyn PlaybackProvider>,
-            ytm as Arc<dyn PlaybackProvider>,
-        ],
+        vec![ytm as Arc<dyn PlaybackProvider>],
         delivery,
     ));
 

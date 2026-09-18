@@ -130,7 +130,6 @@ mod tests {
     use crate::{
         catalogue::{CatalogueCandidate, CatalogueProvider},
         providers::ProviderError,
-        providers::{NavidromeAdapter, UpstreamTransport},
         request::{RequestContext, RequestId},
         tracks::{
             InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackId,
@@ -506,93 +505,6 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(SongError::NotFound)));
-    }
-
-    struct StubUpstream;
-
-    #[async_trait]
-    impl UpstreamTransport for StubUpstream {
-        async fn search(
-            &self,
-            _target: &crate::providers::UpstreamTarget,
-            _search: &CatalogueSearch,
-            _context: &RequestContext,
-        ) -> Result<Vec<crate::providers::UpstreamCandidate>, crate::providers::UpstreamError>
-        {
-            Ok(vec![crate::providers::UpstreamCandidate {
-                external_id: "nd-1".to_owned(),
-                title: "Upstream Song".to_owned(),
-                artists: vec!["Artist".to_owned()],
-                duration_ms: Some(200_000),
-                album: None,
-                artwork_id: None,
-            }])
-        }
-
-        async fn resolve(
-            &self,
-            _target: &crate::providers::UpstreamTarget,
-            _external_id: &str,
-            _context: &RequestContext,
-        ) -> Result<String, crate::providers::UpstreamError> {
-            Err(crate::providers::UpstreamError::Unavailable)
-        }
-    }
-
-    #[tokio::test]
-    async fn linked_user_searches_upstream_and_fallback() {
-        use crate::identity::upstream::{MemoryUpstreamLinkStore, UpstreamLinkStore};
-
-        let key = key();
-        let user = UserId::from_uuid(Uuid::now_v7());
-        let credential = Uuid::now_v7();
-        let auth = TestAuth {
-            service: std::sync::Arc::new(CredentialService::new(
-                std::sync::Arc::new(StubCredentialStore { user, credential }),
-                key.clone(),
-            )),
-            token: session::mint(user, credential, &key),
-        };
-        let user_uuid = user.as_uuid();
-        let server = Uuid::now_v7();
-        let store = MemoryUpstreamLinkStore::new();
-        store.insert_link(
-            &key,
-            user_uuid,
-            server,
-            "https://music.example.test",
-            "friend",
-            "password",
-        );
-
-        let stub = Arc::new(StubCatalogue {
-            responses: Mutex::new(vec![Ok(vec![candidate()])].into()),
-        });
-        let catalogue = CatalogueService::with_providers(
-            Arc::new(InMemoryTrackRepository::default()),
-            vec![
-                Arc::new(NavidromeAdapter::new(
-                    Arc::new(store) as Arc<dyn UpstreamLinkStore>,
-                    key,
-                    Arc::new(StubUpstream) as Arc<dyn UpstreamTransport>,
-                )) as Arc<dyn CatalogueProvider>,
-                stub as Arc<dyn CatalogueProvider>,
-            ],
-        );
-        let songs = search_songs(
-            &catalogue,
-            &auth.service,
-            &context(),
-            &auth.token,
-            &query(Some("song"), None, None),
-            SourceTags::Off,
-        )
-        .await
-        .expect("linked search succeeds");
-
-        assert_eq!(songs.len(), 2);
-        assert_eq!(songs[0].title, "Upstream Song");
-        assert_eq!(songs[1].title, "song");
     }
 
     #[test]

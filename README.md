@@ -33,7 +33,6 @@ don't edit `apps/resolver-client-generated/` or
 - `WHIO_LOG_LEVEL`: defaults to `info`
 - `WHIO_YOUTUBE_ENABLED`: off by default
 - `WHIO_YOUTUBE_RESOLVER_URL`, `WHIO_YOUTUBE_RESOLVER_CONNECT_TIMEOUT_SECONDS`, `WHIO_YOUTUBE_RESOLVER_TOTAL_TIMEOUT_SECONDS`: resolver target and budgets when youtube is enabled
-- `WHIO_UPSTREAM_CONNECTOR_URL`, `WHIO_UPSTREAM_CONNECTOR_CONNECT_TIMEOUT_SECONDS`, `WHIO_UPSTREAM_CONNECTOR_TOTAL_TIMEOUT_SECONDS`: Navidrome connector target and budgets
 - `WHIO_PLAYBACK_MAX_SESSIONS`: defaults to `16`. concurrent spool playbacks before overload
 - `WHIO_SPOOL_DIR`: defaults to the system temp dir. stale `whio-*.part` files are purged at startup
 - `WHIO_YOUTUBE_MEDIA_SUFFIX`: defaults to `googlevideo.com`. host suffix accepted for resolved YouTube media

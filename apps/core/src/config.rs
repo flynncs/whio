@@ -8,8 +8,6 @@ const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:3000";
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_YOUTUBE_CONNECT_TIMEOUT_SECONDS: u64 = 2;
 const DEFAULT_YOUTUBE_TOTAL_TIMEOUT_SECONDS: u64 = 35;
-const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS: u64 = 2;
-const DEFAULT_UPSTREAM_TOTAL_TIMEOUT_SECONDS: u64 = 10;
 
 const DATABASE_URL: &str = "WHIO_DATABASE_URL";
 const CREDENTIAL_KEY: &str = "WHIO_CREDENTIAL_KEY";
@@ -17,12 +15,9 @@ const YOUTUBE_ENABLED: &str = "WHIO_YOUTUBE_ENABLED";
 const YOUTUBE_RESOLVER_URL: &str = "WHIO_YOUTUBE_RESOLVER_URL";
 const YOUTUBE_RESOLVER_CONNECT_TIMEOUT: &str = "WHIO_YOUTUBE_RESOLVER_CONNECT_TIMEOUT_SECONDS";
 const YOUTUBE_RESOLVER_TOTAL_TIMEOUT: &str = "WHIO_YOUTUBE_RESOLVER_TOTAL_TIMEOUT_SECONDS";
-const UPSTREAM_CONNECTOR_URL: &str = "WHIO_UPSTREAM_CONNECTOR_URL";
 const PLAYBACK_MAX_SESSIONS: &str = "WHIO_PLAYBACK_MAX_SESSIONS";
 const SPOOL_DIR: &str = "WHIO_SPOOL_DIR";
 const DEFAULT_MAX_PLAYBACK_SESSIONS: usize = 16;
-const UPSTREAM_CONNECTOR_CONNECT_TIMEOUT: &str = "WHIO_UPSTREAM_CONNECTOR_CONNECT_TIMEOUT_SECONDS";
-const UPSTREAM_CONNECTOR_TOTAL_TIMEOUT: &str = "WHIO_UPSTREAM_CONNECTOR_TOTAL_TIMEOUT_SECONDS";
 const YOUTUBE_MEDIA_SUFFIX: &str = "WHIO_YOUTUBE_MEDIA_SUFFIX";
 const ARTWORK_HOST_SUFFIXES: &str = "WHIO_ARTWORK_HOST_SUFFIXES";
 const SOURCE_TAGS: &str = "WHIO_SOURCE_TAGS";
@@ -36,7 +31,6 @@ pub(crate) struct Config {
     pub(crate) credential_key: secrets::CredentialKey,
     pub(crate) log_level: tracing::Level,
     pub(crate) youtube_resolver: YoutubeResolverConfig,
-    pub(crate) upstream_connector: UpstreamConnectorConfig,
     pub(crate) spool_dir: std::path::PathBuf,
     pub(crate) max_playback_sessions: usize,
     pub(crate) max_spool_bytes: u64,
@@ -48,16 +42,6 @@ pub(crate) struct Config {
 
 #[derive(Debug)]
 pub(crate) enum YoutubeResolverConfig {
-    Disabled,
-    Enabled {
-        url: Url,
-        connect_timeout: Duration,
-        total_timeout: Duration,
-    },
-}
-
-#[derive(Debug)]
-pub(crate) enum UpstreamConnectorConfig {
     Disabled,
     Enabled {
         url: Url,
@@ -205,52 +189,6 @@ impl Config {
             YoutubeResolverConfig::Disabled
         };
 
-        let upstream_connector = match vars.get(UPSTREAM_CONNECTOR_URL) {
-            None => UpstreamConnectorConfig::Disabled,
-            Some(raw_url) => {
-                let url = raw_url.parse::<Url>().map_err(|_| {
-                    invalid(
-                        UPSTREAM_CONNECTOR_URL,
-                        raw_url,
-                        "must be an absolute HTTP(S) URL",
-                    )
-                })?;
-
-                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-                    return Err(invalid(
-                        UPSTREAM_CONNECTOR_URL,
-                        raw_url,
-                        "must be an absolute HTTP(S) URL",
-                    ));
-                }
-
-                let connect_timeout = parse_timeout(
-                    vars,
-                    UPSTREAM_CONNECTOR_CONNECT_TIMEOUT,
-                    DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
-                )?;
-                let total_timeout = parse_timeout(
-                    vars,
-                    UPSTREAM_CONNECTOR_TOTAL_TIMEOUT,
-                    DEFAULT_UPSTREAM_TOTAL_TIMEOUT_SECONDS,
-                )?;
-
-                if total_timeout <= connect_timeout {
-                    return Err(invalid(
-                        UPSTREAM_CONNECTOR_TOTAL_TIMEOUT,
-                        &total_timeout.as_secs().to_string(),
-                        "must be greater than the connect timeout",
-                    ));
-                }
-
-                UpstreamConnectorConfig::Enabled {
-                    url,
-                    connect_timeout,
-                    total_timeout,
-                }
-            }
-        };
-
         let spool_dir = vars
             .get(SPOOL_DIR)
             .map(std::path::PathBuf::from)
@@ -332,7 +270,6 @@ impl Config {
             log_level,
             credential_key,
             youtube_resolver,
-            upstream_connector,
             spool_dir,
             max_playback_sessions,
             max_spool_bytes,
@@ -536,37 +473,6 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn upstream_connector_defaults_to_disabled() {
-        let config = parse_config(&[]).unwrap();
-        assert!(matches!(
-            config.upstream_connector,
-            UpstreamConnectorConfig::Disabled
-        ));
-    }
-
-    #[test]
-    fn upstream_connector_url_enables_with_sane_timeouts() {
-        let config = parse_config(&[(UPSTREAM_CONNECTOR_URL, "http://127.0.0.1:3001")]).unwrap();
-        assert!(matches!(
-            config.upstream_connector,
-            UpstreamConnectorConfig::Enabled { .. }
-        ));
-    }
-
-    #[test]
-    fn upstream_connector_rejects_non_http_urls_and_inverted_timeouts() {
-        assert!(parse_config(&[(UPSTREAM_CONNECTOR_URL, "music.example.test")]).is_err());
-        assert!(
-            parse_config(&[
-                (UPSTREAM_CONNECTOR_URL, "http://127.0.0.1:3001"),
-                (UPSTREAM_CONNECTOR_TOTAL_TIMEOUT, "1"),
-                (UPSTREAM_CONNECTOR_CONNECT_TIMEOUT, "2"),
-            ])
-            .is_err()
-        );
     }
 
     #[test]

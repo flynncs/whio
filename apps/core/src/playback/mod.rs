@@ -10,4 +10,4 @@ pub use ports::{PlaybackDelivery, PlaybackProvider};
 pub use service::{
     ArtworkLocation, DeliveryStrategy, PlaybackError, PlaybackService, ResolvedPlayback,
 };
-pub use source::{NavidromeSource, PlaybackSource, YoutubeSource};
+pub use source::{PlaybackSource, YoutubeSource};

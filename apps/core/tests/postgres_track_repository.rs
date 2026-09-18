@@ -200,15 +200,9 @@ async fn stored_track_round_trips_through_find_track(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires PostgreSQL"]
-async fn album_precedence_and_artwork_follow_the_owning_source(pool: PgPool) {
+async fn album_refreshes_within_a_provider_and_artwork_follows_its_source(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool.clone());
-    let fallback = source("precedence-source");
-    let upstream = SourceIdentity::new(
-        ProviderId::new("navidrome".to_owned()).unwrap(),
-        SourceScope::Named("test-installation".to_owned()),
-        "nd-precedence-source".to_owned(),
-    )
-    .unwrap();
+    let source = source("metadata-source");
 
     let with_album = |album: &str| {
         metadata("Song", &["Artist"], None)
@@ -216,55 +210,24 @@ async fn album_precedence_and_artwork_follow_the_owning_source(pool: PgPool) {
             .unwrap()
     };
 
-    // the fallback provider discovers the track first
     let track = repository
-        .get_or_create(fallback.clone(), with_album("Provisional"))
+        .get_or_create(source.clone(), with_album("Provisional"))
         .await
         .unwrap();
+    assert_eq!(track.album(), Some("Provisional"));
 
-    // correlation attaches the upstream source to the same track
-    sqlx::query(
-        r#"
-        INSERT INTO track_sources (id, track_id, provider_id, source_scope, external_id)
-        VALUES ($1, $2, $3, $4, $5)
-        "#,
-    )
-    .bind(Uuid::now_v7())
-    .bind(track.id().as_uuid())
-    .bind("navidrome")
-    .bind("named:test-installation")
-    .bind("nd-precedence-source")
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // the higher-precedence provider replaces the album
-    let merged = repository
-        .get_or_create(upstream.clone(), with_album("Authoritative"))
+    // the fresher observation from the same provider wins
+    let refreshed = repository
+        .get_or_create(source.clone(), with_album("Authoritative"))
         .await
         .unwrap();
-    assert_eq!(merged.id(), track.id());
-    assert_eq!(merged.album(), Some("Authoritative"));
+    assert_eq!(refreshed.id(), track.id());
+    assert_eq!(refreshed.album(), Some("Authoritative"));
 
-    // a later lower-precedence observation cannot clobber it
-    let merged = repository
-        .get_or_create(fallback.clone(), with_album("Wrong"))
-        .await
-        .unwrap();
-    assert_eq!(merged.album(), Some("Authoritative"));
-
-    // artwork resolves through the upstream source
     repository
         .set_source_artwork(
-            &fallback,
+            &source,
             &ArtworkRef::url("https://art.test/ytm.jpg".to_owned()).unwrap(),
-        )
-        .await
-        .unwrap();
-    repository
-        .set_source_artwork(
-            &upstream,
-            &ArtworkRef::upstream("cover-1".to_owned()).unwrap(),
         )
         .await
         .unwrap();
@@ -274,6 +237,9 @@ async fn album_precedence_and_artwork_follow_the_owning_source(pool: PgPool) {
         .await
         .unwrap()
         .expect("artwork is stored");
-    assert_eq!(owner.provider_id().as_str(), "navidrome");
-    assert_eq!(artwork, ArtworkRef::upstream("cover-1".to_owned()).unwrap());
+    assert_eq!(owner.provider_id().as_str(), "youtube_music");
+    assert_eq!(
+        artwork,
+        ArtworkRef::url("https://art.test/ytm.jpg".to_owned()).unwrap()
+    );
 }

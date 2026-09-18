@@ -58,9 +58,6 @@ subtle = "2"
 whio-resolver-api = { path = "../resolver-client-generated", default-features = false, features = [
     "rustls",
 ] }
-whio-navidrome-connector-api = { path = "../navidrome-connector-client-generated", default-features = false, features = [
-    "rustls",
-] }
 whio-subsonic-api = { path = "../subsonic-types-generated" }
 chrono = "0.4.45"
 url = "2.5.8"

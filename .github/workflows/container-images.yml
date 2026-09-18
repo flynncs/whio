@@ -23,9 +23,6 @@ jobs:
           - name: ytm-resolver
             image: whio-ytm-resolver
             dockerfile: docker/ytm-resolver.Dockerfile
-          - name: nd-connector
-            image: whio-nd-connector
-            dockerfile: docker/navidrome-connector.Dockerfile
 
     steps:
       - name: Check out source

@@ -252,15 +252,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        identity::{
-            secrets::CredentialKey,
-            upstream::{MemoryUpstreamLinkStore, UpstreamLinkStore},
-        },
         media::MediaFetchError,
         playback::{MediaMetadata, PlayableMedia, PlaybackUrl},
-        providers::{
-            NavidromeAdapter, UpstreamCandidate, UpstreamError, UpstreamTarget, UpstreamTransport,
-        },
         request::RequestId,
         tracks::{
             InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, Track, TrackMetadata,
@@ -394,29 +387,6 @@ mod tests {
         }
     }
 
-    struct StubTransport;
-
-    #[async_trait]
-    impl UpstreamTransport for StubTransport {
-        async fn search(
-            &self,
-            _target: &UpstreamTarget,
-            _search: &crate::catalogue::CatalogueSearch,
-            _context: &RequestContext,
-        ) -> Result<Vec<UpstreamCandidate>, UpstreamError> {
-            Ok(Vec::new())
-        }
-
-        async fn resolve(
-            &self,
-            _target: &UpstreamTarget,
-            _external_id: &str,
-            _context: &RequestContext,
-        ) -> Result<String, UpstreamError> {
-            Ok("https://music.example.test/audio".to_owned())
-        }
-    }
-
     fn global(external_id: &str) -> SourceIdentity {
         SourceIdentity::new(
             ProviderId::new("youtube_music".to_owned()).unwrap(),
@@ -533,33 +503,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_never_sends_a_named_source_to_the_fallback_resolver() {
-        let repository = Arc::new(InMemoryTrackRepository::default());
-        let named = SourceIdentity::new(
-            ProviderId::new("navidrome".to_owned()).unwrap(),
-            SourceScope::Named("server-1".to_owned()),
-            "song-1".to_owned(),
-        )
-        .unwrap();
-        let global = global("vid-1");
-        repository
-            .get_or_create(named, track_metadata("Upstream"))
-            .await
-            .unwrap();
-        let track_id = stored_track(&repository, global.clone()).await;
-        let (service, provider) = service(repository, vec![Ok(playable_media())]);
-
-        resolve_global(&service, &track_id, &context())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            provider.seen.lock().as_slice(),
-            &[PlaybackSource::from_identity(global).unwrap()]
-        );
-    }
-
-    #[tokio::test]
     async fn resolve_tries_the_next_global_source_after_a_failure() {
         let first = global("vid-1");
         let second = global("vid-2");
@@ -673,57 +616,5 @@ mod tests {
 
         assert!(matches!(result, Err(PlaybackError::TrackNotFound)));
         assert_eq!(*delivery.attempts.lock(), 0);
-    }
-
-    #[tokio::test]
-    async fn stream_marks_a_rejected_link_stale() {
-        let key =
-            CredentialKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
-        let user = Uuid::now_v7();
-        let server = Uuid::now_v7();
-        let store = Arc::new(MemoryUpstreamLinkStore::new());
-        store.insert_link(
-            &key,
-            user,
-            server,
-            "https://music.example.test",
-            "friend",
-            "password",
-        );
-        let adapter = NavidromeAdapter::new(
-            Arc::clone(&store) as Arc<dyn UpstreamLinkStore>,
-            key,
-            Arc::new(StubTransport),
-        );
-        let repository = Arc::new(InMemoryTrackRepository::default());
-        let track_id = repository
-            .get_or_create(
-                SourceIdentity::new(
-                    ProviderId::new("navidrome".to_owned()).unwrap(),
-                    SourceScope::Named(server.to_string()),
-                    "song-1".to_owned(),
-                )
-                .unwrap(),
-                track_metadata("Song"),
-            )
-            .await
-            .unwrap()
-            .id()
-            .clone();
-        let delivery = Arc::new(FakeDelivery::with_outcomes(vec![Err(
-            DeliveryError::UpstreamUnauthorized,
-        )]));
-        let service = PlaybackService::new(
-            repository,
-            vec![Arc::new(adapter) as Arc<dyn PlaybackProvider>],
-            Arc::clone(&delivery) as Arc<dyn PlaybackDelivery>,
-        );
-
-        let result = service
-            .stream(&track_id, Some(&user), &context(), None)
-            .await;
-
-        assert!(matches!(result, Err(PlaybackError::CredentialsStale)));
-        assert!(store.is_stale(&user, &server));
     }
 }

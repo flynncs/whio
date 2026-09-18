@@ -96,7 +96,6 @@ mod tests {
     use crate::{
         catalogue::{CatalogueCandidate, CatalogueProvider},
         providers::ProviderError,
-        providers::{NavidromeAdapter, UpstreamTransport},
         request::{RequestContext, RequestId},
         tracks::{InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata},
     };
@@ -201,7 +200,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_maps_tracks_sequences_sources_and_short_circuits_empty() {
+    async fn search_maps_tracks_and_short_circuits_empty() {
         let service = catalogue(vec![Ok(vec![candidate()])]);
         let children = search_songs(
             &service,
@@ -232,82 +231,6 @@ mod tests {
         .await
         .expect("search succeeds");
         assert!(children.is_empty());
-
-        use crate::identity::{
-            secrets::CredentialKey,
-            upstream::{MemoryUpstreamLinkStore, UpstreamLinkStore},
-        };
-        let key = CredentialKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-            .expect("valid key");
-        let user = Uuid::now_v7();
-        let store = MemoryUpstreamLinkStore::new();
-        store.insert_link(
-            &key,
-            user,
-            Uuid::now_v7(),
-            "https://music.example.test",
-            "friend",
-            "password",
-        );
-        let stub = Arc::new(StubCatalogue {
-            responses: Mutex::new(vec![Ok(vec![candidate()])].into()),
-        });
-        let catalogue = CatalogueService::with_providers(
-            Arc::new(InMemoryTrackRepository::default()),
-            vec![
-                Arc::new(NavidromeAdapter::new(
-                    Arc::new(store) as Arc<dyn UpstreamLinkStore>,
-                    key,
-                    Arc::new(StubUpstream) as Arc<dyn UpstreamTransport>,
-                )) as Arc<dyn CatalogueProvider>,
-                stub as Arc<dyn CatalogueProvider>,
-            ],
-        );
-        let children = search_songs(
-            &catalogue,
-            &context(),
-            Some(&user),
-            "song",
-            Some("10"),
-            None,
-            SourceTags::Off,
-        )
-        .await
-        .expect("linked search succeeds");
-        assert_eq!(children.len(), 2);
-        assert_eq!(children[0].title, "Upstream Song");
-        assert_eq!(children[1].title, "song");
-    }
-
-    struct StubUpstream;
-
-    #[async_trait]
-    impl UpstreamTransport for StubUpstream {
-        async fn search(
-            &self,
-            _target: &crate::providers::UpstreamTarget,
-            _search: &CatalogueSearch,
-            _context: &RequestContext,
-        ) -> Result<Vec<crate::providers::UpstreamCandidate>, crate::providers::UpstreamError>
-        {
-            Ok(vec![crate::providers::UpstreamCandidate {
-                external_id: "nd-1".to_owned(),
-                title: "Upstream Song".to_owned(),
-                artists: vec!["Artist".to_owned()],
-                duration_ms: Some(200_000),
-                album: None,
-                artwork_id: None,
-            }])
-        }
-
-        async fn resolve(
-            &self,
-            _target: &crate::providers::UpstreamTarget,
-            _external_id: &str,
-            _context: &RequestContext,
-        ) -> Result<String, crate::providers::UpstreamError> {
-            Err(crate::providers::UpstreamError::Unavailable)
-        }
     }
 
     #[tokio::test]
@@ -390,9 +313,9 @@ mod tests {
                 .expect("valid album"),
         );
         let source = SourceIdentity::new(
-            ProviderId::new("navidrome".to_owned()).expect("valid provider"),
-            SourceScope::Named("home-server".to_owned()),
-            "nd-1".to_owned(),
+            ProviderId::new("youtube_music".to_owned()).expect("valid provider"),
+            SourceScope::Global,
+            "vid-1".to_owned(),
         )
         .expect("valid source");
 
@@ -422,7 +345,7 @@ mod tests {
             child_from_hit(&hit, SourceTags::ArtistPrefix)
                 .artist
                 .as_deref(),
-            Some("[ND] artist, featured")
+            Some("[YTM] artist, featured")
         );
     }
 }

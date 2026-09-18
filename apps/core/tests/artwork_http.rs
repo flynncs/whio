@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 mod support;
 
-use async_trait::async_trait;
 use axum::{
-    body::{Body, to_bytes},
+    body::Body,
     http::{Request, StatusCode, header},
 };
 use base64::Engine;
@@ -15,64 +14,24 @@ use uuid::Uuid;
 use support::credentials::{MemoryCredentialStore, TEST_PASSWORD};
 use support::{NATIVE_AUTH_QUERY, delivery, router};
 use whio_core::{
-    catalogue::{CatalogueSearch, CatalogueService},
+    catalogue::CatalogueService,
     identity::{
         domain::{User, UserId},
         secrets::CredentialKey,
         service::CredentialService,
-        upstream::{MemoryUpstreamLinkStore, UpstreamLinkStore},
     },
-    playback::{PlaybackProvider, PlaybackService},
-    providers::{
-        NavidromeAdapter, UpstreamCandidate, UpstreamError, UpstreamTarget, UpstreamTransport,
-    },
-    request::RequestContext,
+    playback::PlaybackService,
     tracks::{
         ArtworkRef, InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope,
         TrackMetadata, TrackRepository,
     },
 };
 
-struct StubTransport {
-    artwork_url: String,
-}
-
-#[async_trait]
-impl UpstreamTransport for StubTransport {
-    async fn search(
-        &self,
-        _target: &UpstreamTarget,
-        _search: &CatalogueSearch,
-        _context: &RequestContext,
-    ) -> Result<Vec<UpstreamCandidate>, UpstreamError> {
-        Ok(Vec::new())
-    }
-
-    async fn resolve(
-        &self,
-        _target: &UpstreamTarget,
-        _external_id: &str,
-        _context: &RequestContext,
-    ) -> Result<String, UpstreamError> {
-        Err(UpstreamError::Unavailable)
-    }
-
-    async fn resolve_artwork(
-        &self,
-        _target: &UpstreamTarget,
-        _artwork_id: &str,
-        _context: &RequestContext,
-    ) -> Result<String, UpstreamError> {
-        Ok(self.artwork_url.clone())
-    }
-}
-
 fn credential_key() -> CredentialKey {
     CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).expect("valid test key")
 }
 
-/// one user whose credentials match `NATIVE_AUTH_QUERY`, returned with its id so
-/// upstream links can be registered against the same user.
+/// one user whose credentials match `NATIVE_AUTH_QUERY`.
 fn credentials() -> (Arc<CredentialService>, Uuid, CredentialKey) {
     let key = credential_key();
     let store = Arc::new(MemoryCredentialStore::new());
@@ -109,59 +68,8 @@ async fn image_server(bytes: &'static [u8]) -> String {
     format!("http://{address}")
 }
 
-/// a registered Navidrome source whose adapter resolves artwork to the local
-/// image server. registered-origin artwork is validated against that origin, so
-/// this exercises the whole path without needing an allowed public host.
-async fn upstream_app(base: &str) -> (axum::Router, String) {
-    let (credential, user, key) = credentials();
-
-    let repository = Arc::new(InMemoryTrackRepository::default());
-    let server_id = Uuid::now_v7();
-    let links = Arc::new(MemoryUpstreamLinkStore::new());
-    links.insert_link(&key, user, server_id, base, "friend", "password");
-
-    let adapter = NavidromeAdapter::new(
-        Arc::clone(&links) as Arc<dyn UpstreamLinkStore>,
-        key,
-        Arc::new(StubTransport {
-            artwork_url: format!("{base}/cover.jpg"),
-        }),
-    );
-
-    let source = SourceIdentity::new(
-        ProviderId::new("navidrome".to_owned()).unwrap(),
-        SourceScope::Named(server_id.to_string()),
-        "song-1".to_owned(),
-    )
-    .unwrap();
-    let track = repository
-        .get_or_create(source.clone(), metadata())
-        .await
-        .unwrap();
-    repository
-        .set_source_artwork(
-            &source,
-            &ArtworkRef::upstream("cover-1".to_owned()).unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let catalogue = Arc::new(CatalogueService::new(
-        Arc::clone(&repository) as Arc<dyn TrackRepository>
-    ));
-    let playback = Arc::new(PlaybackService::new(
-        repository,
-        vec![Arc::new(adapter) as Arc<dyn PlaybackProvider>],
-        delivery(),
-    ));
-
-    (
-        router(credential, catalogue, playback),
-        track.id().to_string(),
-    )
-}
-
-/// a global (public-URL) source with no provider behind it.
+/// a global (public-URL) source, which is what provider-supplied artwork is
+/// today: the reference is a URL core fetches under the allowlist.
 async fn public_app(url: &str) -> (axum::Router, String) {
     let (credential, _user, _key) = credentials();
     let repository = Arc::new(InMemoryTrackRepository::default());
@@ -204,22 +112,9 @@ fn artwork_request(track_id: &str) -> Request<Body> {
 }
 
 #[tokio::test]
-async fn registered_artwork_is_resolved_fetched_and_served() {
-    let base = image_server(b"cover-bytes").await;
-    let (app, track_id) = upstream_app(&base).await;
-
-    let response = app.oneshot(artwork_request(&track_id)).await.unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
-    let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
-    assert_eq!(&bytes[..], b"cover-bytes");
-}
-
-#[tokio::test]
 async fn unknown_and_malformed_track_ids_do_not_serve_artwork() {
     let base = image_server(b"cover-bytes").await;
-    let (app, _track_id) = upstream_app(&base).await;
+    let (app, _track_id) = public_app(&format!("{base}/cover.jpg")).await;
 
     let response = app
         .clone()

@@ -192,7 +192,7 @@ fn merged_album(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracks::{ProviderKind, SourceScope, TrackMetadata};
+    use crate::tracks::{SourceScope, TrackMetadata};
 
     fn source(provider: &str, external_id: &str) -> SourceIdentity {
         SourceIdentity::new(
@@ -309,66 +309,20 @@ mod tests {
         assert_eq!(stored.album(), Some("Corrected"));
     }
 
-    #[test]
-    fn album_merge_follows_provider_precedence() {
-        let upstream = ProviderId::new("navidrome".to_owned()).unwrap();
-        let fallback = ProviderId::new("youtube_music".to_owned()).unwrap();
-
-        let entry = |album_source: &str| TrackEntry {
-            track: Track::new(
-                TrackId::new(),
-                metadata("Song")
-                    .with_album(Some("Authoritative".to_owned()))
-                    .unwrap(),
-            ),
-            sources: vec![],
-            album_source: Some(album_source.to_owned()),
-        };
-
-        // a lower-precedence provider keeps the stored album
-        let merged = merged_album(&fallback, Some("Wrong"), &entry("navidrome"));
-        assert_eq!(merged.value, Some("Authoritative".to_owned()));
-        assert!(!merged.changed);
-
-        // a higher-precedence provider replaces it
-        let merged = merged_album(&upstream, Some("Remastered"), &entry("youtube_music"));
-        assert_eq!(merged.value, Some("Remastered".to_owned()));
-        assert!(merged.changed);
-    }
-
     #[tokio::test]
-    async fn artwork_resolves_by_source_precedence() {
+    async fn artwork_resolves_from_the_source_that_stored_it() {
         let repository = InMemoryTrackRepository::default();
-        let upstream = source("navidrome", "song-1");
-        let fallback = source("youtube_music", "vid-1");
+        let source = source("youtube_music", "vid-1");
 
         let track = repository
-            .get_or_create(upstream.clone(), metadata("Song"))
+            .get_or_create(source.clone(), metadata("Song"))
             .await
             .unwrap();
 
-        // a track grows sources through correlation; the test attaches one
-        // directly so both artwork tiers are present.
-        {
-            let mut indexes = repository.indexes.lock().unwrap();
-            let entry = indexes
-                .by_track_id
-                .get_mut(track.id())
-                .expect("track is indexed");
-            entry.sources.push(fallback.clone());
-        }
-
         repository
             .set_source_artwork(
-                &fallback,
+                &source,
                 &ArtworkRef::url("https://art.test/ytm.jpg".to_owned()).unwrap(),
-            )
-            .await
-            .unwrap();
-        repository
-            .set_source_artwork(
-                &upstream,
-                &ArtworkRef::upstream("cover-1".to_owned()).unwrap(),
             )
             .await
             .unwrap();
@@ -378,7 +332,10 @@ mod tests {
             .await
             .unwrap()
             .expect("artwork is stored");
-        assert_eq!(owner.provider_id().kind(), Some(ProviderKind::Navidrome));
-        assert_eq!(artwork, ArtworkRef::upstream("cover-1".to_owned()).unwrap());
+        assert_eq!(owner.provider_id().as_str(), "youtube_music");
+        assert_eq!(
+            artwork,
+            ArtworkRef::url("https://art.test/ytm.jpg".to_owned()).unwrap()
+        );
     }
 }

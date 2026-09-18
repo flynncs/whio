@@ -311,10 +311,6 @@ mod tests {
     use super::*;
     use crate::{
         catalogue::{CatalogueCandidate, SearchLimit, SearchOffset, SearchQuery},
-        identity::{secrets::CredentialKey, upstream::MemoryUpstreamLinkStore},
-        providers::{
-            NavidromeAdapter, UpstreamCandidate, UpstreamError, UpstreamTarget, UpstreamTransport,
-        },
         request::RequestId,
         tracks::{InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata},
     };
@@ -425,69 +421,6 @@ mod tests {
 
     fn provider(stub: impl CatalogueProvider + 'static) -> Arc<dyn CatalogueProvider> {
         Arc::new(stub) as Arc<dyn CatalogueProvider>
-    }
-
-    type StubResult = Result<Vec<UpstreamCandidate>, UpstreamError>;
-
-    struct StubTransport {
-        response: Mutex<StubResult>,
-    }
-
-    #[async_trait]
-    impl UpstreamTransport for StubTransport {
-        async fn search(
-            &self,
-            _target: &UpstreamTarget,
-            _search: &CatalogueSearch,
-            _context: &RequestContext,
-        ) -> StubResult {
-            std::mem::replace(&mut *self.response.lock(), Err(UpstreamError::Unavailable))
-        }
-
-        async fn resolve(
-            &self,
-            _target: &UpstreamTarget,
-            _external_id: &str,
-            _context: &RequestContext,
-        ) -> Result<String, UpstreamError> {
-            Err(UpstreamError::Unavailable)
-        }
-    }
-
-    fn upstream_candidate() -> UpstreamCandidate {
-        UpstreamCandidate {
-            external_id: "song-1".to_owned(),
-            title: "Upstream Song".to_owned(),
-            artists: vec!["Artist".to_owned()],
-            duration_ms: Some(200_000),
-            album: None,
-            artwork_id: None,
-        }
-    }
-
-    fn linked(password: &str) -> (CredentialKey, Uuid, Uuid, MemoryUpstreamLinkStore) {
-        let key =
-            CredentialKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
-        let user = Uuid::now_v7();
-        let server = Uuid::now_v7();
-        let store = MemoryUpstreamLinkStore::new();
-        store.insert_link(
-            &key,
-            user,
-            server,
-            "https://music.example.test",
-            "friend",
-            password,
-        );
-        (key, user, server, store)
-    }
-
-    fn navidrome(
-        transport: StubTransport,
-        key: CredentialKey,
-        store: Arc<MemoryUpstreamLinkStore>,
-    ) -> NavidromeAdapter {
-        NavidromeAdapter::new(store, key, Arc::new(transport))
     }
 
     struct HangingProvider;
@@ -644,24 +577,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Preferred", "Fallback"]
         );
-
-        let (key, user, _server, store) = linked("password");
-        let upstream = navidrome(
-            StubTransport {
-                response: Mutex::new(Ok(vec![upstream_candidate()])),
-            },
-            key,
-            Arc::new(store),
-        );
-        let fallback = StubProvider::new(vec![Ok(vec![candidate("vid-1", "Fallback")])]);
-        let catalogue = service(vec![provider(upstream), provider(fallback)]);
-        let outcome = catalogue
-            .search(&search(), Some(&user), &context())
-            .await
-            .unwrap();
-        assert_eq!(outcome.hits.len(), 2);
-        assert_eq!(outcome.hits[0].track().title(), "Upstream Song");
-        assert_eq!(outcome.hits[1].track().title(), "Fallback");
     }
 
     #[tokio::test]
@@ -692,43 +607,6 @@ mod tests {
             result,
             Err(CatalogueError::Provider(ProviderError::Access))
         ));
-    }
-
-    #[tokio::test]
-    async fn stale_credentials_are_reported_and_marked() {
-        let (key, user, server, store) = linked("password");
-        let store = Arc::new(store);
-        let adapter = navidrome(
-            StubTransport {
-                response: Mutex::new(Err(UpstreamError::Auth)),
-            },
-            key,
-            Arc::clone(&store),
-        );
-        let error = adapter
-            .search(&search(), Some(&user), &context())
-            .await
-            .unwrap_err();
-        assert!(matches!(error, ProviderError::CredentialsRejected));
-        assert!(store.is_stale(&user, &server));
-
-        let (key, user, server, store) = linked("password");
-        let store = Arc::new(store);
-        let upstream = navidrome(
-            StubTransport {
-                response: Mutex::new(Err(UpstreamError::Auth)),
-            },
-            key,
-            Arc::clone(&store),
-        );
-        let fallback = StubProvider::new(vec![Ok(vec![candidate("vid-1", "Fallback")])]);
-        let catalogue = service(vec![provider(upstream), provider(fallback)]);
-        let outcome = catalogue
-            .search(&search(), Some(&user), &context())
-            .await
-            .unwrap();
-        assert_eq!(outcome.hits.len(), 1);
-        assert!(store.is_stale(&user, &server));
     }
 
     #[tokio::test]

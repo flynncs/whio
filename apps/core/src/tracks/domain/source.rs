@@ -56,7 +56,6 @@ impl ProviderId {
 
     pub fn kind(&self) -> Option<ProviderKind> {
         match self.as_str() {
-            "navidrome" => Some(ProviderKind::Navidrome),
             "youtube_music" => Some(ProviderKind::YoutubeMusic),
             _ => None,
         }
@@ -70,7 +69,6 @@ impl ProviderId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
-    Navidrome,
     YoutubeMusic,
 }
 
@@ -79,8 +77,7 @@ impl ProviderKind {
     /// several providers.
     pub fn precedence(self) -> u8 {
         match self {
-            Self::Navidrome => 0,
-            Self::YoutubeMusic => 1,
+            Self::YoutubeMusic => 0,
         }
     }
 }
