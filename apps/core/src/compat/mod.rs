@@ -1,5 +1,8 @@
 pub(crate) mod navidrome;
+mod source_tags;
 pub(crate) mod subsonic;
+
+pub use source_tags::SourceTags;
 
 use axum::{
     body::Body,

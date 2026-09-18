@@ -210,6 +210,53 @@ async fn song_list_returns_mapped_tracks_for_a_login_token() {
 }
 
 #[tokio::test]
+async fn source_tags_label_the_artist_in_both_song_surfaces() {
+    use support::{router_with_source_tags, services};
+    use whio_core::{
+        catalogue::CatalogueCandidate,
+        compat::SourceTags,
+        tracks::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+    };
+
+    let (service, secret) = credential_service_with_known_app_password();
+    let candidate = CatalogueCandidate::new(
+        SourceIdentity::new(
+            ProviderId::new("youtube_music".to_owned()).expect("valid provider"),
+            SourceScope::Global,
+            "vid-1".to_owned(),
+        )
+        .expect("valid source"),
+        TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
+            .expect("valid metadata"),
+    );
+    let (catalogue, playback) = services(vec![Ok(vec![candidate.clone()]), Ok(vec![candidate])]);
+    let app = router_with_source_tags(service, catalogue, playback, SourceTags::ArtistPrefix);
+    let (_, login) = post_login(app.clone(), "flynn", &secret).await;
+    let token = login["token"].as_str().unwrap();
+
+    let (status, _, body) = get_authed(
+        app.clone(),
+        "/compat/navidrome/api/song?title=song&_start=0&_end=9",
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["artist"], json!("[YTM] artist"));
+
+    let search = get(
+        app,
+        &format!(
+            "/compat/subsonic/rest/search3.view?u=flynn&v=1.16.1&c=test-client&p={secret}&query=song"
+        ),
+    )
+    .await;
+    assert_eq!(
+        search["subsonic-response"]["searchResult3"]["song"][0]["artist"],
+        json!("[YTM] artist")
+    );
+}
+
+#[tokio::test]
 async fn song_detail_returns_the_searched_song() {
     use support::services;
     use whio_core::{

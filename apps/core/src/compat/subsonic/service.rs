@@ -3,10 +3,11 @@ use whio_subsonic_api::models;
 
 use crate::{
     catalogue::{
-        CatalogueError, CatalogueSearch, CatalogueService, SearchLimit, SearchOffset, SearchQuery,
+        CatalogueError, CatalogueSearch, CatalogueService, SearchHit, SearchLimit, SearchOffset,
+        SearchQuery,
     },
+    compat::SourceTags,
     request::RequestContext,
-    tracks::Track,
 };
 
 #[derive(Debug, Error)]
@@ -18,12 +19,14 @@ pub(crate) enum SearchError {
     Catalogue(#[source] CatalogueError),
 }
 
-pub(crate) fn child_from_track(track: &Track) -> models::Child {
+pub(crate) fn child_from_hit(hit: &SearchHit, tags: SourceTags) -> models::Child {
+    let track = hit.track();
+
     models::Child {
         id: track.id().to_string(),
         title: track.title().to_owned(),
         is_dir: false,
-        artist: Some(track.artists().join(", ")),
+        artist: Some(tags.artist(track.artists(), hit.sources())),
         album: track.album().map(str::to_owned),
         cover_art: Some(track.id().to_string()),
         duration: track.duration_ms().map(|ms| (ms / 1000) as i32),
@@ -40,6 +43,7 @@ pub(crate) async fn search_songs(
     query: &str,
     count: Option<&str>,
     offset: Option<&str>,
+    tags: SourceTags,
 ) -> Result<Vec<models::Child>, SearchError> {
     if query.is_empty() {
         return Ok(Vec::new());
@@ -76,7 +80,13 @@ pub(crate) async fn search_songs(
     catalogue
         .search(&search, user, context)
         .await
-        .map(|outcome| outcome.tracks.iter().map(child_from_track).collect())
+        .map(|outcome| {
+            outcome
+                .hits
+                .iter()
+                .map(|hit| child_from_hit(hit, tags))
+                .collect()
+        })
         .map_err(SearchError::Catalogue)
 }
 
@@ -193,18 +203,34 @@ mod tests {
     #[tokio::test]
     async fn search_maps_tracks_sequences_sources_and_short_circuits_empty() {
         let service = catalogue(vec![Ok(vec![candidate()])]);
-        let children = search_songs(&service, &context(), None, "song", Some("10"), None)
-            .await
-            .expect("search succeeds");
+        let children = search_songs(
+            &service,
+            &context(),
+            None,
+            "song",
+            Some("10"),
+            None,
+            SourceTags::Off,
+        )
+        .await
+        .expect("search succeeds");
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].title, "song");
         assert_eq!(children[0].artist.as_deref(), Some("artist"));
         assert_eq!(children[0].duration, Some(200));
         assert!(!children[0].id.is_empty());
 
-        let children = search_songs(&catalogue(vec![]), &context(), None, "", None, None)
-            .await
-            .expect("search succeeds");
+        let children = search_songs(
+            &catalogue(vec![]),
+            &context(),
+            None,
+            "",
+            None,
+            None,
+            SourceTags::Off,
+        )
+        .await
+        .expect("search succeeds");
         assert!(children.is_empty());
 
         use crate::identity::{
@@ -244,6 +270,7 @@ mod tests {
             "song",
             Some("10"),
             None,
+            SourceTags::Off,
         )
         .await
         .expect("linked search succeeds");
@@ -292,6 +319,7 @@ mod tests {
             "song",
             Some("many"),
             None,
+            SourceTags::Off,
         )
         .await;
         assert!(matches!(result, Err(SearchError::InvalidSearch)));
@@ -303,6 +331,7 @@ mod tests {
             "song",
             None,
             Some("1001"),
+            SourceTags::Off,
         )
         .await;
         assert!(matches!(result, Err(SearchError::InvalidSearch)));
@@ -314,9 +343,17 @@ mod tests {
             count: &str,
             offset: &str,
         ) -> Vec<whio_subsonic_api::models::Child> {
-            search_songs(catalogue, context, None, "song", Some(count), Some(offset))
-                .await
-                .expect("page succeeds")
+            search_songs(
+                catalogue,
+                context,
+                None,
+                "song",
+                Some(count),
+                Some(offset),
+                SourceTags::Off,
+            )
+            .await
+            .expect("page succeeds")
         }
         let context = context();
         let first = songs(&service, &context, "10", "0").await;
@@ -330,26 +367,62 @@ mod tests {
         assert!(bounded.is_empty());
 
         let service = paged_catalogue(25);
-        let songs = search_songs(&service, &context, None, "song", Some("100"), None)
-            .await
-            .expect("search succeeds");
+        let songs = search_songs(
+            &service,
+            &context,
+            None,
+            "song",
+            Some("100"),
+            None,
+            SourceTags::Off,
+        )
+        .await
+        .expect("search succeeds");
         assert_eq!(songs.len(), 25);
     }
 
-    #[test]
-    fn child_carries_album_and_cover_art() {
+    fn hit(artists: Vec<String>) -> SearchHit {
         let track = crate::tracks::Track::new(
             crate::tracks::TrackId::new(),
-            TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
+            TrackMetadata::new("song".to_owned(), artists, Some(200_000))
                 .expect("valid metadata")
                 .with_album(Some("album".to_owned()))
                 .expect("valid album"),
         );
-        let id = track.id().to_string();
+        let source = SourceIdentity::new(
+            ProviderId::new("navidrome".to_owned()).expect("valid provider"),
+            SourceScope::Named("home-server".to_owned()),
+            "nd-1".to_owned(),
+        )
+        .expect("valid source");
 
-        let child = child_from_track(&track);
+        SearchHit::new(track, vec![source])
+    }
+
+    #[test]
+    fn child_carries_album_and_cover_art() {
+        let hit = hit(vec!["artist".to_owned()]);
+        let id = hit.track().id().to_string();
+
+        let child = child_from_hit(&hit, SourceTags::Off);
 
         assert_eq!(child.album.as_deref(), Some("album"));
         assert_eq!(child.cover_art.as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn child_tags_the_artist_only_when_configured() {
+        let hit = hit(vec!["artist".to_owned(), "featured".to_owned()]);
+
+        assert_eq!(
+            child_from_hit(&hit, SourceTags::Off).artist.as_deref(),
+            Some("artist, featured")
+        );
+        assert_eq!(
+            child_from_hit(&hit, SourceTags::ArtistPrefix)
+                .artist
+                .as_deref(),
+            Some("[ND] artist, featured")
+        );
     }
 }

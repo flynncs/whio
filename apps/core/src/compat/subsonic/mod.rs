@@ -112,6 +112,7 @@ pub(crate) async fn search3(
         q,
         query.get("songCount"),
         query.get("songOffset"),
+        state.source_tags(),
     )
     .await
     {

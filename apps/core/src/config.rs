@@ -1,6 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use reqwest::Url;
+use whio_core::compat::SourceTags;
 use whio_core::identity::secrets;
 
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:3000";
@@ -24,6 +25,7 @@ const UPSTREAM_CONNECTOR_CONNECT_TIMEOUT: &str = "WHIO_UPSTREAM_CONNECTOR_CONNEC
 const UPSTREAM_CONNECTOR_TOTAL_TIMEOUT: &str = "WHIO_UPSTREAM_CONNECTOR_TOTAL_TIMEOUT_SECONDS";
 const YOUTUBE_MEDIA_SUFFIX: &str = "WHIO_YOUTUBE_MEDIA_SUFFIX";
 const ARTWORK_HOST_SUFFIXES: &str = "WHIO_ARTWORK_HOST_SUFFIXES";
+const SOURCE_TAGS: &str = "WHIO_SOURCE_TAGS";
 
 const DEFAULT_YOUTUBE_MEDIA_SUFFIX: &str = whio_core::media::DEFAULT_YOUTUBE_MEDIA_SUFFIX;
 
@@ -41,6 +43,7 @@ pub(crate) struct Config {
     pub(crate) spool_budget_bytes: u64,
     pub(crate) youtube_media_suffix: String,
     pub(crate) artwork_host_suffixes: Vec<String>,
+    pub(crate) source_tags: SourceTags,
 }
 
 #[derive(Debug)]
@@ -317,6 +320,12 @@ impl Config {
             ARTWORK_HOST_SUFFIXES,
         )?;
 
+        let source_tags = match vars.get(SOURCE_TAGS) {
+            None => SourceTags::Off,
+            Some(raw) => SourceTags::parse(raw)
+                .ok_or_else(|| invalid(SOURCE_TAGS, raw, "must be `off` or `artist`"))?,
+        };
+
         Ok(Self {
             bind_address,
             database_url: database_raw.to_owned(),
@@ -330,6 +339,7 @@ impl Config {
             spool_budget_bytes,
             youtube_media_suffix,
             artwork_host_suffixes,
+            source_tags,
         })
     }
 }
@@ -420,6 +430,29 @@ mod tests {
             parse_config(&[(ARTWORK_HOST_SUFFIXES, " , ")]),
             Err(ConfigError::Invalid {
                 name: ARTWORK_HOST_SUFFIXES,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn source_tags_default_off_and_reject_unknown_placements() {
+        assert_eq!(parse_config(&[]).unwrap().source_tags, SourceTags::Off);
+        assert_eq!(
+            parse_config(&[(SOURCE_TAGS, "artist")])
+                .unwrap()
+                .source_tags,
+            SourceTags::ArtistPrefix
+        );
+        assert_eq!(
+            parse_config(&[(SOURCE_TAGS, " off ")]).unwrap().source_tags,
+            SourceTags::Off
+        );
+
+        assert!(matches!(
+            parse_config(&[(SOURCE_TAGS, "album")]),
+            Err(ConfigError::Invalid {
+                name: SOURCE_TAGS,
                 ..
             })
         ));

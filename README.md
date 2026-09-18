@@ -38,6 +38,7 @@ don't edit `apps/resolver-client-generated/` or
 - `WHIO_SPOOL_DIR`: defaults to the system temp dir. stale `whio-*.part` files are purged at startup
 - `WHIO_YOUTUBE_MEDIA_SUFFIX`: defaults to `googlevideo.com`. host suffix accepted for resolved YouTube media
 - `WHIO_ARTWORK_HOST_SUFFIXES`: comma-separated, defaults to `googleusercontent.com,ytimg.com`. public artwork hosts core will fetch and proxy
+- `WHIO_SOURCE_TAGS`: defaults to `off`. `artist` prefixes each search result's artist with the provider it came from (`[ND]`, `[YTM]`). display only, and nothing is stored
 
 local compose sets everything except the credential key, which lives in a
 gitignored `.env` next to the compose files (`openssl rand -base64 32`).

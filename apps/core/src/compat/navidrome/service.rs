@@ -4,9 +4,10 @@ use crate::{
     catalogue::{
         CatalogueError, CatalogueSearch, CatalogueService, SearchLimit, SearchOffset, SearchQuery,
     },
+    compat::SourceTags,
     identity::service::{AuthError, CredentialService},
     request::RequestContext,
-    tracks::{Track, TrackId},
+    tracks::{SourceIdentity, Track, TrackId},
 };
 
 use super::{
@@ -32,19 +33,17 @@ pub(crate) enum SongError {
     Catalogue(#[source] CatalogueError),
 }
 
-impl From<Track> for Song {
-    fn from(track: Track) -> Self {
-        Self {
-            id: track.id().to_string(),
-            title: track.title().to_owned(),
-            artist: track.artists().join(", "),
-            album: track.album().map(str::to_owned),
-            cover_art: Some(track.id().to_string()),
-            duration: track
-                .duration_ms()
-                .map(|ms| ms as f32 / 1000.0)
-                .unwrap_or(0.0),
-        }
+fn song_from(track: &Track, sources: &[SourceIdentity], tags: SourceTags) -> Song {
+    Song {
+        id: track.id().to_string(),
+        title: track.title().to_owned(),
+        artist: tags.artist(track.artists(), sources),
+        album: track.album().map(str::to_owned),
+        cover_art: Some(track.id().to_string()),
+        duration: track
+            .duration_ms()
+            .map(|ms| ms as f32 / 1000.0)
+            .unwrap_or(0.0),
     }
 }
 
@@ -54,6 +53,7 @@ pub(crate) async fn search_songs(
     context: &RequestContext,
     token: &str,
     query: &SongListQuery,
+    tags: SourceTags,
 ) -> Result<Vec<Song>, SongError> {
     let user_id = match session::authorize(credential, token).await {
         Ok(Some(user_id)) => user_id,
@@ -89,7 +89,11 @@ pub(crate) async fn search_songs(
         .await
         .map_err(SongError::Catalogue)?;
 
-    Ok(outcome.tracks.into_iter().map(Song::from).collect())
+    Ok(outcome
+        .hits
+        .iter()
+        .map(|hit| song_from(hit.track(), hit.sources(), tags))
+        .collect())
 }
 
 pub(crate) async fn song_detail(
@@ -97,6 +101,7 @@ pub(crate) async fn song_detail(
     credential: &CredentialService,
     raw_id: &str,
     token: &str,
+    tags: SourceTags,
 ) -> Result<Song, SongError> {
     match session::authorize(credential, token).await {
         Ok(Some(_)) => {}
@@ -105,12 +110,17 @@ pub(crate) async fn song_detail(
     }
 
     let track_id: TrackId = raw_id.parse().map_err(|_| SongError::NotFound)?;
-    catalogue
+    let track = catalogue
         .track(&track_id)
         .await
         .map_err(SongError::Catalogue)?
-        .map(Song::from)
-        .ok_or(SongError::NotFound)
+        .ok_or(SongError::NotFound)?;
+    let sources = catalogue
+        .sources(&track_id)
+        .await
+        .map_err(SongError::Catalogue)?;
+
+    Ok(song_from(&track, &sources, tags))
 }
 
 #[cfg(test)]
@@ -325,6 +335,7 @@ mod tests {
             &context(),
             "forged",
             &query(None, None, None),
+            SourceTags::Off,
         )
         .await;
         assert!(matches!(result, Err(SongError::Unauthorized)));
@@ -334,6 +345,7 @@ mod tests {
             &auth.service,
             &TrackId::new().to_string(),
             "forged",
+            SourceTags::Off,
         )
         .await;
         assert!(matches!(result, Err(SongError::Unauthorized)));
@@ -345,6 +357,7 @@ mod tests {
             &context(),
             &dead,
             &query(Some("song"), None, None),
+            SourceTags::Off,
         )
         .await;
         assert!(matches!(result, Err(SongError::Unauthorized)));
@@ -359,6 +372,7 @@ mod tests {
             &context(),
             &auth.token,
             &query(None, None, None),
+            SourceTags::Off,
         )
         .await;
         assert!(matches!(result, Ok(songs) if songs.is_empty()));
@@ -369,6 +383,7 @@ mod tests {
             &context(),
             &auth.token,
             &query(Some("song"), Some(0), Some(9)),
+            SourceTags::Off,
         )
         .await
         .expect("search succeeds");
@@ -384,6 +399,7 @@ mod tests {
             &context(),
             &auth.token,
             &query(Some("song"), Some(0), Some(100)),
+            SourceTags::Off,
         )
         .await
         .expect("search succeeds");
@@ -399,6 +415,7 @@ mod tests {
             &context(),
             &auth.token,
             &query(Some("song"), Some(1_001), Some(1_010)),
+            SourceTags::Off,
         )
         .await;
         assert!(matches!(result, Err(SongError::InvalidSearch)));
@@ -417,6 +434,7 @@ mod tests {
                 context,
                 &auth.token,
                 &query(Some("song"), Some(start), Some(end)),
+                SourceTags::Off,
             )
             .await
             .expect("page succeeds")
@@ -451,12 +469,19 @@ mod tests {
             &context(),
             &auth.token,
             &query(Some("song"), Some(0), Some(9)),
+            SourceTags::Off,
         )
         .await
         .expect("search succeeds");
-        let song = song_detail(&catalogue, &auth.service, &songs[0].id, &auth.token)
-            .await
-            .expect("detail succeeds");
+        let song = song_detail(
+            &catalogue,
+            &auth.service,
+            &songs[0].id,
+            &auth.token,
+            SourceTags::Off,
+        )
+        .await
+        .expect("detail succeeds");
         assert_eq!(song.id, songs[0].id);
         assert_eq!(song.title, "song");
         assert_eq!(song.artist, "a, b");
@@ -467,11 +492,19 @@ mod tests {
             &auth.service,
             &TrackId::new().to_string(),
             &auth.token,
+            SourceTags::Off,
         )
         .await;
         assert!(matches!(result, Err(SongError::NotFound)));
 
-        let result = song_detail(&catalogue, &auth.service, "not-a-uuid", &auth.token).await;
+        let result = song_detail(
+            &catalogue,
+            &auth.service,
+            "not-a-uuid",
+            &auth.token,
+            SourceTags::Off,
+        )
+        .await;
         assert!(matches!(result, Err(SongError::NotFound)));
     }
 
@@ -552,6 +585,7 @@ mod tests {
             &context(),
             &auth.token,
             &query(Some("song"), None, None),
+            SourceTags::Off,
         )
         .await
         .expect("linked search succeeds");
@@ -576,7 +610,7 @@ mod tests {
         );
         let id = track.id().to_string();
 
-        let song = Song::from(track);
+        let song = song_from(&track, &[], SourceTags::Off);
 
         assert_eq!(song.title, "title");
         assert_eq!(song.artist, "a, b");

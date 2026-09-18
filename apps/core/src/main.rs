@@ -143,6 +143,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
 
     Ok(
         AppState::with_database(credential, catalogue, playback, database)
-            .with_artwork_host_suffixes(config.artwork_host_suffixes.clone()),
+            .with_artwork_host_suffixes(config.artwork_host_suffixes.clone())
+            .with_source_tags(config.source_tags),
     )
 }

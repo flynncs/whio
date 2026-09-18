@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use uuid::Uuid;
 
 use thiserror::Error;
@@ -11,7 +11,7 @@ use crate::{
     },
     providers::ProviderError,
     request::RequestContext,
-    tracks::{Track, TrackId, TrackRepository, TrackRepositoryError},
+    tracks::{SourceIdentity, Track, TrackId, TrackRepository, TrackRepositoryError},
 };
 
 #[derive(Debug, Error)]
@@ -29,7 +29,44 @@ pub struct CatalogueService {
 }
 
 pub struct SearchOutcome {
-    pub tracks: Vec<Track>,
+    pub hits: Vec<SearchHit>,
+}
+
+/// a matched track with the sources that returned it. provenance is observed
+/// per search, not stored on the track, so the same track can be reached
+/// through several providers without either one owning it.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    track: Track,
+    sources: Vec<SourceIdentity>,
+}
+
+impl SearchHit {
+    pub fn new(track: Track, sources: Vec<SourceIdentity>) -> Self {
+        Self { track, sources }
+    }
+
+    pub fn track(&self) -> &Track {
+        &self.track
+    }
+
+    pub fn into_track(self) -> Track {
+        self.track
+    }
+
+    pub fn sources(&self) -> &[SourceIdentity] {
+        &self.sources
+    }
+
+    /// keeps first-seen source order, which is the order the providers were
+    /// queried in.
+    fn merge(&mut self, other: SearchHit) {
+        for source in other.sources {
+            if !self.sources.contains(&source) {
+                self.sources.push(source);
+            }
+        }
+    }
 }
 
 impl CatalogueService {
@@ -57,15 +94,24 @@ impl CatalogueService {
             .map_err(CatalogueError::Repository)
     }
 
+    /// every source observed for one track, for facades that render a track
+    /// outside a search result.
+    pub async fn sources(&self, track_id: &TrackId) -> Result<Vec<SourceIdentity>, CatalogueError> {
+        self.track_repository
+            .find_sources(track_id)
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
     pub async fn search(
         &self,
         search: &CatalogueSearch,
         user: Option<&Uuid>,
         context: &RequestContext,
     ) -> Result<SearchOutcome, CatalogueError> {
-        let (tracks, first_error, any_success) =
+        let (hits, first_error, any_success) =
             self.fan_out(search, user, context, PROVIDER_BUDGET).await;
-        Self::finalize(search, tracks, first_error, any_success)
+        Self::finalize(search, hits, first_error, any_success)
     }
 
     async fn fan_out(
@@ -74,7 +120,7 @@ impl CatalogueService {
         user: Option<&Uuid>,
         context: &RequestContext,
         budget: Duration,
-    ) -> (Vec<Track>, Option<CatalogueError>, bool) {
+    ) -> (Vec<SearchHit>, Option<CatalogueError>, bool) {
         // Dropping the set aborts remaining tasks, so a disconnected
         // request stops its providers instead of orphaning them.
         let mut tasks = JoinSet::new();
@@ -112,13 +158,13 @@ impl CatalogueService {
 
         let mut results = (0..self.providers.len())
             .map(|_| None)
-            .collect::<Vec<Option<Result<Vec<Track>, CatalogueError>>>>();
+            .collect::<Vec<Option<Result<Vec<SearchHit>, CatalogueError>>>>();
         while let Some(result) = tasks.join_next().await {
             let (index, result) = result.expect("search tasks never panic");
             results[index] = Some(result);
         }
 
-        let mut tracks = Vec::new();
+        let mut hits = Vec::new();
         let mut first_error = None;
         let mut any_success = false;
         // Preserve source priority regardless of completion order.
@@ -126,7 +172,7 @@ impl CatalogueService {
             match result {
                 Ok(page) => {
                     any_success = true;
-                    tracks.extend(page);
+                    hits.extend(page);
                 }
                 Err(CatalogueError::Provider(ProviderError::CredentialsRejected)) => {
                     // the adapter has already marked the link stale; the remaining
@@ -143,24 +189,31 @@ impl CatalogueService {
                 }
             }
         }
-        (tracks, first_error, any_success)
+        (hits, first_error, any_success)
     }
 
     fn finalize(
         search: &CatalogueSearch,
-        tracks: Vec<Track>,
+        hits: Vec<SearchHit>,
         first_error: Option<CatalogueError>,
         any_success: bool,
     ) -> Result<SearchOutcome, CatalogueError> {
         let limit = search.limit().get() as usize;
         let offset = search.offset().get() as usize;
-        let mut seen = HashSet::new();
-        let tracks: Vec<Track> = tracks
-            .into_iter()
-            .filter(|track| seen.insert(track.id().clone()))
-            .skip(offset)
-            .take(limit)
-            .collect();
+        let mut positions: HashMap<TrackId, usize> = HashMap::new();
+        let mut unique: Vec<SearchHit> = Vec::new();
+        for hit in hits {
+            match positions.get(hit.track().id()).copied() {
+                // the first observation decides rank; later ones only add the
+                // providers that also returned the track.
+                Some(index) => unique[index].merge(hit),
+                None => {
+                    positions.insert(hit.track().id().clone(), unique.len());
+                    unique.push(hit);
+                }
+            }
+        }
+        let hits: Vec<SearchHit> = unique.into_iter().skip(offset).take(limit).collect();
 
         if !any_success && let Some(error) = first_error {
             return Err(error);
@@ -169,7 +222,7 @@ impl CatalogueService {
             return Err(error);
         }
 
-        Ok(SearchOutcome { tracks })
+        Ok(SearchOutcome { hits })
     }
 }
 
@@ -190,8 +243,8 @@ async fn search_source(
     target: u32,
     user: Option<Uuid>,
     context: RequestContext,
-) -> Result<Vec<Track>, CatalogueError> {
-    let mut tracks = Vec::new();
+) -> Result<Vec<SearchHit>, CatalogueError> {
+    let mut hits = Vec::new();
     let mut fetched = 0u32;
     while fetched < target {
         let page_size = (target - fetched).min(PROVIDER_PAGE_LIMIT);
@@ -205,21 +258,21 @@ async fn search_source(
             .await
             .map_err(CatalogueError::Provider)?;
         let page_len = candidates.len() as u32;
-        tracks.extend(materialize(&repository, candidates).await?);
+        hits.extend(materialize(&repository, candidates).await?);
         fetched = fetched.saturating_add(page_len);
         // a short page means the provider has no more results for this query.
         if page_len < page_size {
             break;
         }
     }
-    Ok(tracks)
+    Ok(hits)
 }
 
 async fn materialize(
     repository: &Arc<dyn TrackRepository>,
     candidates: Vec<CatalogueCandidate>,
-) -> Result<Vec<Track>, CatalogueError> {
-    let mut tracks = Vec::with_capacity(candidates.len());
+) -> Result<Vec<SearchHit>, CatalogueError> {
+    let mut hits = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let source = candidate.source().clone();
         let artwork = candidate.artwork().cloned();
@@ -236,9 +289,9 @@ async fn materialize(
             tracing::warn!(%error, "artwork could not be stored");
         }
 
-        tracks.push(track);
+        hits.push(SearchHit::new(track, vec![source]));
     }
-    Ok(tracks)
+    Ok(hits)
 }
 
 #[cfg(test)]
@@ -525,13 +578,50 @@ mod tests {
 
         let first = catalogue.search(&search(), None, &context()).await.unwrap();
         let second = catalogue.search(&search(), None, &context()).await.unwrap();
-        assert_ne!(first.tracks[0].id(), first.tracks[1].id());
-        assert_eq!(first.tracks[0].id(), second.tracks[0].id());
-        assert_eq!(first.tracks[0].title(), "Old title");
-        assert_eq!(second.tracks[0].title(), "New title");
+        let (first_a, first_b) = (&first.hits[0], &first.hits[1]);
+        assert_ne!(first_a.track().id(), first_b.track().id());
+        assert_eq!(first_a.track().id(), second.hits[0].track().id());
+        assert_eq!(first_a.track().title(), "Old title");
+        assert_eq!(second.hits[0].track().title(), "New title");
+        assert_eq!(first_a.sources()[0].external_id(), "source-a");
+        assert_eq!(first_b.sources()[0].external_id(), "source-b");
 
         let third = catalogue.search(&search(), None, &context()).await.unwrap();
-        assert_eq!(third.tracks.len(), 1);
+        assert_eq!(third.hits.len(), 1);
+        assert_eq!(third.hits[0].sources().len(), 1);
+    }
+
+    #[test]
+    fn merged_hits_keep_each_provider_once_in_query_order() {
+        fn source(provider: &str, external_id: &str) -> SourceIdentity {
+            SourceIdentity::new(
+                ProviderId::new(provider.to_owned()).unwrap(),
+                SourceScope::Named("home-server".to_owned()),
+                external_id.to_owned(),
+            )
+            .unwrap()
+        }
+
+        let track = || {
+            Track::new(
+                TrackId::new(),
+                TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], None).unwrap(),
+            )
+        };
+        let mut hit = SearchHit::new(track(), vec![source("navidrome", "nd-1")]);
+        hit.merge(SearchHit::new(
+            track(),
+            vec![source("youtube_music", "vid-1")],
+        ));
+        hit.merge(SearchHit::new(track(), vec![source("navidrome", "nd-1")]));
+
+        assert_eq!(
+            hit.sources()
+                .iter()
+                .map(|source| source.provider_id().as_str())
+                .collect::<Vec<_>>(),
+            vec!["navidrome", "youtube_music"]
+        );
     }
 
     #[tokio::test]
@@ -547,7 +637,11 @@ mod tests {
         let catalogue = service(vec![provider(slow_preferred), provider(fast_fallback)]);
         let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
         assert_eq!(
-            outcome.tracks.iter().map(Track::title).collect::<Vec<_>>(),
+            outcome
+                .hits
+                .iter()
+                .map(|hit| hit.track().title())
+                .collect::<Vec<_>>(),
             vec!["Preferred", "Fallback"]
         );
 
@@ -565,9 +659,9 @@ mod tests {
             .search(&search(), Some(&user), &context())
             .await
             .unwrap();
-        assert_eq!(outcome.tracks.len(), 2);
-        assert_eq!(outcome.tracks[0].title(), "Upstream Song");
-        assert_eq!(outcome.tracks[1].title(), "Fallback");
+        assert_eq!(outcome.hits.len(), 2);
+        assert_eq!(outcome.hits[0].track().title(), "Upstream Song");
+        assert_eq!(outcome.hits[1].track().title(), "Fallback");
     }
 
     #[tokio::test]
@@ -577,8 +671,8 @@ mod tests {
         let working = StubProvider::new(vec![Ok(vec![candidate("ytm-1", "YTM Song")])]);
         let catalogue = service(vec![provider(broken), provider(empty), provider(working)]);
         let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
-        assert_eq!(outcome.tracks.len(), 1);
-        assert_eq!(outcome.tracks[0].title(), "YTM Song");
+        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(outcome.hits[0].track().title(), "YTM Song");
 
         let broken = StubProvider::new(vec![Err(ProviderError::ProviderUnavailable)]);
         let result = service(vec![provider(broken)])
@@ -633,7 +727,7 @@ mod tests {
             .search(&search(), Some(&user), &context())
             .await
             .unwrap();
-        assert_eq!(outcome.tracks.len(), 1);
+        assert_eq!(outcome.hits.len(), 1);
         assert!(store.is_stale(&user, &server));
     }
 
@@ -647,9 +741,9 @@ mod tests {
             .collect())]);
         let catalogue = service(vec![provider(first), provider(second)]);
         let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
-        assert_eq!(outcome.tracks.len(), 10);
-        assert_eq!(outcome.tracks[0].title(), "A0");
-        assert_eq!(outcome.tracks[6].title(), "B0");
+        assert_eq!(outcome.hits.len(), 10);
+        assert_eq!(outcome.hits[0].track().title(), "A0");
+        assert_eq!(outcome.hits[6].track().title(), "B0");
 
         let resolver = StubProvider::new(vec![Ok((0..25)
             .map(|index| candidate(&format!("source-{index}"), &format!("Song {index}")))
@@ -659,9 +753,9 @@ mod tests {
             .search(&search_with_offset(10, 10), None, &context())
             .await
             .unwrap();
-        assert_eq!(outcome.tracks.len(), 10);
-        assert_eq!(outcome.tracks[0].title(), "Song 10");
-        assert_eq!(outcome.tracks[9].title(), "Song 19");
+        assert_eq!(outcome.hits.len(), 10);
+        assert_eq!(outcome.hits[0].track().title(), "Song 10");
+        assert_eq!(outcome.hits[9].track().title(), "Song 19");
 
         let limits = StdArc::new(Mutex::new(Vec::new()));
         let resolver = LimitRecordingProvider {
@@ -683,9 +777,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.tracks.len(), 10);
-        assert_eq!(outcome.tracks[0].title(), "P30");
-        assert_eq!(outcome.tracks[9].title(), "P39");
+        assert_eq!(outcome.hits.len(), 10);
+        assert_eq!(outcome.hits[0].track().title(), "P30");
+        assert_eq!(outcome.hits[9].track().title(), "P39");
     }
 
     #[tokio::test]
@@ -693,12 +787,12 @@ mod tests {
         let working = StubProvider::new(vec![Ok(vec![candidate("ytm-1", "YTM Song")])]);
         let catalogue = service(vec![provider(HangingProvider), provider(working)]);
         let started = Instant::now();
-        let (tracks, _error, _success) = catalogue
+        let (hits, _error, _success) = catalogue
             .fan_out(&search(), None, &context(), Duration::from_millis(50))
             .await;
         assert!(started.elapsed() < Duration::from_secs(5));
-        assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].title(), "YTM Song");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].track().title(), "YTM Song");
 
         let current = StdArc::new(AtomicUsize::new(0));
         let maximum = StdArc::new(AtomicUsize::new(0));

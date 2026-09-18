@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AppState,
-    catalogue::{CatalogueSearch, SearchLimit, SearchOffset, SearchQuery, ValidationError},
+    catalogue::{
+        CatalogueSearch, SearchHit, SearchLimit, SearchOffset, SearchQuery, ValidationError,
+    },
     http::auth::AuthenticatedPrincipal,
     http::errors::ApiError,
     request::RequestContext,
@@ -60,6 +62,12 @@ impl From<Track> for TrackResponse {
     }
 }
 
+impl From<SearchHit> for TrackResponse {
+    fn from(hit: SearchHit) -> Self {
+        Self::from(hit.into_track())
+    }
+}
+
 pub(crate) async fn search(
     State(state): State<AppState>,
     Extension(context): Extension<RequestContext>,
@@ -78,7 +86,7 @@ pub(crate) async fn search(
 
     let user_uuid = principal.user_id.as_uuid();
 
-    let tracks = state
+    let outcome = state
         .catalogue()
         .search(&search, Some(&user_uuid), &context)
         .await
@@ -88,6 +96,6 @@ pub(crate) async fn search(
         })?;
 
     Ok(Json(SearchResponse {
-        results: tracks.tracks.into_iter().map(Into::into).collect(),
+        results: outcome.hits.into_iter().map(Into::into).collect(),
     }))
 }

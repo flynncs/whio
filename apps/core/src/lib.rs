@@ -14,7 +14,8 @@ pub mod request;
 pub mod tracks;
 
 use crate::{
-    catalogue::CatalogueService, identity::service::CredentialService, playback::PlaybackService,
+    catalogue::CatalogueService, compat::SourceTags, identity::service::CredentialService,
+    playback::PlaybackService,
 };
 
 #[derive(Clone)]
@@ -25,6 +26,7 @@ pub struct AppState {
     playback: Arc<PlaybackService>,
     artwork_client: reqwest::Client,
     artwork_host_suffixes: Vec<String>,
+    source_tags: SourceTags,
 }
 
 impl AppState {
@@ -53,6 +55,13 @@ impl AppState {
         self
     }
 
+    /// how the compatibility facades label the provider a result came from.
+    /// display only; stored metadata is never tagged.
+    pub fn with_source_tags(mut self, tags: SourceTags) -> Self {
+        self.source_tags = tags;
+        self
+    }
+
     fn build(
         credential: Arc<CredentialService>,
         catalogue: Arc<CatalogueService>,
@@ -69,6 +78,7 @@ impl AppState {
                 artwork_host_suffixes.clone(),
             )),
             artwork_host_suffixes,
+            source_tags: SourceTags::Off,
         }
     }
 
@@ -94,6 +104,10 @@ impl AppState {
 
     pub(crate) fn artwork_host_suffixes(&self) -> &[String] {
         &self.artwork_host_suffixes
+    }
+
+    pub(crate) fn source_tags(&self) -> SourceTags {
+        self.source_tags
     }
 }
 

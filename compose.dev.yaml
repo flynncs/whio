@@ -76,6 +76,7 @@ services:
       WHIO_YOUTUBE_ENABLED: "true"
       WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000
       WHIO_UPSTREAM_CONNECTOR_URL: http://nd-connector:3001
+      WHIO_SOURCE_TAGS: artist
     volumes:
       - .:/workspace
       - cargo-registry:/usr/local/cargo/registry

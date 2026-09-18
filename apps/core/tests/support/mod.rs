@@ -12,6 +12,7 @@ use uuid::Uuid;
 use whio_core::{
     AppState,
     catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch, CatalogueService},
+    compat::SourceTags,
     identity::service::CredentialService,
     playback::{PlaybackProvider, PlaybackService, PlaybackSource, ResolvedPlayback},
     providers::ProviderError,
@@ -35,7 +36,16 @@ pub fn router(
     catalogue: Arc<CatalogueService>,
     playback: Arc<PlaybackService>,
 ) -> Router {
-    whio_core::router(AppState::new(credential, catalogue, playback))
+    router_with_source_tags(credential, catalogue, playback, SourceTags::Off)
+}
+
+pub fn router_with_source_tags(
+    credential: Arc<CredentialService>,
+    catalogue: Arc<CatalogueService>,
+    playback: Arc<PlaybackService>,
+    tags: SourceTags,
+) -> Router {
+    whio_core::router(AppState::new(credential, catalogue, playback).with_source_tags(tags))
 }
 
 struct StubProvider {

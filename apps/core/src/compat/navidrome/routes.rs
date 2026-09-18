@@ -35,6 +35,7 @@ pub(crate) async fn song_list(
         &context,
         &token.0,
         &query,
+        state.source_tags(),
     )
     .await
     {
@@ -60,7 +61,15 @@ pub(crate) async fn song_detail(
     token: NdToken,
     Path(id): Path<String>,
 ) -> Response {
-    match service::song_detail(state.catalogue(), state.credential(), &id, &token.0).await {
+    match service::song_detail(
+        state.catalogue(),
+        state.credential(),
+        &id,
+        &token.0,
+        state.source_tags(),
+    )
+    .await
+    {
         Ok(song) => Json(song).into_response(),
         Err(error) => song_error(error, &context),
     }
