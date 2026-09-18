@@ -18,6 +18,7 @@ path = "src/bin/whio-cli.rs"
 
 [dependencies]
 axum = "0.8.9"
+lofty = "0.22"
 bytes = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
@@ -63,6 +64,8 @@ chrono = "0.4.45"
 url = "2.5.8"
 serde_json = "1.0.151"
 parking_lot = "0.12"
+jwalk = "0.9.0"
+rayon = "1.12.0"
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::tracks::{ArtworkRef, Track, TrackMetadata};
 
-use super::{SourceIdentity, TrackId};
+use super::{ProviderId, SourceIdentity, SourceScope, TrackId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrackRepositoryError {
@@ -10,6 +10,16 @@ pub enum TrackRepositoryError {
     Unavailable,
     #[error("track repository contained invalid data")]
     InvalidData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFileFacts {
+    pub path: Option<String>,
+    pub size_bytes: u64,
+    pub modified_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub missing_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub content_type: Option<String>,
+    pub suffix: Option<String>,
 }
 
 #[async_trait]
@@ -44,5 +54,28 @@ pub trait TrackRepository: Send + Sync {
         _track_id: &TrackId,
     ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
         Ok(None)
+    }
+
+    async fn set_source_file_facts(
+        &self,
+        _source: &SourceIdentity,
+        _facts: &SourceFileFacts,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn find_source_file_facts(
+        &self,
+        _source: &SourceIdentity,
+    ) -> Result<Option<SourceFileFacts>, TrackRepositoryError> {
+        Ok(None)
+    }
+
+    async fn list_scanned_paths(
+        &self,
+        _provider_id: &ProviderId,
+        _source_scope: &SourceScope,
+    ) -> Result<Vec<(SourceIdentity, SourceFileFacts)>, TrackRepositoryError> {
+        Ok(Vec::new())
     }
 }

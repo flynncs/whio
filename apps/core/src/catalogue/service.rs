@@ -32,9 +32,6 @@ pub struct SearchOutcome {
     pub hits: Vec<SearchHit>,
 }
 
-/// a matched track with the sources that returned it. provenance is observed
-/// per search, not stored on the track, so the same track can be reached
-/// through several providers without either one owning it.
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     track: Track,
@@ -58,8 +55,6 @@ impl SearchHit {
         &self.sources
     }
 
-    /// keeps first-seen source order, which is the order the providers were
-    /// queried in.
     fn merge(&mut self, other: SearchHit) {
         for source in other.sources {
             if !self.sources.contains(&source) {
@@ -94,8 +89,6 @@ impl CatalogueService {
             .map_err(CatalogueError::Repository)
     }
 
-    /// every source observed for one track, for facades that render a track
-    /// outside a search result.
     pub async fn sources(&self, track_id: &TrackId) -> Result<Vec<SourceIdentity>, CatalogueError> {
         self.track_repository
             .find_sources(track_id)
@@ -204,8 +197,6 @@ impl CatalogueService {
         let mut unique: Vec<SearchHit> = Vec::new();
         for hit in hits {
             match positions.get(hit.track().id()).copied() {
-                // the first observation decides rank; later ones only add the
-                // providers that also returned the track.
                 Some(index) => unique[index].merge(hit),
                 None => {
                     positions.insert(hit.track().id().clone(), unique.len());

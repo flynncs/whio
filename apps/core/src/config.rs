@@ -21,6 +21,7 @@ const DEFAULT_MAX_PLAYBACK_SESSIONS: usize = 16;
 const YOUTUBE_MEDIA_SUFFIX: &str = "WHIO_YOUTUBE_MEDIA_SUFFIX";
 const ARTWORK_HOST_SUFFIXES: &str = "WHIO_ARTWORK_HOST_SUFFIXES";
 const SOURCE_TAGS: &str = "WHIO_SOURCE_TAGS";
+const MEDIA_ROOTS: &str = "WHIO_MEDIA_ROOTS";
 
 const DEFAULT_YOUTUBE_MEDIA_SUFFIX: &str = whio_core::media::DEFAULT_YOUTUBE_MEDIA_SUFFIX;
 
@@ -38,6 +39,7 @@ pub(crate) struct Config {
     pub(crate) youtube_media_suffix: String,
     pub(crate) artwork_host_suffixes: Vec<String>,
     pub(crate) source_tags: SourceTags,
+    pub(crate) media_roots: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -264,6 +266,11 @@ impl Config {
                 .ok_or_else(|| invalid(SOURCE_TAGS, raw, "must be `off` or `artist`"))?,
         };
 
+        let media_roots = match vars.get(MEDIA_ROOTS) {
+            None => Vec::new(),
+            Some(raw) => parse_media_roots(raw)?,
+        };
+
         Ok(Self {
             bind_address,
             database_url: database_raw.to_owned(),
@@ -277,6 +284,7 @@ impl Config {
             youtube_media_suffix,
             artwork_host_suffixes,
             source_tags,
+            media_roots,
         })
     }
 }
@@ -309,6 +317,41 @@ fn invalid(name: &'static str, value: &str, reason: &'static str) -> ConfigError
         value: value.to_owned(),
         reason,
     }
+}
+
+fn parse_media_roots(raw: &str) -> Result<Vec<std::path::PathBuf>, ConfigError> {
+    let roots: Vec<std::path::PathBuf> = raw
+        .split(',')
+        .map(|root| std::path::PathBuf::from(root.trim()))
+        .filter(|root| !root.as_os_str().is_empty())
+        .collect();
+
+    if roots.is_empty() {
+        return Err(invalid(
+            MEDIA_ROOTS,
+            raw,
+            "must list at least one directory",
+        ));
+    }
+
+    for (index, root) in roots.iter().enumerate() {
+        if !root.is_absolute() {
+            return Err(invalid(
+                MEDIA_ROOTS,
+                &root.display().to_string(),
+                "must be an absolute path",
+            ));
+        }
+        if roots[..index].contains(root) {
+            return Err(invalid(
+                MEDIA_ROOTS,
+                &root.display().to_string(),
+                "must not list the same directory twice",
+            ));
+        }
+    }
+
+    Ok(roots)
 }
 
 /// host suffixes are matched case-insensitively and must list at least one entry.
@@ -393,6 +436,42 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn media_roots_default_empty_and_accept_an_absolute_list() {
+        assert!(parse_config(&[]).unwrap().media_roots.is_empty());
+
+        let config = parse_config(&[(MEDIA_ROOTS, "/tank/data/media/music")]).unwrap();
+        assert_eq!(
+            config.media_roots,
+            vec![std::path::PathBuf::from("/tank/data/media/music")]
+        );
+
+        let config = parse_config(&[(MEDIA_ROOTS, " /a , /b ")]).unwrap();
+        assert_eq!(
+            config.media_roots,
+            vec![
+                std::path::PathBuf::from("/a"),
+                std::path::PathBuf::from("/b")
+            ]
+        );
+    }
+
+    #[test]
+    fn media_roots_reject_relative_empty_and_duplicate_entries() {
+        for value in ["", " , ", "relative/path", "/a,/a", "/a, /a"] {
+            assert!(
+                matches!(
+                    parse_config(&[(MEDIA_ROOTS, value)]),
+                    Err(ConfigError::Invalid {
+                        name: MEDIA_ROOTS,
+                        ..
+                    })
+                ),
+                "{value}"
+            );
+        }
     }
 
     #[test]

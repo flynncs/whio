@@ -3,8 +3,8 @@ use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::tracks::{
-    ArtworkRef, ProviderId, SourceIdentity, SourceScope, Track, TrackId, TrackMetadata,
-    TrackRepository, TrackRepositoryError,
+    ArtworkRef, ProviderId, SourceFileFacts, SourceIdentity, SourceScope, Track, TrackId,
+    TrackMetadata, TrackRepository, TrackRepositoryError,
 };
 
 pub struct PostgresTrackRepository {
@@ -182,6 +182,133 @@ impl TrackRepository for PostgresTrackRepository {
         }
 
         Ok(best)
+    }
+
+    async fn set_source_file_facts(
+        &self,
+        source: &SourceIdentity,
+        facts: &SourceFileFacts,
+    ) -> Result<(), TrackRepositoryError> {
+        sqlx::query(
+            r#"UPDATE track_sources
+            SET path = $1, size_bytes = $2, modified_at = $3, missing_at = $4,
+                content_type = $5, suffix = $6
+            WHERE provider_id = $7 AND source_scope = $8 AND external_id = $9
+            "#,
+        )
+        .bind(facts.path.as_deref())
+        .bind(facts.size_bytes as i64)
+        .bind(facts.modified_at)
+        .bind(facts.missing_at)
+        .bind(facts.content_type.as_deref())
+        .bind(facts.suffix.as_deref())
+        .bind(source.provider_id().as_str())
+        .bind(encode_source_scope(source.source_scope()))
+        .bind(source.external_id())
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|_| TrackRepositoryError::Unavailable)
+    }
+
+    async fn find_source_file_facts(
+        &self,
+        source: &SourceIdentity,
+    ) -> Result<Option<SourceFileFacts>, TrackRepositoryError> {
+        let row = sqlx::query_as::<
+            _,
+            (
+                Option<String>,
+                Option<i64>,
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            r#"SELECT path, size_bytes, modified_at, missing_at, content_type, suffix
+            FROM track_sources
+            WHERE provider_id = $1 AND source_scope = $2 AND external_id = $3
+            "#,
+        )
+        .bind(source.provider_id().as_str())
+        .bind(encode_source_scope(source.source_scope()))
+        .bind(source.external_id())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(row.map(
+            |(path, size_bytes, modified_at, missing_at, content_type, suffix)| SourceFileFacts {
+                path,
+                size_bytes: size_bytes.unwrap_or_default().max(0) as u64,
+                modified_at,
+                missing_at,
+                content_type,
+                suffix,
+            },
+        ))
+    }
+
+    async fn list_scanned_paths(
+        &self,
+        provider_id: &ProviderId,
+        source_scope: &SourceScope,
+    ) -> Result<Vec<(SourceIdentity, SourceFileFacts)>, TrackRepositoryError> {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<i64>,
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            r#"SELECT provider_id, source_scope, external_id,
+                      path, size_bytes, modified_at, missing_at, content_type, suffix
+            FROM track_sources
+            WHERE provider_id = $1 AND source_scope = $2 AND path IS NOT NULL
+            "#,
+        )
+        .bind(provider_id.as_str())
+        .bind(encode_source_scope(source_scope))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        let mut scanned = Vec::with_capacity(rows.len());
+        for (
+            provider,
+            scope,
+            external_id,
+            path,
+            size_bytes,
+            modified_at,
+            missing_at,
+            content_type,
+            suffix,
+        ) in rows
+        {
+            let source = decode_source(provider, scope, external_id)?;
+            scanned.push((
+                source,
+                SourceFileFacts {
+                    path,
+                    size_bytes: size_bytes.unwrap_or_default().max(0) as u64,
+                    modified_at,
+                    missing_at,
+                    content_type,
+                    suffix,
+                },
+            ));
+        }
+
+        Ok(scanned)
     }
 }
 

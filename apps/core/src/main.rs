@@ -56,10 +56,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database = Arc::new(Database::connect(&config.database_url).await?);
     let _spool_directory = whio_core::delivery::SpoolDirectory::open(&config.spool_dir).await?;
-    let state = build_state(&config, database)?;
+    let state = build_state(&config, database.clone())?;
     let listener = TcpListener::bind(config.bind_address).await?;
 
     tracing::info!(address = %config.bind_address, "listening");
+
+    if !config.media_roots.is_empty() {
+        let repository: Arc<dyn TrackRepository> =
+            Arc::new(PostgresTrackRepository::new(database.pool()));
+        let roots = config.media_roots.clone();
+        tokio::spawn(async move {
+            match whio_core::library::scan(&repository, &roots).await {
+                Ok(report) => tracing::info!(?report, "library scan finished"),
+                Err(error) => tracing::warn!(%error, "library scan failed"),
+            }
+        });
+    }
 
     axum::serve(listener, whio_core::router(state))
         .with_graceful_shutdown(shutdown_signal())

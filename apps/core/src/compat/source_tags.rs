@@ -1,10 +1,3 @@
-//! how the compatibility facades label the provider a result came from.
-//!
-//! Subsonic and Navidrome payloads carry titled metadata and no field a client
-//! would render as a source, so a visible label has to ride on a field clients
-//! already display. this is a display policy: nothing here reaches storage, and
-//! turning it off restores the untouched metadata.
-
 use crate::tracks::{ProviderKind, SourceIdentity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,7 +16,6 @@ impl SourceTags {
         }
     }
 
-    /// the artist line for one result.
     pub(crate) fn artist(self, artists: &[String], sources: &[SourceIdentity]) -> String {
         let artists = artists.join(", ");
         match self.marker(sources) {
@@ -32,8 +24,6 @@ impl SourceTags {
         }
     }
 
-    /// the bracketed marker for the providers behind one result, or nothing
-    /// when tagging is off or no provider was recognised.
     fn marker(self, sources: &[SourceIdentity]) -> Option<String> {
         if self == Self::Off {
             return None;
@@ -54,7 +44,6 @@ impl SourceTags {
     }
 }
 
-/// the client-facing shorthand for one provider.
 fn shorthand(kind: ProviderKind) -> &'static str {
     match kind {
         ProviderKind::YoutubeMusic => "YTM",

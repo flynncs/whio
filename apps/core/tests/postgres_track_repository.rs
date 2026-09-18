@@ -216,7 +216,6 @@ async fn album_refreshes_within_a_provider_and_artwork_follows_its_source(pool: 
         .unwrap();
     assert_eq!(track.album(), Some("Provisional"));
 
-    // the fresher observation from the same provider wins
     let refreshed = repository
         .get_or_create(source.clone(), with_album("Authoritative"))
         .await

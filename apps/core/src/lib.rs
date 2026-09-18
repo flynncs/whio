@@ -7,6 +7,7 @@ pub mod compat;
 pub mod database;
 pub mod delivery;
 pub mod identity;
+pub mod library;
 pub mod media;
 pub mod playback;
 pub mod providers;
@@ -55,8 +56,6 @@ impl AppState {
         self
     }
 
-    /// how the compatibility facades label the provider a result came from.
-    /// display only; stored metadata is never tagged.
     pub fn with_source_tags(mut self, tags: SourceTags) -> Self {
         self.source_tags = tags;
         self

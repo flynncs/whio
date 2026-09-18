@@ -2,9 +2,9 @@ use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 
-use crate::tracks::{ArtworkRef, ProviderId, Track, TrackMetadata};
+use crate::tracks::{ArtworkRef, ProviderId, SourceFileFacts, Track, TrackMetadata};
 
-use super::{SourceIdentity, TrackId, TrackRepository, TrackRepositoryError};
+use super::{SourceIdentity, SourceScope, TrackId, TrackRepository, TrackRepositoryError};
 
 struct TrackEntry {
     track: Track,
@@ -17,6 +17,7 @@ struct TrackIndexes {
     by_source: HashMap<SourceIdentity, TrackId>,
     by_track_id: HashMap<TrackId, TrackEntry>,
     artwork_by_source: HashMap<SourceIdentity, ArtworkRef>,
+    file_facts_by_source: HashMap<SourceIdentity, SourceFileFacts>,
 }
 
 #[derive(Default)]
@@ -143,6 +144,54 @@ impl TrackRepository for InMemoryTrackRepository {
             })
             .min_by_key(|(source, _)| source.provider_id().precedence())
             .map(|(source, artwork)| (source.clone(), artwork.clone())))
+    }
+
+    async fn set_source_file_facts(
+        &self,
+        source: &SourceIdentity,
+        facts: &SourceFileFacts,
+    ) -> Result<(), TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        indexes
+            .file_facts_by_source
+            .insert(source.clone(), facts.clone());
+        Ok(())
+    }
+
+    async fn find_source_file_facts(
+        &self,
+        source: &SourceIdentity,
+    ) -> Result<Option<SourceFileFacts>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes.file_facts_by_source.get(source).cloned())
+    }
+
+    async fn list_scanned_paths(
+        &self,
+        provider_id: &ProviderId,
+        source_scope: &SourceScope,
+    ) -> Result<Vec<(SourceIdentity, SourceFileFacts)>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes
+            .file_facts_by_source
+            .iter()
+            .filter(|(source, _)| {
+                source.provider_id() == provider_id && source.source_scope() == source_scope
+            })
+            .map(|(source, facts)| (source.clone(), facts.clone()))
+            .collect())
     }
 }
 

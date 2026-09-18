@@ -9,4 +9,4 @@ pub use domain::{
 };
 pub use in_memory_repository::InMemoryTrackRepository;
 pub use postgres_repository::PostgresTrackRepository;
-pub use repository::{TrackRepository, TrackRepositoryError};
+pub use repository::{SourceFileFacts, TrackRepository, TrackRepositoryError};

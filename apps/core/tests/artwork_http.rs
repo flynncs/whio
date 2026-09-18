@@ -31,7 +31,6 @@ fn credential_key() -> CredentialKey {
     CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).expect("valid test key")
 }
 
-/// one user whose credentials match `NATIVE_AUTH_QUERY`.
 fn credentials() -> (Arc<CredentialService>, Uuid, CredentialKey) {
     let key = credential_key();
     let store = Arc::new(MemoryCredentialStore::new());
@@ -68,8 +67,6 @@ async fn image_server(bytes: &'static [u8]) -> String {
     format!("http://{address}")
 }
 
-/// a global (public-URL) source, which is what provider-supplied artwork is
-/// today: the reference is a URL core fetches under the allowlist.
 async fn public_app(url: &str) -> (axum::Router, String) {
     let (credential, _user, _key) = credentials();
     let repository = Arc::new(InMemoryTrackRepository::default());
