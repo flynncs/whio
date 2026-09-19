@@ -24,10 +24,6 @@ impl TrackMetadata {
             return Err(ValidationError::TooLong { field: "title" });
         }
 
-        if artists.is_empty() {
-            return Err(ValidationError::Empty { field: "artists" });
-        }
-
         for artist in &artists {
             if artist.is_empty() {
                 return Err(ValidationError::Empty { field: "artist" });
@@ -155,11 +151,13 @@ mod tests {
     }
 
     #[test]
-    fn metadata_rejects_invalid_artists() {
-        assert!(matches!(
-            TrackMetadata::new("Title".to_owned(), vec![], None),
-            Err(ValidationError::Empty { field: "artists" })
-        ));
+    fn metadata_allows_a_track_with_no_credited_artist() {
+        let metadata = TrackMetadata::new("Title".to_owned(), vec![], None).unwrap();
+        assert!(metadata.artists().is_empty());
+    }
+
+    #[test]
+    fn metadata_rejects_blank_artist_values() {
         assert!(matches!(
             TrackMetadata::new("Title".to_owned(), vec![String::new()], None),
             Err(ValidationError::Empty { field: "artist" })

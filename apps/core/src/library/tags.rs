@@ -65,9 +65,7 @@ pub fn read_tags(path: &Path) -> Result<TrackTags, TagError> {
     let Some(title) = text(tag, |tag| tag.title().map(|value| value.into_owned())) else {
         return Err(TagError::Untagged);
     };
-    let Some(artists) = artist_credits(tag) else {
-        return Err(TagError::Untagged);
-    };
+    let artists = artist_credits(tag).unwrap_or_default();
 
     let artist_ids = tag
         .get_strings(&ItemKey::MusicBrainzArtistId)
@@ -387,6 +385,40 @@ mod tests {
 
         let tags = read_tags(&path).unwrap();
         assert_eq!(tags.artists, vec!["AC/DC", "Daft Punk"]);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_file_with_no_artist_tag_still_reads() {
+        use lofty::{
+            config::WriteOptions,
+            file::{AudioFile, TaggedFileExt},
+        };
+
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac");
+        let path =
+            std::env::temp_dir().join(format!("whio-noartist-{}.flac", uuid::Uuid::now_v7()));
+        std::fs::copy(&fixture, &path).unwrap();
+
+        let mut tagged = Probe::open(&path).unwrap().read().unwrap();
+        {
+            let has_primary = tagged.primary_tag_mut().is_some();
+            let tag = if has_primary {
+                tagged.primary_tag_mut().expect("checked above")
+            } else {
+                tagged.first_tag_mut().expect("the fixture carries a tag")
+            };
+
+            tag.take(&ItemKey::TrackArtist).count();
+            tag.take(&ItemKey::TrackArtists).count();
+        }
+        tagged.save_to_path(&path, WriteOptions::default()).unwrap();
+
+        let tags = read_tags(&path).unwrap();
+        assert!(tags.artists.is_empty());
+        assert_eq!(tags.title, "Fixture Song");
 
         std::fs::remove_file(&path).unwrap();
     }

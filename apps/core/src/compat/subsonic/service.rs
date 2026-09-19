@@ -26,7 +26,7 @@ pub(crate) fn child_from_hit(hit: &SearchHit, tags: SourceTags) -> models::Child
         id: track.id().to_string(),
         title: track.title().to_owned(),
         is_dir: false,
-        artist: Some(tags.artist(track.artists(), hit.sources())),
+        artist: (!track.artists().is_empty()).then(|| tags.artist(track.artists(), hit.sources())),
         album: track.album().map(str::to_owned),
         cover_art: Some(track.id().to_string()),
         duration: track.duration_ms().map(|ms| (ms / 1000) as i32),

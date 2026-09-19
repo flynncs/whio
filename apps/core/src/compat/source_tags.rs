@@ -18,6 +18,11 @@ impl SourceTags {
 
     pub(crate) fn artist(self, artists: &[String], sources: &[SourceIdentity]) -> String {
         let artists = artists.join(", ");
+
+        if artists.is_empty() {
+            return artists;
+        }
+
         match self.marker(sources) {
             Some(marker) => format!("{marker} {artists}"),
             None => artists,

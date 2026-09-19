@@ -152,8 +152,9 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
             };
             let membership = album_track(&tags);
             let acoustid_fingerprint = tags.acoustid_fingerprint.clone();
+            let credits = track_credits(&tags);
 
-            let Ok(metadata) = TrackMetadata::new(tags.title, tags.artists, tags.duration_ms)
+            let Ok(metadata) = TrackMetadata::new(tags.title, credits, tags.duration_ms)
                 .and_then(|metadata| metadata.with_recording_id(tags.recording_id))
                 .and_then(|metadata| metadata.with_isrc(tags.isrc))
             else {
@@ -205,6 +206,14 @@ fn album_track(tags: &super::TrackTags) -> Option<AlbumTrack> {
     let position = u32::from(track_number).saturating_sub(1);
 
     AlbumTrack::new(disc_number, Some(track_number), position).ok()
+}
+
+fn track_credits(tags: &super::TrackTags) -> Vec<String> {
+    if !tags.artists.is_empty() {
+        return tags.artists.clone();
+    }
+
+    tags.album_artist.iter().cloned().collect()
 }
 
 async fn known_paths(
@@ -435,6 +444,53 @@ mod tests {
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].1.disc_number(), Some(1));
         assert_eq!(tracks[0].1.track_number(), Some(3));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_track_without_an_artist_tag_falls_back_to_the_album_artist() {
+        use lofty::{
+            config::WriteOptions,
+            file::{AudioFile, TaggedFileExt},
+            tag::ItemKey,
+        };
+
+        let root = temp_root("no-artist");
+        let path = root.join("a.flac");
+        std::fs::copy(fixture(), &path).unwrap();
+
+        let mut tagged = lofty::probe::Probe::open(&path).unwrap().read().unwrap();
+        {
+            let has_primary = tagged.primary_tag_mut().is_some();
+            let tag = if has_primary {
+                tagged.primary_tag_mut().expect("checked above")
+            } else {
+                tagged.first_tag_mut().expect("the fixture carries a tag")
+            };
+            tag.take(&ItemKey::TrackArtist).count();
+            tag.take(&ItemKey::TrackArtists).count();
+        }
+        tagged.save_to_path(&path, WriteOptions::default()).unwrap();
+
+        let found = std::fs::metadata(&path).unwrap();
+        let prepared = prepare(
+            &std::collections::HashMap::new(),
+            FoundFile {
+                absolute: path,
+                relative: "a.flac".to_owned(),
+                size_bytes: found.len(),
+                modified_at: found.modified().ok().map(chrono::DateTime::from),
+                suffix: Some("flac".to_owned()),
+            },
+        );
+
+        match prepared {
+            Prepared::Ready(track) => {
+                assert_eq!(track.metadata.artists().to_vec(), vec!["Fixture Artist"]);
+            }
+            _ => panic!("expected a prepared track"),
+        }
 
         std::fs::remove_dir_all(&root).unwrap();
     }
