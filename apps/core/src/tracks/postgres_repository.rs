@@ -1,11 +1,13 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::tracks::{
-    Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, ArtworkRef,
-    ProviderId, SourceFileFacts, SourceIdentity, SourceScope, Track, TrackId, TrackMetadata,
-    TrackRepository, TrackRepositoryError,
+    Album, AlbumEntry, AlbumId, AlbumMetadata, AlbumSummary, AlbumTrack, Artist, ArtistCredit,
+    ArtistId, ArtistSummary, ArtworkRef, ProviderId, SourceFileFacts, SourceIdentity, SourceScope,
+    Track, TrackId, TrackMetadata, TrackRepository, TrackRepositoryError,
 };
 
 pub struct PostgresTrackRepository {
@@ -384,6 +386,21 @@ impl TrackRepository for PostgresTrackRepository {
         track_id: &TrackId,
         membership: &AlbumTrack,
     ) -> Result<(), TrackRepositoryError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        // a track is filed under one album, so filing it here unfiles it
+        // everywhere else in the same transaction (A-048).
+        sqlx::query("DELETE FROM album_tracks WHERE track_id = $1 AND album_id <> $2")
+            .bind(track_id.as_uuid())
+            .bind(album_id.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
         sqlx::query(
             r#"
             INSERT INTO album_tracks (album_id, track_id, disc_number, track_number, position)
@@ -399,10 +416,24 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(encode_smallint(membership.disc_number())?)
         .bind(encode_smallint(membership.track_number())?)
         .bind(i32::try_from(membership.position()).map_err(|_| TrackRepositoryError::InvalidData)?)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
-        .map(|_| ())
-        .map_err(|_| TrackRepositoryError::Unavailable)
+        .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        tx.commit()
+            .await
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(())
+    }
+
+    async fn clear_album_track(&self, track_id: &TrackId) -> Result<(), TrackRepositoryError> {
+        sqlx::query("DELETE FROM album_tracks WHERE track_id = $1")
+            .bind(track_id.as_uuid())
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|_| TrackRepositoryError::Unavailable)
     }
 
     async fn find_album(&self, album_id: &AlbumId) -> Result<Option<Album>, TrackRepositoryError> {
@@ -415,6 +446,42 @@ impl TrackRepository for PostgresTrackRepository {
         .map_err(|_| TrackRepositoryError::Unavailable)?;
 
         row.map(decode_album).transpose()
+    }
+
+    async fn find_album_for_track(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Option<Album>, TrackRepositoryError> {
+        let row = sqlx::query_as::<_, AlbumRow>(&format!(
+            r#"
+            SELECT {ALBUM_COLUMNS}
+            FROM albums AS a
+            JOIN album_tracks AS mt ON mt.album_id = a.id
+            WHERE mt.track_id = $1
+            LIMIT 1
+            "#
+        ))
+        .bind(track_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        row.map(decode_album).transpose()
+    }
+
+    async fn find_artist(
+        &self,
+        artist_id: &ArtistId,
+    ) -> Result<Option<Artist>, TrackRepositoryError> {
+        let row = sqlx::query_as::<_, ArtistRow>(&format!(
+            "SELECT {ARTIST_COLUMNS} FROM artists WHERE id = $1"
+        ))
+        .bind(artist_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        row.map(decode_artist).transpose()
     }
 
     async fn find_album_sources(
@@ -441,16 +508,31 @@ impl TrackRepository for PostgresTrackRepository {
             .collect()
     }
 
-    async fn find_album_tracks(
+    async fn find_album_entries(
         &self,
         album_id: &AlbumId,
-    ) -> Result<Vec<(TrackId, AlbumTrack)>, TrackRepositoryError> {
-        let rows = sqlx::query_as::<_, (Uuid, Option<i16>, Option<i16>, i32)>(
+    ) -> Result<Vec<AlbumEntry>, TrackRepositoryError> {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                Option<i64>,
+                Option<String>,
+                Option<String>,
+                Option<i16>,
+                Option<i16>,
+                i32,
+            ),
+        >(
             r#"
-            SELECT track_id, disc_number, track_number, position
-            FROM album_tracks
-            WHERE album_id = $1
-            ORDER BY position, track_id
+            SELECT t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, t.isrc,
+                   mt.disc_number, mt.track_number, mt.position
+            FROM album_tracks AS mt
+            JOIN tracks AS t ON t.id = mt.track_id
+            WHERE mt.album_id = $1
+            ORDER BY COALESCE(mt.disc_number, 1), mt.track_number NULLS LAST,
+                     mt.position, mt.track_id
             "#,
         )
         .bind(album_id.as_uuid())
@@ -458,18 +540,94 @@ impl TrackRepository for PostgresTrackRepository {
         .await
         .map_err(|_| TrackRepositoryError::Unavailable)?;
 
-        rows.into_iter()
-            .map(|(track_id, disc_number, track_number, position)| {
-                let disc_number = decode_smallint(disc_number)?;
-                let track_number = decode_smallint(track_number)?;
-                let position =
-                    u32::try_from(position).map_err(|_| TrackRepositoryError::InvalidData)?;
-                let membership = AlbumTrack::new(disc_number, track_number, position)
-                    .map_err(|_| TrackRepositoryError::InvalidData)?;
+        let track_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
+        let mut credits = credits_for_tracks(&self.pool, &track_ids).await?;
+        let mut entries = Vec::with_capacity(rows.len());
 
-                Ok((TrackId::from_uuid(track_id), membership))
-            })
-            .collect()
+        for (id, title, duration_ms, recording_id, isrc, disc_number, track_number, position) in
+            rows
+        {
+            let track = decode_track(
+                id,
+                title,
+                duration_ms,
+                recording_id,
+                isrc,
+                credits.remove(&id).unwrap_or_default(),
+            )?;
+            let membership = decode_membership(disc_number, track_number, position)?;
+
+            entries.push(AlbumEntry::new(track, membership));
+        }
+
+        Ok(entries)
+    }
+
+    async fn find_albums_for_artist(
+        &self,
+        artist_id: &ArtistId,
+    ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
+        let rows = sqlx::query_as::<_, AlbumBrowseRow>(&format!(
+            r#"
+            SELECT {ALBUM_BROWSE_COLUMNS}
+            {ALBUM_BROWSE_FROM}
+            WHERE a.album_artist_id = $1
+            GROUP BY a.id, ar.id
+            ORDER BY a.title_normalized, a.id
+            "#
+        ))
+        .bind(artist_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        rows.into_iter().map(decode_album_summary).collect()
+    }
+
+    async fn list_albums(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
+        let rows = sqlx::query_as::<_, AlbumBrowseRow>(&format!(
+            r#"
+            SELECT {ALBUM_BROWSE_COLUMNS}
+            {ALBUM_BROWSE_FROM}
+            GROUP BY a.id, ar.id
+            ORDER BY a.title_normalized, a.id
+            LIMIT $1 OFFSET $2
+            "#
+        ))
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        rows.into_iter().map(decode_album_summary).collect()
+    }
+
+    async fn list_artists(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
+        let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64)>(
+            r#"
+            SELECT ar.id, ar.name, ar.sort_name, ar.musicbrainz_artist_id,
+                   (SELECT COUNT(*) FROM albums WHERE album_artist_id = ar.id)::BIGINT
+            FROM artists AS ar
+            ORDER BY ar.name_normalized, ar.id
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        rows.into_iter().map(decode_artist_summary).collect()
     }
 }
 
@@ -484,10 +642,35 @@ type AlbumRow = (
     Option<String>,
     Option<String>,
 );
+/// album columns, the joined album artist, its track count and its duration.
+type AlbumBrowseRow = (
+    Uuid,
+    String,
+    Option<Uuid>,
+    Option<i16>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<Uuid>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    i64,
+);
 
 const ARTIST_COLUMNS: &str = "id, name, sort_name, musicbrainz_artist_id";
 const ALBUM_COLUMNS: &str = "id, title, album_artist_id, year, release_type, label, \
      musicbrainz_release_group_id, musicbrainz_release_id";
+const ALBUM_BROWSE_COLUMNS: &str = "a.id, a.title, a.album_artist_id, a.year, a.release_type, \
+     a.label, a.musicbrainz_release_group_id, a.musicbrainz_release_id, \
+     ar.id, ar.name, ar.sort_name, ar.musicbrainz_artist_id, \
+     COUNT(DISTINCT mt.track_id)::BIGINT, COALESCE(SUM(t.duration_ms), 0)::BIGINT";
+const ALBUM_BROWSE_FROM: &str = "FROM albums AS a \
+     LEFT JOIN artists AS ar ON ar.id = a.album_artist_id \
+     LEFT JOIN album_tracks AS mt ON mt.album_id = a.id \
+     LEFT JOIN tracks AS t ON t.id = mt.track_id";
 
 async fn resolve_artist(
     pool: &PgPool,
@@ -789,6 +972,134 @@ fn decode_album(row: AlbumRow) -> Result<Album, TrackRepositoryError> {
         release_id,
     )
     .map_err(|_| TrackRepositoryError::InvalidData)
+}
+
+fn decode_album_summary(row: AlbumBrowseRow) -> Result<AlbumSummary, TrackRepositoryError> {
+    let (
+        id,
+        title,
+        album_artist_id,
+        year,
+        release_type,
+        label,
+        group_id,
+        release_id,
+        artist_id,
+        artist_name,
+        sort_name,
+        artist_identifier,
+        track_count,
+        duration_ms,
+    ) = row;
+
+    let album = Album::new(
+        AlbumId::from_uuid(id),
+        title,
+        album_artist_id.map(ArtistId::from_uuid),
+        year.map(i32::from),
+        release_type,
+        label,
+        group_id,
+        release_id,
+    )
+    .map_err(|_| TrackRepositoryError::InvalidData)?;
+
+    let album_artist = match (artist_id, artist_name) {
+        (Some(id), Some(name)) => Some(
+            Artist::new(ArtistId::from_uuid(id), name, sort_name, artist_identifier)
+                .map_err(|_| TrackRepositoryError::InvalidData)?,
+        ),
+        _ => None,
+    };
+    let track_count = u32::try_from(track_count).map_err(|_| TrackRepositoryError::InvalidData)?;
+
+    Ok(AlbumSummary::new(
+        album,
+        album_artist,
+        track_count,
+        duration_ms.max(0) as u64,
+    ))
+}
+
+fn decode_artist_summary(
+    row: (Uuid, String, Option<String>, Option<String>, i64),
+) -> Result<ArtistSummary, TrackRepositoryError> {
+    let (id, name, sort_name, identifier, album_count) = row;
+    let artist = Artist::new(ArtistId::from_uuid(id), name, sort_name, identifier)
+        .map_err(|_| TrackRepositoryError::InvalidData)?;
+    let album_count = u32::try_from(album_count).map_err(|_| TrackRepositoryError::InvalidData)?;
+
+    Ok(ArtistSummary::new(artist, album_count))
+}
+
+fn decode_track(
+    id: Uuid,
+    title: String,
+    duration_ms: Option<i64>,
+    recording_id: Option<String>,
+    isrc: Option<String>,
+    artists: Vec<ArtistCredit>,
+) -> Result<Track, TrackRepositoryError> {
+    let duration_ms = duration_ms
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| TrackRepositoryError::InvalidData)?;
+    let metadata = TrackMetadata::new(title, artists, duration_ms)
+        .map_err(|_| TrackRepositoryError::InvalidData)?
+        .with_recording_id(recording_id)
+        .map_err(|_| TrackRepositoryError::InvalidData)?
+        .with_isrc(isrc)
+        .map_err(|_| TrackRepositoryError::InvalidData)?;
+
+    Ok(Track::new(TrackId::from_uuid(id), metadata))
+}
+
+fn decode_membership(
+    disc_number: Option<i16>,
+    track_number: Option<i16>,
+    position: i32,
+) -> Result<AlbumTrack, TrackRepositoryError> {
+    let position = u32::try_from(position).map_err(|_| TrackRepositoryError::InvalidData)?;
+
+    AlbumTrack::new(
+        decode_smallint(disc_number)?,
+        decode_smallint(track_number)?,
+        position,
+    )
+    .map_err(|_| TrackRepositoryError::InvalidData)
+}
+
+async fn credits_for_tracks(
+    pool: &PgPool,
+    track_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<ArtistCredit>>, TrackRepositoryError> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+        r#"
+        SELECT credits.track_id, credits.name, artists.musicbrainz_artist_id
+        FROM track_artist_credits AS credits
+        LEFT JOIN artists ON artists.id = credits.artist_id
+        WHERE credits.track_id = ANY($1)
+        ORDER BY credits.track_id, credits.position
+        "#,
+    )
+    .bind(track_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+    let mut by_track: HashMap<Uuid, Vec<ArtistCredit>> = HashMap::new();
+    for (track_id, name, identifier) in rows {
+        let credit =
+            ArtistCredit::new(name, identifier).map_err(|_| TrackRepositoryError::InvalidData)?;
+
+        by_track.entry(track_id).or_default().push(credit);
+    }
+
+    Ok(by_track)
 }
 
 fn encode_smallint(value: Option<u16>) -> Result<Option<i16>, TrackRepositoryError> {

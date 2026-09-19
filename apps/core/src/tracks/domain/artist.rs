@@ -94,6 +94,31 @@ impl Artist {
     }
 }
 
+/// an artist as a browse list shows it, with the album count a client card
+/// renders without opening the artist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistSummary {
+    artist: Artist,
+    album_count: u32,
+}
+
+impl ArtistSummary {
+    pub fn new(artist: Artist, album_count: u32) -> Self {
+        Self {
+            artist,
+            album_count,
+        }
+    }
+
+    pub fn artist(&self) -> &Artist {
+        &self.artist
+    }
+
+    pub fn album_count(&self) -> u32 {
+        self.album_count
+    }
+}
+
 /// a name as a track or album credits it, with the identifier when the source
 /// supplied one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -538,10 +538,161 @@ async fn album_sources_and_membership_round_trip(pool: PgPool) {
         .set_album_track(album.id(), track.id(), &membership)
         .await
         .unwrap();
+    let entries = repository.find_album_entries(album.id()).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].track().id(), track.id());
+    assert_eq!(entries[0].membership(), &membership);
     assert_eq!(
-        repository.find_album_tracks(album.id()).await.unwrap(),
-        vec![(track.id().clone(), membership)]
+        repository
+            .find_album_for_track(track.id())
+            .await
+            .unwrap()
+            .expect("the track is filed under the album")
+            .id(),
+        album.id()
     );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let artist = repository
+        .resolve_or_create_artist(&credit("Daft Punk", None))
+        .await
+        .unwrap();
+    let discovery = repository
+        .resolve_or_create_album(&album("Discovery").with_album_artist(credit("Daft Punk", None)))
+        .await
+        .unwrap();
+    let other = repository
+        .resolve_or_create_album(&album("Homework").with_album_artist(credit("Daft Punk", None)))
+        .await
+        .unwrap();
+
+    let third = repository
+        .get_or_create(
+            source("track-c"),
+            metadata("Third", &["Daft Punk"], Some(3_000)),
+        )
+        .await
+        .unwrap();
+    let first = repository
+        .get_or_create(
+            source("track-a"),
+            metadata("First", &["Daft Punk"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+    let later = repository
+        .get_or_create(
+            source("track-b"),
+            metadata("Later", &["Daft Punk"], Some(2_000)),
+        )
+        .await
+        .unwrap();
+
+    repository
+        .set_album_track(
+            discovery.id(),
+            third.id(),
+            &AlbumTrack::new(Some(1), Some(3), 2).unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            discovery.id(),
+            first.id(),
+            &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            discovery.id(),
+            later.id(),
+            &AlbumTrack::new(None, None, 0).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let titles = repository
+        .find_album_entries(discovery.id())
+        .await
+        .unwrap()
+        .iter()
+        .map(|entry| entry.track().title().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        ["First", "Third", "Later"],
+        "numbered tracks come first in track order, unnumbered last"
+    );
+
+    repository
+        .set_album_track(
+            other.id(),
+            third.id(),
+            &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .find_album_for_track(third.id())
+            .await
+            .unwrap()
+            .expect("re-filing moves the track")
+            .id(),
+        other.id()
+    );
+    assert_eq!(
+        repository
+            .find_album_entries(discovery.id())
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "the previous album no longer holds the track"
+    );
+
+    repository.clear_album_track(third.id()).await.unwrap();
+    assert!(
+        repository
+            .find_album_for_track(third.id())
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let summaries = repository.list_albums(0, 10).await.unwrap();
+    let names = summaries
+        .iter()
+        .map(|summary| summary.album().title().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Discovery", "Homework"]);
+    let listed = summaries
+        .iter()
+        .find(|summary| summary.album().id() == discovery.id())
+        .expect("the album is listed");
+    assert_eq!(listed.album_artist().unwrap().id(), artist.id());
+    assert_eq!(listed.track_count(), 2);
+    assert_eq!(listed.duration_ms(), 3_000);
+
+    assert_eq!(
+        repository
+            .find_albums_for_artist(artist.id())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let artists = repository.list_artists(0, 10).await.unwrap();
+    assert_eq!(artists.len(), 1);
+    assert_eq!(artists[0].artist().id(), artist.id());
+    assert_eq!(artists[0].album_count(), 2);
 }
 
 #[sqlx::test]

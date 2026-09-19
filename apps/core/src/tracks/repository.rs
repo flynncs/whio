@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use crate::tracks::{ArtworkRef, Track, TrackMetadata};
 
 use super::{
-    Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ProviderId, SourceIdentity,
-    SourceScope, TrackId,
+    Album, AlbumEntry, AlbumId, AlbumMetadata, AlbumSummary, AlbumTrack, Artist, ArtistCredit,
+    ArtistId, ArtistSummary, ProviderId, SourceIdentity, SourceScope, TrackId,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -120,7 +120,29 @@ pub trait TrackRepository: Send + Sync {
         Ok(())
     }
 
+    /// removes a track's album membership without filing it elsewhere. a writer
+    /// that observes no album clears rather than leaving the previous one
+    /// (A-048).
+    async fn clear_album_track(&self, _track_id: &TrackId) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
     async fn find_album(&self, _album_id: &AlbumId) -> Result<Option<Album>, TrackRepositoryError> {
+        Ok(None)
+    }
+
+    /// the one album a track is filed under (A-048).
+    async fn find_album_for_track(
+        &self,
+        _track_id: &TrackId,
+    ) -> Result<Option<Album>, TrackRepositoryError> {
+        Ok(None)
+    }
+
+    async fn find_artist(
+        &self,
+        _artist_id: &ArtistId,
+    ) -> Result<Option<Artist>, TrackRepositoryError> {
         Ok(None)
     }
 
@@ -131,10 +153,35 @@ pub trait TrackRepository: Send + Sync {
         Ok(Vec::new())
     }
 
-    async fn find_album_tracks(
+    /// an album's tracks in the order the album lists them, with the rows the
+    /// detail surfaces render.
+    async fn find_album_entries(
         &self,
         _album_id: &AlbumId,
-    ) -> Result<Vec<(TrackId, AlbumTrack)>, TrackRepositoryError> {
+    ) -> Result<Vec<AlbumEntry>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn find_albums_for_artist(
+        &self,
+        _artist_id: &ArtistId,
+    ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_albums(
+        &self,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_artists(
+        &self,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }
 }

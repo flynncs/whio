@@ -110,6 +110,8 @@ pub async fn scan(
                                 .await?;
                         }
                         repository.set_album_source(album.id(), &source).await?;
+                    } else {
+                        repository.clear_album_track(stored.id()).await?;
                     }
 
                     report.indexed += 1;
@@ -201,11 +203,17 @@ fn album_metadata(tags: &super::TrackTags) -> Result<Option<AlbumMetadata>, ()> 
 }
 
 fn album_track(tags: &super::TrackTags) -> Option<AlbumTrack> {
-    let track_number = u16::try_from(tags.track_number?).ok()?;
-    let disc_number = tags.disc_number.and_then(|disc| u16::try_from(disc).ok());
-    let position = u32::from(track_number).saturating_sub(1);
+    let track_number = tags
+        .track_number
+        .and_then(|number| u16::try_from(number).ok())
+        .filter(|number| *number >= 1);
+    let disc_number = tags
+        .disc_number
+        .and_then(|number| u16::try_from(number).ok())
+        .filter(|number| *number >= 1);
+    let position = track_number.map_or(0, |number| u32::from(number) - 1);
 
-    AlbumTrack::new(disc_number, Some(track_number), position).ok()
+    AlbumTrack::new(disc_number, track_number, position).ok()
 }
 
 fn track_credits(tags: &super::TrackTags) -> Vec<ArtistCredit> {
@@ -451,10 +459,10 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].provider_id().as_str(), "local");
 
-        let tracks = repository.find_album_tracks(album.id()).await.unwrap();
+        let tracks = repository.find_album_entries(album.id()).await.unwrap();
         assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].1.disc_number(), Some(1));
-        assert_eq!(tracks[0].1.track_number(), Some(3));
+        assert_eq!(tracks[0].membership().disc_number(), Some(1));
+        assert_eq!(tracks[0].membership().track_number(), Some(3));
 
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -4,9 +4,9 @@ mod postgres_repository;
 mod repository;
 
 pub use domain::{
-    Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, ArtworkRef,
-    ProviderId, ProviderKind, SourceIdentity, SourceScope, Track, TrackId, TrackMetadata,
-    ValidationError,
+    Album, AlbumEntry, AlbumId, AlbumMetadata, AlbumSummary, AlbumTrack, Artist, ArtistCredit,
+    ArtistId, ArtistSummary, ArtworkRef, ProviderId, ProviderKind, SourceIdentity, SourceScope,
+    Track, TrackId, TrackMetadata, ValidationError,
 };
 pub use in_memory_repository::InMemoryTrackRepository;
 pub use postgres_repository::PostgresTrackRepository;

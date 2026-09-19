@@ -6,7 +6,7 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    ArtistCredit, ArtistId, ValidationError,
+    Artist, ArtistCredit, ArtistId, Track, ValidationError,
     text::{optional, required},
 };
 
@@ -267,6 +267,73 @@ impl AlbumTrack {
 
     pub fn position(&self) -> u32 {
         self.position
+    }
+}
+
+/// an album as a browse list shows it: the row, its album artist, and the
+/// totals a client card renders without opening the album.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumSummary {
+    album: Album,
+    album_artist: Option<Artist>,
+    track_count: u32,
+    duration_ms: u64,
+}
+
+impl AlbumSummary {
+    pub fn new(
+        album: Album,
+        album_artist: Option<Artist>,
+        track_count: u32,
+        duration_ms: u64,
+    ) -> Self {
+        Self {
+            album,
+            album_artist,
+            track_count,
+            duration_ms,
+        }
+    }
+
+    pub fn album(&self) -> &Album {
+        &self.album
+    }
+
+    pub fn album_artist(&self) -> Option<&Artist> {
+        self.album_artist.as_ref()
+    }
+
+    pub fn track_count(&self) -> u32 {
+        self.track_count
+    }
+
+    pub fn duration_ms(&self) -> u64 {
+        self.duration_ms
+    }
+}
+
+/// one track on an album, in the order the album lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumEntry {
+    track: Track,
+    membership: AlbumTrack,
+}
+
+impl AlbumEntry {
+    pub fn new(track: Track, membership: AlbumTrack) -> Self {
+        Self { track, membership }
+    }
+
+    pub fn track(&self) -> &Track {
+        &self.track
+    }
+
+    pub fn into_track(self) -> Track {
+        self.track
+    }
+
+    pub fn membership(&self) -> &AlbumTrack {
+        &self.membership
     }
 }
 
