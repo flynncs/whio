@@ -85,8 +85,14 @@ impl TrackRepository for PostgresTrackRepository {
     }
 
     async fn find_track(&self, track_id: &TrackId) -> Result<Option<Track>, TrackRepositoryError> {
-        let row: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
-            r#"SELECT title, duration_ms, album
+        let row: Option<(
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            r#"SELECT title, duration_ms, album, musicbrainz_recording_id, isrc
             FROM tracks
             WHERE id = $1
             "#,
@@ -96,7 +102,7 @@ impl TrackRepository for PostgresTrackRepository {
         .await
         .map_err(|_| TrackRepositoryError::Unavailable)?;
 
-        let Some((title, duration_ms, album)) = row else {
+        let Some((title, duration_ms, album, recording_id, isrc)) = row else {
             return Ok(None);
         };
 
@@ -119,6 +125,10 @@ impl TrackRepository for PostgresTrackRepository {
         let metadata = TrackMetadata::new(title, artists, duration_ms)
             .map_err(|_| TrackRepositoryError::InvalidData)?
             .with_album(album)
+            .map_err(|_| TrackRepositoryError::InvalidData)?
+            .with_recording_id(recording_id)
+            .map_err(|_| TrackRepositoryError::InvalidData)?
+            .with_isrc(isrc)
             .map_err(|_| TrackRepositoryError::InvalidData)?;
 
         Ok(Some(Track::new(
@@ -193,8 +203,8 @@ impl TrackRepository for PostgresTrackRepository {
         sqlx::query(
             r#"UPDATE track_sources
             SET path = $1, size_bytes = $2, modified_at = $3, missing_at = $4,
-                content_type = $5, suffix = $6
-            WHERE provider_id = $7 AND source_scope = $8 AND external_id = $9
+                content_type = $5, suffix = $6, acoustid_fingerprint = $7
+            WHERE provider_id = $8 AND source_scope = $9 AND external_id = $10
             "#,
         )
         .bind(facts.path.as_deref())
@@ -203,6 +213,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(facts.missing_at)
         .bind(facts.content_type.as_deref())
         .bind(facts.suffix.as_deref())
+        .bind(facts.acoustid_fingerprint.as_deref())
         .bind(source.provider_id().as_str())
         .bind(encode_source_scope(source.source_scope()))
         .bind(source.external_id())
@@ -225,9 +236,11 @@ impl TrackRepository for PostgresTrackRepository {
                 Option<chrono::DateTime<chrono::Utc>>,
                 Option<String>,
                 Option<String>,
+                Option<String>,
             ),
         >(
-            r#"SELECT path, size_bytes, modified_at, missing_at, content_type, suffix
+            r#"SELECT path, size_bytes, modified_at, missing_at, content_type, suffix,
+                      acoustid_fingerprint
             FROM track_sources
             WHERE provider_id = $1 AND source_scope = $2 AND external_id = $3
             "#,
@@ -240,13 +253,16 @@ impl TrackRepository for PostgresTrackRepository {
         .map_err(|_| TrackRepositoryError::Unavailable)?;
 
         Ok(row.map(
-            |(path, size_bytes, modified_at, missing_at, content_type, suffix)| SourceFileFacts {
-                path,
-                size_bytes: size_bytes.unwrap_or_default().max(0) as u64,
-                modified_at,
-                missing_at,
-                content_type,
-                suffix,
+            |(path, size_bytes, modified_at, missing_at, content_type, suffix, fingerprint)| {
+                SourceFileFacts {
+                    path,
+                    size_bytes: size_bytes.unwrap_or_default().max(0) as u64,
+                    modified_at,
+                    missing_at,
+                    content_type,
+                    suffix,
+                    acoustid_fingerprint: fingerprint,
+                }
             },
         ))
     }
@@ -268,10 +284,12 @@ impl TrackRepository for PostgresTrackRepository {
                 Option<chrono::DateTime<chrono::Utc>>,
                 Option<String>,
                 Option<String>,
+                Option<String>,
             ),
         >(
             r#"SELECT provider_id, source_scope, external_id,
-                      path, size_bytes, modified_at, missing_at, content_type, suffix
+                      path, size_bytes, modified_at, missing_at, content_type, suffix,
+                      acoustid_fingerprint
             FROM track_sources
             WHERE provider_id = $1 AND source_scope = $2 AND path IS NOT NULL
             "#,
@@ -293,6 +311,7 @@ impl TrackRepository for PostgresTrackRepository {
             missing_at,
             content_type,
             suffix,
+            fingerprint,
         ) in rows
         {
             let source = decode_source(provider, scope, external_id)?;
@@ -305,6 +324,7 @@ impl TrackRepository for PostgresTrackRepository {
                     missing_at,
                     content_type,
                     suffix,
+                    acoustid_fingerprint: fingerprint,
                 },
             ));
         }
@@ -827,8 +847,11 @@ async fn insert_candidate_track(
 ) -> Result<(), TrackRepositoryError> {
     sqlx::query(
         r#"
-        INSERT INTO tracks (id, title, duration_ms, album, album_source)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO tracks (
+            id, title, duration_ms, album, album_source,
+            musicbrainz_recording_id, isrc
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(track_id.as_uuid())
@@ -836,6 +859,8 @@ async fn insert_candidate_track(
     .bind(encode_duration_ms(metadata.duration_ms())?)
     .bind(metadata.album())
     .bind(metadata.album().map(|_| source.provider_id().as_str()))
+    .bind(metadata.musicbrainz_recording_id())
+    .bind(metadata.isrc())
     .execute(&mut *connection)
     .await
     .map(|_| ())
@@ -946,14 +971,18 @@ async fn update_track_metadata(
             duration_ms = $2,
             album = $3,
             album_source = $4,
+            musicbrainz_recording_id = COALESCE($5, musicbrainz_recording_id),
+            isrc = COALESCE($6, isrc),
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = $5
+        WHERE id = $7
         "#,
     )
     .bind(metadata.title())
     .bind(encode_duration_ms(metadata.duration_ms())?)
     .bind(album.as_deref())
     .bind(album_source.as_deref())
+    .bind(metadata.musicbrainz_recording_id())
+    .bind(metadata.isrc())
     .bind(track_id.as_uuid())
     .execute(&mut *connection)
     .await

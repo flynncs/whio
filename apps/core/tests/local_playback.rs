@@ -59,6 +59,7 @@ async fn app() -> (Router, TrackId, PathBuf) {
                 missing_at: None,
                 content_type: None,
                 suffix: Some("flac".to_owned()),
+                acoustid_fingerprint: None,
             },
         )
         .await

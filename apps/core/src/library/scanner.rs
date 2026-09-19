@@ -5,8 +5,8 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::tracks::{
-    ProviderId, SourceFileFacts, SourceIdentity, SourceScope, TrackMetadata, TrackRepository,
-    TrackRepositoryError,
+    AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceFileFacts, SourceIdentity,
+    SourceScope, TrackMetadata, TrackRepository, TrackRepositoryError,
 };
 
 use super::tags::{TagError, identity_for, read_tags};
@@ -55,6 +55,8 @@ struct PreparedTrack {
     facts: SourceFileFacts,
     external_id: String,
     metadata: TrackMetadata,
+    album: Option<AlbumMetadata>,
+    membership: Option<AlbumTrack>,
 }
 
 pub async fn scan(
@@ -85,16 +87,31 @@ pub async fn scan(
                 Prepared::Untagged => report.untagged += 1,
                 Prepared::Failed => report.failed += 1,
                 Prepared::Ready(track) => {
-                    seen.push(track.relative.clone());
-                    let source =
-                        SourceIdentity::new(provider.clone(), scope.clone(), track.external_id)
-                            .expect("scanned identity is non-empty");
-                    repository
-                        .get_or_create(source.clone(), track.metadata)
-                        .await?;
-                    repository
-                        .set_source_file_facts(&source, &track.facts)
-                        .await?;
+                    let PreparedTrack {
+                        relative,
+                        facts,
+                        external_id,
+                        metadata,
+                        album,
+                        membership,
+                    } = *track;
+                    seen.push(relative);
+
+                    let source = SourceIdentity::new(provider.clone(), scope.clone(), external_id)
+                        .expect("scanned identity is non-empty");
+                    let stored = repository.get_or_create(source.clone(), metadata).await?;
+                    repository.set_source_file_facts(&source, &facts).await?;
+
+                    if let Some(album) = &album {
+                        let album = repository.resolve_or_create_album(album).await?;
+                        if let Some(membership) = membership {
+                            repository
+                                .set_album_track(album.id(), stored.id(), &membership)
+                                .await?;
+                        }
+                        repository.set_album_source(album.id(), &source).await?;
+                    }
+
                     report.indexed += 1;
                 }
             }
@@ -107,13 +124,14 @@ pub async fn scan(
 }
 
 fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepared {
-    let facts = SourceFileFacts {
+    let mut facts = SourceFileFacts {
         path: Some(file.relative.clone()),
         size_bytes: file.size_bytes,
         modified_at: file.modified_at,
         missing_at: None,
         content_type: None,
         suffix: file.suffix,
+        acoustid_fingerprint: None,
     };
 
     if let Some(previous) = known.get(&file.relative)
@@ -128,20 +146,65 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
     match read_tags(&file.absolute) {
         Ok(tags) => {
             let (_, external_id) = identity_for(&tags, &file.relative);
+            let album = match album_metadata(&tags) {
+                Ok(album) => album,
+                Err(()) => return Prepared::Untagged,
+            };
+            let membership = album_track(&tags);
+            let acoustid_fingerprint = tags.acoustid_fingerprint.clone();
+
             let Ok(metadata) = TrackMetadata::new(tags.title, tags.artists, tags.duration_ms)
+                .and_then(|metadata| metadata.with_recording_id(tags.recording_id))
+                .and_then(|metadata| metadata.with_isrc(tags.isrc))
             else {
                 return Prepared::Untagged;
             };
+
+            facts.acoustid_fingerprint = acoustid_fingerprint;
+
             Prepared::Ready(Box::new(PreparedTrack {
                 relative: file.relative,
                 facts,
                 external_id,
                 metadata,
+                album,
+                membership,
             }))
         }
         Err(TagError::Untagged) => Prepared::Untagged,
         Err(TagError::Unreadable) => Prepared::Failed,
     }
+}
+
+fn album_metadata(tags: &super::TrackTags) -> Result<Option<AlbumMetadata>, ()> {
+    let Some(title) = &tags.album else {
+        return Ok(None);
+    };
+
+    let mut album = AlbumMetadata::new(title.clone()).map_err(|_| ())?;
+
+    if let Some(album_artist) = &tags.album_artist {
+        let credit = ArtistCredit::new(album_artist.clone(), tags.album_artist_id.clone())
+            .map_err(|_| ())?;
+        album = album.with_album_artist(credit);
+    }
+
+    album
+        .with_year(tags.year)
+        .and_then(|album| album.with_release_type(tags.release_type.clone()))
+        .and_then(|album| album.with_label(tags.label.clone()))
+        .and_then(|album| album.with_release_group_id(tags.release_group_id.clone()))
+        .and_then(|album| album.with_release_id(tags.release_id.clone()))
+        .map(Some)
+        .map_err(|_| ())
+}
+
+fn album_track(tags: &super::TrackTags) -> Option<AlbumTrack> {
+    let track_number = u16::try_from(tags.track_number?).ok()?;
+    let disc_number = tags.disc_number.and_then(|disc| u16::try_from(disc).ok());
+    let position = u32::from(track_number).saturating_sub(1);
+
+    AlbumTrack::new(disc_number, Some(track_number), position).ok()
 }
 
 async fn known_paths(
@@ -347,5 +410,32 @@ mod tests {
     async fn a_missing_root_is_an_error() {
         let missing = std::env::temp_dir().join(format!("whio-x-{}", uuid::Uuid::now_v7()));
         assert!(matches!(walk(&missing), Err(ScanError::Unreadable)));
+    }
+
+    #[tokio::test]
+    async fn a_scanned_file_populates_its_album_and_membership() {
+        let root = temp_root("album");
+        std::fs::copy(fixture(), root.join("a.flac")).unwrap();
+        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+
+        let report = scan(&repository, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(report.indexed, 1);
+
+        let tags = read_tags(&fixture()).unwrap();
+        let expected = album_metadata(&tags).unwrap().unwrap();
+        let album = repository.resolve_or_create_album(&expected).await.unwrap();
+
+        let sources = repository.find_album_sources(album.id()).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].provider_id().as_str(), "local");
+
+        let tracks = repository.find_album_tracks(album.id()).await.unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].1.disc_number(), Some(1));
+        assert_eq!(tracks[0].1.track_number(), Some(3));
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

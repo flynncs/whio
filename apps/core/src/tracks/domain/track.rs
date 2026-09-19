@@ -79,6 +79,14 @@ impl Track {
         self.metadata.album()
     }
 
+    pub fn musicbrainz_recording_id(&self) -> Option<&str> {
+        self.metadata.musicbrainz_recording_id()
+    }
+
+    pub fn isrc(&self) -> Option<&str> {
+        self.metadata.isrc()
+    }
+
     pub fn into_parts(self) -> (TrackId, TrackMetadata) {
         (self.id, self.metadata)
     }

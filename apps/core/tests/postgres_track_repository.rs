@@ -266,6 +266,7 @@ async fn source_file_facts_round_trip_for_a_local_file(pool: PgPool) {
         missing_at: None,
         content_type: Some("audio/flac".to_owned()),
         suffix: Some("flac".to_owned()),
+        acoustid_fingerprint: Some("AQAA-test".to_owned()),
     };
     repository
         .set_source_file_facts(&source, &facts)
@@ -534,4 +535,29 @@ async fn album_sources_and_membership_round_trip(pool: PgPool) {
         repository.find_album_tracks(album.id()).await.unwrap(),
         vec![(track.id().clone(), membership)]
     );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn recording_identifiers_round_trip_on_the_track(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let stored = repository
+        .get_or_create(
+            source("local-recording"),
+            metadata("Song", &["Artist"], None)
+                .with_recording_id(Some("mb-recording".to_owned()))
+                .unwrap()
+                .with_isrc(Some("ISRC-1".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let found = repository
+        .find_track(stored.id())
+        .await
+        .unwrap()
+        .expect("stored track is found");
+    assert_eq!(found.musicbrainz_recording_id(), Some("mb-recording"));
+    assert_eq!(found.isrc(), Some("ISRC-1"));
 }

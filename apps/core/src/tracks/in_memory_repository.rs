@@ -689,6 +689,30 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn recording_identifiers_round_trip_on_the_track() {
+        let repository = InMemoryTrackRepository::default();
+        let stored = repository
+            .get_or_create(
+                source("local", "recording-1"),
+                metadata("Song")
+                    .with_recording_id(Some("mb-recording".to_owned()))
+                    .unwrap()
+                    .with_isrc(Some("ISRC-1".to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let found = repository
+            .find_track(stored.id())
+            .await
+            .unwrap()
+            .expect("stored track is found");
+        assert_eq!(found.musicbrainz_recording_id(), Some("mb-recording"));
+        assert_eq!(found.isrc(), Some("ISRC-1"));
+    }
+
     fn credit(name: &str, identifier: Option<&str>) -> ArtistCredit {
         ArtistCredit::new(name.to_owned(), identifier.map(str::to_owned)).unwrap()
     }

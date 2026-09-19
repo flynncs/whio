@@ -1,4 +1,4 @@
-use super::ValidationError;
+use super::{ValidationError, text::optional};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrackMetadata {
@@ -6,6 +6,8 @@ pub struct TrackMetadata {
     artists: Vec<String>,
     duration_ms: Option<u64>,
     album: Option<String>,
+    musicbrainz_recording_id: Option<String>,
+    isrc: Option<String>,
 }
 
 impl TrackMetadata {
@@ -41,7 +43,22 @@ impl TrackMetadata {
             artists,
             duration_ms,
             album: None,
+            musicbrainz_recording_id: None,
+            isrc: None,
         })
+    }
+
+    pub fn with_recording_id(
+        mut self,
+        recording_id: Option<String>,
+    ) -> Result<Self, ValidationError> {
+        self.musicbrainz_recording_id = optional("musicbrainz_recording_id", recording_id, 64)?;
+        Ok(self)
+    }
+
+    pub fn with_isrc(mut self, isrc: Option<String>) -> Result<Self, ValidationError> {
+        self.isrc = optional("isrc", isrc, 32)?;
+        Ok(self)
     }
 
     pub fn with_album(mut self, album: Option<String>) -> Result<Self, ValidationError> {
@@ -74,6 +91,14 @@ impl TrackMetadata {
 
     pub fn album(&self) -> Option<&str> {
         self.album.as_deref()
+    }
+
+    pub fn musicbrainz_recording_id(&self) -> Option<&str> {
+        self.musicbrainz_recording_id.as_deref()
+    }
+
+    pub fn isrc(&self) -> Option<&str> {
+        self.isrc.as_deref()
     }
 
     pub fn into_parts(self) -> (String, Vec<String>, Option<u64>) {

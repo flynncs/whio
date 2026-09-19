@@ -23,6 +23,7 @@ pub struct SourceFileFacts {
     pub missing_at: Option<chrono::DateTime<chrono::Utc>>,
     pub content_type: Option<String>,
     pub suffix: Option<String>,
+    pub acoustid_fingerprint: Option<String>,
 }
 
 #[async_trait]

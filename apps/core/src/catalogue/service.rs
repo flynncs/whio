@@ -11,7 +11,10 @@ use crate::{
     },
     providers::ProviderError,
     request::RequestContext,
-    tracks::{SourceIdentity, Track, TrackId, TrackRepository, TrackRepositoryError},
+    tracks::{
+        AlbumMetadata, ArtistCredit, SourceIdentity, Track, TrackId, TrackRepository,
+        TrackRepositoryError,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -268,11 +271,36 @@ async fn materialize(
         let source = candidate.source().clone();
         let artwork = candidate.artwork().cloned();
         let metadata = candidate.metadata().clone();
+        let album = match metadata.album() {
+            Some(title) => {
+                let mut album = AlbumMetadata::new(title.to_owned())
+                    .map_err(|_| CatalogueError::Repository(TrackRepositoryError::InvalidData))?;
+                if let Some(artist) = metadata.artists().first() {
+                    let credit = ArtistCredit::new(artist.clone(), None).map_err(|_| {
+                        CatalogueError::Repository(TrackRepositoryError::InvalidData)
+                    })?;
+                    album = album.with_album_artist(credit);
+                }
+                Some(album)
+            }
+            None => None,
+        };
 
         let track = repository
             .get_or_create(source.clone(), metadata)
             .await
             .map_err(CatalogueError::Repository)?;
+
+        if let Some(album) = &album {
+            let album = repository
+                .resolve_or_create_album(album)
+                .await
+                .map_err(CatalogueError::Repository)?;
+            repository
+                .set_album_source(album.id(), &source)
+                .await
+                .map_err(CatalogueError::Repository)?;
+        }
 
         if let Some(artwork) = artwork
             && let Err(error) = repository.set_source_artwork(&source, &artwork).await
@@ -696,5 +724,31 @@ mod tests {
                 TrackRepositoryError::Unavailable
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_provider_album_is_registered_with_its_source() {
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        let base = candidate("ytm-album-track", "Song");
+        let source = base.source().clone();
+        let metadata = base
+            .metadata()
+            .clone()
+            .with_album(Some("Discovery".to_owned()))
+            .unwrap();
+        let resolver = StubProvider::new(vec![Ok(vec![CatalogueCandidate::new(source, metadata)])]);
+        let catalogue =
+            CatalogueService::with_providers(repository.clone(), vec![provider(resolver)]);
+
+        let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
+        assert_eq!(outcome.hits.len(), 1);
+
+        let expected = AlbumMetadata::new("Discovery".to_owned())
+            .unwrap()
+            .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap());
+        let album = repository.resolve_or_create_album(&expected).await.unwrap();
+        let sources = repository.find_album_sources(album.id()).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].provider_id().as_str(), "youtube_music");
     }
 }
