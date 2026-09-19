@@ -3,8 +3,9 @@ use async_trait::async_trait;
 use crate::tracks::{ArtworkRef, Track, TrackMetadata};
 
 use super::{
-    Album, AlbumEntry, AlbumId, AlbumMetadata, AlbumSummary, AlbumTrack, Artist, ArtistCredit,
-    ArtistId, ArtistSummary, ProviderId, SourceIdentity, SourceScope, TrackId,
+    Album, AlbumEntry, AlbumId, AlbumMetadata, AlbumOrder, AlbumSummary, AlbumTrack, Artist,
+    ArtistCredit, ArtistId, ArtistSummary, ProviderId, SourceIdentity, SourceScope, TrackHit,
+    TrackId,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -136,6 +137,13 @@ pub trait TrackRepository: Send + Sync {
         Ok(None)
     }
 
+    async fn find_album_summary(
+        &self,
+        _album_id: &AlbumId,
+    ) -> Result<Option<AlbumSummary>, TrackRepositoryError> {
+        Ok(None)
+    }
+
     async fn find_artist(
         &self,
         _artist_id: &ArtistId,
@@ -168,6 +176,7 @@ pub trait TrackRepository: Send + Sync {
         &self,
         _offset: u32,
         _limit: u32,
+        _order: AlbumOrder,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }
@@ -175,6 +184,38 @@ pub trait TrackRepository: Send + Sync {
     async fn list_artists(
         &self,
         _offset: u32,
+        _limit: u32,
+    ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn count_albums(&self) -> Result<u32, TrackRepositoryError> {
+        Ok(0)
+    }
+
+    async fn count_artists(&self) -> Result<u32, TrackRepositoryError> {
+        Ok(0)
+    }
+
+    async fn search_tracks(
+        &self,
+        _query: &str,
+        _limit: u32,
+    ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn search_albums(
+        &self,
+        _query: &str,
+        _limit: u32,
+    ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn search_artists(
+        &self,
+        _query: &str,
         _limit: u32,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         Ok(Vec::new())

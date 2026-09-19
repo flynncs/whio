@@ -235,7 +235,7 @@ async fn unknown_rest_endpoints_answer_with_a_subsonic_envelope_not_product_json
     // must speak subsonic even there
     let response = get(
         app(support::credential_service()),
-        "/rest/getArtists.view?u=flynn&v=1.16.1&c=test-client&apiKey=whio_whatever",
+        "/rest/getPlaylists.view?u=flynn&v=1.16.1&c=test-client&apiKey=whio_whatever",
     )
     .await;
 

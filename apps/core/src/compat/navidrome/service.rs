@@ -8,11 +8,11 @@ use crate::{
     compat::SourceTags,
     identity::service::{AuthError, CredentialService},
     request::RequestContext,
-    tracks::TrackId,
+    tracks::{AlbumEntry, AlbumId, AlbumOrder, AlbumSummary, ArtistId, ArtistSummary, TrackId},
 };
 
 use super::{
-    dto::{Song, SongListQuery},
+    dto::{Album, Artist, Song, SongListQuery},
     session,
 };
 
@@ -36,17 +36,91 @@ pub(crate) enum SongError {
 
 fn song_from(hit: &SearchHit, tags: SourceTags) -> Song {
     let track = hit.track();
+    let album = hit.album();
 
     Song {
         id: track.id().to_string(),
         title: track.title().to_owned(),
         artist: tags.artist(track.artists(), hit.sources()),
-        album: hit.album().map(|album| album.title().to_owned()),
+        album: album.map(|album| album.title().to_owned()),
+        album_id: album.map(|album| album.id().to_string()),
+        album_artist: None,
+        track_number: None,
+        disc_number: None,
         cover_art: Some(track.id().to_string()),
         duration: track
             .duration_ms()
             .map(|ms| ms as f32 / 1000.0)
             .unwrap_or(0.0),
+    }
+}
+
+fn song_from_entry(entry: &AlbumEntry, album: &AlbumSummary, tags: SourceTags) -> Song {
+    let track = entry.track();
+    let membership = entry.membership();
+
+    Song {
+        id: track.id().to_string(),
+        title: track.title().to_owned(),
+        artist: tags.artist(track.artists(), &[]),
+        album: Some(album.album().title().to_owned()),
+        album_id: Some(album.album().id().to_string()),
+        album_artist: album.album_artist().map(|artist| artist.name().to_owned()),
+        track_number: membership.track_number().map(i32::from),
+        disc_number: membership.disc_number().map(i32::from),
+        cover_art: Some(track.id().to_string()),
+        duration: track
+            .duration_ms()
+            .map(|ms| ms as f32 / 1000.0)
+            .unwrap_or(0.0),
+    }
+}
+
+fn album_from_summary(summary: &AlbumSummary) -> Album {
+    let album = summary.album();
+    let artist = summary.album_artist();
+    let created_at = summary.created_at().to_rfc3339();
+
+    Album {
+        id: album.id().to_string(),
+        name: album.title().to_owned(),
+        album_artist: artist.map_or_else(String::new, |artist| artist.name().to_owned()),
+        album_artist_id: artist.map_or_else(String::new, |artist| artist.id().to_string()),
+        song_count: summary.track_count(),
+        duration: summary.duration_ms() as f32 / 1000.0,
+        size: 0,
+        year: album.year(),
+        min_year: album.year().unwrap_or(0),
+        max_year: album.year().unwrap_or(0),
+        compilation: false,
+        created_at: created_at.clone(),
+        updated_at: created_at,
+        genres: None,
+        library_id: 1,
+        library_name: "whio".to_owned(),
+        library_path: String::new(),
+        order_album_name: album.title().to_lowercase(),
+        order_album_artist_name: artist
+            .map_or_else(String::new, |artist| artist.name().to_lowercase()),
+        external_info_updated_at: None,
+    }
+}
+
+fn artist_from_summary(summary: &ArtistSummary) -> Artist {
+    let artist = summary.artist();
+
+    Artist {
+        id: artist.id().to_string(),
+        name: artist.name().to_owned(),
+        album_count: summary.album_count(),
+        song_count: 0,
+        size: 0,
+        missing: false,
+        sort_artist_name: artist
+            .sort_name()
+            .map_or_else(|| artist.name().to_lowercase(), str::to_owned),
+        order_artist_name: artist.name().to_lowercase(),
+        mbz_artist_id: artist.musicbrainz_artist_id().map(str::to_owned),
     }
 }
 
@@ -93,7 +167,7 @@ pub(crate) async fn search_songs(
         .map_err(SongError::Catalogue)?;
 
     Ok(outcome
-        .hits
+        .tracks
         .iter()
         .map(|hit| song_from(hit, tags))
         .collect())
@@ -120,6 +194,158 @@ pub(crate) async fn song_detail(
         .ok_or(SongError::NotFound)?;
 
     Ok(song_from(&hit, tags))
+}
+
+const DEFAULT_PAGE_SIZE: u32 = 500;
+
+pub(crate) async fn album_songs(
+    catalogue: &CatalogueService,
+    credential: &CredentialService,
+    token: &str,
+    raw_album_id: &str,
+    tags: SourceTags,
+) -> Result<Vec<Song>, SongError> {
+    authorize(credential, token).await?;
+    let album_id: AlbumId = raw_album_id.parse().map_err(|_| SongError::NotFound)?;
+    let detail = catalogue
+        .album_detail(&album_id)
+        .await
+        .map_err(SongError::Catalogue)?
+        .ok_or(SongError::NotFound)?;
+
+    Ok(detail
+        .entries
+        .iter()
+        .map(|entry| song_from_entry(entry, &detail.album, tags))
+        .collect())
+}
+
+pub(crate) async fn album_list(
+    catalogue: &CatalogueService,
+    credential: &CredentialService,
+    token: &str,
+    order: AlbumOrder,
+    artist_id: Option<&str>,
+    start: u32,
+    end: u32,
+) -> Result<(Vec<Album>, u32), SongError> {
+    authorize(credential, token).await?;
+    let (offset, limit) = page(start, end);
+
+    match artist_id {
+        Some(raw) => {
+            let artist_id: ArtistId = raw.parse().map_err(|_| SongError::InvalidSearch)?;
+            let detail = catalogue
+                .artist_detail(&artist_id)
+                .await
+                .map_err(SongError::Catalogue)?
+                .ok_or(SongError::NotFound)?;
+            let total = detail.albums.len() as u32;
+            let albums = detail
+                .albums
+                .iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .map(album_from_summary)
+                .collect();
+
+            Ok((albums, total))
+        }
+        None => {
+            let total = catalogue
+                .album_count()
+                .await
+                .map_err(SongError::Catalogue)?;
+            let albums = catalogue
+                .album_list(offset, limit, order)
+                .await
+                .map_err(SongError::Catalogue)?;
+
+            Ok((albums.iter().map(album_from_summary).collect(), total))
+        }
+    }
+}
+
+pub(crate) async fn album_detail(
+    catalogue: &CatalogueService,
+    credential: &CredentialService,
+    token: &str,
+    raw_id: &str,
+) -> Result<Album, SongError> {
+    authorize(credential, token).await?;
+    let album_id: AlbumId = raw_id.parse().map_err(|_| SongError::NotFound)?;
+    let detail = catalogue
+        .album_detail(&album_id)
+        .await
+        .map_err(SongError::Catalogue)?
+        .ok_or(SongError::NotFound)?;
+
+    Ok(album_from_summary(&detail.album))
+}
+
+pub(crate) async fn artist_list(
+    catalogue: &CatalogueService,
+    credential: &CredentialService,
+    token: &str,
+    start: u32,
+    end: u32,
+) -> Result<(Vec<Artist>, u32), SongError> {
+    authorize(credential, token).await?;
+    let (offset, limit) = page(start, end);
+    let total = catalogue
+        .artist_count()
+        .await
+        .map_err(SongError::Catalogue)?;
+    let artists = catalogue
+        .artist_list(offset, limit)
+        .await
+        .map_err(SongError::Catalogue)?;
+
+    Ok((artists.iter().map(artist_from_summary).collect(), total))
+}
+
+pub(crate) async fn artist_detail(
+    catalogue: &CatalogueService,
+    credential: &CredentialService,
+    token: &str,
+    raw_id: &str,
+) -> Result<Artist, SongError> {
+    authorize(credential, token).await?;
+    let artist_id: ArtistId = raw_id.parse().map_err(|_| SongError::NotFound)?;
+    let detail = catalogue
+        .artist_detail(&artist_id)
+        .await
+        .map_err(SongError::Catalogue)?
+        .ok_or(SongError::NotFound)?;
+
+    Ok(artist_from_summary(&detail.artist))
+}
+
+pub(crate) fn album_order(sort: Option<&str>) -> AlbumOrder {
+    let sort = sort.unwrap_or_default().to_ascii_lowercase();
+    let sort = sort.replace('_', "");
+
+    match sort.as_str() {
+        "albumartist" | "artist" => AlbumOrder::Artist,
+        "recentlyadded" | "createdat" => AlbumOrder::RecentlyAdded,
+        _ => AlbumOrder::Title,
+    }
+}
+
+async fn authorize(credential: &CredentialService, token: &str) -> Result<(), SongError> {
+    match session::authorize(credential, token).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(SongError::Unauthorized),
+        Err(error) => Err(SongError::Authentication(error)),
+    }
+}
+
+fn page(start: u32, end: u32) -> (u32, u32) {
+    if end > start {
+        (start, end - start)
+    } else {
+        (start, DEFAULT_PAGE_SIZE)
+    }
 }
 
 #[cfg(test)]
@@ -284,6 +510,7 @@ mod tests {
     fn query(title: Option<&str>, start: Option<u32>, end: Option<u32>) -> SongListQuery {
         SongListQuery {
             title: title.map(str::to_owned),
+            album_id: None,
             start,
             end,
         }

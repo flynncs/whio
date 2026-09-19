@@ -100,6 +100,6 @@ pub(crate) async fn search(
         })?;
 
     Ok(Json(SearchResponse {
-        results: outcome.hits.into_iter().map(Into::into).collect(),
+        results: outcome.tracks.into_iter().map(Into::into).collect(),
     }))
 }

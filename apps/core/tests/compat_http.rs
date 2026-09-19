@@ -30,6 +30,13 @@ fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum
 }
 
 async fn get(app: axum::Router, uri: &str) -> Value {
+    let (status, body) = get_status(app, uri).await;
+    assert_eq!(status, StatusCode::OK);
+
+    body
+}
+
+async fn get_status(app: axum::Router, uri: &str) -> (StatusCode, Value) {
     let request = Request::builder()
         .method("GET")
         .uri(uri)
@@ -38,10 +45,226 @@ async fn get(app: axum::Router, uri: &str) -> Value {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
+    let status = response.status();
     let body = to_bytes(response.into_body(), 8192).await.unwrap();
-    serde_json::from_slice(&body).unwrap()
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+async fn browse_app(
+    credential: Arc<whio_core::identity::service::CredentialService>,
+) -> axum::Router {
+    use whio_core::tracks::{
+        AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
+        TrackMetadata, TrackRepository,
+    };
+
+    let local_source = |external_id: &str| {
+        SourceIdentity::new(
+            ProviderId::new("local".to_owned()).unwrap(),
+            SourceScope::Named("/music".to_owned()),
+            external_id.to_owned(),
+        )
+        .unwrap()
+    };
+
+    let repository = Arc::new(InMemoryTrackRepository::default());
+    let album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Discovery".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let second = repository
+        .get_or_create(
+            local_source("path-b"),
+            TrackMetadata::from_names(
+                "Second".to_owned(),
+                vec!["Daft Punk".to_owned()],
+                Some(2_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let first = repository
+        .get_or_create(
+            local_source("path-a"),
+            TrackMetadata::from_names(
+                "First".to_owned(),
+                vec!["Daft Punk".to_owned()],
+                Some(1_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            album.id(),
+            second.id(),
+            &AlbumTrack::new(Some(1), Some(2), 1).unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            album.id(),
+            first.id(),
+            &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let catalogue = Arc::new(CatalogueService::new(repository.clone()));
+    let playback = Arc::new(PlaybackService::new(
+        repository,
+        vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
+        delivery(),
+    ));
+
+    router(credential, catalogue, playback)
+}
+
+#[tokio::test]
+async fn subsonic_browse_lists_albums_artists_and_songs() {
+    let (service, secret) = credential_service_with_known_app_password();
+    let app = browse_app(service).await;
+    let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
+
+    let body = get(
+        app.clone(),
+        &format!("/compat/subsonic/rest/getAlbumList2.view?{auth}&type=alphabeticalByName"),
+    )
+    .await;
+    let album = &body["subsonic-response"]["albumList2"]["album"][0];
+    assert_eq!(album["name"], json!("Discovery"));
+    assert_eq!(album["artist"], json!("Daft Punk"));
+    assert_eq!(album["songCount"], json!(2));
+    assert_eq!(album["duration"], json!(3));
+    let album_id = album["id"].as_str().unwrap();
+
+    let body = get(
+        app.clone(),
+        &format!("/compat/subsonic/rest/getAlbum.view?{auth}&id={album_id}"),
+    )
+    .await;
+    let songs = body["subsonic-response"]["album"]["song"]
+        .as_array()
+        .unwrap();
+    assert_eq!(songs.len(), 2);
+    assert_eq!(songs[0]["title"], json!("First"));
+    assert_eq!(songs[0]["track"], json!(1));
+    assert_eq!(songs[1]["title"], json!("Second"));
+
+    let body = get(
+        app.clone(),
+        &format!("/compat/subsonic/rest/getArtists.view?{auth}"),
+    )
+    .await;
+    let index = &body["subsonic-response"]["artists"]["index"][0];
+    assert_eq!(index["name"], json!("D"));
+    assert_eq!(index["artist"][0]["name"], json!("Daft Punk"));
+    assert_eq!(index["artist"][0]["albumCount"], json!(1));
+    let artist_id = index["artist"][0]["id"].as_str().unwrap();
+
+    let body = get(
+        app.clone(),
+        &format!("/compat/subsonic/rest/getArtist.view?{auth}&id={artist_id}"),
+    )
+    .await;
+    assert_eq!(
+        body["subsonic-response"]["artist"]["album"][0]["name"],
+        json!("Discovery")
+    );
+
+    let (status, body) = get_status(
+        app,
+        &format!("/compat/subsonic/rest/getAlbumList2.view?{auth}&type=random"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["subsonic-response"]["status"], json!("failed"));
+}
+
+#[tokio::test]
+async fn navidrome_browse_lists_albums_artists_and_songs() {
+    let (service, secret) = credential_service_with_known_app_password();
+    let app = browse_app(service).await;
+    let (_, login) = post_login(app.clone(), "flynn", &secret).await;
+    let token = login["token"].as_str().unwrap();
+
+    let (status, headers, body) = get_authed(
+        app.clone(),
+        "/compat/navidrome/api/album?_start=0&_end=10",
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-total-count"], "1");
+    assert_eq!(body[0]["name"], json!("Discovery"));
+    assert_eq!(body[0]["albumArtist"], json!("Daft Punk"));
+    assert_eq!(body[0]["songCount"], json!(2));
+    assert!(body[0]["createdAt"].as_str().is_some_and(|v| !v.is_empty()));
+    let album_id = body[0]["id"].as_str().unwrap();
+
+    let (status, _, body) = get_authed(
+        app.clone(),
+        &format!("/compat/navidrome/api/album/{album_id}"),
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], json!("Discovery"));
+
+    let (status, headers, body) = get_authed(
+        app.clone(),
+        &format!("/compat/navidrome/api/song?album_id={album_id}&_start=0&_end=0"),
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-total-count"], "2");
+    assert_eq!(body.as_array().unwrap().len(), 2);
+    assert_eq!(body[0]["title"], json!("First"));
+    assert_eq!(body[0]["trackNumber"], json!(1));
+    assert_eq!(body[0]["albumId"], json!(album_id));
+
+    let (status, headers, body) =
+        get_authed(app.clone(), "/compat/navidrome/api/artist", token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-total-count"], "1");
+    assert_eq!(body[0]["name"], json!("Daft Punk"));
+    assert_eq!(body[0]["albumCount"], json!(1));
+    let artist_id = body[0]["id"].as_str().unwrap();
+
+    let (status, _, body) = get_authed(
+        app.clone(),
+        &format!("/compat/navidrome/api/artist/{artist_id}"),
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], json!("Daft Punk"));
+
+    let (status, _, body) = get_authed(
+        app.clone(),
+        &format!("/compat/navidrome/api/album?artist_id={artist_id}"),
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+
+    let (status, _, body) = get_authed(
+        app,
+        "/compat/navidrome/api/album/01a07482-0f2d-7511-a4da-ac170d6f97bd",
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({"error": "Not found."}));
 }
 
 #[tokio::test]

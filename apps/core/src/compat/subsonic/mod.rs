@@ -1,5 +1,6 @@
 mod auth;
 mod envelope;
+mod mapping;
 mod service;
 
 use axum::{
@@ -22,7 +23,8 @@ use crate::{
 pub(crate) use auth::SubsonicAuth;
 use auth::SubsonicError;
 use envelope::{
-    extensions_envelope, failed_envelope, ok_envelope, search3_envelope, user_envelope,
+    album_envelope, album_list2_envelope, artist_envelope, artists_envelope, extensions_envelope,
+    failed_envelope, ok_envelope, search3_envelope, user_envelope,
 };
 
 pub(crate) fn router() -> Router<AppState> {
@@ -30,6 +32,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/ping.view", get(ping).post(ping))
         .route("/getUser.view", get(get_user).post(get_user))
         .route("/search3.view", get(search3).post(search3))
+        .route("/getAlbumList2.view", get(get_album_list2))
+        .route("/getAlbum.view", get(get_album))
+        .route("/getArtists.view", get(get_artists))
+        .route("/getArtist.view", get(get_artist))
         .route("/stream.view", get(stream))
         .route("/getCoverArt.view", get(get_cover_art))
         .route(
@@ -105,7 +111,7 @@ pub(crate) async fn search3(
         return SubsonicError::MissingParameter.into_response();
     };
     let user_uuid = principal.user_id.as_uuid();
-    match service::search_songs(
+    match service::search(
         state.catalogue(),
         &context,
         Some(&user_uuid),
@@ -116,7 +122,7 @@ pub(crate) async fn search3(
     )
     .await
     {
-        Ok(songs) => Json(search3_envelope(songs)).into_response(),
+        Ok(result) => Json(search3_envelope(result)).into_response(),
         Err(service::SearchError::InvalidSearch) => {
             let mut response = Json(failed_envelope(
                 models::error::Code::Variant0,
@@ -142,6 +148,121 @@ pub(crate) async fn search3(
             response
         }
     }
+}
+
+pub(crate) async fn get_album_list2(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    if let Err(response) = authenticate(&state, &context, auth).await {
+        return response;
+    }
+    let Some(list_type) = query.get("type") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+
+    match service::album_list(
+        state.catalogue(),
+        list_type,
+        query.get("size"),
+        query.get("offset"),
+    )
+    .await
+    {
+        Ok(albums) => Json(album_list2_envelope(albums)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_album(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    if let Err(response) = authenticate(&state, &context, auth).await {
+        return response;
+    }
+    let Some(id) = query.get("id") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+
+    match service::album_detail(state.catalogue(), id, state.source_tags()).await {
+        Ok(album) => Json(album_envelope(album)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_artists(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    if let Err(response) = authenticate(&state, &context, auth).await {
+        return response;
+    }
+
+    match service::artists(state.catalogue()).await {
+        Ok(artists) => Json(artists_envelope(service::artist_indexes(artists))).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_artist(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    if let Err(response) = authenticate(&state, &context, auth).await {
+        return response;
+    }
+    let Some(id) = query.get("id") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+
+    match service::artist_detail(state.catalogue(), id).await {
+        Ok(artist) => Json(artist_envelope(artist)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+fn browse_failure_response(context: &RequestContext, error: service::BrowseError) -> Response {
+    let (status, code, message) = match error {
+        service::BrowseError::InvalidRequest => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            models::error::Code::Variant0,
+            "Invalid browse parameters.",
+        ),
+        service::BrowseError::UnsupportedType => (
+            StatusCode::BAD_REQUEST,
+            models::error::Code::Variant10,
+            "Unsupported album list type.",
+        ),
+        service::BrowseError::AlbumNotFound | service::BrowseError::ArtistNotFound => (
+            StatusCode::NOT_FOUND,
+            models::error::Code::Variant70,
+            "Not found.",
+        ),
+        service::BrowseError::Catalogue(error) => {
+            tracing::error!(
+                error = %error,
+                request_id = context.request_id().as_str(),
+                "catalogue read failed"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                models::error::Code::Variant0,
+                "Internal error.",
+            )
+        }
+    };
+
+    let mut response = Json(failed_envelope(code, message)).into_response();
+    *response.status_mut() = status;
+    response
 }
 
 pub(crate) async fn stream(

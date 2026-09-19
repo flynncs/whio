@@ -56,8 +56,8 @@ impl ProviderId {
 
     pub fn kind(&self) -> Option<ProviderKind> {
         match self.as_str() {
-            "local" => Some(ProviderKind::Local),
-            "youtube_music" => Some(ProviderKind::YoutubeMusic),
+            LOCAL_PROVIDER_ID => Some(ProviderKind::Local),
+            YOUTUBE_MUSIC_PROVIDER_ID => Some(ProviderKind::YoutubeMusic),
             _ => None,
         }
     }
@@ -67,6 +67,9 @@ impl ProviderId {
         self.kind().map_or(u8::MAX, ProviderKind::precedence)
     }
 }
+
+pub const LOCAL_PROVIDER_ID: &str = "local";
+pub const YOUTUBE_MUSIC_PROVIDER_ID: &str = "youtube_music";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {

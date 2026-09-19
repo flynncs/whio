@@ -6,7 +6,7 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    Artist, ArtistCredit, ArtistId, Track, ValidationError,
+    Artist, ArtistCredit, ArtistId, Track, TrackId, ValidationError,
     text::{optional, required},
 };
 
@@ -284,6 +284,8 @@ pub struct AlbumSummary {
     album_artist: Option<Artist>,
     track_count: u32,
     duration_ms: u64,
+    cover_art_track_id: Option<TrackId>,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl AlbumSummary {
@@ -292,12 +294,16 @@ impl AlbumSummary {
         album_artist: Option<Artist>,
         track_count: u32,
         duration_ms: u64,
+        cover_art_track_id: Option<TrackId>,
+        created_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         Self {
             album,
             album_artist,
             track_count,
             duration_ms,
+            cover_art_track_id,
+            created_at,
         }
     }
 
@@ -316,6 +322,21 @@ impl AlbumSummary {
     pub fn duration_ms(&self) -> u64 {
         self.duration_ms
     }
+
+    pub fn cover_art_track_id(&self) -> Option<&TrackId> {
+        self.cover_art_track_id.as_ref()
+    }
+
+    pub fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.created_at
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlbumOrder {
+    Title,
+    Artist,
+    RecentlyAdded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

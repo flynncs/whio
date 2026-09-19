@@ -5,7 +5,7 @@ use std::{
 
 use uuid::Uuid;
 
-use super::{ArtistCredit, TrackMetadata};
+use super::{Album, ArtistCredit, SourceIdentity, TrackMetadata};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrackId(Uuid);
@@ -85,6 +85,51 @@ impl Track {
 
     pub fn into_parts(self) -> (TrackId, TrackMetadata) {
         (self.id, self.metadata)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackHit {
+    track: Track,
+    album: Option<Album>,
+    sources: Vec<SourceIdentity>,
+}
+
+impl TrackHit {
+    pub fn new(track: Track, album: Option<Album>, sources: Vec<SourceIdentity>) -> Self {
+        Self {
+            track,
+            album,
+            sources,
+        }
+    }
+
+    pub fn track(&self) -> &Track {
+        &self.track
+    }
+
+    pub fn album(&self) -> Option<&Album> {
+        self.album.as_ref()
+    }
+
+    pub fn into_track(self) -> Track {
+        self.track
+    }
+
+    pub fn sources(&self) -> &[SourceIdentity] {
+        &self.sources
+    }
+
+    pub(crate) fn merge(&mut self, other: TrackHit) {
+        self.track = other.track;
+        if other.album.is_some() {
+            self.album = other.album;
+        }
+        for source in other.sources {
+            if !self.sources.contains(&source) {
+                self.sources.push(source);
+            }
+        }
     }
 }
 

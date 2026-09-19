@@ -6,15 +6,24 @@ use sqlx::PgPool;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 use whio_core::tracks::{
-    AlbumMetadata, AlbumTrack, ArtistCredit, ArtworkRef, PostgresTrackRepository, ProviderId,
-    SourceFileFacts, SourceIdentity, SourceScope, TrackId, TrackMetadata, TrackRepository,
-    TrackRepositoryError,
+    AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef, PostgresTrackRepository,
+    ProviderId, SourceFileFacts, SourceIdentity, SourceScope, TrackId, TrackMetadata,
+    TrackRepository, TrackRepositoryError,
 };
 
 fn source(external_id: &str) -> SourceIdentity {
     SourceIdentity::new(
         ProviderId::new("youtube_music".to_owned()).unwrap(),
         SourceScope::Named("test-installation".to_owned()),
+        external_id.to_owned(),
+    )
+    .unwrap()
+}
+
+fn local_source(external_id: &str) -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new("local".to_owned()).unwrap(),
+        SourceScope::Named("/music".to_owned()),
         external_id.to_owned(),
     )
     .unwrap()
@@ -658,7 +667,10 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
             .is_none()
     );
 
-    let summaries = repository.list_albums(0, 10).await.unwrap();
+    let summaries = repository
+        .list_albums(0, 10, AlbumOrder::Title)
+        .await
+        .unwrap();
     let names = summaries
         .iter()
         .map(|summary| summary.album().title().to_owned())
@@ -785,4 +797,82 @@ async fn performer_credits_link_to_artist_rows(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(pharrell, 1, "the same name-only artist is reused");
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+
+    let owned = repository
+        .get_or_create(
+            local_source("path-a"),
+            metadata("Zebra", &["Daft Punk"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+    let remote = repository
+        .get_or_create(
+            source("vid-1"),
+            metadata("Apple", &["Daft Punk"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+
+    let hits = repository.search_tracks("daft punk", 10).await.unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(
+        hits[0].track().id(),
+        owned.id(),
+        "the local track outranks the remote one"
+    );
+    assert_eq!(hits[1].track().id(), remote.id());
+
+    let by_title = repository.search_tracks("zeb", 10).await.unwrap();
+    assert_eq!(by_title.len(), 1);
+    assert_eq!(by_title[0].track().id(), owned.id());
+    assert!(
+        repository
+            .search_tracks("nothing", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let album_metadata = album("Discovery").with_album_artist(credit("Daft Punk", None));
+    let album = repository
+        .resolve_or_create_album(&album_metadata)
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            album.id(),
+            owned.id(),
+            &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let albums = repository.search_albums("disc", 10).await.unwrap();
+    assert_eq!(albums.len(), 1);
+    assert_eq!(albums[0].album().id(), album.id());
+    assert_eq!(albums[0].cover_art_track_id(), Some(owned.id()));
+    assert_eq!(albums[0].track_count(), 1);
+
+    let artists = repository.search_artists("daft", 10).await.unwrap();
+    assert!(
+        artists
+            .iter()
+            .any(|artist| artist.artist().name() == "Daft Punk")
+    );
+    assert!(
+        repository
+            .search_artists("nope", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    assert_eq!(repository.count_albums().await.unwrap(), 1);
+    assert!(repository.count_artists().await.unwrap() >= 1);
 }

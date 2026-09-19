@@ -1,0 +1,336 @@
+use whio_subsonic_api::models;
+
+use crate::{
+    catalogue::{AlbumDetail, ArtistDetail, SearchHit},
+    compat::SourceTags,
+    tracks::{
+        Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary,
+        SourceIdentity, Track,
+    },
+};
+
+pub(crate) fn child_from_hit(hit: &SearchHit, tags: SourceTags) -> models::Child {
+    child_from_track(
+        hit.track(),
+        hit.album().map(Album::id),
+        hit.album().map(Album::title),
+        hit.sources(),
+        tags,
+        None,
+    )
+}
+
+pub(crate) fn child_from_entry(
+    entry: &AlbumEntry,
+    album_id: &AlbumId,
+    album_title: &str,
+    tags: SourceTags,
+) -> models::Child {
+    child_from_track(
+        entry.track(),
+        Some(album_id),
+        Some(album_title),
+        &[],
+        tags,
+        Some(entry.membership()),
+    )
+}
+
+fn child_from_track(
+    track: &Track,
+    album_id: Option<&AlbumId>,
+    album_title: Option<&str>,
+    sources: &[SourceIdentity],
+    tags: SourceTags,
+    membership: Option<&AlbumTrack>,
+) -> models::Child {
+    models::Child {
+        id: track.id().to_string(),
+        is_dir: false,
+        title: track.title().to_owned(),
+        album: album_title.map(str::to_owned),
+        artist: (!track.artists().is_empty()).then(|| tags.artist(track.artists(), sources)),
+        track: membership.and_then(AlbumTrack::track_number).map(i32::from),
+        cover_art: Some(track.id().to_string()),
+        duration: track.duration_ms().map(|ms| (ms / 1000) as i32),
+        disc_number: membership.and_then(AlbumTrack::disc_number).map(i32::from),
+        album_id: album_id.map(AlbumId::to_string),
+        media_type: Some(models::MediaType::Song),
+        r#type: Some(models::GenericMediaType::Music),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn album_from_summary(summary: &AlbumSummary) -> models::AlbumId3 {
+    album_fields(summary).into_album()
+}
+
+pub(crate) fn album_with_songs(
+    summary: &AlbumSummary,
+    songs: Vec<models::Child>,
+) -> models::AlbumId3WithSongs {
+    album_fields(summary).into_album_with_songs(songs)
+}
+
+pub(crate) fn artist_from_summary(summary: &ArtistSummary) -> models::ArtistId3 {
+    artist_id3(summary.artist(), Some(summary.album_count()))
+}
+
+pub(crate) fn artist_with_albums(detail: &ArtistDetail) -> models::ArtistWithAlbumsId3 {
+    let artist = detail.artist.artist();
+
+    models::ArtistWithAlbumsId3 {
+        id: artist.id().to_string(),
+        name: artist.name().to_owned(),
+        album_count: Some(detail.artist.album_count() as i32),
+        music_brainz_id: artist.musicbrainz_artist_id().map(str::to_owned),
+        sort_name: artist.sort_name().map(str::to_owned),
+        album: detail.albums.iter().map(album_from_summary).collect(),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn album_detail_with_songs(
+    detail: &AlbumDetail,
+    tags: SourceTags,
+) -> models::AlbumId3WithSongs {
+    let album = detail.album.album();
+    let songs = detail
+        .entries
+        .iter()
+        .map(|entry| child_from_entry(entry, album.id(), album.title(), tags))
+        .collect();
+
+    album_with_songs(&detail.album, songs)
+}
+
+pub(crate) fn album_artist(artist: &Artist) -> models::ArtistId3 {
+    artist_id3(artist, None)
+}
+
+fn artist_id3(artist: &Artist, album_count: Option<u32>) -> models::ArtistId3 {
+    models::ArtistId3 {
+        id: artist.id().to_string(),
+        name: artist.name().to_owned(),
+        album_count: album_count.map(|count| count as i32),
+        music_brainz_id: artist.musicbrainz_artist_id().map(str::to_owned),
+        sort_name: artist.sort_name().map(str::to_owned),
+        ..Default::default()
+    }
+}
+
+struct AlbumFields {
+    id: String,
+    name: String,
+    artist: Option<String>,
+    artist_id: Option<String>,
+    artists: Option<Vec<models::ArtistId3>>,
+    display_artist: Option<String>,
+    cover_art: Option<String>,
+    song_count: i32,
+    duration: i32,
+    created: chrono::DateTime<chrono::FixedOffset>,
+    year: Option<i32>,
+    record_labels: Option<Vec<models::RecordLabel>>,
+    music_brainz_id: Option<String>,
+    release_types: Option<Vec<String>>,
+}
+
+fn album_fields(summary: &AlbumSummary) -> AlbumFields {
+    let album = summary.album();
+    let artist = summary.album_artist();
+    let artists = artist.map(|artist| vec![album_artist(artist)]);
+
+    AlbumFields {
+        id: album.id().to_string(),
+        name: album.title().to_owned(),
+        artist: artist.map(|artist| artist.name().to_owned()),
+        artist_id: artist.map(|artist| artist.id().to_string()),
+        artists,
+        display_artist: artist.map(|artist| artist.name().to_owned()),
+        cover_art: summary
+            .cover_art_track_id()
+            .map(std::string::ToString::to_string),
+        song_count: summary.track_count() as i32,
+        duration: (summary.duration_ms() / 1000) as i32,
+        created: summary.created_at().fixed_offset(),
+        year: album.year(),
+        record_labels: album.label().map(|label| {
+            vec![models::RecordLabel {
+                name: label.to_owned(),
+            }]
+        }),
+        music_brainz_id: album
+            .musicbrainz_release_group_id()
+            .or_else(|| album.musicbrainz_release_id())
+            .map(str::to_owned),
+        release_types: album
+            .release_type()
+            .map(|release_type| vec![release_type.to_owned()]),
+    }
+}
+
+impl AlbumFields {
+    fn into_album(self) -> models::AlbumId3 {
+        models::AlbumId3 {
+            id: self.id,
+            name: self.name,
+            artist: self.artist,
+            artist_id: self.artist_id,
+            artists: self.artists,
+            display_artist: self.display_artist,
+            cover_art: self.cover_art,
+            song_count: self.song_count,
+            duration: self.duration,
+            created: self.created,
+            year: self.year,
+            record_labels: self.record_labels,
+            music_brainz_id: self.music_brainz_id,
+            release_types: self.release_types,
+            ..Default::default()
+        }
+    }
+
+    fn into_album_with_songs(self, songs: Vec<models::Child>) -> models::AlbumId3WithSongs {
+        models::AlbumId3WithSongs {
+            id: self.id,
+            name: self.name,
+            artist: self.artist,
+            artist_id: self.artist_id,
+            artists: self.artists,
+            display_artist: self.display_artist,
+            cover_art: self.cover_art,
+            song_count: self.song_count,
+            duration: self.duration,
+            created: self.created,
+            year: self.year,
+            record_labels: self.record_labels,
+            music_brainz_id: self.music_brainz_id,
+            release_types: self.release_types,
+            song: songs,
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tracks::{Artist, ArtistId, ProviderId, SourceScope, TrackId, TrackMetadata};
+
+    fn track(artists: &[&str]) -> Track {
+        Track::new(
+            TrackId::new(),
+            TrackMetadata::from_names(
+                "song".to_owned(),
+                artists.iter().map(|artist| (*artist).to_owned()).collect(),
+                Some(200_000),
+            )
+            .expect("valid metadata"),
+        )
+    }
+
+    fn album() -> Album {
+        Album::new(
+            AlbumId::new(),
+            "album".to_owned(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("valid album")
+    }
+
+    fn source() -> SourceIdentity {
+        SourceIdentity::new(
+            ProviderId::new("youtube_music".to_owned()).expect("valid provider"),
+            SourceScope::Global,
+            "vid-1".to_owned(),
+        )
+        .expect("valid source")
+    }
+
+    #[test]
+    fn a_hit_carries_its_album_and_cover_art() {
+        let track = track(&["artist"]);
+        let id = track.id().to_string();
+        let hit = SearchHit::new(track, Some(album()), vec![source()]);
+
+        let child = child_from_hit(&hit, SourceTags::Off);
+
+        assert_eq!(child.album.as_deref(), Some("album"));
+        assert_eq!(child.cover_art.as_deref(), Some(id.as_str()));
+        assert_eq!(child.artist.as_deref(), Some("artist"));
+    }
+
+    #[test]
+    fn a_hit_tags_the_artist_only_when_configured() {
+        let hit = SearchHit::new(
+            track(&["artist", "featured"]),
+            Some(album()),
+            vec![source()],
+        );
+
+        assert_eq!(
+            child_from_hit(&hit, SourceTags::Off).artist.as_deref(),
+            Some("artist, featured")
+        );
+        assert_eq!(
+            child_from_hit(&hit, SourceTags::ArtistPrefix)
+                .artist
+                .as_deref(),
+            Some("[YTM] artist, featured")
+        );
+    }
+
+    #[test]
+    fn an_album_entry_carries_its_place_on_the_album() {
+        let album = album();
+        let entry = AlbumEntry::new(
+            track(&["artist"]),
+            AlbumTrack::new(Some(1), Some(3), 2).expect("valid membership"),
+        );
+
+        let child = child_from_entry(&entry, album.id(), album.title(), SourceTags::Off);
+
+        assert_eq!(child.album.as_deref(), Some("album"));
+        assert_eq!(
+            child.album_id.as_deref(),
+            Some(album.id().to_string().as_str())
+        );
+        assert_eq!(child.track, Some(3));
+        assert_eq!(child.disc_number, Some(1));
+    }
+
+    #[test]
+    fn an_album_summary_maps_its_artist_and_totals() {
+        let artist = Artist::new(ArtistId::new(), "Daft Punk".to_owned(), None, None).unwrap();
+        let track_id = TrackId::new();
+        let summary = AlbumSummary::new(
+            album(),
+            Some(artist.clone()),
+            2,
+            400_000,
+            Some(track_id.clone()),
+            chrono::Utc::now(),
+        );
+
+        let mapped = album_from_summary(&summary);
+
+        assert_eq!(mapped.name, "album");
+        assert_eq!(mapped.artist.as_deref(), Some("Daft Punk"));
+        assert_eq!(
+            mapped.artist_id.as_deref(),
+            Some(artist.id().to_string().as_str())
+        );
+        assert_eq!(mapped.song_count, 2);
+        assert_eq!(mapped.duration, 400);
+        assert_eq!(
+            mapped.cover_art.as_deref(),
+            Some(track_id.to_string().as_str())
+        );
+    }
+}

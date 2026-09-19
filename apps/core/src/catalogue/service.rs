@@ -12,9 +12,12 @@ use crate::{
     providers::ProviderError,
     request::RequestContext,
     tracks::{
-        Album, AlbumTrack, SourceIdentity, Track, TrackId, TrackRepository, TrackRepositoryError,
+        AlbumEntry, AlbumId, AlbumOrder, AlbumSummary, AlbumTrack, ArtistId, ArtistSummary,
+        ProviderKind, SourceIdentity, Track, TrackId, TrackRepository, TrackRepositoryError,
     },
 };
+
+pub use crate::tracks::TrackHit as SearchHit;
 
 #[derive(Debug, Error)]
 pub enum CatalogueError {
@@ -31,51 +34,19 @@ pub struct CatalogueService {
 }
 
 pub struct SearchOutcome {
-    pub hits: Vec<SearchHit>,
+    pub tracks: Vec<SearchHit>,
+    pub albums: Vec<AlbumSummary>,
+    pub artists: Vec<ArtistSummary>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SearchHit {
-    track: Track,
-    album: Option<Album>,
-    sources: Vec<SourceIdentity>,
+pub struct AlbumDetail {
+    pub album: AlbumSummary,
+    pub entries: Vec<AlbumEntry>,
 }
 
-impl SearchHit {
-    pub fn new(track: Track, album: Option<Album>, sources: Vec<SourceIdentity>) -> Self {
-        Self {
-            track,
-            album,
-            sources,
-        }
-    }
-
-    pub fn track(&self) -> &Track {
-        &self.track
-    }
-
-    pub fn album(&self) -> Option<&Album> {
-        self.album.as_ref()
-    }
-
-    pub fn into_track(self) -> Track {
-        self.track
-    }
-
-    pub fn sources(&self) -> &[SourceIdentity] {
-        &self.sources
-    }
-
-    fn merge(&mut self, other: SearchHit) {
-        if self.album.is_none() {
-            self.album = other.album;
-        }
-        for source in other.sources {
-            if !self.sources.contains(&source) {
-                self.sources.push(source);
-            }
-        }
-    }
+pub struct ArtistDetail {
+    pub artist: ArtistSummary,
+    pub albums: Vec<AlbumSummary>,
 }
 
 impl CatalogueService {
@@ -120,6 +91,88 @@ impl CatalogueService {
         Ok(Some(SearchHit::new(track, album, sources)))
     }
 
+    pub async fn album_list(
+        &self,
+        offset: u32,
+        limit: u32,
+        order: AlbumOrder,
+    ) -> Result<Vec<AlbumSummary>, CatalogueError> {
+        self.track_repository
+            .list_albums(offset, limit, order)
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn album_count(&self) -> Result<u32, CatalogueError> {
+        self.track_repository
+            .count_albums()
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn artist_count(&self) -> Result<u32, CatalogueError> {
+        self.track_repository
+            .count_artists()
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn album_detail(
+        &self,
+        album_id: &AlbumId,
+    ) -> Result<Option<AlbumDetail>, CatalogueError> {
+        let Some(album) = self
+            .track_repository
+            .find_album_summary(album_id)
+            .await
+            .map_err(CatalogueError::Repository)?
+        else {
+            return Ok(None);
+        };
+
+        let entries = self
+            .track_repository
+            .find_album_entries(album_id)
+            .await
+            .map_err(CatalogueError::Repository)?;
+
+        Ok(Some(AlbumDetail { album, entries }))
+    }
+
+    pub async fn artist_list(
+        &self,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<ArtistSummary>, CatalogueError> {
+        self.track_repository
+            .list_artists(offset, limit)
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn artist_detail(
+        &self,
+        artist_id: &ArtistId,
+    ) -> Result<Option<ArtistDetail>, CatalogueError> {
+        let Some(artist) = self
+            .track_repository
+            .find_artist(artist_id)
+            .await
+            .map_err(CatalogueError::Repository)?
+        else {
+            return Ok(None);
+        };
+
+        let albums = self
+            .track_repository
+            .find_albums_for_artist(artist_id)
+            .await
+            .map_err(CatalogueError::Repository)?;
+        let artist = ArtistSummary::new(artist, albums.len() as u32);
+
+        Ok(Some(ArtistDetail { artist, albums }))
+    }
+
     pub async fn sources(&self, track_id: &TrackId) -> Result<Vec<SourceIdentity>, CatalogueError> {
         self.track_repository
             .find_sources(track_id)
@@ -133,9 +186,36 @@ impl CatalogueService {
         user: Option<&Uuid>,
         context: &RequestContext,
     ) -> Result<SearchOutcome, CatalogueError> {
-        let (hits, first_error, any_success) =
+        let window = provider_target(search);
+        let query = search.query().as_str().to_owned();
+
+        let known = self
+            .track_repository
+            .search_tracks(&query, window)
+            .await
+            .map_err(CatalogueError::Repository)?;
+        let (fresh, first_error, any_success) =
             self.fan_out(search, user, context, PROVIDER_BUDGET).await;
-        Self::finalize(search, hits, first_error, any_success)
+        let albums = self
+            .track_repository
+            .search_albums(&query, window)
+            .await
+            .map_err(CatalogueError::Repository)?;
+        let artists = self
+            .track_repository
+            .search_artists(&query, window)
+            .await
+            .map_err(CatalogueError::Repository)?;
+
+        Self::finalize(
+            search,
+            known,
+            fresh,
+            albums,
+            artists,
+            first_error,
+            any_success,
+        )
     }
 
     async fn fan_out(
@@ -218,7 +298,10 @@ impl CatalogueService {
 
     fn finalize(
         search: &CatalogueSearch,
-        hits: Vec<SearchHit>,
+        known: Vec<SearchHit>,
+        fresh: Vec<SearchHit>,
+        albums: Vec<AlbumSummary>,
+        artists: Vec<ArtistSummary>,
         first_error: Option<CatalogueError>,
         any_success: bool,
     ) -> Result<SearchOutcome, CatalogueError> {
@@ -226,7 +309,7 @@ impl CatalogueService {
         let offset = search.offset().get() as usize;
         let mut positions: HashMap<TrackId, usize> = HashMap::new();
         let mut unique: Vec<SearchHit> = Vec::new();
-        for hit in hits {
+        for hit in known.into_iter().chain(fresh) {
             match positions.get(hit.track().id()).copied() {
                 Some(index) => unique[index].merge(hit),
                 None => {
@@ -235,17 +318,30 @@ impl CatalogueService {
                 }
             }
         }
-        let hits: Vec<SearchHit> = unique.into_iter().skip(offset).take(limit).collect();
+        unique.sort_by_key(|hit| !is_owned(hit.sources()));
 
-        if !any_success && let Some(error) = first_error {
+        if !any_success
+            && (unique.is_empty() && albums.is_empty() && artists.is_empty())
+            && let Some(error) = first_error
+        {
             return Err(error);
         }
         if let Some(error @ CatalogueError::Provider(ProviderError::Access)) = first_error {
             return Err(error);
         }
 
-        Ok(SearchOutcome { hits })
+        Ok(SearchOutcome {
+            tracks: unique.into_iter().skip(offset).take(limit).collect(),
+            albums: albums.into_iter().skip(offset).take(limit).collect(),
+            artists: artists.into_iter().skip(offset).take(limit).collect(),
+        })
     }
+}
+
+fn is_owned(sources: &[SourceIdentity]) -> bool {
+    sources
+        .iter()
+        .any(|source| source.provider_id().kind() == Some(ProviderKind::Local))
 }
 
 const PROVIDER_BUDGET: Duration = Duration::from_secs(45);
@@ -564,17 +660,33 @@ mod tests {
 
         let first = catalogue.search(&search(), None, &context()).await.unwrap();
         let second = catalogue.search(&search(), None, &context()).await.unwrap();
-        let (first_a, first_b) = (&first.hits[0], &first.hits[1]);
+        let (first_a, first_b) = (&first.tracks[0], &first.tracks[1]);
         assert_ne!(first_a.track().id(), first_b.track().id());
-        assert_eq!(first_a.track().id(), second.hits[0].track().id());
+        assert_eq!(first_a.track().id(), second.tracks[0].track().id());
         assert_eq!(first_a.track().title(), "Old title");
-        assert_eq!(second.hits[0].track().title(), "New title");
+        assert_eq!(second.tracks[0].track().title(), "New title");
         assert_eq!(first_a.sources()[0].external_id(), "source-a");
         assert_eq!(first_b.sources()[0].external_id(), "source-b");
 
         let third = catalogue.search(&search(), None, &context()).await.unwrap();
-        assert_eq!(third.hits.len(), 1);
-        assert_eq!(third.hits[0].sources().len(), 1);
+        let titles = third
+            .tracks
+            .iter()
+            .map(|hit| hit.track().title().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles.len(),
+            3,
+            "the two known tracks join the one discovery, not three"
+        );
+        assert_eq!(
+            titles
+                .iter()
+                .filter(|title| title.as_str() == "Same")
+                .count(),
+            1,
+            "the duplicate provider page materialises one track"
+        );
     }
 
     #[test]
@@ -630,7 +742,7 @@ mod tests {
         let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
         assert_eq!(
             outcome
-                .hits
+                .tracks
                 .iter()
                 .map(|hit| hit.track().title())
                 .collect::<Vec<_>>(),
@@ -645,8 +757,8 @@ mod tests {
         let working = StubProvider::new(vec![Ok(vec![candidate("ytm-1", "YTM Song")])]);
         let catalogue = service(vec![provider(broken), provider(empty), provider(working)]);
         let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
-        assert_eq!(outcome.hits.len(), 1);
-        assert_eq!(outcome.hits[0].track().title(), "YTM Song");
+        assert_eq!(outcome.tracks.len(), 1);
+        assert_eq!(outcome.tracks[0].track().title(), "YTM Song");
 
         let broken = StubProvider::new(vec![Err(ProviderError::ProviderUnavailable)]);
         let result = service(vec![provider(broken)])
@@ -678,9 +790,9 @@ mod tests {
             .collect())]);
         let catalogue = service(vec![provider(first), provider(second)]);
         let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
-        assert_eq!(outcome.hits.len(), 10);
-        assert_eq!(outcome.hits[0].track().title(), "A0");
-        assert_eq!(outcome.hits[6].track().title(), "B0");
+        assert_eq!(outcome.tracks.len(), 10);
+        assert_eq!(outcome.tracks[0].track().title(), "A0");
+        assert_eq!(outcome.tracks[6].track().title(), "B0");
 
         let resolver = StubProvider::new(vec![Ok((0..25)
             .map(|index| candidate(&format!("source-{index}"), &format!("Song {index}")))
@@ -690,9 +802,9 @@ mod tests {
             .search(&search_with_offset(10, 10), None, &context())
             .await
             .unwrap();
-        assert_eq!(outcome.hits.len(), 10);
-        assert_eq!(outcome.hits[0].track().title(), "Song 10");
-        assert_eq!(outcome.hits[9].track().title(), "Song 19");
+        assert_eq!(outcome.tracks.len(), 10);
+        assert_eq!(outcome.tracks[0].track().title(), "Song 10");
+        assert_eq!(outcome.tracks[9].track().title(), "Song 19");
 
         let limits = StdArc::new(Mutex::new(Vec::new()));
         let resolver = LimitRecordingProvider {
@@ -714,9 +826,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.hits.len(), 10);
-        assert_eq!(outcome.hits[0].track().title(), "P30");
-        assert_eq!(outcome.hits[9].track().title(), "P39");
+        assert_eq!(outcome.tracks.len(), 10);
+        assert_eq!(outcome.tracks[0].track().title(), "P30");
+        assert_eq!(outcome.tracks[9].track().title(), "P39");
     }
 
     #[tokio::test]
@@ -781,7 +893,7 @@ mod tests {
             CatalogueService::with_providers(repository.clone(), vec![provider(resolver)]);
 
         let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
-        assert_eq!(outcome.hits.len(), 1);
+        assert_eq!(outcome.tracks.len(), 1);
 
         let album = repository
             .resolve_or_create_album(&album_metadata)
@@ -793,6 +905,58 @@ mod tests {
 
         let entries = repository.find_album_entries(album.id()).await.unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].track().id(), outcome.hits[0].track().id());
+        assert_eq!(entries[0].track().id(), outcome.tracks[0].track().id());
+    }
+
+    fn local_source() -> SourceIdentity {
+        SourceIdentity::new(
+            ProviderId::new("local".to_owned()).unwrap(),
+            SourceScope::Named("/music".to_owned()),
+            "path-a".to_owned(),
+        )
+        .unwrap()
+    }
+
+    fn named_metadata(title: &str) -> TrackMetadata {
+        TrackMetadata::from_names(title.to_owned(), vec!["Daft Punk".to_owned()], Some(1_000))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_library_without_providers_still_searches() {
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        repository
+            .get_or_create(local_source(), named_metadata("Zebra"))
+            .await
+            .unwrap();
+        let catalogue = CatalogueService::new(repository);
+
+        let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
+
+        assert_eq!(outcome.tracks.len(), 1);
+        assert_eq!(outcome.tracks[0].track().title(), "Zebra");
+        assert!(is_owned(outcome.tracks[0].sources()));
+    }
+
+    #[tokio::test]
+    async fn owned_tracks_outrank_fresh_provider_discoveries() {
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        repository
+            .get_or_create(local_source(), named_metadata("Zebra"))
+            .await
+            .unwrap();
+        let resolver = StubProvider::new(vec![Ok(vec![candidate("vid-1", "Apple")])]);
+        let catalogue = CatalogueService::with_providers(repository, vec![provider(resolver)]);
+
+        let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
+
+        let titles = outcome
+            .tracks
+            .iter()
+            .map(|hit| hit.track().title().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, ["Zebra", "Apple"]);
+        assert!(is_owned(outcome.tracks[0].sources()));
+        assert!(!is_owned(outcome.tracks[1].sources()));
     }
 }

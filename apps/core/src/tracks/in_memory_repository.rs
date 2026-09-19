@@ -3,9 +3,9 @@ use std::{collections::HashMap, sync::Mutex};
 use async_trait::async_trait;
 
 use crate::tracks::{
-    Album, AlbumEntry, AlbumId, AlbumMetadata, AlbumSummary, AlbumTrack, Artist, ArtistCredit,
-    ArtistId, ArtistSummary, ArtworkRef, ProviderId, SourceFileFacts, Track, TrackMetadata,
-    domain::normalize_for_matching,
+    Album, AlbumEntry, AlbumId, AlbumMetadata, AlbumOrder, AlbumSummary, AlbumTrack, Artist,
+    ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, ProviderId, ProviderKind, SourceFileFacts,
+    Track, TrackHit, TrackMetadata, domain::normalize_for_matching,
 };
 
 use super::{SourceIdentity, SourceScope, TrackId, TrackRepository, TrackRepositoryError};
@@ -30,6 +30,7 @@ struct TrackIndexes {
     album_by_text: HashMap<(Option<ArtistId>, String), AlbumId>,
     album_sources: HashMap<AlbumId, Vec<SourceIdentity>>,
     album_tracks: HashMap<AlbumId, Vec<(TrackId, AlbumTrack)>>,
+    album_created_at: HashMap<AlbumId, chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Default)]
@@ -313,6 +314,21 @@ impl TrackRepository for InMemoryTrackRepository {
         Ok(indexes.artists_by_id.get(artist_id).cloned())
     }
 
+    async fn find_album_summary(
+        &self,
+        album_id: &AlbumId,
+    ) -> Result<Option<AlbumSummary>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes
+            .albums_by_id
+            .get(album_id)
+            .map(|album| album_summary(&indexes, album)))
+    }
+
     async fn find_album_sources(
         &self,
         album_id: &AlbumId,
@@ -338,28 +354,15 @@ impl TrackRepository for InMemoryTrackRepository {
             .lock()
             .map_err(|_| TrackRepositoryError::Unavailable)?;
 
-        let Some(memberships) = indexes.album_tracks.get(album_id) else {
-            return Ok(Vec::new());
-        };
-
-        let mut entries = memberships
-            .iter()
+        let entries = ordered_memberships(&indexes, album_id)
+            .into_iter()
             .filter_map(|(track_id, membership)| {
                 indexes
                     .by_track_id
-                    .get(track_id)
-                    .map(|entry| AlbumEntry::new(entry.track.clone(), *membership))
+                    .get(&track_id)
+                    .map(|entry| AlbumEntry::new(entry.track.clone(), membership))
             })
-            .collect::<Vec<_>>();
-
-        entries.sort_by(|left, right| {
-            entry_order(left).cmp(&entry_order(right)).then_with(|| {
-                left.track()
-                    .id()
-                    .to_string()
-                    .cmp(&right.track().id().to_string())
-            })
-        });
+            .collect();
 
         Ok(entries)
     }
@@ -373,25 +376,28 @@ impl TrackRepository for InMemoryTrackRepository {
             .lock()
             .map_err(|_| TrackRepositoryError::Unavailable)?;
 
-        Ok(
-            ordered_albums(&indexes, |album| album.album_artist_id() == Some(artist_id))
-                .into_iter()
-                .map(|album| album_summary(&indexes, album))
-                .collect(),
+        Ok(ordered_albums(
+            &indexes,
+            |album| album.album_artist_id() == Some(artist_id),
+            AlbumOrder::Title,
         )
+        .into_iter()
+        .map(|album| album_summary(&indexes, album))
+        .collect())
     }
 
     async fn list_albums(
         &self,
         offset: u32,
         limit: u32,
+        order: AlbumOrder,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
         let indexes = self
             .indexes
             .lock()
             .map_err(|_| TrackRepositoryError::Unavailable)?;
 
-        Ok(ordered_albums(&indexes, |_| true)
+        Ok(ordered_albums(&indexes, |_| true, order)
             .into_iter()
             .skip(offset as usize)
             .take(limit as usize)
@@ -423,6 +429,145 @@ impl TrackRepository for InMemoryTrackRepository {
             .map(|artist| ArtistSummary::new(artist.clone(), album_count(&indexes, artist.id())))
             .collect())
     }
+
+    async fn count_albums(&self) -> Result<u32, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes.albums_by_id.len() as u32)
+    }
+
+    async fn count_artists(&self) -> Result<u32, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes.artists_by_id.len() as u32)
+    }
+
+    async fn search_tracks(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        let needle = normalize_for_matching(query);
+
+        let mut hits = indexes
+            .by_track_id
+            .values()
+            .filter(|entry| track_matches(&entry.track, &needle))
+            .map(|entry| {
+                TrackHit::new(
+                    entry.track.clone(),
+                    album_for_track(&indexes, entry.track.id()),
+                    entry.sources.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        hits.sort_by(|left, right| {
+            (!owned(left.sources()))
+                .cmp(&(!owned(right.sources())))
+                .then_with(|| {
+                    normalize_for_matching(left.track().title())
+                        .cmp(&normalize_for_matching(right.track().title()))
+                })
+                .then_with(|| {
+                    left.track()
+                        .id()
+                        .to_string()
+                        .cmp(&right.track().id().to_string())
+                })
+        });
+        hits.truncate(limit as usize);
+
+        Ok(hits)
+    }
+
+    async fn search_albums(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        let needle = normalize_for_matching(query);
+
+        let mut albums = ordered_albums(
+            &indexes,
+            |album| album_matches(&indexes, album, &needle),
+            AlbumOrder::Title,
+        );
+        albums.truncate(limit as usize);
+
+        Ok(albums
+            .into_iter()
+            .map(|album| album_summary(&indexes, album))
+            .collect())
+    }
+
+    async fn search_artists(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        let needle = normalize_for_matching(query);
+
+        let mut artists = indexes
+            .artists_by_id
+            .values()
+            .filter(|artist| normalize_for_matching(artist.name()).contains(&needle))
+            .collect::<Vec<_>>();
+        artists.sort_by(|left, right| {
+            normalize_for_matching(left.name())
+                .cmp(&normalize_for_matching(right.name()))
+                .then_with(|| left.id().to_string().cmp(&right.id().to_string()))
+        });
+        artists.truncate(limit as usize);
+
+        Ok(artists
+            .into_iter()
+            .map(|artist| ArtistSummary::new(artist.clone(), album_count(&indexes, artist.id())))
+            .collect())
+    }
+}
+
+fn owned(sources: &[SourceIdentity]) -> bool {
+    sources
+        .iter()
+        .any(|source| source.provider_id().kind() == Some(ProviderKind::Local))
+}
+
+fn track_matches(track: &Track, needle: &str) -> bool {
+    normalize_for_matching(track.title()).contains(needle)
+        || track
+            .artists()
+            .iter()
+            .any(|artist| normalize_for_matching(artist.name()).contains(needle))
+}
+
+fn album_matches(indexes: &TrackIndexes, album: &Album, needle: &str) -> bool {
+    if normalize_for_matching(album.title()).contains(needle) {
+        return true;
+    }
+
+    album
+        .album_artist_id()
+        .and_then(|artist_id| indexes.artists_by_id.get(artist_id))
+        .is_some_and(|artist| normalize_for_matching(artist.name()).contains(needle))
 }
 
 fn detach_track(
@@ -452,9 +597,7 @@ fn album_for_track(indexes: &TrackIndexes, track_id: &TrackId) -> Option<Album> 
     indexes.albums_by_id.get(album_id).cloned()
 }
 
-fn entry_order(entry: &AlbumEntry) -> (u16, bool, u16, u32) {
-    let membership = entry.membership();
-
+fn membership_order(membership: &AlbumTrack) -> (u16, bool, u16, u32) {
     (
         membership.disc_number().unwrap_or(1),
         membership.track_number().is_none(),
@@ -463,7 +606,26 @@ fn entry_order(entry: &AlbumEntry) -> (u16, bool, u16, u32) {
     )
 }
 
-fn ordered_albums(indexes: &TrackIndexes, keep: impl Fn(&Album) -> bool) -> Vec<&Album> {
+fn ordered_memberships(indexes: &TrackIndexes, album_id: &AlbumId) -> Vec<(TrackId, AlbumTrack)> {
+    let Some(memberships) = indexes.album_tracks.get(album_id) else {
+        return Vec::new();
+    };
+
+    let mut ordered = memberships.clone();
+    ordered.sort_by(|left, right| {
+        membership_order(&left.1)
+            .cmp(&membership_order(&right.1))
+            .then_with(|| left.0.to_string().cmp(&right.0.to_string()))
+    });
+
+    ordered
+}
+
+fn ordered_albums(
+    indexes: &TrackIndexes,
+    keep: impl Fn(&Album) -> bool,
+    order: AlbumOrder,
+) -> Vec<&Album> {
     let mut albums = indexes
         .albums_by_id
         .values()
@@ -471,28 +633,62 @@ fn ordered_albums(indexes: &TrackIndexes, keep: impl Fn(&Album) -> bool) -> Vec<
         .collect::<Vec<_>>();
 
     albums.sort_by(|left, right| {
-        normalize_for_matching(left.title())
-            .cmp(&normalize_for_matching(right.title()))
-            .then_with(|| left.id().to_string().cmp(&right.id().to_string()))
+        let primary = match order {
+            AlbumOrder::Title => {
+                normalize_for_matching(left.title()).cmp(&normalize_for_matching(right.title()))
+            }
+            AlbumOrder::Artist => album_artist_name(indexes, left)
+                .cmp(&album_artist_name(indexes, right))
+                .then_with(|| {
+                    normalize_for_matching(left.title()).cmp(&normalize_for_matching(right.title()))
+                }),
+            AlbumOrder::RecentlyAdded => {
+                album_created_at(indexes, right).cmp(&album_created_at(indexes, left))
+            }
+        };
+
+        primary.then_with(|| left.id().to_string().cmp(&right.id().to_string()))
     });
 
     albums
 }
 
+fn album_artist_name(indexes: &TrackIndexes, album: &Album) -> String {
+    album
+        .album_artist_id()
+        .and_then(|artist_id| indexes.artists_by_id.get(artist_id))
+        .map_or_else(String::new, |artist| normalize_for_matching(artist.name()))
+}
+
+fn album_created_at(indexes: &TrackIndexes, album: &Album) -> chrono::DateTime<chrono::Utc> {
+    indexes
+        .album_created_at
+        .get(album.id())
+        .copied()
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH)
+}
+
 fn album_summary(indexes: &TrackIndexes, album: &Album) -> AlbumSummary {
-    let memberships = indexes.album_tracks.get(album.id());
-    let track_count = memberships.map_or(0, |entries| entries.len() as u32);
+    let memberships = ordered_memberships(indexes, album.id());
+    let track_count = memberships.len() as u32;
     let duration_ms = memberships
-        .into_iter()
-        .flatten()
+        .iter()
         .filter_map(|(track_id, _)| indexes.by_track_id.get(track_id))
         .filter_map(|entry| entry.track.duration_ms())
         .fold(0u64, u64::saturating_add);
     let album_artist = album
         .album_artist_id()
         .and_then(|artist_id| indexes.artists_by_id.get(artist_id).cloned());
+    let cover_art_track_id = memberships.first().map(|(track_id, _)| track_id.clone());
 
-    AlbumSummary::new(album.clone(), album_artist, track_count, duration_ms)
+    AlbumSummary::new(
+        album.clone(),
+        album_artist,
+        track_count,
+        duration_ms,
+        cover_art_track_id,
+        album_created_at(indexes, album),
+    )
 }
 
 fn album_count(indexes: &TrackIndexes, artist_id: &ArtistId) -> u32 {
@@ -667,6 +863,9 @@ fn resolve_album(
     indexes
         .albums_by_id
         .insert(album.id().clone(), album.clone());
+    indexes
+        .album_created_at
+        .insert(album.id().clone(), chrono::Utc::now());
 
     album
 }
@@ -1138,7 +1337,10 @@ mod tests {
             "numbered tracks come first in track order, unnumbered last"
         );
 
-        let summaries = repository.list_albums(0, 10).await.unwrap();
+        let summaries = repository
+            .list_albums(0, 10, AlbumOrder::Title)
+            .await
+            .unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].album().id(), album.id());
         assert_eq!(summaries[0].album_artist().unwrap().id(), artist.id());
@@ -1156,5 +1358,130 @@ mod tests {
         assert_eq!(artists.len(), 1);
         assert_eq!(artists[0].artist().id(), artist.id());
         assert_eq!(artists[0].album_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_matches_titles_and_artists_and_ranks_owned_first() {
+        let repository = InMemoryTrackRepository::default();
+        let owned = repository
+            .get_or_create(
+                source("local", "path-a"),
+                TrackMetadata::from_names(
+                    "Zebra".to_owned(),
+                    vec!["Daft Punk".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let remote = repository
+            .get_or_create(
+                source("youtube_music", "vid-1"),
+                TrackMetadata::from_names(
+                    "Apple".to_owned(),
+                    vec!["Daft Punk".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let by_artist = repository.search_tracks("daft punk", 10).await.unwrap();
+        assert_eq!(
+            by_artist
+                .iter()
+                .map(|hit| hit.track().id().clone())
+                .collect::<Vec<_>>(),
+            vec![owned.id().clone(), remote.id().clone()],
+            "the owned track outranks the remote one despite the title"
+        );
+
+        let by_title = repository.search_tracks("zeb", 10).await.unwrap();
+        assert_eq!(by_title.len(), 1);
+        assert_eq!(by_title[0].track().id(), owned.id());
+        assert_eq!(by_title[0].sources().len(), 1);
+
+        assert!(
+            repository
+                .search_tracks("nothing here", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn search_matches_albums_and_their_artists() {
+        let repository = InMemoryTrackRepository::default();
+        repository
+            .resolve_or_create_album(
+                &album_metadata("Discovery").with_album_artist(credit("Daft Punk", None)),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(repository.search_albums("disc", 10).await.unwrap().len(), 1);
+        assert_eq!(
+            repository.search_albums("daft", 10).await.unwrap().len(),
+            1,
+            "the album artist name matches the album"
+        );
+        assert!(
+            repository
+                .search_albums("nope", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(
+            repository.search_artists("daft", 10).await.unwrap().len(),
+            1
+        );
+        assert!(
+            repository
+                .search_artists("nope", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn albums_order_by_title_artist_and_creation() {
+        let repository = InMemoryTrackRepository::default();
+        let first = repository
+            .resolve_or_create_album(
+                &album_metadata("Zebra").with_album_artist(credit("A Band", None)),
+            )
+            .await
+            .unwrap();
+        let second = repository
+            .resolve_or_create_album(
+                &album_metadata("Apple").with_album_artist(credit("Z Band", None)),
+            )
+            .await
+            .unwrap();
+
+        let by_title = repository
+            .list_albums(0, 10, AlbumOrder::Title)
+            .await
+            .unwrap();
+        assert_eq!(by_title[0].album().id(), second.id());
+        assert_eq!(by_title[1].album().id(), first.id());
+
+        let by_artist = repository
+            .list_albums(0, 10, AlbumOrder::Artist)
+            .await
+            .unwrap();
+        assert_eq!(by_artist[0].album().id(), first.id());
+
+        let recent = repository
+            .list_albums(0, 10, AlbumOrder::RecentlyAdded)
+            .await
+            .unwrap();
+        assert_eq!(recent[0].album().id(), second.id());
     }
 }

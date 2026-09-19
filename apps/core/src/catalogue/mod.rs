@@ -7,4 +7,6 @@ pub use domain::{
     ValidationError,
 };
 pub use ports::CatalogueProvider;
-pub use service::{CatalogueError, CatalogueService, SearchHit, SearchOutcome};
+pub use service::{
+    AlbumDetail, ArtistDetail, CatalogueError, CatalogueService, SearchHit, SearchOutcome,
+};
