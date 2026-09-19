@@ -2,7 +2,10 @@ use async_trait::async_trait;
 
 use crate::tracks::{ArtworkRef, Track, TrackMetadata};
 
-use super::{ProviderId, SourceIdentity, SourceScope, TrackId};
+use super::{
+    Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ProviderId, SourceIdentity,
+    SourceScope, TrackId,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrackRepositoryError {
@@ -76,6 +79,61 @@ pub trait TrackRepository: Send + Sync {
         _provider_id: &ProviderId,
         _source_scope: &SourceScope,
     ) -> Result<Vec<(SourceIdentity, SourceFileFacts)>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    /// the one artist ladder. a MusicBrainz id match wins; otherwise a
+    /// normalized-name match among artists that carry no id, attaching the
+    /// incoming id when the existing row has none; otherwise a new artist.
+    async fn resolve_or_create_artist(
+        &self,
+        _credit: &ArtistCredit,
+    ) -> Result<Artist, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    /// the one album ladder (A-044). a release-group or release id match wins;
+    /// otherwise a normalized (title, album artist) match where at most one
+    /// side carries an identifier; otherwise a new album.
+    async fn resolve_or_create_album(
+        &self,
+        _metadata: &AlbumMetadata,
+    ) -> Result<Album, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    async fn set_album_source(
+        &self,
+        _album_id: &AlbumId,
+        _source: &SourceIdentity,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn set_album_track(
+        &self,
+        _album_id: &AlbumId,
+        _track_id: &TrackId,
+        _membership: &AlbumTrack,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn find_album(&self, _album_id: &AlbumId) -> Result<Option<Album>, TrackRepositoryError> {
+        Ok(None)
+    }
+
+    async fn find_album_sources(
+        &self,
+        _album_id: &AlbumId,
+    ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn find_album_tracks(
+        &self,
+        _album_id: &AlbumId,
+    ) -> Result<Vec<(TrackId, AlbumTrack)>, TrackRepositoryError> {
         Ok(Vec::new())
     }
 }

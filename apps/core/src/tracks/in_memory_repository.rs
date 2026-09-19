@@ -2,7 +2,10 @@ use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 
-use crate::tracks::{ArtworkRef, ProviderId, SourceFileFacts, Track, TrackMetadata};
+use crate::tracks::{
+    Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, ArtworkRef,
+    ProviderId, SourceFileFacts, Track, TrackMetadata, domain::normalize_for_matching,
+};
 
 use super::{SourceIdentity, SourceScope, TrackId, TrackRepository, TrackRepositoryError};
 
@@ -18,6 +21,15 @@ struct TrackIndexes {
     by_track_id: HashMap<TrackId, TrackEntry>,
     artwork_by_source: HashMap<SourceIdentity, ArtworkRef>,
     file_facts_by_source: HashMap<SourceIdentity, SourceFileFacts>,
+    artists_by_id: HashMap<ArtistId, Artist>,
+    artist_by_identifier: HashMap<String, ArtistId>,
+    artist_by_name: HashMap<String, ArtistId>,
+    albums_by_id: HashMap<AlbumId, Album>,
+    album_by_release_group: HashMap<String, AlbumId>,
+    album_by_release: HashMap<String, AlbumId>,
+    album_by_text: HashMap<(Option<ArtistId>, String), AlbumId>,
+    album_sources: HashMap<AlbumId, Vec<SourceIdentity>>,
+    album_tracks: HashMap<AlbumId, Vec<(TrackId, AlbumTrack)>>,
 }
 
 #[derive(Default)]
@@ -193,6 +205,293 @@ impl TrackRepository for InMemoryTrackRepository {
             .map(|(source, facts)| (source.clone(), facts.clone()))
             .collect())
     }
+
+    async fn resolve_or_create_artist(
+        &self,
+        credit: &ArtistCredit,
+    ) -> Result<Artist, TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(resolve_artist(&mut indexes, credit))
+    }
+
+    async fn resolve_or_create_album(
+        &self,
+        metadata: &AlbumMetadata,
+    ) -> Result<Album, TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        let album_artist_id = metadata
+            .album_artist()
+            .map(|credit| resolve_artist(&mut indexes, credit).id().clone());
+
+        Ok(resolve_album(&mut indexes, metadata, album_artist_id))
+    }
+
+    async fn set_album_source(
+        &self,
+        album_id: &AlbumId,
+        source: &SourceIdentity,
+    ) -> Result<(), TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        if !indexes.albums_by_id.contains_key(album_id) {
+            return Err(TrackRepositoryError::InvalidData);
+        }
+
+        let sources = indexes.album_sources.entry(album_id.clone()).or_default();
+        if !sources.contains(source) {
+            sources.push(source.clone());
+        }
+
+        Ok(())
+    }
+
+    async fn set_album_track(
+        &self,
+        album_id: &AlbumId,
+        track_id: &TrackId,
+        membership: &AlbumTrack,
+    ) -> Result<(), TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        if !indexes.albums_by_id.contains_key(album_id)
+            || !indexes.by_track_id.contains_key(track_id)
+        {
+            return Err(TrackRepositoryError::InvalidData);
+        }
+
+        let tracks = indexes.album_tracks.entry(album_id.clone()).or_default();
+        match tracks.iter_mut().find(|(id, _)| id == track_id) {
+            Some(entry) => entry.1 = *membership,
+            None => tracks.push((track_id.clone(), *membership)),
+        }
+
+        Ok(())
+    }
+
+    async fn find_album(&self, album_id: &AlbumId) -> Result<Option<Album>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes.albums_by_id.get(album_id).cloned())
+    }
+
+    async fn find_album_sources(
+        &self,
+        album_id: &AlbumId,
+    ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes
+            .album_sources
+            .get(album_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn find_album_tracks(
+        &self,
+        album_id: &AlbumId,
+    ) -> Result<Vec<(TrackId, AlbumTrack)>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes
+            .album_tracks
+            .get(album_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+}
+
+fn resolve_artist(indexes: &mut TrackIndexes, credit: &ArtistCredit) -> Artist {
+    if let Some(identifier) = credit.musicbrainz_artist_id()
+        && let Some(artist_id) = indexes.artist_by_identifier.get(identifier)
+        && let Some(artist) = indexes.artists_by_id.get(artist_id)
+    {
+        return artist.clone();
+    }
+
+    let normalized = normalize_for_matching(credit.name());
+
+    if let Some(artist_id) = indexes.artist_by_name.get(&normalized).cloned() {
+        let Some(artist) = indexes.artists_by_id.get(&artist_id).cloned() else {
+            unreachable!("a name index only points at a stored artist");
+        };
+
+        let Some(identifier) = credit.musicbrainz_artist_id() else {
+            return artist;
+        };
+
+        let attached = Artist::new(
+            artist.id().clone(),
+            artist.name().to_owned(),
+            artist.sort_name().map(str::to_owned),
+            Some(identifier.to_owned()),
+        )
+        .expect("a stored artist stays valid when an identifier is attached");
+
+        indexes
+            .artist_by_identifier
+            .insert(identifier.to_owned(), attached.id().clone());
+        indexes.artist_by_name.remove(&normalized);
+        indexes
+            .artists_by_id
+            .insert(attached.id().clone(), attached.clone());
+
+        return attached;
+    }
+
+    let artist = Artist::new(
+        ArtistId::new(),
+        credit.name().to_owned(),
+        None,
+        credit.musicbrainz_artist_id().map(str::to_owned),
+    )
+    .expect("a validated credit yields a valid artist");
+
+    if let Some(identifier) = artist.musicbrainz_artist_id() {
+        indexes
+            .artist_by_identifier
+            .insert(identifier.to_owned(), artist.id().clone());
+    } else {
+        indexes
+            .artist_by_name
+            .insert(normalized, artist.id().clone());
+    }
+    indexes
+        .artists_by_id
+        .insert(artist.id().clone(), artist.clone());
+
+    artist
+}
+
+fn resolve_album(
+    indexes: &mut TrackIndexes,
+    metadata: &AlbumMetadata,
+    album_artist_id: Option<ArtistId>,
+) -> Album {
+    if let Some(identifier) = metadata.musicbrainz_release_group_id()
+        && let Some(album_id) = indexes.album_by_release_group.get(identifier)
+        && let Some(album) = indexes.albums_by_id.get(album_id)
+    {
+        return album.clone();
+    }
+
+    if let Some(identifier) = metadata.musicbrainz_release_id()
+        && let Some(album_id) = indexes.album_by_release.get(identifier)
+        && let Some(album) = indexes.albums_by_id.get(album_id)
+    {
+        return album.clone();
+    }
+
+    let normalized = normalize_for_matching(metadata.title());
+    let key = (album_artist_id.clone(), normalized);
+
+    if let Some(album_id) = indexes.album_by_text.get(&key).cloned()
+        && let Some(existing) = indexes.albums_by_id.get(&album_id).cloned()
+    {
+        let existing_has_identifier = existing.musicbrainz_release_group_id().is_some()
+            || existing.musicbrainz_release_id().is_some();
+        let incoming_has_identifier = metadata.musicbrainz_release_group_id().is_some()
+            || metadata.musicbrainz_release_id().is_some();
+
+        if existing_has_identifier && incoming_has_identifier {
+            // two different identifiers are two different albums, whatever the text says
+        } else if incoming_has_identifier {
+            let attached = Album::new(
+                existing.id().clone(),
+                existing.title().to_owned(),
+                album_artist_id,
+                metadata.year().or(existing.year()),
+                preferred(metadata.release_type(), existing.release_type()),
+                preferred(metadata.label(), existing.label()),
+                preferred(
+                    metadata.musicbrainz_release_group_id(),
+                    existing.musicbrainz_release_group_id(),
+                ),
+                preferred(
+                    metadata.musicbrainz_release_id(),
+                    existing.musicbrainz_release_id(),
+                ),
+            )
+            .expect("attaching an identifier keeps the album valid");
+
+            if let Some(identifier) = attached.musicbrainz_release_group_id() {
+                indexes
+                    .album_by_release_group
+                    .insert(identifier.to_owned(), attached.id().clone());
+            }
+            if let Some(identifier) = attached.musicbrainz_release_id() {
+                indexes
+                    .album_by_release
+                    .insert(identifier.to_owned(), attached.id().clone());
+            }
+            indexes
+                .albums_by_id
+                .insert(attached.id().clone(), attached.clone());
+
+            return attached;
+        } else {
+            return existing;
+        }
+    }
+
+    let album = Album::new(
+        AlbumId::new(),
+        metadata.title().to_owned(),
+        album_artist_id,
+        metadata.year(),
+        metadata.release_type().map(str::to_owned),
+        metadata.label().map(str::to_owned),
+        metadata.musicbrainz_release_group_id().map(str::to_owned),
+        metadata.musicbrainz_release_id().map(str::to_owned),
+    )
+    .expect("validated album metadata yields a valid album");
+
+    indexes
+        .album_by_text
+        .entry(key)
+        .or_insert(album.id().clone());
+    if let Some(identifier) = album.musicbrainz_release_group_id() {
+        indexes
+            .album_by_release_group
+            .insert(identifier.to_owned(), album.id().clone());
+    }
+    if let Some(identifier) = album.musicbrainz_release_id() {
+        indexes
+            .album_by_release
+            .insert(identifier.to_owned(), album.id().clone());
+    }
+    indexes
+        .albums_by_id
+        .insert(album.id().clone(), album.clone());
+
+    album
+}
+
+fn preferred<'a>(incoming: Option<&'a str>, existing: Option<&'a str>) -> Option<String> {
+    incoming.or(existing).map(str::to_owned)
 }
 
 struct MergedAlbum {
@@ -385,6 +684,203 @@ mod tests {
         assert_eq!(
             artwork,
             ArtworkRef::url("https://art.test/ytm.jpg".to_owned()).unwrap()
+        );
+    }
+
+    fn credit(name: &str, identifier: Option<&str>) -> ArtistCredit {
+        ArtistCredit::new(name.to_owned(), identifier.map(str::to_owned)).unwrap()
+    }
+
+    fn album_metadata(title: &str) -> AlbumMetadata {
+        AlbumMetadata::new(title.to_owned()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn artist_ladder_prefers_identifiers_then_normalised_names() {
+        let repository = InMemoryTrackRepository::default();
+
+        let first = repository
+            .resolve_or_create_artist(&credit("Daft Punk", None))
+            .await
+            .unwrap();
+        let again = repository
+            .resolve_or_create_artist(&credit("  daft   punk ", None))
+            .await
+            .unwrap();
+        assert_eq!(first.id(), again.id(), "normalised names match");
+        assert_eq!(again.musicbrainz_artist_id(), None);
+
+        let by_name = repository
+            .resolve_or_create_artist(&credit("Daft Punk", Some("mb-1")))
+            .await
+            .unwrap();
+        assert_eq!(by_name.id(), first.id(), "an id attaches to the name row");
+        assert_eq!(by_name.musicbrainz_artist_id(), Some("mb-1"));
+
+        let by_id = repository
+            .resolve_or_create_artist(&credit("Someone Else", Some("mb-1")))
+            .await
+            .unwrap();
+        assert_eq!(by_id.id(), first.id(), "the id wins over the name");
+    }
+
+    #[tokio::test]
+    async fn an_id_bearing_and_a_name_only_artist_coexist() {
+        let repository = InMemoryTrackRepository::default();
+
+        let named = repository
+            .resolve_or_create_artist(&credit("Daft Punk", Some("mb-1")))
+            .await
+            .unwrap();
+        let plain = repository
+            .resolve_or_create_artist(&credit("Daft Punk", None))
+            .await
+            .unwrap();
+
+        assert_ne!(named.id(), plain.id());
+        assert_eq!(named.musicbrainz_artist_id(), Some("mb-1"));
+        assert_eq!(plain.musicbrainz_artist_id(), None);
+    }
+
+    #[tokio::test]
+    async fn album_ladder_matches_identifiers_then_normalised_text() {
+        let repository = InMemoryTrackRepository::default();
+        let artist = credit("Daft Punk", None);
+
+        let first = repository
+            .resolve_or_create_album(&album_metadata("Discovery").with_album_artist(artist.clone()))
+            .await
+            .unwrap();
+        let same_text = repository
+            .resolve_or_create_album(&album_metadata("  discovery ").with_album_artist(artist))
+            .await
+            .unwrap();
+        assert_eq!(first.id(), same_text.id());
+
+        let by_group = repository
+            .resolve_or_create_album(
+                &album_metadata("Totally Different")
+                    .with_release_group_id(Some("rg-1".to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let same_group = repository
+            .resolve_or_create_album(
+                &album_metadata("Also Different")
+                    .with_release_group_id(Some("rg-1".to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            by_group.id(),
+            same_group.id(),
+            "the group id wins over text"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_identifier_attaches_to_a_text_only_album() {
+        let repository = InMemoryTrackRepository::default();
+
+        let plain = repository
+            .resolve_or_create_album(&album_metadata("Discovery"))
+            .await
+            .unwrap();
+        assert_eq!(plain.musicbrainz_release_group_id(), None);
+
+        let discovered = repository
+            .resolve_or_create_album(
+                &album_metadata("Discovery")
+                    .with_release_group_id(Some("rg-1".to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(discovered.id(), plain.id());
+        assert_eq!(discovered.musicbrainz_release_group_id(), Some("rg-1"));
+        assert_eq!(
+            repository
+                .find_album(plain.id())
+                .await
+                .unwrap()
+                .unwrap()
+                .musicbrainz_release_group_id(),
+            Some("rg-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn two_identifiers_are_two_albums_even_when_the_text_agrees() {
+        let repository = InMemoryTrackRepository::default();
+
+        let original = repository
+            .resolve_or_create_album(
+                &album_metadata("Discovery")
+                    .with_release_group_id(Some("rg-original".to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let remaster = repository
+            .resolve_or_create_album(
+                &album_metadata("Discovery")
+                    .with_release_group_id(Some("rg-remaster".to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(original.id(), remaster.id());
+    }
+
+    #[tokio::test]
+    async fn album_sources_and_membership_round_trip() {
+        let repository = InMemoryTrackRepository::default();
+        let album = repository
+            .resolve_or_create_album(&album_metadata("Discovery"))
+            .await
+            .unwrap();
+        let track = repository
+            .get_or_create(source("local", "path-a"), metadata("Song"))
+            .await
+            .unwrap();
+        let album_source = source("youtube_music", "album-1");
+        let membership = AlbumTrack::new(Some(1), Some(3), 2).unwrap();
+
+        repository
+            .set_album_source(album.id(), &album_source)
+            .await
+            .unwrap();
+        repository
+            .set_album_source(album.id(), &album_source)
+            .await
+            .unwrap();
+        assert_eq!(
+            repository.find_album_sources(album.id()).await.unwrap(),
+            vec![album_source]
+        );
+
+        repository
+            .set_album_track(album.id(), track.id(), &membership)
+            .await
+            .unwrap();
+        assert_eq!(
+            repository.find_album_tracks(album.id()).await.unwrap(),
+            vec![(track.id().clone(), membership)]
+        );
+
+        assert!(
+            repository
+                .set_album_track(
+                    &AlbumId::new(),
+                    track.id(),
+                    &AlbumTrack::new(None, None, 0).unwrap(),
+                )
+                .await
+                .is_err()
         );
     }
 }

@@ -1,0 +1,351 @@
+use std::{
+    fmt::{self, Display},
+    str::FromStr,
+};
+
+use uuid::Uuid;
+
+use super::{
+    ArtistCredit, ArtistId, ValidationError,
+    text::{optional, required},
+};
+
+const MAX_TITLE: usize = 500;
+const MAX_TEXT: usize = 500;
+const MAX_IDENTIFIER: usize = 64;
+const MIN_YEAR: i64 = 1000;
+const MAX_YEAR: i64 = 3000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AlbumId(Uuid);
+
+impl AlbumId {
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for AlbumId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Display for AlbumId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+impl FromStr for AlbumId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Uuid::parse_str(value)?))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Album {
+    id: AlbumId,
+    title: String,
+    album_artist_id: Option<ArtistId>,
+    year: Option<i32>,
+    release_type: Option<String>,
+    label: Option<String>,
+    musicbrainz_release_group_id: Option<String>,
+    musicbrainz_release_id: Option<String>,
+}
+
+impl Album {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: AlbumId,
+        title: String,
+        album_artist_id: Option<ArtistId>,
+        year: Option<i32>,
+        release_type: Option<String>,
+        label: Option<String>,
+        musicbrainz_release_group_id: Option<String>,
+        musicbrainz_release_id: Option<String>,
+    ) -> Result<Self, ValidationError> {
+        Ok(Self {
+            id,
+            title: required("title", title, MAX_TITLE)?,
+            album_artist_id,
+            year: checked_year(year)?,
+            release_type: optional("release_type", release_type, MAX_IDENTIFIER)?,
+            label: optional("label", label, MAX_TEXT)?,
+            musicbrainz_release_group_id: optional(
+                "musicbrainz_release_group_id",
+                musicbrainz_release_group_id,
+                MAX_IDENTIFIER,
+            )?,
+            musicbrainz_release_id: optional(
+                "musicbrainz_release_id",
+                musicbrainz_release_id,
+                MAX_IDENTIFIER,
+            )?,
+        })
+    }
+
+    pub fn id(&self) -> &AlbumId {
+        &self.id
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn album_artist_id(&self) -> Option<&ArtistId> {
+        self.album_artist_id.as_ref()
+    }
+
+    pub fn year(&self) -> Option<i32> {
+        self.year
+    }
+
+    pub fn release_type(&self) -> Option<&str> {
+        self.release_type.as_deref()
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub fn musicbrainz_release_group_id(&self) -> Option<&str> {
+        self.musicbrainz_release_group_id.as_deref()
+    }
+
+    pub fn musicbrainz_release_id(&self) -> Option<&str> {
+        self.musicbrainz_release_id.as_deref()
+    }
+}
+
+/// what a writer knows about an album before the repository decides whether it
+/// already exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumMetadata {
+    title: String,
+    album_artist: Option<ArtistCredit>,
+    year: Option<i32>,
+    release_type: Option<String>,
+    label: Option<String>,
+    musicbrainz_release_group_id: Option<String>,
+    musicbrainz_release_id: Option<String>,
+}
+
+impl AlbumMetadata {
+    pub fn new(title: String) -> Result<Self, ValidationError> {
+        Ok(Self {
+            title: required("title", title, MAX_TITLE)?,
+            album_artist: None,
+            year: None,
+            release_type: None,
+            label: None,
+            musicbrainz_release_group_id: None,
+            musicbrainz_release_id: None,
+        })
+    }
+
+    pub fn with_album_artist(mut self, album_artist: ArtistCredit) -> Self {
+        self.album_artist = Some(album_artist);
+        self
+    }
+
+    pub fn with_year(mut self, year: Option<i32>) -> Result<Self, ValidationError> {
+        self.year = checked_year(year)?;
+        Ok(self)
+    }
+
+    pub fn with_release_type(
+        mut self,
+        release_type: Option<String>,
+    ) -> Result<Self, ValidationError> {
+        self.release_type = optional("release_type", release_type, MAX_IDENTIFIER)?;
+        Ok(self)
+    }
+
+    pub fn with_label(mut self, label: Option<String>) -> Result<Self, ValidationError> {
+        self.label = optional("label", label, MAX_TEXT)?;
+        Ok(self)
+    }
+
+    pub fn with_release_group_id(
+        mut self,
+        release_group_id: Option<String>,
+    ) -> Result<Self, ValidationError> {
+        self.musicbrainz_release_group_id = optional(
+            "musicbrainz_release_group_id",
+            release_group_id,
+            MAX_IDENTIFIER,
+        )?;
+        Ok(self)
+    }
+
+    pub fn with_release_id(mut self, release_id: Option<String>) -> Result<Self, ValidationError> {
+        self.musicbrainz_release_id =
+            optional("musicbrainz_release_id", release_id, MAX_IDENTIFIER)?;
+        Ok(self)
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn album_artist(&self) -> Option<&ArtistCredit> {
+        self.album_artist.as_ref()
+    }
+
+    pub fn year(&self) -> Option<i32> {
+        self.year
+    }
+
+    pub fn release_type(&self) -> Option<&str> {
+        self.release_type.as_deref()
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub fn musicbrainz_release_group_id(&self) -> Option<&str> {
+        self.musicbrainz_release_group_id.as_deref()
+    }
+
+    pub fn musicbrainz_release_id(&self) -> Option<&str> {
+        self.musicbrainz_release_id.as_deref()
+    }
+}
+
+/// a track's place on an album.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlbumTrack {
+    disc_number: Option<u16>,
+    track_number: Option<u16>,
+    position: u32,
+}
+
+impl AlbumTrack {
+    pub fn new(
+        disc_number: Option<u16>,
+        track_number: Option<u16>,
+        position: u32,
+    ) -> Result<Self, ValidationError> {
+        for (field, value) in [("disc_number", disc_number), ("track_number", track_number)] {
+            if value == Some(0) {
+                return Err(ValidationError::OutOfRange {
+                    field,
+                    min: 1,
+                    max: i64::from(u16::MAX),
+                });
+            }
+        }
+
+        Ok(Self {
+            disc_number,
+            track_number,
+            position,
+        })
+    }
+
+    pub fn disc_number(&self) -> Option<u16> {
+        self.disc_number
+    }
+
+    pub fn track_number(&self) -> Option<u16> {
+        self.track_number
+    }
+
+    pub fn position(&self) -> u32 {
+        self.position
+    }
+}
+
+fn checked_year(year: Option<i32>) -> Result<Option<i32>, ValidationError> {
+    if let Some(year) = year
+        && !(MIN_YEAR..=MAX_YEAR).contains(&i64::from(year))
+    {
+        return Err(ValidationError::OutOfRange {
+            field: "year",
+            min: MIN_YEAR,
+            max: MAX_YEAR,
+        });
+    }
+
+    Ok(year)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn album_identity_round_trips() {
+        let id = AlbumId::new();
+        assert_eq!(id.to_string().parse::<AlbumId>().unwrap(), id);
+    }
+
+    #[test]
+    fn album_metadata_trims_and_bounds_optional_fields() {
+        let metadata = AlbumMetadata::new("  Discovery ".to_owned())
+            .unwrap()
+            .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap())
+            .with_year(Some(2001))
+            .unwrap()
+            .with_release_type(Some(" album ".to_owned()))
+            .unwrap()
+            .with_label(Some("  ".to_owned()))
+            .unwrap()
+            .with_release_group_id(Some("rg-1".to_owned()))
+            .unwrap();
+
+        assert_eq!(metadata.title(), "Discovery");
+        assert_eq!(metadata.album_artist().unwrap().name(), "Daft Punk");
+        assert_eq!(metadata.year(), Some(2001));
+        assert_eq!(metadata.release_type(), Some("album"));
+        assert_eq!(metadata.label(), None);
+        assert_eq!(metadata.musicbrainz_release_group_id(), Some("rg-1"));
+    }
+
+    #[test]
+    fn album_rejects_empty_titles_and_out_of_range_years() {
+        assert!(matches!(
+            AlbumMetadata::new("  ".to_owned()),
+            Err(ValidationError::Empty { field: "title" })
+        ));
+        assert!(matches!(
+            AlbumMetadata::new("Album".to_owned())
+                .unwrap()
+                .with_year(Some(999)),
+            Err(ValidationError::OutOfRange { field: "year", .. })
+        ));
+    }
+
+    #[test]
+    fn album_track_rejects_zero_numbering() {
+        assert!(matches!(
+            AlbumTrack::new(Some(0), Some(1), 0),
+            Err(ValidationError::OutOfRange {
+                field: "disc_number",
+                ..
+            })
+        ));
+        assert!(matches!(
+            AlbumTrack::new(None, Some(0), 0),
+            Err(ValidationError::OutOfRange {
+                field: "track_number",
+                ..
+            })
+        ));
+        assert_eq!(AlbumTrack::new(None, Some(3), 2).unwrap().position(), 2);
+    }
+}

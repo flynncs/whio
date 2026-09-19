@@ -6,8 +6,9 @@ use sqlx::PgPool;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 use whio_core::tracks::{
-    ArtworkRef, PostgresTrackRepository, ProviderId, SourceFileFacts, SourceIdentity, SourceScope,
-    TrackId, TrackMetadata, TrackRepository, TrackRepositoryError,
+    AlbumMetadata, AlbumTrack, ArtistCredit, ArtworkRef, PostgresTrackRepository, ProviderId,
+    SourceFileFacts, SourceIdentity, SourceScope, TrackId, TrackMetadata, TrackRepository,
+    TrackRepositoryError,
 };
 
 fn source(external_id: &str) -> SourceIdentity {
@@ -281,5 +282,256 @@ async fn source_file_facts_round_trip_for_a_local_file(pool: PgPool) {
             .await
             .unwrap(),
         vec![(source, facts)]
+    );
+}
+
+fn credit(name: &str, identifier: Option<&str>) -> ArtistCredit {
+    ArtistCredit::new(name.to_owned(), identifier.map(str::to_owned)).unwrap()
+}
+
+fn album(title: &str) -> AlbumMetadata {
+    AlbumMetadata::new(title.to_owned()).unwrap()
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn artist_ladder_is_identifier_then_normalised_name(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+
+    let named = repository
+        .resolve_or_create_artist(&credit("Daft Punk", None))
+        .await
+        .unwrap();
+    let again = repository
+        .resolve_or_create_artist(&credit("  daft   punk ", None))
+        .await
+        .unwrap();
+    assert_eq!(named.id(), again.id());
+
+    let attached = repository
+        .resolve_or_create_artist(&credit("Daft Punk", Some("mb-1")))
+        .await
+        .unwrap();
+    assert_eq!(attached.id(), named.id(), "an id attaches to the name row");
+    assert_eq!(attached.musicbrainz_artist_id(), Some("mb-1"));
+
+    let plain = repository
+        .resolve_or_create_artist(&credit("Daft Punk", None))
+        .await
+        .unwrap();
+    assert_ne!(
+        plain.id(),
+        attached.id(),
+        "an id-bearing artist and a name-only artist coexist"
+    );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn album_ladder_prefers_identifiers_then_normalised_text(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let artist = credit("Daft Punk", None);
+
+    let first = repository
+        .resolve_or_create_album(&album("Discovery").with_album_artist(artist.clone()))
+        .await
+        .unwrap();
+    let same_text = repository
+        .resolve_or_create_album(&album("  discovery ").with_album_artist(artist))
+        .await
+        .unwrap();
+    assert_eq!(first.id(), same_text.id());
+
+    let by_group = repository
+        .resolve_or_create_album(
+            &album("Totally Different")
+                .with_release_group_id(Some("rg-1".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let same_group = repository
+        .resolve_or_create_album(
+            &album("Also Different")
+                .with_release_group_id(Some("rg-1".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        by_group.id(),
+        same_group.id(),
+        "the group id wins over text"
+    );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn an_identifier_attaches_to_a_text_only_album(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+
+    let plain = repository
+        .resolve_or_create_album(&album("Discovery"))
+        .await
+        .unwrap();
+    assert_eq!(plain.musicbrainz_release_group_id(), None);
+
+    let discovered = repository
+        .resolve_or_create_album(
+            &album("Discovery")
+                .with_release_group_id(Some("rg-1".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(discovered.id(), plain.id());
+    assert_eq!(discovered.musicbrainz_release_group_id(), Some("rg-1"));
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn two_identifiers_are_two_albums_even_when_the_text_agrees(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+
+    let original = repository
+        .resolve_or_create_album(
+            &album("Discovery")
+                .with_release_group_id(Some("rg-original".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let remaster = repository
+        .resolve_or_create_album(
+            &album("Discovery")
+                .with_release_group_id(Some("rg-remaster".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(original.id(), remaster.id());
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn concurrent_album_resolution_creates_one_row(pool: PgPool) {
+    const RESOLUTIONS: usize = 8;
+
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let barrier = Arc::new(Barrier::new(RESOLUTIONS));
+    let mut tasks = Vec::with_capacity(RESOLUTIONS);
+
+    for _ in 0..RESOLUTIONS {
+        let repository = Arc::clone(&repository);
+        let barrier = Arc::clone(&barrier);
+
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            repository
+                .resolve_or_create_album(
+                    &album("Discovery").with_album_artist(credit("Daft Punk", None)),
+                )
+                .await
+        }));
+    }
+
+    let mut album_ids = Vec::with_capacity(RESOLUTIONS);
+    for task in tasks {
+        album_ids.push(task.await.unwrap().unwrap().id().clone());
+    }
+
+    assert!(album_ids.iter().all(|id| id == &album_ids[0]));
+
+    let albums: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM albums")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let artists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artists")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(albums, 1);
+    assert_eq!(artists, 1);
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn album_unique_indexes_refuse_a_second_row(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let artist = repository
+        .resolve_or_create_artist(&credit("Daft Punk", None))
+        .await
+        .unwrap();
+    repository
+        .resolve_or_create_album(&album("Discovery").with_album_artist(credit("Daft Punk", None)))
+        .await
+        .unwrap();
+
+    let duplicate_text =
+        sqlx::query("INSERT INTO albums (id, title, album_artist_id) VALUES ($1, $2, $3)")
+            .bind(Uuid::now_v7())
+            .bind("Discovery")
+            .bind(artist.id().as_uuid())
+            .execute(&pool)
+            .await;
+    assert!(duplicate_text.is_err(), "the text index must refuse it");
+
+    repository
+        .resolve_or_create_album(
+            &album("Remaster")
+                .with_release_group_id(Some("rg-1".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let duplicate_group = sqlx::query(
+        "INSERT INTO albums (id, title, musicbrainz_release_group_id) VALUES ($1, $2, $3)",
+    )
+    .bind(Uuid::now_v7())
+    .bind("Other")
+    .bind("rg-1")
+    .execute(&pool)
+    .await;
+    assert!(duplicate_group.is_err(), "the group index must refuse it");
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn album_sources_and_membership_round_trip(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let album = repository
+        .resolve_or_create_album(&album("Discovery"))
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(source("local-track"), metadata("Song", &["Artist"], None))
+        .await
+        .unwrap();
+    let album_source = source("youtube_music");
+    let membership = AlbumTrack::new(Some(1), Some(3), 2).unwrap();
+
+    repository
+        .set_album_source(album.id(), &album_source)
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &album_source)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.find_album_sources(album.id()).await.unwrap(),
+        vec![album_source]
+    );
+
+    repository
+        .set_album_track(album.id(), track.id(), &membership)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.find_album_tracks(album.id()).await.unwrap(),
+        vec![(track.id().clone(), membership)]
     );
 }
