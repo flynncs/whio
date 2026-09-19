@@ -120,9 +120,7 @@ pub trait TrackRepository: Send + Sync {
         Ok(())
     }
 
-    /// removes a track's album membership without filing it elsewhere. a writer
-    /// that observes no album clears rather than leaving the previous one
-    /// (A-048).
+    /// removes a track's album membership without filing it elsewhere (A-048).
     async fn clear_album_track(&self, _track_id: &TrackId) -> Result<(), TrackRepositoryError> {
         Ok(())
     }
@@ -131,7 +129,6 @@ pub trait TrackRepository: Send + Sync {
         Ok(None)
     }
 
-    /// the one album a track is filed under (A-048).
     async fn find_album_for_track(
         &self,
         _track_id: &TrackId,
@@ -153,8 +150,6 @@ pub trait TrackRepository: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// an album's tracks in the order the album lists them, with the rows the
-    /// detail surfaces render.
     async fn find_album_entries(
         &self,
         _album_id: &AlbumId,

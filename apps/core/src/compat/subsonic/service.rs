@@ -27,7 +27,7 @@ pub(crate) fn child_from_hit(hit: &SearchHit, tags: SourceTags) -> models::Child
         title: track.title().to_owned(),
         is_dir: false,
         artist: (!track.artists().is_empty()).then(|| tags.artist(track.artists(), hit.sources())),
-        album: track.album().map(str::to_owned),
+        album: hit.album().map(|album| album.title().to_owned()),
         cover_art: Some(track.id().to_string()),
         duration: track.duration_ms().map(|ms| (ms / 1000) as i32),
         r#type: Some(models::GenericMediaType::Music),
@@ -308,10 +308,19 @@ mod tests {
         let track = crate::tracks::Track::new(
             crate::tracks::TrackId::new(),
             TrackMetadata::from_names("song".to_owned(), artists, Some(200_000))
-                .expect("valid metadata")
-                .with_album(Some("album".to_owned()))
-                .expect("valid album"),
+                .expect("valid metadata"),
         );
+        let album = crate::tracks::Album::new(
+            crate::tracks::AlbumId::new(),
+            "album".to_owned(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("valid album");
         let source = SourceIdentity::new(
             ProviderId::new("youtube_music".to_owned()).expect("valid provider"),
             SourceScope::Global,
@@ -319,7 +328,7 @@ mod tests {
         )
         .expect("valid source");
 
-        SearchHit::new(track, vec![source])
+        SearchHit::new(track, Some(album), vec![source])
     }
 
     #[test]

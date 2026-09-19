@@ -1,9 +1,10 @@
-use crate::tracks::{ArtistCredit, ArtworkRef, SourceIdentity, TrackMetadata};
+use crate::tracks::{AlbumMetadata, ArtistCredit, ArtworkRef, SourceIdentity, TrackMetadata};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CatalogueCandidate {
     source: SourceIdentity,
     metadata: TrackMetadata,
+    album: Option<AlbumMetadata>,
     artwork: Option<ArtworkRef>,
 }
 
@@ -12,8 +13,14 @@ impl CatalogueCandidate {
         Self {
             source,
             metadata,
+            album: None,
             artwork: None,
         }
+    }
+
+    pub fn with_album(mut self, album: Option<AlbumMetadata>) -> Self {
+        self.album = album;
+        self
     }
 
     pub fn with_artwork(mut self, artwork: Option<ArtworkRef>) -> Self {
@@ -27,6 +34,10 @@ impl CatalogueCandidate {
 
     pub fn metadata(&self) -> &TrackMetadata {
         &self.metadata
+    }
+
+    pub fn album(&self) -> Option<&AlbumMetadata> {
+        self.album.as_ref()
     }
 
     pub fn artwork(&self) -> Option<&ArtworkRef> {
@@ -47,9 +58,5 @@ impl CatalogueCandidate {
 
     pub fn duration_ms(&self) -> Option<u64> {
         self.metadata.duration_ms()
-    }
-
-    pub fn album(&self) -> Option<&str> {
-        self.metadata.album()
     }
 }

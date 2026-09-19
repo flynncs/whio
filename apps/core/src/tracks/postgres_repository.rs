@@ -42,7 +42,7 @@ impl TrackRepository for PostgresTrackRepository {
         } else {
             let candidate_track_id = TrackId::new();
 
-            insert_candidate_track(&mut tx, &candidate_track_id, &source, &metadata).await?;
+            insert_candidate_track(&mut tx, &candidate_track_id, &metadata).await?;
 
             if try_insert_source(&mut tx, &candidate_track_id, &source).await? {
                 candidate_track_id
@@ -51,16 +51,12 @@ impl TrackRepository for PostgresTrackRepository {
             }
         };
 
-        let album = update_track_metadata(&mut tx, &track_id, &source, &metadata).await?;
+        update_track_metadata(&mut tx, &track_id, &metadata).await?;
         replace_artist_credits(&mut tx, &track_id, &credits).await?;
 
         tx.commit()
             .await
             .map_err(|_| TrackRepositoryError::Unavailable)?;
-
-        let metadata = metadata
-            .with_album(album)
-            .map_err(|_| TrackRepositoryError::InvalidData)?;
 
         Ok(Track::new(track_id, metadata))
     }
@@ -89,14 +85,8 @@ impl TrackRepository for PostgresTrackRepository {
     }
 
     async fn find_track(&self, track_id: &TrackId) -> Result<Option<Track>, TrackRepositoryError> {
-        let row: Option<(
-            String,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = sqlx::query_as(
-            r#"SELECT title, duration_ms, album, musicbrainz_recording_id, isrc
+        let row: Option<(String, Option<i64>, Option<String>, Option<String>)> = sqlx::query_as(
+            r#"SELECT title, duration_ms, musicbrainz_recording_id, isrc
             FROM tracks
             WHERE id = $1
             "#,
@@ -106,7 +96,7 @@ impl TrackRepository for PostgresTrackRepository {
         .await
         .map_err(|_| TrackRepositoryError::Unavailable)?;
 
-        let Some((title, duration_ms, album, recording_id, isrc)) = row else {
+        let Some((title, duration_ms, recording_id, isrc)) = row else {
             return Ok(None);
         };
 
@@ -129,23 +119,14 @@ impl TrackRepository for PostgresTrackRepository {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| TrackRepositoryError::InvalidData)?;
 
-        let duration_ms = duration_ms
-            .map(u64::try_from)
-            .transpose()
-            .map_err(|_| TrackRepositoryError::InvalidData)?;
-        let metadata = TrackMetadata::new(title, artists, duration_ms)
-            .map_err(|_| TrackRepositoryError::InvalidData)?
-            .with_album(album)
-            .map_err(|_| TrackRepositoryError::InvalidData)?
-            .with_recording_id(recording_id)
-            .map_err(|_| TrackRepositoryError::InvalidData)?
-            .with_isrc(isrc)
-            .map_err(|_| TrackRepositoryError::InvalidData)?;
-
-        Ok(Some(Track::new(
-            TrackId::from_uuid(*track_id.as_uuid()),
-            metadata,
-        )))
+        Ok(Some(decode_track(
+            *track_id.as_uuid(),
+            title,
+            duration_ms,
+            recording_id,
+            isrc,
+            artists,
+        )?))
     }
 
     async fn set_source_artwork(
@@ -392,8 +373,6 @@ impl TrackRepository for PostgresTrackRepository {
             .await
             .map_err(|_| TrackRepositoryError::Unavailable)?;
 
-        // a track is filed under one album, so filing it here unfiles it
-        // everywhere else in the same transaction (A-048).
         sqlx::query("DELETE FROM album_tracks WHERE track_id = $1 AND album_id <> $2")
             .bind(track_id.as_uuid())
             .bind(album_id.as_uuid())
@@ -642,7 +621,6 @@ type AlbumRow = (
     Option<String>,
     Option<String>,
 );
-/// album columns, the joined album artist, its track count and its duration.
 type AlbumBrowseRow = (
     Uuid,
     String,
@@ -1162,23 +1140,17 @@ async fn find_track_id_by_source_for_update(
 async fn insert_candidate_track(
     connection: &mut PgConnection,
     track_id: &TrackId,
-    source: &SourceIdentity,
     metadata: &TrackMetadata,
 ) -> Result<(), TrackRepositoryError> {
     sqlx::query(
         r#"
-        INSERT INTO tracks (
-            id, title, duration_ms, album, album_source,
-            musicbrainz_recording_id, isrc
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO tracks (id, title, duration_ms, musicbrainz_recording_id, isrc)
+        VALUES ($1, $2, $3, $4, $5)
         "#,
     )
     .bind(track_id.as_uuid())
     .bind(metadata.title())
     .bind(encode_duration_ms(metadata.duration_ms())?)
-    .bind(metadata.album())
-    .bind(metadata.album().map(|_| source.provider_id().as_str()))
     .bind(metadata.musicbrainz_recording_id())
     .bind(metadata.isrc())
     .execute(&mut *connection)
@@ -1243,64 +1215,24 @@ async fn resolve_concurrent_winner(
         .ok_or(TrackRepositoryError::InvalidData)
 }
 
-/// merges display metadata and returns the album that won provider precedence.
 async fn update_track_metadata(
     connection: &mut PgConnection,
     track_id: &TrackId,
-    source: &SourceIdentity,
     metadata: &TrackMetadata,
-) -> Result<Option<String>, TrackRepositoryError> {
-    let (existing_album, existing_source): (Option<String>, Option<String>) = sqlx::query_as(
-        r#"
-        SELECT album, album_source
-        FROM tracks
-        WHERE id = $1
-        FOR UPDATE
-        "#,
-    )
-    .bind(track_id.as_uuid())
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
-
-    let (album, album_source) = match metadata.album() {
-        None => (existing_album, existing_source),
-        Some(incoming) => {
-            let existing_rank = existing_source
-                .as_deref()
-                .and_then(|value| ProviderId::new(value.to_owned()).ok())
-                .map_or(u8::MAX, |provider| provider.precedence());
-
-            // a higher-precedence provider replaces the album; within one
-            // provider the fresher observation wins.
-            if existing_album.is_some() && existing_rank < source.provider_id().precedence() {
-                (existing_album, existing_source)
-            } else {
-                (
-                    Some(incoming.to_owned()),
-                    Some(source.provider_id().as_str().to_owned()),
-                )
-            }
-        }
-    };
-
+) -> Result<(), TrackRepositoryError> {
     let result = sqlx::query(
         r#"
         UPDATE tracks
         SET title = $1,
             duration_ms = $2,
-            album = $3,
-            album_source = $4,
-            musicbrainz_recording_id = COALESCE($5, musicbrainz_recording_id),
-            isrc = COALESCE($6, isrc),
+            musicbrainz_recording_id = COALESCE($3, musicbrainz_recording_id),
+            isrc = COALESCE($4, isrc),
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = $7
+        WHERE id = $5
         "#,
     )
     .bind(metadata.title())
     .bind(encode_duration_ms(metadata.duration_ms())?)
-    .bind(album.as_deref())
-    .bind(album_source.as_deref())
     .bind(metadata.musicbrainz_recording_id())
     .bind(metadata.isrc())
     .bind(track_id.as_uuid())
@@ -1312,7 +1244,7 @@ async fn update_track_metadata(
         return Err(TrackRepositoryError::InvalidData);
     }
 
-    Ok(album)
+    Ok(())
 }
 
 async fn replace_artist_credits(

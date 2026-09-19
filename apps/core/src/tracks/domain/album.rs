@@ -132,7 +132,7 @@ impl Album {
 
 /// what a writer knows about an album before the repository decides whether it
 /// already exists.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AlbumMetadata {
     title: String,
     album_artist: Option<ArtistCredit>,
@@ -257,6 +257,14 @@ impl AlbumTrack {
         })
     }
 
+    pub fn unplaced() -> Self {
+        Self {
+            disc_number: None,
+            track_number: None,
+            position: 0,
+        }
+    }
+
     pub fn disc_number(&self) -> Option<u16> {
         self.disc_number
     }
@@ -270,8 +278,6 @@ impl AlbumTrack {
     }
 }
 
-/// an album as a browse list shows it: the row, its album artist, and the
-/// totals a client card renders without opening the album.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumSummary {
     album: Album,
@@ -312,7 +318,6 @@ impl AlbumSummary {
     }
 }
 
-/// one track on an album, in the order the album lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumEntry {
     track: Track,

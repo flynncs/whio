@@ -94,8 +94,6 @@ impl Artist {
     }
 }
 
-/// an artist as a browse list shows it, with the album count a client card
-/// renders without opening the artist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtistSummary {
     artist: Artist,

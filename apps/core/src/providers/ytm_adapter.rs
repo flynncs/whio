@@ -167,7 +167,8 @@ mod mapping {
             MediaMetadata, PlayableMedia, PlaybackUrl, ValidationError as PlaybackValidationError,
         },
         tracks::{
-            ArtworkRef, ProviderId, SourceIdentity, SourceScope, TrackMetadata, ValidationError,
+            AlbumMetadata, ArtworkRef, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+            ValidationError,
         },
     };
 
@@ -189,15 +190,28 @@ mod mapping {
                 .transpose()
                 .map_err(|_| ValidationError::InvalidDuration)?;
 
+            let album_title = candidate.album.flatten();
             let metadata =
-                TrackMetadata::from_names(candidate.title, candidate.artists, duration_ms)?
-                    .with_album(candidate.album.flatten())?;
+                TrackMetadata::from_names(candidate.title, candidate.artists, duration_ms)?;
+            let album = match album_title {
+                Some(title) => {
+                    let mut album = AlbumMetadata::new(title)?;
+                    if let Some(artist) = metadata.artists().first() {
+                        album = album.with_album_artist(artist.clone());
+                    }
+
+                    Some(album)
+                }
+                None => None,
+            };
             let artwork = candidate
                 .artwork_url
                 .flatten()
                 .and_then(|url| ArtworkRef::url(url).ok());
 
-            Ok(CatalogueCandidate::new(source, metadata).with_artwork(artwork))
+            Ok(CatalogueCandidate::new(source, metadata)
+                .with_album(album)
+                .with_artwork(artwork))
         }
     }
 
@@ -343,7 +357,9 @@ mod mapping {
 
             let candidate = CatalogueCandidate::try_from(dto).unwrap();
 
-            assert_eq!(candidate.album(), Some("Random Access Memories"));
+            let album = candidate.album().expect("the dto album becomes metadata");
+            assert_eq!(album.title(), "Random Access Memories");
+            assert_eq!(album.album_artist().unwrap().name(), "Daft Punk");
             assert_eq!(
                 candidate.artwork(),
                 Some(&ArtworkRef::url("https://art.test/ram.jpg".to_owned()).unwrap())

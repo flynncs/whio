@@ -2,12 +2,13 @@ use thiserror::Error;
 
 use crate::{
     catalogue::{
-        CatalogueError, CatalogueSearch, CatalogueService, SearchLimit, SearchOffset, SearchQuery,
+        CatalogueError, CatalogueSearch, CatalogueService, SearchHit, SearchLimit, SearchOffset,
+        SearchQuery,
     },
     compat::SourceTags,
     identity::service::{AuthError, CredentialService},
     request::RequestContext,
-    tracks::{SourceIdentity, Track, TrackId},
+    tracks::TrackId,
 };
 
 use super::{
@@ -33,12 +34,14 @@ pub(crate) enum SongError {
     Catalogue(#[source] CatalogueError),
 }
 
-fn song_from(track: &Track, sources: &[SourceIdentity], tags: SourceTags) -> Song {
+fn song_from(hit: &SearchHit, tags: SourceTags) -> Song {
+    let track = hit.track();
+
     Song {
         id: track.id().to_string(),
         title: track.title().to_owned(),
-        artist: tags.artist(track.artists(), sources),
-        album: track.album().map(str::to_owned),
+        artist: tags.artist(track.artists(), hit.sources()),
+        album: hit.album().map(|album| album.title().to_owned()),
         cover_art: Some(track.id().to_string()),
         duration: track
             .duration_ms()
@@ -92,7 +95,7 @@ pub(crate) async fn search_songs(
     Ok(outcome
         .hits
         .iter()
-        .map(|hit| song_from(hit.track(), hit.sources(), tags))
+        .map(|hit| song_from(hit, tags))
         .collect())
 }
 
@@ -110,17 +113,13 @@ pub(crate) async fn song_detail(
     }
 
     let track_id: TrackId = raw_id.parse().map_err(|_| SongError::NotFound)?;
-    let track = catalogue
-        .track(&track_id)
+    let hit = catalogue
+        .track_detail(&track_id)
         .await
         .map_err(SongError::Catalogue)?
         .ok_or(SongError::NotFound)?;
-    let sources = catalogue
-        .sources(&track_id)
-        .await
-        .map_err(SongError::Catalogue)?;
 
-    Ok(song_from(&track, &sources, tags))
+    Ok(song_from(&hit, tags))
 }
 
 #[cfg(test)]
@@ -132,7 +131,7 @@ mod tests {
         providers::ProviderError,
         request::{RequestContext, RequestId},
         tracks::{
-            InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackId,
+            InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, Track, TrackId,
             TrackMetadata,
         },
     };
@@ -516,13 +515,25 @@ mod tests {
                 vec!["a".to_owned(), "b".to_owned()],
                 Some(180_000),
             )
-            .expect("valid metadata")
-            .with_album(Some("album".to_owned()))
-            .expect("valid album"),
+            .expect("valid metadata"),
         );
+        let album = crate::tracks::Album::new(
+            crate::tracks::AlbumId::new(),
+            "album".to_owned(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("valid album");
         let id = track.id().to_string();
 
-        let song = song_from(&track, &[], SourceTags::Off);
+        let song = song_from(
+            &SearchHit::new(track, Some(album), Vec::new()),
+            SourceTags::Off,
+        );
 
         assert_eq!(song.title, "title");
         assert_eq!(song.artist, "a, b");

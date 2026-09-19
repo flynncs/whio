@@ -208,28 +208,20 @@ async fn stored_track_round_trips_through_find_track(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires PostgreSQL"]
-async fn album_refreshes_within_a_provider_and_artwork_follows_its_source(pool: PgPool) {
+async fn artwork_follows_its_source(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool.clone());
     let source = source("metadata-source");
 
-    let with_album = |album: &str| {
-        metadata("Song", &["Artist"], None)
-            .with_album(Some(album.to_owned()))
-            .unwrap()
-    };
-
     let track = repository
-        .get_or_create(source.clone(), with_album("Provisional"))
+        .get_or_create(source.clone(), metadata("Song", &["Artist"], None))
         .await
         .unwrap();
-    assert_eq!(track.album(), Some("Provisional"));
-
     let refreshed = repository
-        .get_or_create(source.clone(), with_album("Authoritative"))
+        .get_or_create(source.clone(), metadata("Song", &["Artist"], Some(1_000)))
         .await
         .unwrap();
     assert_eq!(refreshed.id(), track.id());
-    assert_eq!(refreshed.album(), Some("Authoritative"));
+    assert_eq!(refreshed.duration_ms(), Some(1_000));
 
     repository
         .set_source_artwork(

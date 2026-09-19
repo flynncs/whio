@@ -75,10 +75,6 @@ impl Track {
         self.metadata.duration_ms()
     }
 
-    pub fn album(&self) -> Option<&str> {
-        self.metadata.album()
-    }
-
     pub fn musicbrainz_recording_id(&self) -> Option<&str> {
         self.metadata.musicbrainz_recording_id()
     }

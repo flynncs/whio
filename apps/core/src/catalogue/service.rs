@@ -12,7 +12,7 @@ use crate::{
     providers::ProviderError,
     request::RequestContext,
     tracks::{
-        AlbumMetadata, SourceIdentity, Track, TrackId, TrackRepository, TrackRepositoryError,
+        Album, AlbumTrack, SourceIdentity, Track, TrackId, TrackRepository, TrackRepositoryError,
     },
 };
 
@@ -37,16 +37,25 @@ pub struct SearchOutcome {
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     track: Track,
+    album: Option<Album>,
     sources: Vec<SourceIdentity>,
 }
 
 impl SearchHit {
-    pub fn new(track: Track, sources: Vec<SourceIdentity>) -> Self {
-        Self { track, sources }
+    pub fn new(track: Track, album: Option<Album>, sources: Vec<SourceIdentity>) -> Self {
+        Self {
+            track,
+            album,
+            sources,
+        }
     }
 
     pub fn track(&self) -> &Track {
         &self.track
+    }
+
+    pub fn album(&self) -> Option<&Album> {
+        self.album.as_ref()
     }
 
     pub fn into_track(self) -> Track {
@@ -58,6 +67,9 @@ impl SearchHit {
     }
 
     fn merge(&mut self, other: SearchHit) {
+        if self.album.is_none() {
+            self.album = other.album;
+        }
         for source in other.sources {
             if !self.sources.contains(&source) {
                 self.sources.push(source);
@@ -89,6 +101,23 @@ impl CatalogueService {
             .find_track(track_id)
             .await
             .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn track_detail(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Option<SearchHit>, CatalogueError> {
+        let Some(track) = self.track(track_id).await? else {
+            return Ok(None);
+        };
+        let album = self
+            .track_repository
+            .find_album_for_track(track_id)
+            .await
+            .map_err(CatalogueError::Repository)?;
+        let sources = self.sources(track_id).await?;
+
+        Ok(Some(SearchHit::new(track, album, sources)))
     }
 
     pub async fn sources(&self, track_id: &TrackId) -> Result<Vec<SourceIdentity>, CatalogueError> {
@@ -269,34 +298,40 @@ async fn materialize(
     for candidate in candidates {
         let source = candidate.source().clone();
         let artwork = candidate.artwork().cloned();
+        let album_metadata = candidate.album().cloned();
         let metadata = candidate.metadata().clone();
-        let album = match metadata.album() {
-            Some(title) => {
-                let mut album = AlbumMetadata::new(title.to_owned())
-                    .map_err(|_| CatalogueError::Repository(TrackRepositoryError::InvalidData))?;
-                if let Some(artist) = metadata.artists().first() {
-                    album = album.with_album_artist(artist.clone());
-                }
-                Some(album)
-            }
-            None => None,
-        };
 
         let track = repository
             .get_or_create(source.clone(), metadata)
             .await
             .map_err(CatalogueError::Repository)?;
 
-        if let Some(album) = &album {
-            let album = repository
-                .resolve_or_create_album(album)
-                .await
-                .map_err(CatalogueError::Repository)?;
-            repository
-                .set_album_source(album.id(), &source)
-                .await
-                .map_err(CatalogueError::Repository)?;
-        }
+        let album = match &album_metadata {
+            Some(metadata) => {
+                let album = repository
+                    .resolve_or_create_album(metadata)
+                    .await
+                    .map_err(CatalogueError::Repository)?;
+                repository
+                    .set_album_source(album.id(), &source)
+                    .await
+                    .map_err(CatalogueError::Repository)?;
+                repository
+                    .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+                    .await
+                    .map_err(CatalogueError::Repository)?;
+
+                Some(album)
+            }
+            None => {
+                repository
+                    .clear_album_track(track.id())
+                    .await
+                    .map_err(CatalogueError::Repository)?;
+
+                None
+            }
+        };
 
         if let Some(artwork) = artwork
             && let Err(error) = repository.set_source_artwork(&source, &artwork).await
@@ -304,7 +339,7 @@ async fn materialize(
             tracing::warn!(%error, "artwork could not be stored");
         }
 
-        hits.push(SearchHit::new(track, vec![source]));
+        hits.push(SearchHit::new(track, album, vec![source]));
     }
     Ok(hits)
 }
@@ -328,8 +363,8 @@ mod tests {
         catalogue::{CatalogueCandidate, SearchLimit, SearchOffset, SearchQuery},
         request::RequestId,
         tracks::{
-            ArtistCredit, InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope,
-            TrackMetadata,
+            AlbumMetadata, ArtistCredit, InMemoryTrackRepository, ProviderId, SourceIdentity,
+            SourceScope, TrackMetadata,
         },
     };
     use uuid::Uuid;
@@ -560,12 +595,17 @@ mod tests {
                     .unwrap(),
             )
         };
-        let mut hit = SearchHit::new(track(), vec![source("navidrome", "nd-1")]);
+        let mut hit = SearchHit::new(track(), None, vec![source("navidrome", "nd-1")]);
         hit.merge(SearchHit::new(
             track(),
+            None,
             vec![source("youtube_music", "vid-1")],
         ));
-        hit.merge(SearchHit::new(track(), vec![source("navidrome", "nd-1")]));
+        hit.merge(SearchHit::new(
+            track(),
+            None,
+            vec![source("navidrome", "nd-1")],
+        ));
 
         assert_eq!(
             hit.sources()
@@ -731,24 +771,28 @@ mod tests {
         let repository = Arc::new(InMemoryTrackRepository::default());
         let base = candidate("ytm-album-track", "Song");
         let source = base.source().clone();
-        let metadata = base
-            .metadata()
-            .clone()
-            .with_album(Some("Discovery".to_owned()))
-            .unwrap();
-        let resolver = StubProvider::new(vec![Ok(vec![CatalogueCandidate::new(source, metadata)])]);
+        let album_metadata = AlbumMetadata::new("Discovery".to_owned())
+            .unwrap()
+            .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap());
+        let candidate = CatalogueCandidate::new(source, base.metadata().clone())
+            .with_album(Some(album_metadata.clone()));
+        let resolver = StubProvider::new(vec![Ok(vec![candidate])]);
         let catalogue =
             CatalogueService::with_providers(repository.clone(), vec![provider(resolver)]);
 
         let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
         assert_eq!(outcome.hits.len(), 1);
 
-        let expected = AlbumMetadata::new("Discovery".to_owned())
-            .unwrap()
-            .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap());
-        let album = repository.resolve_or_create_album(&expected).await.unwrap();
+        let album = repository
+            .resolve_or_create_album(&album_metadata)
+            .await
+            .unwrap();
         let sources = repository.find_album_sources(album.id()).await.unwrap();
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].provider_id().as_str(), "youtube_music");
+
+        let entries = repository.find_album_entries(album.id()).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].track().id(), outcome.hits[0].track().id());
     }
 }
