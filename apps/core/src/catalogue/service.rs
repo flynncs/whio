@@ -12,8 +12,7 @@ use crate::{
     providers::ProviderError,
     request::RequestContext,
     tracks::{
-        AlbumMetadata, ArtistCredit, SourceIdentity, Track, TrackId, TrackRepository,
-        TrackRepositoryError,
+        AlbumMetadata, SourceIdentity, Track, TrackId, TrackRepository, TrackRepositoryError,
     },
 };
 
@@ -276,10 +275,7 @@ async fn materialize(
                 let mut album = AlbumMetadata::new(title.to_owned())
                     .map_err(|_| CatalogueError::Repository(TrackRepositoryError::InvalidData))?;
                 if let Some(artist) = metadata.artists().first() {
-                    let credit = ArtistCredit::new(artist.clone(), None).map_err(|_| {
-                        CatalogueError::Repository(TrackRepositoryError::InvalidData)
-                    })?;
-                    album = album.with_album_artist(credit);
+                    album = album.with_album_artist(artist.clone());
                 }
                 Some(album)
             }
@@ -331,7 +327,10 @@ mod tests {
     use crate::{
         catalogue::{CatalogueCandidate, SearchLimit, SearchOffset, SearchQuery},
         request::RequestId,
-        tracks::{InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+        tracks::{
+            ArtistCredit, InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope,
+            TrackMetadata,
+        },
     };
     use uuid::Uuid;
 
@@ -405,7 +404,7 @@ mod tests {
         let provider_id = ProviderId::new("youtube_music".to_owned()).unwrap();
         let source =
             SourceIdentity::new(provider_id, SourceScope::Global, external_id.to_owned()).unwrap();
-        let metadata = TrackMetadata::new(
+        let metadata = TrackMetadata::from_names(
             title.to_owned(),
             vec!["Daft Punk".to_owned()],
             Some(337_000),
@@ -557,7 +556,8 @@ mod tests {
         let track = || {
             Track::new(
                 TrackId::new(),
-                TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], None).unwrap(),
+                TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], None)
+                    .unwrap(),
             )
         };
         let mut hit = SearchHit::new(track(), vec![source("navidrome", "nd-1")]);

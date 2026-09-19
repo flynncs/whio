@@ -30,7 +30,7 @@ fn source() -> SourceIdentity {
 }
 
 fn metadata() -> TrackMetadata {
-    TrackMetadata::new("Title".to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
+    TrackMetadata::from_names("Title".to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
 }
 
 async fn app() -> (axum::Router, String) {

@@ -76,7 +76,14 @@ fn valid_candidate_dto_maps_to_domain_candidate() {
     assert_eq!(candidate.source().provider_id().as_str(), "example_music");
     assert_eq!(candidate.source().external_id(), "example-source-id");
     assert_eq!(candidate.title(), "Instant Crush");
-    assert_eq!(candidate.artists(), ["Daft Punk"]);
+    assert_eq!(
+        candidate
+            .artists()
+            .iter()
+            .map(|artist| artist.name())
+            .collect::<Vec<_>>(),
+        ["Daft Punk"]
+    );
     assert_eq!(candidate.duration_ms(), Some(337_000));
 }
 

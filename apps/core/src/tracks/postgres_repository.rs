@@ -25,6 +25,8 @@ impl TrackRepository for PostgresTrackRepository {
         source: SourceIdentity,
         metadata: TrackMetadata,
     ) -> Result<Track, TrackRepositoryError> {
+        let credits = resolve_credits(&self.pool, metadata.artists()).await?;
+
         let mut tx = self
             .pool
             .begin()
@@ -48,7 +50,7 @@ impl TrackRepository for PostgresTrackRepository {
         };
 
         let album = update_track_metadata(&mut tx, &track_id, &source, &metadata).await?;
-        replace_artist_credits(&mut tx, &track_id, &metadata).await?;
+        replace_artist_credits(&mut tx, &track_id, &credits).await?;
 
         tx.commit()
             .await
@@ -106,17 +108,24 @@ impl TrackRepository for PostgresTrackRepository {
             return Ok(None);
         };
 
-        let artists: Vec<String> = sqlx::query_scalar(
-            r#"SELECT name
-            FROM track_artist_credits
-            WHERE track_id = $1
-            ORDER BY position
+        let credits: Vec<(String, Option<String>)> = sqlx::query_as(
+            r#"SELECT credits.name, artists.musicbrainz_artist_id
+            FROM track_artist_credits AS credits
+            LEFT JOIN artists ON artists.id = credits.artist_id
+            WHERE credits.track_id = $1
+            ORDER BY credits.position
             "#,
         )
         .bind(track_id.as_uuid())
         .fetch_all(&self.pool)
         .await
         .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        let artists = credits
+            .into_iter()
+            .map(|(name, identifier)| ArtistCredit::new(name, identifier))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| TrackRepositoryError::InvalidData)?;
 
         let duration_ms = duration_ms
             .map(u64::try_from)
@@ -998,7 +1007,7 @@ async fn update_track_metadata(
 async fn replace_artist_credits(
     connection: &mut PgConnection,
     track_id: &TrackId,
-    metadata: &TrackMetadata,
+    credits: &[(String, ArtistId)],
 ) -> Result<(), TrackRepositoryError> {
     sqlx::query(
         r#"
@@ -1011,24 +1020,39 @@ async fn replace_artist_credits(
     .await
     .map_err(|_| TrackRepositoryError::Unavailable)?;
 
-    for (position, artist) in metadata.artists().iter().enumerate() {
+    for (position, (name, artist_id)) in credits.iter().enumerate() {
         let position = i32::try_from(position).map_err(|_| TrackRepositoryError::InvalidData)?;
 
         sqlx::query(
             r#"
-            INSERT INTO track_artist_credits (track_id, position, name)
-            VALUES ($1, $2, $3)
+            INSERT INTO track_artist_credits (track_id, position, name, artist_id)
+            VALUES ($1, $2, $3, $4)
             "#,
         )
         .bind(track_id.as_uuid())
         .bind(position)
-        .bind(artist)
+        .bind(name)
+        .bind(artist_id.as_uuid())
         .execute(&mut *connection)
         .await
         .map_err(|_| TrackRepositoryError::Unavailable)?;
     }
 
     Ok(())
+}
+
+async fn resolve_credits(
+    pool: &PgPool,
+    credits: &[ArtistCredit],
+) -> Result<Vec<(String, ArtistId)>, TrackRepositoryError> {
+    let mut resolved = Vec::with_capacity(credits.len());
+
+    for credit in credits {
+        let artist = resolve_artist(pool, credit).await?;
+        resolved.push((credit.name().to_owned(), artist.id().clone()));
+    }
+
+    Ok(resolved)
 }
 
 fn encode_duration_ms(duration_ms: Option<u64>) -> Result<Option<i64>, TrackRepositoryError> {

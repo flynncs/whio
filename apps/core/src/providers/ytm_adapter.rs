@@ -189,8 +189,9 @@ mod mapping {
                 .transpose()
                 .map_err(|_| ValidationError::InvalidDuration)?;
 
-            let metadata = TrackMetadata::new(candidate.title, candidate.artists, duration_ms)?
-                .with_album(candidate.album.flatten())?;
+            let metadata =
+                TrackMetadata::from_names(candidate.title, candidate.artists, duration_ms)?
+                    .with_album(candidate.album.flatten())?;
             let artwork = candidate
                 .artwork_url
                 .flatten()
@@ -323,7 +324,14 @@ mod mapping {
             assert_eq!(candidate.source().provider_id().as_str(), "example_music");
             assert_eq!(candidate.source().external_id(), "example-source-id");
             assert_eq!(candidate.title(), "Instant Crush");
-            assert_eq!(candidate.artists(), ["Daft Punk"]);
+            assert_eq!(
+                candidate
+                    .artists()
+                    .iter()
+                    .map(|artist| artist.name())
+                    .collect::<Vec<_>>(),
+                ["Daft Punk"]
+            );
             assert_eq!(candidate.duration_ms(), Some(337_000));
         }
 

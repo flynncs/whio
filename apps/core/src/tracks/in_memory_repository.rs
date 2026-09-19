@@ -554,7 +554,7 @@ mod tests {
     }
 
     fn metadata(title: &str) -> TrackMetadata {
-        TrackMetadata::new(title.to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
+        TrackMetadata::from_names(title.to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
     }
 
     #[tokio::test]

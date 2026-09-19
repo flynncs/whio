@@ -5,7 +5,7 @@ use std::{
 
 use uuid::Uuid;
 
-use super::TrackMetadata;
+use super::{ArtistCredit, TrackMetadata};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrackId(Uuid);
@@ -67,7 +67,7 @@ impl Track {
         self.metadata.title()
     }
 
-    pub fn artists(&self) -> &[String] {
+    pub fn artists(&self) -> &[ArtistCredit] {
         self.metadata.artists()
     }
 
@@ -97,7 +97,7 @@ mod tests {
     use super::*;
 
     fn metadata() -> TrackMetadata {
-        TrackMetadata::new(
+        TrackMetadata::from_names(
             "Instant Crush".to_owned(),
             vec!["Daft Punk".to_owned()],
             Some(337_000),
@@ -120,7 +120,14 @@ mod tests {
 
         assert_eq!(track.id(), &id);
         assert_eq!(track.title(), "Instant Crush");
-        assert_eq!(track.artists(), ["Daft Punk"]);
+        assert_eq!(
+            track
+                .artists()
+                .iter()
+                .map(|artist| artist.name())
+                .collect::<Vec<_>>(),
+            ["Daft Punk"]
+        );
         assert_eq!(track.duration_ms(), Some(337_000));
     }
 }

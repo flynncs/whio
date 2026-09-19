@@ -177,7 +177,7 @@ mod tests {
                 "vid-1".to_owned(),
             )
             .expect("valid source"),
-            TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
+            TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
                 .expect("valid metadata"),
         )
     }
@@ -190,7 +190,7 @@ mod tests {
                 format!("vid-{index}"),
             )
             .expect("valid source"),
-            TrackMetadata::new(
+            TrackMetadata::from_names(
                 format!("song-{index}"),
                 vec!["artist".to_owned()],
                 Some(200_000),
@@ -307,7 +307,7 @@ mod tests {
     fn hit(artists: Vec<String>) -> SearchHit {
         let track = crate::tracks::Track::new(
             crate::tracks::TrackId::new(),
-            TrackMetadata::new("song".to_owned(), artists, Some(200_000))
+            TrackMetadata::from_names("song".to_owned(), artists, Some(200_000))
                 .expect("valid metadata")
                 .with_album(Some("album".to_owned()))
                 .expect("valid album"),

@@ -40,7 +40,7 @@ async fn app() -> (Router, TrackId, PathBuf) {
     let track = repository
         .get_or_create(
             source.clone(),
-            TrackMetadata::new(
+            TrackMetadata::from_names(
                 "Fixture Song".to_owned(),
                 vec!["Fixture Artist".to_owned()],
                 Some(1_000),

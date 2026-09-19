@@ -107,7 +107,7 @@ fn source() -> SourceIdentity {
 fn candidate(source: SourceIdentity) -> CatalogueCandidate {
     CatalogueCandidate::new(
         source,
-        TrackMetadata::new(
+        TrackMetadata::from_names(
             "Instant Crush".to_owned(),
             vec!["Daft Punk".to_owned()],
             Some(337_000),

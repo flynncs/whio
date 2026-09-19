@@ -21,7 +21,7 @@ fn source(external_id: &str) -> SourceIdentity {
 }
 
 fn metadata(title: &str, artists: &[&str], duration_ms: Option<u64>) -> TrackMetadata {
-    TrackMetadata::new(
+    TrackMetadata::from_names(
         title.to_owned(),
         artists.iter().map(|artist| (*artist).to_owned()).collect(),
         duration_ms,
@@ -52,7 +52,14 @@ async fn repeated_discovery_preserves_identity_and_updates_metadata(pool: PgPool
 
     assert_eq!(first.id(), updated.id());
     assert_eq!(updated.title(), "New title");
-    assert_eq!(updated.artists(), ["Replacement"]);
+    assert_eq!(
+        updated
+            .artists()
+            .iter()
+            .map(|artist| artist.name())
+            .collect::<Vec<_>>(),
+        ["Replacement"]
+    );
     assert_eq!(updated.duration_ms(), Some(2_000));
     assert_eq!(
         repository.find_sources(updated.id()).await.unwrap(),
@@ -560,4 +567,79 @@ async fn recording_identifiers_round_trip_on_the_track(pool: PgPool) {
         .expect("stored track is found");
     assert_eq!(found.musicbrainz_recording_id(), Some("mb-recording"));
     assert_eq!(found.isrc(), Some("ISRC-1"));
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn performer_credits_link_to_artist_rows(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let metadata = TrackMetadata::new(
+        "Song".to_owned(),
+        vec![
+            ArtistCredit::new("Daft Punk".to_owned(), Some("mb-artist-1".to_owned())).unwrap(),
+            ArtistCredit::new("Pharrell".to_owned(), None).unwrap(),
+        ],
+        None,
+    )
+    .unwrap();
+    let stored = repository
+        .get_or_create(source("linked-credits"), metadata)
+        .await
+        .unwrap();
+
+    let rows: Vec<(i32, String, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT position, name, artist_id
+        FROM track_artist_credits
+        WHERE track_id = $1
+        ORDER BY position
+        "#,
+    )
+    .bind(stored.id().as_uuid())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].1, "Daft Punk");
+    assert_eq!(rows[1].1, "Pharrell");
+    let daft_punk = rows[0].2.expect("an id-bearing credit links");
+    assert!(rows[1].2.is_some(), "a name-only credit still links");
+
+    let identifier: Option<String> =
+        sqlx::query_scalar("SELECT musicbrainz_artist_id FROM artists WHERE id = $1")
+            .bind(daft_punk)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(identifier.as_deref(), Some("mb-artist-1"));
+
+    let found = repository
+        .find_track(stored.id())
+        .await
+        .unwrap()
+        .expect("stored track is found");
+    assert_eq!(found.artists().len(), 2);
+    assert_eq!(found.artists()[0].name(), "Daft Punk");
+    assert_eq!(
+        found.artists()[0].musicbrainz_artist_id(),
+        Some("mb-artist-1")
+    );
+    assert_eq!(found.artists()[1].musicbrainz_artist_id(), None);
+
+    let second = TrackMetadata::new(
+        "Other".to_owned(),
+        vec![ArtistCredit::new("Pharrell".to_owned(), None).unwrap()],
+        None,
+    )
+    .unwrap();
+    repository
+        .get_or_create(source("linked-credits-2"), second)
+        .await
+        .unwrap();
+
+    let pharrell: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artists WHERE name = 'Pharrell'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(pharrell, 1, "the same name-only artist is reused");
 }

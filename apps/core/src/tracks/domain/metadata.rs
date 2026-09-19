@@ -1,9 +1,9 @@
-use super::{ValidationError, text::optional};
+use super::{ArtistCredit, ValidationError, text::optional};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrackMetadata {
     title: String,
-    artists: Vec<String>,
+    artists: Vec<ArtistCredit>,
     duration_ms: Option<u64>,
     album: Option<String>,
     musicbrainz_recording_id: Option<String>,
@@ -13,7 +13,7 @@ pub struct TrackMetadata {
 impl TrackMetadata {
     pub fn new(
         title: String,
-        artists: Vec<String>,
+        artists: Vec<ArtistCredit>,
         duration_ms: Option<u64>,
     ) -> Result<Self, ValidationError> {
         if title.is_empty() {
@@ -24,16 +24,6 @@ impl TrackMetadata {
             return Err(ValidationError::TooLong { field: "title" });
         }
 
-        for artist in &artists {
-            if artist.is_empty() {
-                return Err(ValidationError::Empty { field: "artist" });
-            }
-
-            if artist.chars().count() > 500 {
-                return Err(ValidationError::TooLong { field: "artist" });
-            }
-        }
-
         Ok(Self {
             title,
             artists,
@@ -42,6 +32,19 @@ impl TrackMetadata {
             musicbrainz_recording_id: None,
             isrc: None,
         })
+    }
+
+    pub fn from_names(
+        title: String,
+        artists: Vec<String>,
+        duration_ms: Option<u64>,
+    ) -> Result<Self, ValidationError> {
+        let artists = artists
+            .into_iter()
+            .map(|name| ArtistCredit::new(name, None))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Self::new(title, artists, duration_ms)
     }
 
     pub fn with_recording_id(
@@ -77,7 +80,7 @@ impl TrackMetadata {
         &self.title
     }
 
-    pub fn artists(&self) -> &[String] {
+    pub fn artists(&self) -> &[ArtistCredit] {
         &self.artists
     }
 
@@ -97,7 +100,7 @@ impl TrackMetadata {
         self.isrc.as_deref()
     }
 
-    pub fn into_parts(self) -> (String, Vec<String>, Option<u64>) {
+    pub fn into_parts(self) -> (String, Vec<ArtistCredit>, Option<u64>) {
         (self.title, self.artists, self.duration_ms)
     }
 }
@@ -108,7 +111,7 @@ mod tests {
 
     #[test]
     fn metadata_keeps_normalized_values() {
-        let metadata = TrackMetadata::new(
+        let metadata = TrackMetadata::from_names(
             "Instant Crush".to_owned(),
             vec!["Daft Punk".to_owned()],
             Some(337_000),
@@ -116,17 +119,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(metadata.title(), "Instant Crush");
-        assert_eq!(metadata.artists(), ["Daft Punk"]);
+        assert_eq!(
+            metadata
+                .artists()
+                .iter()
+                .map(|artist| artist.name())
+                .collect::<Vec<_>>(),
+            ["Daft Punk"]
+        );
         assert_eq!(metadata.duration_ms(), Some(337_000));
         assert_eq!(metadata.album(), None);
     }
 
     #[test]
     fn metadata_trims_and_bounds_album() {
-        let metadata = TrackMetadata::new("Title".to_owned(), vec!["Artist".to_owned()], None)
-            .unwrap()
-            .with_album(Some("  Discovery  ".to_owned()))
-            .unwrap();
+        let metadata =
+            TrackMetadata::from_names("Title".to_owned(), vec!["Artist".to_owned()], None)
+                .unwrap()
+                .with_album(Some("  Discovery  ".to_owned()))
+                .unwrap();
         assert_eq!(metadata.album(), Some("Discovery"));
 
         let blank = metadata.clone().with_album(Some("   ".to_owned())).unwrap();
@@ -141,29 +152,29 @@ mod tests {
     #[test]
     fn metadata_rejects_invalid_titles() {
         assert!(matches!(
-            TrackMetadata::new(String::new(), vec!["Artist".to_owned()], None),
+            TrackMetadata::from_names(String::new(), vec!["Artist".to_owned()], None),
             Err(ValidationError::Empty { field: "title" })
         ));
         assert!(matches!(
-            TrackMetadata::new("a".repeat(501), vec!["Artist".to_owned()], None),
+            TrackMetadata::from_names("a".repeat(501), vec!["Artist".to_owned()], None),
             Err(ValidationError::TooLong { field: "title" })
         ));
     }
 
     #[test]
     fn metadata_allows_a_track_with_no_credited_artist() {
-        let metadata = TrackMetadata::new("Title".to_owned(), vec![], None).unwrap();
+        let metadata = TrackMetadata::from_names("Title".to_owned(), vec![], None).unwrap();
         assert!(metadata.artists().is_empty());
     }
 
     #[test]
     fn metadata_rejects_blank_artist_values() {
         assert!(matches!(
-            TrackMetadata::new("Title".to_owned(), vec![String::new()], None),
+            TrackMetadata::from_names("Title".to_owned(), vec![String::new()], None),
             Err(ValidationError::Empty { field: "artist" })
         ));
         assert!(matches!(
-            TrackMetadata::new("Title".to_owned(), vec!["a".repeat(501)], None),
+            TrackMetadata::from_names("Title".to_owned(), vec!["a".repeat(501)], None),
             Err(ValidationError::TooLong { field: "artist" })
         ));
     }

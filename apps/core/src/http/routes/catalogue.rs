@@ -52,6 +52,10 @@ impl From<Track> for TrackResponse {
     fn from(value: Track) -> Self {
         let (id, metadata) = value.into_parts();
         let (title, artists, duration_ms) = metadata.into_parts();
+        let artists = artists
+            .iter()
+            .map(|artist| artist.name().to_owned())
+            .collect();
 
         Self {
             id: id.to_string(),

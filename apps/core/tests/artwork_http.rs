@@ -51,7 +51,7 @@ fn credentials() -> (Arc<CredentialService>, Uuid, CredentialKey) {
 }
 
 fn metadata() -> TrackMetadata {
-    TrackMetadata::new("Song".to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
+    TrackMetadata::from_names("Song".to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
 }
 
 async fn image_server(bytes: &'static [u8]) -> String {

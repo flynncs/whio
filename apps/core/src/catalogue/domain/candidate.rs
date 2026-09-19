@@ -1,4 +1,4 @@
-use crate::tracks::{ArtworkRef, SourceIdentity, TrackMetadata};
+use crate::tracks::{ArtistCredit, ArtworkRef, SourceIdentity, TrackMetadata};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CatalogueCandidate {
@@ -41,7 +41,7 @@ impl CatalogueCandidate {
         self.metadata.title()
     }
 
-    pub fn artists(&self) -> &[String] {
+    pub fn artists(&self) -> &[ArtistCredit] {
         self.metadata.artists()
     }
 

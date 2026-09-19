@@ -19,7 +19,7 @@ fn candidate() -> CatalogueCandidate {
     let provider_id = ProviderId::new("youtube_music".to_owned()).unwrap();
     let source =
         SourceIdentity::new(provider_id, SourceScope::Global, "source-123".to_owned()).unwrap();
-    let metadata = TrackMetadata::new(
+    let metadata = TrackMetadata::from_names(
         "Instant Crush".to_owned(),
         vec!["Daft Punk".to_owned()],
         Some(337_000),

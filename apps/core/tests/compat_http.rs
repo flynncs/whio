@@ -182,7 +182,7 @@ async fn song_list_returns_mapped_tracks_for_a_login_token() {
             "vid-1".to_owned(),
         )
         .expect("valid source"),
-        TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
+        TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
     let (catalogue, playback) = services(vec![Ok(vec![candidate])]);
@@ -226,7 +226,7 @@ async fn source_tags_label_the_artist_in_both_song_surfaces() {
             "vid-1".to_owned(),
         )
         .expect("valid source"),
-        TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
+        TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
     let (catalogue, playback) = services(vec![Ok(vec![candidate.clone()]), Ok(vec![candidate])]);
@@ -272,7 +272,7 @@ async fn song_detail_returns_the_searched_song() {
             "vid-1".to_owned(),
         )
         .expect("valid source"),
-        TrackMetadata::new("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
+        TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
     let (catalogue, playback) = services(vec![Ok(vec![candidate])]);

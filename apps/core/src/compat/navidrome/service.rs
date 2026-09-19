@@ -298,7 +298,7 @@ mod tests {
                 "vid-1".to_owned(),
             )
             .expect("valid source"),
-            TrackMetadata::new(
+            TrackMetadata::from_names(
                 "song".to_owned(),
                 vec!["a".to_owned(), "b".to_owned()],
                 Some(180_000),
@@ -315,7 +315,7 @@ mod tests {
                 format!("vid-{index}"),
             )
             .expect("valid source"),
-            TrackMetadata::new(
+            TrackMetadata::from_names(
                 format!("song-{index}"),
                 vec!["artist".to_owned()],
                 Some(180_000),
@@ -511,7 +511,7 @@ mod tests {
     fn track_maps_to_song() {
         let track = Track::new(
             TrackId::new(),
-            TrackMetadata::new(
+            TrackMetadata::from_names(
                 "title".to_owned(),
                 vec!["a".to_owned(), "b".to_owned()],
                 Some(180_000),

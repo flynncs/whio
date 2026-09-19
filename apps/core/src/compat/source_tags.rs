@@ -1,4 +1,4 @@
-use crate::tracks::{ProviderKind, SourceIdentity};
+use crate::tracks::{ArtistCredit, ProviderKind, SourceIdentity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceTags {
@@ -16,8 +16,12 @@ impl SourceTags {
         }
     }
 
-    pub(crate) fn artist(self, artists: &[String], sources: &[SourceIdentity]) -> String {
-        let artists = artists.join(", ");
+    pub(crate) fn artist(self, artists: &[ArtistCredit], sources: &[SourceIdentity]) -> String {
+        let artists = artists
+            .iter()
+            .map(ArtistCredit::name)
+            .collect::<Vec<_>>()
+            .join(", ");
 
         if artists.is_empty() {
             return artists;
@@ -70,8 +74,8 @@ mod tests {
         .expect("valid source")
     }
 
-    fn artists() -> Vec<String> {
-        vec!["Daft Punk".to_owned()]
+    fn artists() -> Vec<ArtistCredit> {
+        vec![ArtistCredit::new("Daft Punk".to_owned(), None).expect("valid credit")]
     }
 
     #[test]
@@ -112,7 +116,10 @@ mod tests {
 
     #[test]
     fn every_artist_joins_before_the_marker() {
-        let artists = vec!["Daft Punk".to_owned(), "Julian Casablancas".to_owned()];
+        let artists = vec![
+            ArtistCredit::new("Daft Punk".to_owned(), None).unwrap(),
+            ArtistCredit::new("Julian Casablancas".to_owned(), None).unwrap(),
+        ];
 
         assert_eq!(
             SourceTags::ArtistPrefix.artist(&artists, &[source("youtube_music")]),
