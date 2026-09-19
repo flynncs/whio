@@ -6,7 +6,7 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    Artist, ArtistCredit, ArtistId, Track, TrackId, ValidationError,
+    Artist, ArtistCredit, ArtistId, LibraryState, Track, TrackId, ValidationError,
     text::{optional, required},
 };
 
@@ -286,6 +286,7 @@ pub struct AlbumSummary {
     duration_ms: u64,
     cover_art_track_id: Option<TrackId>,
     created_at: chrono::DateTime<chrono::Utc>,
+    state: LibraryState,
 }
 
 impl AlbumSummary {
@@ -304,7 +305,17 @@ impl AlbumSummary {
             duration_ms,
             cover_art_track_id,
             created_at,
+            state: LibraryState::default(),
         }
+    }
+
+    pub fn with_state(mut self, state: LibraryState) -> Self {
+        self.state = state;
+        self
+    }
+
+    pub fn state(&self) -> LibraryState {
+        self.state
     }
 
     pub fn album(&self) -> &Album {
@@ -332,22 +343,92 @@ impl AlbumSummary {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlbumOrder {
+    #[default]
     Title,
     Artist,
     RecentlyAdded,
+    Random,
+    Frequent,
+    Recent,
+    HighestRated,
+    Starred,
+    YearAscending,
+    YearDescending,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AlbumListFilter {
+    starred: bool,
+    genre: Option<String>,
+    year_from: Option<i32>,
+    year_to: Option<i32>,
+}
+
+impl AlbumListFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn starred(mut self) -> Self {
+        self.starred = true;
+        self
+    }
+
+    pub fn with_genre(mut self, genre: Option<String>) -> Self {
+        self.genre = genre
+            .map(|genre| genre.trim().to_owned())
+            .filter(|genre| !genre.is_empty());
+        self
+    }
+
+    pub fn with_year(mut self, from: Option<i32>, to: Option<i32>) -> Self {
+        self.year_from = from;
+        self.year_to = to;
+        self
+    }
+
+    pub fn is_starred(&self) -> bool {
+        self.starred
+    }
+
+    pub fn genre(&self) -> Option<&str> {
+        self.genre.as_deref()
+    }
+
+    pub fn year_from(&self) -> Option<i32> {
+        self.year_from
+    }
+
+    pub fn year_to(&self) -> Option<i32> {
+        self.year_to
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumEntry {
     track: Track,
     membership: AlbumTrack,
+    state: LibraryState,
 }
 
 impl AlbumEntry {
     pub fn new(track: Track, membership: AlbumTrack) -> Self {
-        Self { track, membership }
+        Self {
+            track,
+            membership,
+            state: LibraryState::default(),
+        }
+    }
+
+    pub fn with_state(mut self, state: LibraryState) -> Self {
+        self.state = state;
+        self
+    }
+
+    pub fn state(&self) -> LibraryState {
+        self.state
     }
 
     pub fn track(&self) -> &Track {

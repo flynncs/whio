@@ -12,8 +12,9 @@ use crate::{
     providers::ProviderError,
     request::RequestContext,
     tracks::{
-        AlbumEntry, AlbumId, AlbumOrder, AlbumSummary, AlbumTrack, ArtistId, ArtistSummary,
-        ProviderKind, SourceIdentity, Track, TrackId, TrackRepository, TrackRepositoryError,
+        AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, AlbumTrack, ArtistId,
+        ArtistSummary, GenreSummary, LibraryState, ProviderKind, SourceIdentity, Starred,
+        StateTarget, Track, TrackId, TrackRepository, TrackRepositoryError,
     },
 };
 
@@ -77,6 +78,7 @@ impl CatalogueService {
     pub async fn track_detail(
         &self,
         track_id: &TrackId,
+        user: Option<&Uuid>,
     ) -> Result<Option<SearchHit>, CatalogueError> {
         let Some(track) = self.track(track_id).await? else {
             return Ok(None);
@@ -87,8 +89,18 @@ impl CatalogueService {
             .await
             .map_err(CatalogueError::Repository)?;
         let sources = self.sources(track_id).await?;
+        let state = match user {
+            Some(user) => self
+                .track_repository
+                .find_track_state(track_id, *user)
+                .await
+                .map_err(CatalogueError::Repository)?,
+            None => LibraryState::default(),
+        };
 
-        Ok(Some(SearchHit::new(track, album, sources)))
+        Ok(Some(
+            SearchHit::new(track, album, sources).with_state(state),
+        ))
     }
 
     pub async fn album_list(
@@ -96,9 +108,102 @@ impl CatalogueService {
         offset: u32,
         limit: u32,
         order: AlbumOrder,
+        filter: AlbumListFilter,
+        user: Option<&Uuid>,
     ) -> Result<Vec<AlbumSummary>, CatalogueError> {
         self.track_repository
-            .list_albums(offset, limit, order)
+            .list_albums(offset, limit, order, filter, user.copied())
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn genres(&self) -> Result<Vec<GenreSummary>, CatalogueError> {
+        self.track_repository
+            .list_genres()
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn starred(&self, user: Uuid) -> Result<Starred, CatalogueError> {
+        self.track_repository
+            .starred(user)
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn set_starred(
+        &self,
+        user: Uuid,
+        target: StateTarget<'_>,
+        starred: bool,
+    ) -> Result<(), CatalogueError> {
+        self.track_repository
+            .set_starred(user, target, starred)
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn set_rating(
+        &self,
+        user: Uuid,
+        target: StateTarget<'_>,
+        rating: Option<u8>,
+    ) -> Result<(), CatalogueError> {
+        self.track_repository
+            .set_rating(user, target, rating)
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn rate_id(
+        &self,
+        user: Uuid,
+        raw_id: &str,
+        rating: Option<u8>,
+    ) -> Result<bool, CatalogueError> {
+        if let Ok(track_id) = raw_id.parse::<TrackId>()
+            && self.track(&track_id).await?.is_some()
+        {
+            self.set_rating(user, StateTarget::Track(&track_id), rating)
+                .await?;
+            return Ok(true);
+        }
+        if let Ok(album_id) = raw_id.parse::<AlbumId>()
+            && self
+                .track_repository
+                .find_album(&album_id)
+                .await
+                .map_err(CatalogueError::Repository)?
+                .is_some()
+        {
+            self.set_rating(user, StateTarget::Album(&album_id), rating)
+                .await?;
+            return Ok(true);
+        }
+        if let Ok(artist_id) = raw_id.parse::<ArtistId>()
+            && self
+                .track_repository
+                .find_artist(&artist_id, Some(user))
+                .await
+                .map_err(CatalogueError::Repository)?
+                .is_some()
+        {
+            self.set_rating(user, StateTarget::Artist(&artist_id), rating)
+                .await?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    pub async fn record_play(
+        &self,
+        user: Uuid,
+        track_id: &TrackId,
+        played_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), CatalogueError> {
+        self.track_repository
+            .record_play(user, track_id, played_at)
             .await
             .map_err(CatalogueError::Repository)
     }
@@ -120,10 +225,11 @@ impl CatalogueService {
     pub async fn album_detail(
         &self,
         album_id: &AlbumId,
+        user: Option<&Uuid>,
     ) -> Result<Option<AlbumDetail>, CatalogueError> {
         let Some(album) = self
             .track_repository
-            .find_album_summary(album_id)
+            .find_album_summary(album_id, user.copied())
             .await
             .map_err(CatalogueError::Repository)?
         else {
@@ -132,7 +238,7 @@ impl CatalogueService {
 
         let entries = self
             .track_repository
-            .find_album_entries(album_id)
+            .find_album_entries(album_id, user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
 
@@ -143,9 +249,10 @@ impl CatalogueService {
         &self,
         offset: u32,
         limit: u32,
+        user: Option<&Uuid>,
     ) -> Result<Vec<ArtistSummary>, CatalogueError> {
         self.track_repository
-            .list_artists(offset, limit)
+            .list_artists(offset, limit, user.copied())
             .await
             .map_err(CatalogueError::Repository)
     }
@@ -153,10 +260,11 @@ impl CatalogueService {
     pub async fn artist_detail(
         &self,
         artist_id: &ArtistId,
+        user: Option<&Uuid>,
     ) -> Result<Option<ArtistDetail>, CatalogueError> {
         let Some(artist) = self
             .track_repository
-            .find_artist(artist_id)
+            .find_artist(artist_id, user.copied())
             .await
             .map_err(CatalogueError::Repository)?
         else {
@@ -165,10 +273,18 @@ impl CatalogueService {
 
         let albums = self
             .track_repository
-            .find_albums_for_artist(artist_id)
+            .find_albums_for_artist(artist_id, user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
-        let artist = ArtistSummary::new(artist, albums.len() as u32);
+        let state = match user {
+            Some(user) => self
+                .track_repository
+                .find_artist_state(artist_id, *user)
+                .await
+                .map_err(CatalogueError::Repository)?,
+            None => LibraryState::default(),
+        };
+        let artist = ArtistSummary::new(artist, albums.len() as u32).with_state(state);
 
         Ok(Some(ArtistDetail { artist, albums }))
     }
@@ -191,19 +307,19 @@ impl CatalogueService {
 
         let known = self
             .track_repository
-            .search_tracks(&query, window)
+            .search_tracks(&query, window, user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
         let (fresh, first_error, any_success) =
             self.fan_out(search, user, context, PROVIDER_BUDGET).await;
         let albums = self
             .track_repository
-            .search_albums(&query, window)
+            .search_albums(&query, window, user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
         let artists = self
             .track_repository
-            .search_artists(&query, window)
+            .search_artists(&query, window, user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
 
@@ -903,7 +1019,10 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].provider_id().as_str(), "youtube_music");
 
-        let entries = repository.find_album_entries(album.id()).await.unwrap();
+        let entries = repository
+            .find_album_entries(album.id(), None)
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].track().id(), outcome.tracks[0].track().id());
     }

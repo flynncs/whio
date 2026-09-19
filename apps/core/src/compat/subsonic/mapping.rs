@@ -4,8 +4,8 @@ use crate::{
     catalogue::{AlbumDetail, ArtistDetail, SearchHit},
     compat::SourceTags,
     tracks::{
-        Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary,
-        SourceIdentity, Track,
+        Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary, GenreSummary,
+        LibraryState, SourceIdentity, Track,
     },
 };
 
@@ -17,6 +17,7 @@ pub(crate) fn child_from_hit(hit: &SearchHit, tags: SourceTags) -> models::Child
         hit.sources(),
         tags,
         None,
+        hit.state(),
     )
 }
 
@@ -33,6 +34,7 @@ pub(crate) fn child_from_entry(
         &[],
         tags,
         Some(entry.membership()),
+        entry.state(),
     )
 }
 
@@ -43,6 +45,7 @@ fn child_from_track(
     sources: &[SourceIdentity],
     tags: SourceTags,
     membership: Option<&AlbumTrack>,
+    state: LibraryState,
 ) -> models::Child {
     models::Child {
         id: track.id().to_string(),
@@ -55,6 +58,13 @@ fn child_from_track(
         duration: track.duration_ms().map(|ms| (ms / 1000) as i32),
         disc_number: membership.and_then(AlbumTrack::disc_number).map(i32::from),
         album_id: album_id.map(AlbumId::to_string),
+        genre: track.metadata().genre().map(str::to_owned),
+        user_rating: state.rating().map(i32::from),
+        play_count: i32::try_from(state.play_count())
+            .ok()
+            .filter(|count| *count > 0),
+        starred: state.starred_at().map(|at| at.fixed_offset()),
+        played: state.last_played_at().map(|at| at.fixed_offset()),
         media_type: Some(models::MediaType::Song),
         r#type: Some(models::GenericMediaType::Music),
         ..Default::default()
@@ -73,7 +83,11 @@ pub(crate) fn album_with_songs(
 }
 
 pub(crate) fn artist_from_summary(summary: &ArtistSummary) -> models::ArtistId3 {
-    artist_id3(summary.artist(), Some(summary.album_count()))
+    artist_id3(
+        summary.artist(),
+        Some(summary.album_count()),
+        summary.state(),
+    )
 }
 
 pub(crate) fn artist_with_albums(detail: &ArtistDetail) -> models::ArtistWithAlbumsId3 {
@@ -85,6 +99,11 @@ pub(crate) fn artist_with_albums(detail: &ArtistDetail) -> models::ArtistWithAlb
         album_count: Some(detail.artist.album_count() as i32),
         music_brainz_id: artist.musicbrainz_artist_id().map(str::to_owned),
         sort_name: artist.sort_name().map(str::to_owned),
+        starred: detail
+            .artist
+            .state()
+            .starred_at()
+            .map(|at| at.fixed_offset()),
         album: detail.albums.iter().map(album_from_summary).collect(),
         ..Default::default()
     }
@@ -105,17 +124,26 @@ pub(crate) fn album_detail_with_songs(
 }
 
 pub(crate) fn album_artist(artist: &Artist) -> models::ArtistId3 {
-    artist_id3(artist, None)
+    artist_id3(artist, None, LibraryState::default())
 }
 
-fn artist_id3(artist: &Artist, album_count: Option<u32>) -> models::ArtistId3 {
+fn artist_id3(artist: &Artist, album_count: Option<u32>, state: LibraryState) -> models::ArtistId3 {
     models::ArtistId3 {
         id: artist.id().to_string(),
         name: artist.name().to_owned(),
         album_count: album_count.map(|count| count as i32),
         music_brainz_id: artist.musicbrainz_artist_id().map(str::to_owned),
         sort_name: artist.sort_name().map(str::to_owned),
+        starred: state.starred_at().map(|at| at.fixed_offset()),
         ..Default::default()
+    }
+}
+
+pub(crate) fn genre_from_summary(summary: &GenreSummary) -> models::Genre {
+    models::Genre {
+        value: summary.genre().to_owned(),
+        song_count: summary.song_count() as i32,
+        album_count: summary.album_count() as i32,
     }
 }
 
@@ -134,6 +162,10 @@ struct AlbumFields {
     record_labels: Option<Vec<models::RecordLabel>>,
     music_brainz_id: Option<String>,
     release_types: Option<Vec<String>>,
+    play_count: Option<i32>,
+    starred: Option<chrono::DateTime<chrono::FixedOffset>>,
+    played: Option<chrono::DateTime<chrono::FixedOffset>>,
+    user_rating: Option<i32>,
 }
 
 fn album_fields(summary: &AlbumSummary) -> AlbumFields {
@@ -167,6 +199,12 @@ fn album_fields(summary: &AlbumSummary) -> AlbumFields {
         release_types: album
             .release_type()
             .map(|release_type| vec![release_type.to_owned()]),
+        play_count: i32::try_from(summary.state().play_count())
+            .ok()
+            .filter(|count| *count > 0),
+        starred: summary.state().starred_at().map(|at| at.fixed_offset()),
+        played: summary.state().last_played_at().map(|at| at.fixed_offset()),
+        user_rating: summary.state().rating().map(i32::from),
     }
 }
 
@@ -187,6 +225,10 @@ impl AlbumFields {
             record_labels: self.record_labels,
             music_brainz_id: self.music_brainz_id,
             release_types: self.release_types,
+            play_count: self.play_count,
+            starred: self.starred,
+            played: self.played,
+            user_rating: self.user_rating,
             ..Default::default()
         }
     }
@@ -207,6 +249,10 @@ impl AlbumFields {
             record_labels: self.record_labels,
             music_brainz_id: self.music_brainz_id,
             release_types: self.release_types,
+            play_count: self.play_count,
+            starred: self.starred,
+            played: self.played,
+            user_rating: self.user_rating,
             song: songs,
             ..Default::default()
         }

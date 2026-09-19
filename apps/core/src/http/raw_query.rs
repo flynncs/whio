@@ -19,6 +19,14 @@ impl RawQuery {
             .find(|(key, _)| key == name)
             .map(|(_, value)| value.as_str())
     }
+
+    pub(crate) fn all(&self, name: &str) -> Vec<&str> {
+        self.0
+            .iter()
+            .filter(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+            .collect()
+    }
 }
 
 // serde-based query extractors collapse duplicates and reorder, which breaks

@@ -1,14 +1,21 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Mutex,
+};
 
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::tracks::{
-    Album, AlbumEntry, AlbumId, AlbumMetadata, AlbumOrder, AlbumSummary, AlbumTrack, Artist,
-    ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, ProviderId, ProviderKind, SourceFileFacts,
-    Track, TrackHit, TrackMetadata, domain::normalize_for_matching,
+    Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
+    AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, GenreSummary,
+    LibraryState, ProviderId, ProviderKind, SourceFileFacts, Starred, StateTarget, Track, TrackHit,
+    TrackMetadata, checked_rating, domain::normalize_for_matching,
 };
 
 use super::{SourceIdentity, SourceScope, TrackId, TrackRepository, TrackRepositoryError};
+
+type StarredAt = chrono::DateTime<chrono::Utc>;
 
 struct TrackEntry {
     track: Track,
@@ -31,6 +38,13 @@ struct TrackIndexes {
     album_sources: HashMap<AlbumId, Vec<SourceIdentity>>,
     album_tracks: HashMap<AlbumId, Vec<(TrackId, AlbumTrack)>>,
     album_created_at: HashMap<AlbumId, chrono::DateTime<chrono::Utc>>,
+    track_favorites: HashMap<(Uuid, TrackId), StarredAt>,
+    album_favorites: HashMap<(Uuid, AlbumId), StarredAt>,
+    artist_favorites: HashMap<(Uuid, ArtistId), StarredAt>,
+    track_ratings: HashMap<(Uuid, TrackId), u8>,
+    album_ratings: HashMap<(Uuid, AlbumId), u8>,
+    artist_ratings: HashMap<(Uuid, ArtistId), u8>,
+    track_plays: HashMap<(Uuid, TrackId), (u32, Option<StarredAt>)>,
 }
 
 #[derive(Default)]
@@ -101,6 +115,19 @@ impl TrackRepository for InMemoryTrackRepository {
             .by_track_id
             .get(track_id)
             .map(|entry| entry.track.clone()))
+    }
+
+    async fn find_track_state(
+        &self,
+        track_id: &TrackId,
+        user: Uuid,
+    ) -> Result<LibraryState, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(track_state(&indexes, track_id, Some(user)))
     }
 
     async fn set_source_artwork(
@@ -305,6 +332,7 @@ impl TrackRepository for InMemoryTrackRepository {
     async fn find_artist(
         &self,
         artist_id: &ArtistId,
+        _user: Option<Uuid>,
     ) -> Result<Option<Artist>, TrackRepositoryError> {
         let indexes = self
             .indexes
@@ -317,6 +345,7 @@ impl TrackRepository for InMemoryTrackRepository {
     async fn find_album_summary(
         &self,
         album_id: &AlbumId,
+        user: Option<Uuid>,
     ) -> Result<Option<AlbumSummary>, TrackRepositoryError> {
         let indexes = self
             .indexes
@@ -326,7 +355,20 @@ impl TrackRepository for InMemoryTrackRepository {
         Ok(indexes
             .albums_by_id
             .get(album_id)
-            .map(|album| album_summary(&indexes, album)))
+            .map(|album| album_summary(&indexes, album, user)))
+    }
+
+    async fn find_artist_state(
+        &self,
+        artist_id: &ArtistId,
+        user: Uuid,
+    ) -> Result<LibraryState, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(artist_state(&indexes, artist_id, Some(user)))
     }
 
     async fn find_album_sources(
@@ -348,6 +390,7 @@ impl TrackRepository for InMemoryTrackRepository {
     async fn find_album_entries(
         &self,
         album_id: &AlbumId,
+        user: Option<Uuid>,
     ) -> Result<Vec<AlbumEntry>, TrackRepositoryError> {
         let indexes = self
             .indexes
@@ -357,10 +400,10 @@ impl TrackRepository for InMemoryTrackRepository {
         let entries = ordered_memberships(&indexes, album_id)
             .into_iter()
             .filter_map(|(track_id, membership)| {
-                indexes
-                    .by_track_id
-                    .get(&track_id)
-                    .map(|entry| AlbumEntry::new(entry.track.clone(), membership))
+                indexes.by_track_id.get(&track_id).map(|entry| {
+                    AlbumEntry::new(entry.track.clone(), membership)
+                        .with_state(track_state(&indexes, &track_id, user))
+                })
             })
             .collect();
 
@@ -370,6 +413,7 @@ impl TrackRepository for InMemoryTrackRepository {
     async fn find_albums_for_artist(
         &self,
         artist_id: &ArtistId,
+        user: Option<Uuid>,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
         let indexes = self
             .indexes
@@ -380,9 +424,10 @@ impl TrackRepository for InMemoryTrackRepository {
             &indexes,
             |album| album.album_artist_id() == Some(artist_id),
             AlbumOrder::Title,
+            user,
         )
         .into_iter()
-        .map(|album| album_summary(&indexes, album))
+        .map(|album| album_summary(&indexes, album, user))
         .collect())
     }
 
@@ -391,24 +436,32 @@ impl TrackRepository for InMemoryTrackRepository {
         offset: u32,
         limit: u32,
         order: AlbumOrder,
+        filter: AlbumListFilter,
+        user: Option<Uuid>,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
         let indexes = self
             .indexes
             .lock()
             .map_err(|_| TrackRepositoryError::Unavailable)?;
 
-        Ok(ordered_albums(&indexes, |_| true, order)
-            .into_iter()
-            .skip(offset as usize)
-            .take(limit as usize)
-            .map(|album| album_summary(&indexes, album))
-            .collect())
+        Ok(ordered_albums(
+            &indexes,
+            |album| album_matches_filter(&indexes, album, &filter, user),
+            order,
+            user,
+        )
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .map(|album| album_summary(&indexes, album, user))
+        .collect())
     }
 
     async fn list_artists(
         &self,
         offset: u32,
         limit: u32,
+        user: Option<Uuid>,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         let indexes = self
             .indexes
@@ -426,7 +479,7 @@ impl TrackRepository for InMemoryTrackRepository {
             .into_iter()
             .skip(offset as usize)
             .take(limit as usize)
-            .map(|artist| ArtistSummary::new(artist.clone(), album_count(&indexes, artist.id())))
+            .map(|artist| artist_summary(&indexes, artist, user))
             .collect())
     }
 
@@ -452,6 +505,7 @@ impl TrackRepository for InMemoryTrackRepository {
         &self,
         query: &str,
         limit: u32,
+        user: Option<Uuid>,
     ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
         let indexes = self
             .indexes
@@ -469,6 +523,7 @@ impl TrackRepository for InMemoryTrackRepository {
                     album_for_track(&indexes, entry.track.id()),
                     entry.sources.clone(),
                 )
+                .with_state(track_state(&indexes, entry.track.id(), user))
             })
             .collect::<Vec<_>>();
 
@@ -495,6 +550,7 @@ impl TrackRepository for InMemoryTrackRepository {
         &self,
         query: &str,
         limit: u32,
+        user: Option<Uuid>,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
         let indexes = self
             .indexes
@@ -506,12 +562,13 @@ impl TrackRepository for InMemoryTrackRepository {
             &indexes,
             |album| album_matches(&indexes, album, &needle),
             AlbumOrder::Title,
+            user,
         );
         albums.truncate(limit as usize);
 
         Ok(albums
             .into_iter()
-            .map(|album| album_summary(&indexes, album))
+            .map(|album| album_summary(&indexes, album, user))
             .collect())
     }
 
@@ -519,6 +576,7 @@ impl TrackRepository for InMemoryTrackRepository {
         &self,
         query: &str,
         limit: u32,
+        user: Option<Uuid>,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         let indexes = self
             .indexes
@@ -540,8 +598,139 @@ impl TrackRepository for InMemoryTrackRepository {
 
         Ok(artists
             .into_iter()
-            .map(|artist| ArtistSummary::new(artist.clone(), album_count(&indexes, artist.id())))
+            .map(|artist| artist_summary(&indexes, artist, user))
             .collect())
+    }
+
+    async fn list_genres(&self) -> Result<Vec<GenreSummary>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(genre_summaries(&indexes))
+    }
+
+    async fn starred(&self, user: Uuid) -> Result<Starred, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        let hits = favorite_ids(&indexes.track_favorites, user)
+            .into_iter()
+            .filter_map(|track_id| {
+                indexes.by_track_id.get(&track_id).map(|entry| {
+                    TrackHit::new(
+                        entry.track.clone(),
+                        album_for_track(&indexes, &track_id),
+                        entry.sources.clone(),
+                    )
+                    .with_state(track_state(&indexes, &track_id, Some(user)))
+                })
+            })
+            .collect();
+
+        let albums = favorite_ids(&indexes.album_favorites, user)
+            .into_iter()
+            .filter_map(|album_id| indexes.albums_by_id.get(&album_id))
+            .map(|album| album_summary(&indexes, album, Some(user)))
+            .collect();
+
+        let artists = favorite_ids(&indexes.artist_favorites, user)
+            .into_iter()
+            .filter_map(|artist_id| indexes.artists_by_id.get(&artist_id))
+            .map(|artist| artist_summary(&indexes, artist, Some(user)))
+            .collect();
+
+        Ok(Starred::new(hits, albums, artists))
+    }
+
+    async fn set_starred(
+        &self,
+        user: Uuid,
+        target: StateTarget<'_>,
+        starred: bool,
+    ) -> Result<(), TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        let now = chrono::Utc::now();
+
+        match target {
+            StateTarget::Track(track_id) => set_favorite(
+                &mut indexes.track_favorites,
+                user,
+                track_id.clone(),
+                starred,
+                now,
+            ),
+            StateTarget::Album(album_id) => set_favorite(
+                &mut indexes.album_favorites,
+                user,
+                album_id.clone(),
+                starred,
+                now,
+            ),
+            StateTarget::Artist(artist_id) => set_favorite(
+                &mut indexes.artist_favorites,
+                user,
+                artist_id.clone(),
+                starred,
+                now,
+            ),
+        }
+
+        Ok(())
+    }
+
+    async fn set_rating(
+        &self,
+        user: Uuid,
+        target: StateTarget<'_>,
+        rating: Option<u8>,
+    ) -> Result<(), TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        let rating = checked_rating(rating).map_err(|_| TrackRepositoryError::InvalidData)?;
+
+        match target {
+            StateTarget::Track(track_id) => {
+                set_rating_entry(&mut indexes.track_ratings, user, track_id.clone(), rating);
+            }
+            StateTarget::Album(album_id) => {
+                set_rating_entry(&mut indexes.album_ratings, user, album_id.clone(), rating);
+            }
+            StateTarget::Artist(artist_id) => {
+                set_rating_entry(&mut indexes.artist_ratings, user, artist_id.clone(), rating);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn record_play(
+        &self,
+        user: Uuid,
+        track_id: &TrackId,
+        played_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        let entry = indexes
+            .track_plays
+            .entry((user, track_id.clone()))
+            .or_insert((0, None));
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = Some(played_at);
+
+        Ok(())
     }
 }
 
@@ -625,12 +814,14 @@ fn ordered_albums(
     indexes: &TrackIndexes,
     keep: impl Fn(&Album) -> bool,
     order: AlbumOrder,
+    user: Option<Uuid>,
 ) -> Vec<&Album> {
     let mut albums = indexes
         .albums_by_id
         .values()
         .filter(|album| keep(album))
         .collect::<Vec<_>>();
+    let seed = Uuid::now_v7().as_u128() as u64;
 
     albums.sort_by(|left, right| {
         let primary = match order {
@@ -645,12 +836,50 @@ fn ordered_albums(
             AlbumOrder::RecentlyAdded => {
                 album_created_at(indexes, right).cmp(&album_created_at(indexes, left))
             }
+            AlbumOrder::Random => shuffle_key(left.id(), seed).cmp(&shuffle_key(right.id(), seed)),
+            AlbumOrder::Frequent => album_state(indexes, right.id(), user)
+                .play_count()
+                .cmp(&album_state(indexes, left.id(), user).play_count()),
+            AlbumOrder::Recent => album_state(indexes, right.id(), user)
+                .last_played_at()
+                .cmp(&album_state(indexes, left.id(), user).last_played_at()),
+            AlbumOrder::HighestRated => album_state(indexes, right.id(), user)
+                .rating()
+                .cmp(&album_state(indexes, left.id(), user).rating()),
+            AlbumOrder::Starred => album_state(indexes, right.id(), user)
+                .starred_at()
+                .cmp(&album_state(indexes, left.id(), user).starred_at()),
+            AlbumOrder::YearAscending => left
+                .year()
+                .is_none()
+                .cmp(&right.year().is_none())
+                .then_with(|| left.year().cmp(&right.year())),
+            AlbumOrder::YearDescending => right
+                .year()
+                .is_none()
+                .cmp(&left.year().is_none())
+                .then_with(|| right.year().cmp(&left.year())),
         };
 
-        primary.then_with(|| left.id().to_string().cmp(&right.id().to_string()))
+        primary
+            .then_with(|| {
+                normalize_for_matching(left.title()).cmp(&normalize_for_matching(right.title()))
+            })
+            .then_with(|| left.id().to_string().cmp(&right.id().to_string()))
     });
 
     albums
+}
+
+fn shuffle_key(album_id: &AlbumId, seed: u64) -> u64 {
+    mix(album_id.as_uuid().as_u128() as u64 ^ seed)
+}
+
+fn mix(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
 }
 
 fn album_artist_name(indexes: &TrackIndexes, album: &Album) -> String {
@@ -668,7 +897,7 @@ fn album_created_at(indexes: &TrackIndexes, album: &Album) -> chrono::DateTime<c
         .unwrap_or(chrono::DateTime::UNIX_EPOCH)
 }
 
-fn album_summary(indexes: &TrackIndexes, album: &Album) -> AlbumSummary {
+fn album_summary(indexes: &TrackIndexes, album: &Album, user: Option<Uuid>) -> AlbumSummary {
     let memberships = ordered_memberships(indexes, album.id());
     let track_count = memberships.len() as u32;
     let duration_ms = memberships
@@ -689,6 +918,15 @@ fn album_summary(indexes: &TrackIndexes, album: &Album) -> AlbumSummary {
         cover_art_track_id,
         album_created_at(indexes, album),
     )
+    .with_state(album_state(indexes, album.id(), user))
+}
+
+fn artist_summary(indexes: &TrackIndexes, artist: &Artist, user: Option<Uuid>) -> ArtistSummary {
+    ArtistSummary::new(artist.clone(), album_count(indexes, artist.id())).with_state(artist_state(
+        indexes,
+        artist.id(),
+        user,
+    ))
 }
 
 fn album_count(indexes: &TrackIndexes, artist_id: &ArtistId) -> u32 {
@@ -697,6 +935,212 @@ fn album_count(indexes: &TrackIndexes, artist_id: &ArtistId) -> u32 {
         .values()
         .filter(|album| album.album_artist_id() == Some(artist_id))
         .count() as u32
+}
+
+fn track_state(indexes: &TrackIndexes, track_id: &TrackId, user: Option<Uuid>) -> LibraryState {
+    let Some(user) = user else {
+        return LibraryState::default();
+    };
+    let starred_at = indexes
+        .track_favorites
+        .get(&(user, track_id.clone()))
+        .copied();
+    let rating = indexes
+        .track_ratings
+        .get(&(user, track_id.clone()))
+        .copied();
+    let (play_count, last_played_at) = indexes
+        .track_plays
+        .get(&(user, track_id.clone()))
+        .copied()
+        .unwrap_or((0, None));
+
+    LibraryState::new(starred_at, rating, play_count, last_played_at)
+        .expect("in-memory state is validated on write")
+}
+
+fn album_state(indexes: &TrackIndexes, album_id: &AlbumId, user: Option<Uuid>) -> LibraryState {
+    let Some(user) = user else {
+        return LibraryState::default();
+    };
+    let starred_at = indexes
+        .album_favorites
+        .get(&(user, album_id.clone()))
+        .copied();
+    let rating = indexes
+        .album_ratings
+        .get(&(user, album_id.clone()))
+        .copied();
+    let (play_count, last_played_at) = indexes
+        .album_tracks
+        .get(album_id)
+        .map(|memberships| {
+            memberships
+                .iter()
+                .fold((0u32, None), |(count, last), (track_id, _)| {
+                    let (track_count, track_last) = indexes
+                        .track_plays
+                        .get(&(user, track_id.clone()))
+                        .copied()
+                        .unwrap_or((0, None));
+                    (count.saturating_add(track_count), last.max(track_last))
+                })
+        })
+        .unwrap_or((0, None));
+
+    LibraryState::new(starred_at, rating, play_count, last_played_at)
+        .expect("in-memory state is validated on write")
+}
+
+fn artist_state(indexes: &TrackIndexes, artist_id: &ArtistId, user: Option<Uuid>) -> LibraryState {
+    let Some(user) = user else {
+        return LibraryState::default();
+    };
+    let starred_at = indexes
+        .artist_favorites
+        .get(&(user, artist_id.clone()))
+        .copied();
+    let rating = indexes
+        .artist_ratings
+        .get(&(user, artist_id.clone()))
+        .copied();
+    let (play_count, last_played_at) = indexes
+        .albums_by_id
+        .values()
+        .filter(|album| album.album_artist_id() == Some(artist_id))
+        .fold((0u32, None), |(count, last), album| {
+            let album_state = album_state(indexes, album.id(), Some(user));
+            (
+                count.saturating_add(album_state.play_count()),
+                last.max(album_state.last_played_at()),
+            )
+        });
+
+    LibraryState::new(starred_at, rating, play_count, last_played_at)
+        .expect("in-memory state is validated on write")
+}
+
+fn album_matches_filter(
+    indexes: &TrackIndexes,
+    album: &Album,
+    filter: &AlbumListFilter,
+    user: Option<Uuid>,
+) -> bool {
+    if filter.is_starred()
+        && !user.is_some_and(|user| {
+            indexes
+                .album_favorites
+                .contains_key(&(user, album.id().clone()))
+        })
+    {
+        return false;
+    }
+
+    if let Some(genre) = filter.genre() {
+        let needle = normalize_for_matching(genre);
+        let matches = ordered_memberships(indexes, album.id())
+            .iter()
+            .any(|(track_id, _)| {
+                indexes
+                    .by_track_id
+                    .get(track_id)
+                    .and_then(|entry| entry.track.metadata().genre())
+                    .is_some_and(|track_genre| normalize_for_matching(track_genre) == needle)
+            });
+        if !matches {
+            return false;
+        }
+    }
+
+    if let Some(from) = filter.year_from()
+        && album.year().is_none_or(|year| year < from)
+    {
+        return false;
+    }
+    if let Some(to) = filter.year_to()
+        && album.year().is_none_or(|year| year > to)
+    {
+        return false;
+    }
+
+    true
+}
+
+fn genre_summaries(indexes: &TrackIndexes) -> Vec<GenreSummary> {
+    let mut totals: HashMap<String, (String, u32, HashSet<AlbumId>)> = HashMap::new();
+
+    for entry in indexes.by_track_id.values() {
+        let Some(genre) = entry.track.metadata().genre() else {
+            continue;
+        };
+        let key = normalize_for_matching(genre);
+        let bucket = totals
+            .entry(key)
+            .or_insert_with(|| (genre.to_owned(), 0, HashSet::new()));
+        bucket.1 = bucket.1.saturating_add(1);
+        if let Some(album) = album_for_track(indexes, entry.track.id()) {
+            bucket.2.insert(album.id().clone());
+        }
+    }
+
+    let mut summaries = totals
+        .into_values()
+        .map(|(name, song_count, albums)| {
+            GenreSummary::new(name, song_count, albums.len() as u32)
+                .expect("a stored genre is valid")
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| {
+        normalize_for_matching(left.genre())
+            .cmp(&normalize_for_matching(right.genre()))
+            .then_with(|| left.genre().cmp(right.genre()))
+    });
+
+    summaries
+}
+
+fn favorite_ids<K: Clone + Eq + std::hash::Hash>(
+    favorites: &HashMap<(Uuid, K), StarredAt>,
+    user: Uuid,
+) -> Vec<K> {
+    let mut ids = favorites
+        .iter()
+        .filter(|((owner, _), _)| *owner == user)
+        .map(|((_, id), starred_at)| (*starred_at, id.clone()))
+        .collect::<Vec<_>>();
+    ids.sort_by_key(|(starred_at, _)| std::cmp::Reverse(*starred_at));
+
+    ids.into_iter().map(|(_, id)| id).collect()
+}
+
+fn set_favorite<K: Clone + Eq + std::hash::Hash>(
+    favorites: &mut HashMap<(Uuid, K), StarredAt>,
+    user: Uuid,
+    id: K,
+    starred: bool,
+    now: StarredAt,
+) {
+    if starred {
+        favorites.insert((user, id), now);
+    } else {
+        favorites.remove(&(user, id));
+    }
+}
+
+fn set_rating_entry<K: Clone + Eq + std::hash::Hash>(
+    ratings: &mut HashMap<(Uuid, K), u8>,
+    user: Uuid,
+    id: K,
+    rating: Option<u8>,
+) {
+    match rating {
+        Some(rating) => {
+            ratings.insert((user, id), rating);
+        }
+        None => {
+            ratings.remove(&(user, id));
+        }
+    }
 }
 
 fn resolve_artist(indexes: &mut TrackIndexes, credit: &ArtistCredit) -> Artist {
@@ -1191,7 +1635,10 @@ mod tests {
             .set_album_track(album.id(), track.id(), &membership)
             .await
             .unwrap();
-        let entries = repository.find_album_entries(album.id()).await.unwrap();
+        let entries = repository
+            .find_album_entries(album.id(), None)
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].track().id(), track.id());
         assert_eq!(entries[0].membership(), &membership);
@@ -1254,7 +1701,7 @@ mod tests {
         );
         assert!(
             repository
-                .find_album_entries(first.id())
+                .find_album_entries(first.id(), None)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -1262,7 +1709,7 @@ mod tests {
         );
         assert_eq!(
             repository
-                .find_album_entries(second.id())
+                .find_album_entries(second.id(), None)
                 .await
                 .unwrap()
                 .len(),
@@ -1279,7 +1726,7 @@ mod tests {
         );
         assert!(
             repository
-                .find_album_entries(second.id())
+                .find_album_entries(second.id(), None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1325,7 +1772,7 @@ mod tests {
         }
 
         let titles = repository
-            .find_album_entries(album.id())
+            .find_album_entries(album.id(), None)
             .await
             .unwrap()
             .iter()
@@ -1338,7 +1785,7 @@ mod tests {
         );
 
         let summaries = repository
-            .list_albums(0, 10, AlbumOrder::Title)
+            .list_albums(0, 10, AlbumOrder::Title, AlbumListFilter::default(), None)
             .await
             .unwrap();
         assert_eq!(summaries.len(), 1);
@@ -1348,13 +1795,13 @@ mod tests {
         assert_eq!(summaries[0].duration_ms(), 3_000);
 
         let albums = repository
-            .find_albums_for_artist(artist.id())
+            .find_albums_for_artist(artist.id(), None)
             .await
             .unwrap();
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].album().id(), album.id());
 
-        let artists = repository.list_artists(0, 10).await.unwrap();
+        let artists = repository.list_artists(0, 10, None).await.unwrap();
         assert_eq!(artists.len(), 1);
         assert_eq!(artists[0].artist().id(), artist.id());
         assert_eq!(artists[0].album_count(), 1);
@@ -1388,7 +1835,10 @@ mod tests {
             .await
             .unwrap();
 
-        let by_artist = repository.search_tracks("daft punk", 10).await.unwrap();
+        let by_artist = repository
+            .search_tracks("daft punk", 10, None)
+            .await
+            .unwrap();
         assert_eq!(
             by_artist
                 .iter()
@@ -1398,14 +1848,14 @@ mod tests {
             "the owned track outranks the remote one despite the title"
         );
 
-        let by_title = repository.search_tracks("zeb", 10).await.unwrap();
+        let by_title = repository.search_tracks("zeb", 10, None).await.unwrap();
         assert_eq!(by_title.len(), 1);
         assert_eq!(by_title[0].track().id(), owned.id());
         assert_eq!(by_title[0].sources().len(), 1);
 
         assert!(
             repository
-                .search_tracks("nothing here", 10)
+                .search_tracks("nothing here", 10, None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1422,27 +1872,42 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(repository.search_albums("disc", 10).await.unwrap().len(), 1);
         assert_eq!(
-            repository.search_albums("daft", 10).await.unwrap().len(),
+            repository
+                .search_albums("disc", 10, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            repository
+                .search_albums("daft", 10, None)
+                .await
+                .unwrap()
+                .len(),
             1,
             "the album artist name matches the album"
         );
         assert!(
             repository
-                .search_albums("nope", 10)
+                .search_albums("nope", 10, None)
                 .await
                 .unwrap()
                 .is_empty()
         );
 
         assert_eq!(
-            repository.search_artists("daft", 10).await.unwrap().len(),
+            repository
+                .search_artists("daft", 10, None)
+                .await
+                .unwrap()
+                .len(),
             1
         );
         assert!(
             repository
-                .search_artists("nope", 10)
+                .search_artists("nope", 10, None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1466,22 +1931,277 @@ mod tests {
             .unwrap();
 
         let by_title = repository
-            .list_albums(0, 10, AlbumOrder::Title)
+            .list_albums(0, 10, AlbumOrder::Title, AlbumListFilter::default(), None)
             .await
             .unwrap();
         assert_eq!(by_title[0].album().id(), second.id());
         assert_eq!(by_title[1].album().id(), first.id());
 
         let by_artist = repository
-            .list_albums(0, 10, AlbumOrder::Artist)
+            .list_albums(0, 10, AlbumOrder::Artist, AlbumListFilter::default(), None)
             .await
             .unwrap();
         assert_eq!(by_artist[0].album().id(), first.id());
 
         let recent = repository
-            .list_albums(0, 10, AlbumOrder::RecentlyAdded)
+            .list_albums(
+                0,
+                10,
+                AlbumOrder::RecentlyAdded,
+                AlbumListFilter::default(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(recent[0].album().id(), second.id());
+    }
+
+    #[tokio::test]
+    async fn per_user_state_round_trips_for_every_entity() {
+        let repository = InMemoryTrackRepository::default();
+        let user = Uuid::now_v7();
+        let track = repository
+            .get_or_create(source("local", "path-a"), metadata("Song"))
+            .await
+            .unwrap();
+        let album = repository
+            .resolve_or_create_album(&album_metadata("Discovery"))
+            .await
+            .unwrap();
+        let artist = repository
+            .resolve_or_create_artist(&credit("Daft Punk", None))
+            .await
+            .unwrap();
+
+        repository
+            .set_starred(user, StateTarget::Track(track.id()), true)
+            .await
+            .unwrap();
+        repository
+            .set_rating(user, StateTarget::Track(track.id()), Some(4))
+            .await
+            .unwrap();
+        repository
+            .record_play(user, track.id(), chrono::Utc::now())
+            .await
+            .unwrap();
+        repository
+            .record_play(user, track.id(), chrono::Utc::now())
+            .await
+            .unwrap();
+
+        let state = repository.find_track_state(track.id(), user).await.unwrap();
+        assert!(state.is_starred());
+        assert_eq!(state.rating(), Some(4));
+        assert_eq!(state.play_count(), 2);
+        assert!(
+            repository
+                .find_track_state(track.id(), Uuid::now_v7())
+                .await
+                .unwrap()
+                .play_count()
+                == 0,
+            "state is per user"
+        );
+
+        repository
+            .set_starred(user, StateTarget::Album(album.id()), true)
+            .await
+            .unwrap();
+        let summary = repository
+            .find_album_summary(album.id(), Some(user))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(summary.state().is_starred());
+
+        repository
+            .set_starred(user, StateTarget::Artist(artist.id()), true)
+            .await
+            .unwrap();
+        repository
+            .set_rating(user, StateTarget::Artist(artist.id()), Some(5))
+            .await
+            .unwrap();
+        let artist_state = repository
+            .find_artist_state(artist.id(), user)
+            .await
+            .unwrap();
+        assert!(artist_state.is_starred());
+        assert_eq!(artist_state.rating(), Some(5));
+
+        let starred = repository.starred(user).await.unwrap();
+        assert_eq!(starred.tracks().len(), 1);
+        assert_eq!(starred.albums().len(), 1);
+        assert_eq!(starred.artists().len(), 1);
+
+        repository
+            .set_rating(user, StateTarget::Track(track.id()), Some(0))
+            .await
+            .unwrap();
+        assert_eq!(
+            repository
+                .find_track_state(track.id(), user)
+                .await
+                .unwrap()
+                .rating(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn album_orders_reflect_plays_and_ratings() {
+        let repository = InMemoryTrackRepository::default();
+        let user = Uuid::now_v7();
+        let first = repository
+            .resolve_or_create_album(&album_metadata("First"))
+            .await
+            .unwrap();
+        let second = repository
+            .resolve_or_create_album(&album_metadata("Second"))
+            .await
+            .unwrap();
+        let first_track = repository
+            .get_or_create(source("local", "path-a"), metadata("A"))
+            .await
+            .unwrap();
+        let second_track = repository
+            .get_or_create(source("local", "path-b"), metadata("B"))
+            .await
+            .unwrap();
+        repository
+            .set_album_track(first.id(), first_track.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+        repository
+            .set_album_track(second.id(), second_track.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+
+        repository
+            .record_play(user, second_track.id(), chrono::Utc::now())
+            .await
+            .unwrap();
+        repository
+            .record_play(user, second_track.id(), chrono::Utc::now())
+            .await
+            .unwrap();
+        repository
+            .set_rating(user, StateTarget::Album(first.id()), Some(5))
+            .await
+            .unwrap();
+
+        let frequent = repository
+            .list_albums(
+                0,
+                10,
+                AlbumOrder::Frequent,
+                AlbumListFilter::new(),
+                Some(user),
+            )
+            .await
+            .unwrap();
+        assert_eq!(frequent[0].album().id(), second.id());
+        assert_eq!(frequent[0].state().play_count(), 2);
+
+        let highest = repository
+            .list_albums(
+                0,
+                10,
+                AlbumOrder::HighestRated,
+                AlbumListFilter::new(),
+                Some(user),
+            )
+            .await
+            .unwrap();
+        assert_eq!(highest[0].album().id(), first.id());
+
+        let recent = repository
+            .list_albums(
+                0,
+                10,
+                AlbumOrder::Recent,
+                AlbumListFilter::new(),
+                Some(user),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recent[0].album().id(), second.id());
+    }
+
+    #[tokio::test]
+    async fn genres_aggregate_and_filter_albums() {
+        let repository = InMemoryTrackRepository::default();
+        let album = repository
+            .resolve_or_create_album(&album_metadata("Discovery").with_year(Some(2001)).unwrap())
+            .await
+            .unwrap();
+        let rock = repository
+            .get_or_create(
+                source("local", "path-a"),
+                metadata("One").with_genre(Some("Rock".to_owned())).unwrap(),
+            )
+            .await
+            .unwrap();
+        let pop = repository
+            .get_or_create(
+                source("local", "path-b"),
+                metadata("Two").with_genre(Some("Pop".to_owned())).unwrap(),
+            )
+            .await
+            .unwrap();
+        repository
+            .set_album_track(album.id(), rock.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+        repository
+            .set_album_track(album.id(), pop.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+
+        let genres = repository.list_genres().await.unwrap();
+        assert_eq!(genres.len(), 2);
+        assert!(
+            genres
+                .iter()
+                .any(|genre| genre.genre() == "Rock" && genre.song_count() == 1)
+        );
+
+        let rock_albums = repository
+            .list_albums(
+                0,
+                10,
+                AlbumOrder::Title,
+                AlbumListFilter::new().with_genre(Some("rock".to_owned())),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rock_albums.len(), 1);
+        assert_eq!(rock_albums[0].album().id(), album.id());
+
+        let by_year = repository
+            .list_albums(
+                0,
+                10,
+                AlbumOrder::YearAscending,
+                AlbumListFilter::new().with_year(Some(2000), Some(2005)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_year.len(), 1);
+
+        let none = repository
+            .list_albums(
+                0,
+                10,
+                AlbumOrder::YearAscending,
+                AlbumListFilter::new().with_year(Some(2010), Some(2015)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(none.is_empty());
     }
 }

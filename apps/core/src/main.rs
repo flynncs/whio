@@ -61,17 +61,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(address = %config.bind_address, "listening");
 
-    if !config.media_roots.is_empty() {
-        let repository: Arc<dyn TrackRepository> =
-            Arc::new(PostgresTrackRepository::new(database.pool()));
-        let roots = config.media_roots.clone();
-        tokio::spawn(async move {
-            match whio_core::library::scan(&repository, &roots).await {
-                Ok(report) => tracing::info!(?report, "library scan finished"),
-                Err(error) => tracing::warn!(%error, "library scan failed"),
+    let scanner = state.scanner_handle();
+    scanner.start();
+    scanner.trigger(whio_core::library::ScanMode::Incremental);
+
+    let _watcher = if config.media_roots.is_empty() {
+        None
+    } else {
+        match whio_core::library::watch(&config.media_roots, Arc::clone(&scanner)) {
+            Ok(watcher) => Some(watcher),
+            Err(error) => {
+                tracing::warn!(%error, "media watcher could not start");
+                None
             }
-        });
-    }
+        }
+    };
 
     axum::serve(listener, whio_core::router(state))
         .with_graceful_shutdown(shutdown_signal())
@@ -119,6 +123,8 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         .with_spool_limits(config.max_spool_bytes, config.spool_budget_bytes),
     );
     let local = Arc::new(LocalPlaybackProvider::new(track_repository.clone()));
+    let scanner =
+        whio_core::library::ScanService::new(track_repository.clone(), config.media_roots.clone());
     let playback = Arc::new(PlaybackService::new(
         track_repository,
         vec![
@@ -130,6 +136,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
 
     Ok(
         AppState::with_database(credential, catalogue, playback, database)
+            .with_scanner(scanner)
             .with_artwork_host_suffixes(config.artwork_host_suffixes.clone())
             .with_source_tags(config.source_tags),
     )

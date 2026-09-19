@@ -180,8 +180,16 @@ async fn subsonic_browse_lists_albums_artists_and_songs() {
     );
 
     let (status, body) = get_status(
-        app,
+        app.clone(),
         &format!("/compat/subsonic/rest/getAlbumList2.view?{auth}&type=random"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let (status, body) = get_status(
+        app,
+        &format!("/compat/subsonic/rest/getAlbumList2.view?{auth}&type=notAType"),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

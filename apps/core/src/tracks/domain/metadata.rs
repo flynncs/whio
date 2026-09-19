@@ -7,6 +7,7 @@ pub struct TrackMetadata {
     duration_ms: Option<u64>,
     musicbrainz_recording_id: Option<String>,
     isrc: Option<String>,
+    genre: Option<String>,
 }
 
 impl TrackMetadata {
@@ -29,6 +30,7 @@ impl TrackMetadata {
             duration_ms,
             musicbrainz_recording_id: None,
             isrc: None,
+            genre: None,
         })
     }
 
@@ -58,6 +60,11 @@ impl TrackMetadata {
         Ok(self)
     }
 
+    pub fn with_genre(mut self, genre: Option<String>) -> Result<Self, ValidationError> {
+        self.genre = optional("genre", genre, 200)?;
+        Ok(self)
+    }
+
     pub fn title(&self) -> &str {
         &self.title
     }
@@ -76,6 +83,10 @@ impl TrackMetadata {
 
     pub fn isrc(&self) -> Option<&str> {
         self.isrc.as_deref()
+    }
+
+    pub fn genre(&self) -> Option<&str> {
+        self.genre.as_deref()
     }
 
     pub fn into_parts(self) -> (String, Vec<ArtistCredit>, Option<u64>) {
@@ -118,6 +129,21 @@ mod tests {
             TrackMetadata::from_names("a".repeat(501), vec!["Artist".to_owned()], None),
             Err(ValidationError::TooLong { field: "title" })
         ));
+    }
+
+    #[test]
+    fn metadata_keeps_a_trimmed_genre_and_drops_a_blank_one() {
+        let metadata = TrackMetadata::from_names("Title".to_owned(), vec![], None)
+            .unwrap()
+            .with_genre(Some("  Rock ".to_owned()))
+            .unwrap();
+        assert_eq!(metadata.genre(), Some("Rock"));
+
+        let blank = TrackMetadata::from_names("Title".to_owned(), vec![], None)
+            .unwrap()
+            .with_genre(Some("   ".to_owned()))
+            .unwrap();
+        assert_eq!(blank.genre(), None);
     }
 
     #[test]

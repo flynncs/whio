@@ -16,7 +16,7 @@ pub mod tracks;
 
 use crate::{
     catalogue::CatalogueService, compat::SourceTags, identity::service::CredentialService,
-    playback::PlaybackService,
+    library::ScanService, playback::PlaybackService,
 };
 
 #[derive(Clone)]
@@ -25,6 +25,7 @@ pub struct AppState {
     credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
     playback: Arc<PlaybackService>,
+    scanner: Arc<ScanService>,
     artwork_client: reqwest::Client,
     artwork_host_suffixes: Vec<String>,
     source_tags: SourceTags,
@@ -61,6 +62,15 @@ impl AppState {
         self
     }
 
+    pub fn with_scanner(mut self, scanner: Arc<ScanService>) -> Self {
+        self.scanner = scanner;
+        self
+    }
+
+    pub fn scanner_handle(&self) -> Arc<ScanService> {
+        Arc::clone(&self.scanner)
+    }
+
     fn build(
         credential: Arc<CredentialService>,
         catalogue: Arc<CatalogueService>,
@@ -73,6 +83,7 @@ impl AppState {
             catalogue,
             database,
             playback,
+            scanner: ScanService::disabled(),
             artwork_client: media::client(media::artwork_redirect_policy(
                 artwork_host_suffixes.clone(),
             )),
@@ -95,6 +106,10 @@ impl AppState {
 
     pub(crate) fn playback(&self) -> &PlaybackService {
         &self.playback
+    }
+
+    pub(crate) fn scanner(&self) -> &ScanService {
+        &self.scanner
     }
 
     pub(crate) fn artwork_client(&self) -> &reqwest::Client {

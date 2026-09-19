@@ -1,11 +1,12 @@
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::tracks::{ArtworkRef, Track, TrackMetadata};
 
 use super::{
-    Album, AlbumEntry, AlbumId, AlbumMetadata, AlbumOrder, AlbumSummary, AlbumTrack, Artist,
-    ArtistCredit, ArtistId, ArtistSummary, ProviderId, SourceIdentity, SourceScope, TrackHit,
-    TrackId,
+    Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
+    AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, GenreSummary, LibraryState,
+    ProviderId, SourceIdentity, SourceScope, Starred, StateTarget, TrackHit, TrackId,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +42,14 @@ pub trait TrackRepository: Send + Sync {
     ) -> Result<Vec<SourceIdentity>, TrackRepositoryError>;
 
     async fn find_track(&self, track_id: &TrackId) -> Result<Option<Track>, TrackRepositoryError>;
+
+    async fn find_track_state(
+        &self,
+        _track_id: &TrackId,
+        _user: Uuid,
+    ) -> Result<LibraryState, TrackRepositoryError> {
+        Ok(LibraryState::default())
+    }
 
     /// record where one source keeps its cover art. repositories without
     /// artwork storage accept and discard it.
@@ -140,6 +149,7 @@ pub trait TrackRepository: Send + Sync {
     async fn find_album_summary(
         &self,
         _album_id: &AlbumId,
+        _user: Option<Uuid>,
     ) -> Result<Option<AlbumSummary>, TrackRepositoryError> {
         Ok(None)
     }
@@ -147,8 +157,17 @@ pub trait TrackRepository: Send + Sync {
     async fn find_artist(
         &self,
         _artist_id: &ArtistId,
+        _user: Option<Uuid>,
     ) -> Result<Option<Artist>, TrackRepositoryError> {
         Ok(None)
+    }
+
+    async fn find_artist_state(
+        &self,
+        _artist_id: &ArtistId,
+        _user: Uuid,
+    ) -> Result<LibraryState, TrackRepositoryError> {
+        Ok(LibraryState::default())
     }
 
     async fn find_album_sources(
@@ -161,6 +180,7 @@ pub trait TrackRepository: Send + Sync {
     async fn find_album_entries(
         &self,
         _album_id: &AlbumId,
+        _user: Option<Uuid>,
     ) -> Result<Vec<AlbumEntry>, TrackRepositoryError> {
         Ok(Vec::new())
     }
@@ -168,6 +188,7 @@ pub trait TrackRepository: Send + Sync {
     async fn find_albums_for_artist(
         &self,
         _artist_id: &ArtistId,
+        _user: Option<Uuid>,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }
@@ -177,6 +198,8 @@ pub trait TrackRepository: Send + Sync {
         _offset: u32,
         _limit: u32,
         _order: AlbumOrder,
+        _filter: AlbumListFilter,
+        _user: Option<Uuid>,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }
@@ -185,6 +208,7 @@ pub trait TrackRepository: Send + Sync {
         &self,
         _offset: u32,
         _limit: u32,
+        _user: Option<Uuid>,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }
@@ -201,6 +225,7 @@ pub trait TrackRepository: Send + Sync {
         &self,
         _query: &str,
         _limit: u32,
+        _user: Option<Uuid>,
     ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
         Ok(Vec::new())
     }
@@ -209,6 +234,7 @@ pub trait TrackRepository: Send + Sync {
         &self,
         _query: &str,
         _limit: u32,
+        _user: Option<Uuid>,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }
@@ -217,7 +243,43 @@ pub trait TrackRepository: Send + Sync {
         &self,
         _query: &str,
         _limit: u32,
+        _user: Option<Uuid>,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         Ok(Vec::new())
+    }
+
+    async fn list_genres(&self) -> Result<Vec<GenreSummary>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn starred(&self, _user: Uuid) -> Result<Starred, TrackRepositoryError> {
+        Ok(Starred::new(Vec::new(), Vec::new(), Vec::new()))
+    }
+
+    async fn set_starred(
+        &self,
+        _user: Uuid,
+        _target: StateTarget<'_>,
+        _starred: bool,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn set_rating(
+        &self,
+        _user: Uuid,
+        _target: StateTarget<'_>,
+        _rating: Option<u8>,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn record_play(
+        &self,
+        _user: Uuid,
+        _track_id: &TrackId,
+        _played_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
     }
 }

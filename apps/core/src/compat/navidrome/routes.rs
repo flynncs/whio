@@ -5,7 +5,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::{AppState, http::raw_query::RawQuery, request::RequestContext};
+use crate::{
+    AppState, http::raw_query::RawQuery, request::RequestContext, tracks::AlbumListFilter,
+};
 
 use super::{
     auth::NdToken,
@@ -87,12 +89,25 @@ pub(crate) async fn album_list(
     query: RawQuery,
 ) -> Response {
     let order = service::album_order(query.get("_sort"));
+    let year = query
+        .get("year")
+        .and_then(|raw| raw.trim().parse::<i32>().ok());
+    let mut filter = AlbumListFilter::new()
+        .with_genre(query.get("genre").map(str::to_owned))
+        .with_year(year, year);
+    if query
+        .get("starred")
+        .is_some_and(|raw| matches!(raw.trim().to_ascii_lowercase().as_str(), "true" | "1"))
+    {
+        filter = filter.starred();
+    }
 
     match service::album_list(
         state.catalogue(),
         state.credential(),
         &token.0,
         order,
+        filter,
         query.get("artist_id"),
         page_start(&query),
         page_end(&query),
@@ -144,6 +159,17 @@ pub(crate) async fn artist_detail(
 ) -> Response {
     match service::artist_detail(state.catalogue(), state.credential(), &token.0, &id).await {
         Ok(artist) => Json(artist).into_response(),
+        Err(error) => song_error(error, &context),
+    }
+}
+
+pub(crate) async fn genre_list(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+) -> Response {
+    match service::genre_list(state.catalogue(), state.credential(), &token.0).await {
+        Ok(genres) => Json(genres).into_response(),
         Err(error) => song_error(error, &context),
     }
 }

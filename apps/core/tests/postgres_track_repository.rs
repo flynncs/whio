@@ -6,9 +6,9 @@ use sqlx::PgPool;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 use whio_core::tracks::{
-    AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef, PostgresTrackRepository,
-    ProviderId, SourceFileFacts, SourceIdentity, SourceScope, TrackId, TrackMetadata,
-    TrackRepository, TrackRepositoryError,
+    AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef,
+    PostgresTrackRepository, ProviderId, SourceFileFacts, SourceIdentity, SourceScope, StateTarget,
+    TrackId, TrackMetadata, TrackRepository, TrackRepositoryError,
 };
 
 fn source(external_id: &str) -> SourceIdentity {
@@ -302,6 +302,16 @@ fn album(title: &str) -> AlbumMetadata {
     AlbumMetadata::new(title.to_owned()).unwrap()
 }
 
+async fn insert_user(pool: &PgPool, id: Uuid, username: &str) {
+    sqlx::query("INSERT INTO users (id, username, display_name) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(username)
+        .bind(username)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 #[sqlx::test]
 #[ignore = "requires PostgreSQL"]
 async fn artist_ladder_is_identifier_then_normalised_name(pool: PgPool) {
@@ -539,7 +549,10 @@ async fn album_sources_and_membership_round_trip(pool: PgPool) {
         .set_album_track(album.id(), track.id(), &membership)
         .await
         .unwrap();
-    let entries = repository.find_album_entries(album.id()).await.unwrap();
+    let entries = repository
+        .find_album_entries(album.id(), None)
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].track().id(), track.id());
     assert_eq!(entries[0].membership(), &membership);
@@ -619,7 +632,7 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
         .unwrap();
 
     let titles = repository
-        .find_album_entries(discovery.id())
+        .find_album_entries(discovery.id(), None)
         .await
         .unwrap()
         .iter()
@@ -650,7 +663,7 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
     );
     assert_eq!(
         repository
-            .find_album_entries(discovery.id())
+            .find_album_entries(discovery.id(), None)
             .await
             .unwrap()
             .len(),
@@ -668,7 +681,7 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
     );
 
     let summaries = repository
-        .list_albums(0, 10, AlbumOrder::Title)
+        .list_albums(0, 10, AlbumOrder::Title, AlbumListFilter::default(), None)
         .await
         .unwrap();
     let names = summaries
@@ -686,14 +699,14 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
 
     assert_eq!(
         repository
-            .find_albums_for_artist(artist.id())
+            .find_albums_for_artist(artist.id(), None)
             .await
             .unwrap()
             .len(),
         2
     );
 
-    let artists = repository.list_artists(0, 10).await.unwrap();
+    let artists = repository.list_artists(0, 10, None).await.unwrap();
     assert_eq!(artists.len(), 1);
     assert_eq!(artists[0].artist().id(), artist.id());
     assert_eq!(artists[0].album_count(), 2);
@@ -819,7 +832,10 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
         .await
         .unwrap();
 
-    let hits = repository.search_tracks("daft punk", 10).await.unwrap();
+    let hits = repository
+        .search_tracks("daft punk", 10, None)
+        .await
+        .unwrap();
     assert_eq!(hits.len(), 2);
     assert_eq!(
         hits[0].track().id(),
@@ -828,12 +844,12 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
     );
     assert_eq!(hits[1].track().id(), remote.id());
 
-    let by_title = repository.search_tracks("zeb", 10).await.unwrap();
+    let by_title = repository.search_tracks("zeb", 10, None).await.unwrap();
     assert_eq!(by_title.len(), 1);
     assert_eq!(by_title[0].track().id(), owned.id());
     assert!(
         repository
-            .search_tracks("nothing", 10)
+            .search_tracks("nothing", 10, None)
             .await
             .unwrap()
             .is_empty()
@@ -853,13 +869,13 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
         .await
         .unwrap();
 
-    let albums = repository.search_albums("disc", 10).await.unwrap();
+    let albums = repository.search_albums("disc", 10, None).await.unwrap();
     assert_eq!(albums.len(), 1);
     assert_eq!(albums[0].album().id(), album.id());
     assert_eq!(albums[0].cover_art_track_id(), Some(owned.id()));
     assert_eq!(albums[0].track_count(), 1);
 
-    let artists = repository.search_artists("daft", 10).await.unwrap();
+    let artists = repository.search_artists("daft", 10, None).await.unwrap();
     assert!(
         artists
             .iter()
@@ -867,7 +883,7 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
     );
     assert!(
         repository
-            .search_artists("nope", 10)
+            .search_artists("nope", 10, None)
             .await
             .unwrap()
             .is_empty()
@@ -875,4 +891,171 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
 
     assert_eq!(repository.count_albums().await.unwrap(), 1);
     assert!(repository.count_artists().await.unwrap() >= 1);
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn per_user_state_and_genres_round_trip(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = Uuid::now_v7();
+    let other = Uuid::now_v7();
+    insert_user(&pool, user, "state-user").await;
+    insert_user(&pool, other, "other-user").await;
+
+    let album = repository
+        .resolve_or_create_album(
+            &album("Discovery")
+                .with_album_artist(credit("Daft Punk", None))
+                .with_year(Some(2001))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(
+            local_source("path-a"),
+            metadata("First", &["Daft Punk"], Some(1_000))
+                .with_genre(Some("Rock".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            album.id(),
+            track.id(),
+            &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+    let artist = repository
+        .resolve_or_create_artist(&credit("Daft Punk", None))
+        .await
+        .unwrap();
+
+    repository
+        .set_starred(user, StateTarget::Track(track.id()), true)
+        .await
+        .unwrap();
+    repository
+        .set_starred(user, StateTarget::Album(album.id()), true)
+        .await
+        .unwrap();
+    repository
+        .set_starred(user, StateTarget::Artist(artist.id()), true)
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Track(track.id()), Some(4))
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Album(album.id()), Some(5))
+        .await
+        .unwrap();
+    repository
+        .record_play(user, track.id(), chrono::Utc::now())
+        .await
+        .unwrap();
+    repository
+        .record_play(user, track.id(), chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let state = repository.find_track_state(track.id(), user).await.unwrap();
+    assert!(state.is_starred());
+    assert_eq!(state.rating(), Some(4));
+    assert_eq!(state.play_count(), 2);
+
+    let other_state = repository
+        .find_track_state(track.id(), other)
+        .await
+        .unwrap();
+    assert!(!other_state.is_starred());
+    assert_eq!(other_state.play_count(), 0);
+
+    let starred = repository.starred(user).await.unwrap();
+    assert_eq!(starred.tracks().len(), 1);
+    assert_eq!(starred.albums().len(), 1);
+    assert_eq!(starred.artists().len(), 1);
+
+    let genres = repository.list_genres().await.unwrap();
+    assert_eq!(genres.len(), 1);
+    assert_eq!(genres[0].genre(), "Rock");
+    assert_eq!(genres[0].song_count(), 1);
+    assert_eq!(genres[0].album_count(), 1);
+
+    let frequent = repository
+        .list_albums(
+            0,
+            10,
+            AlbumOrder::Frequent,
+            AlbumListFilter::new(),
+            Some(user),
+        )
+        .await
+        .unwrap();
+    assert_eq!(frequent[0].album().id(), album.id());
+    assert_eq!(frequent[0].state().play_count(), 2);
+
+    let highest = repository
+        .list_albums(
+            0,
+            10,
+            AlbumOrder::HighestRated,
+            AlbumListFilter::new(),
+            Some(user),
+        )
+        .await
+        .unwrap();
+    assert_eq!(highest[0].album().id(), album.id());
+
+    let starred_albums = repository
+        .list_albums(
+            0,
+            10,
+            AlbumOrder::Starred,
+            AlbumListFilter::new(),
+            Some(user),
+        )
+        .await
+        .unwrap();
+    assert_eq!(starred_albums[0].album().id(), album.id());
+
+    let by_genre = repository
+        .list_albums(
+            0,
+            10,
+            AlbumOrder::Title,
+            AlbumListFilter::new().with_genre(Some("rock".to_owned())),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_genre.len(), 1);
+
+    let by_year = repository
+        .list_albums(
+            0,
+            10,
+            AlbumOrder::YearAscending,
+            AlbumListFilter::new().with_year(Some(1900), Some(2100)),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_year.len(), 1);
+
+    repository
+        .set_rating(user, StateTarget::Track(track.id()), Some(0))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .find_track_state(track.id(), user)
+            .await
+            .unwrap()
+            .rating(),
+        None
+    );
 }

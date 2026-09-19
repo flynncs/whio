@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use rayon::prelude::*;
 
@@ -17,7 +18,7 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 
 pub const LOCAL_PROVIDER: &str = "local";
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
     pub indexed: usize,
     pub unchanged: usize,
@@ -59,26 +60,53 @@ struct PreparedTrack {
     membership: Option<AlbumTrack>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanMode {
+    Incremental,
+    Full,
+}
+
 pub async fn scan(
     repository: &Arc<dyn TrackRepository>,
     roots: &[PathBuf],
 ) -> Result<ScanReport, ScanError> {
+    let progress = AtomicU32::new(0);
+
+    scan_with(repository, roots, ScanMode::Incremental, &progress).await
+}
+
+pub async fn scan_with(
+    repository: &Arc<dyn TrackRepository>,
+    roots: &[PathBuf],
+    mode: ScanMode,
+    progress: &AtomicU32,
+) -> Result<ScanReport, ScanError> {
     let provider = ProviderId::new(LOCAL_PROVIDER.to_owned())
         .expect("the local provider id is a valid identifier");
     let mut report = ScanReport::default();
+    let mut processed = 0u32;
+    let empty = HashMap::new();
 
     for root in roots {
         let scope = SourceScope::Named(root.display().to_string());
         let known = known_paths(repository, &provider, &scope).await?;
         let found = walk(root)?;
         let mut seen = Vec::with_capacity(found.len());
+        let lookup = if mode == ScanMode::Full {
+            &empty
+        } else {
+            &known
+        };
 
         let prepared: Vec<Prepared> = found
             .into_par_iter()
-            .map(|file| prepare(&known, file))
+            .map(|file| prepare(lookup, file))
             .collect();
 
         for item in prepared {
+            processed = processed.saturating_add(1);
+            progress.store(processed, Ordering::SeqCst);
+
             match item {
                 Prepared::Unchanged { relative } => {
                     seen.push(relative);
@@ -159,6 +187,7 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
             let Ok(metadata) = TrackMetadata::new(tags.title, credits, tags.duration_ms)
                 .and_then(|metadata| metadata.with_recording_id(tags.recording_id))
                 .and_then(|metadata| metadata.with_isrc(tags.isrc))
+                .and_then(|metadata| metadata.with_genre(tags.genre))
             else {
                 return Prepared::Untagged;
             };
@@ -459,7 +488,10 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].provider_id().as_str(), "local");
 
-        let tracks = repository.find_album_entries(album.id()).await.unwrap();
+        let tracks = repository
+            .find_album_entries(album.id(), None)
+            .await
+            .unwrap();
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].membership().disc_number(), Some(1));
         assert_eq!(tracks[0].membership().track_number(), Some(3));

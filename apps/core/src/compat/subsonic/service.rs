@@ -1,13 +1,15 @@
 use thiserror::Error;
 use whio_subsonic_api::models;
 
+use uuid::Uuid;
+
 use crate::{
     catalogue::{
         CatalogueError, CatalogueSearch, CatalogueService, SearchLimit, SearchOffset, SearchQuery,
     },
     compat::SourceTags,
     request::RequestContext,
-    tracks::{AlbumId, AlbumOrder, ArtistId},
+    tracks::{AlbumId, AlbumListFilter, AlbumOrder, ArtistId, StateTarget, TrackId},
 };
 
 use super::mapping;
@@ -103,6 +105,9 @@ pub(crate) enum BrowseError {
     #[error("invalid browse parameters")]
     InvalidRequest,
 
+    #[error("missing browse parameter")]
+    MissingParameter,
+
     #[error("unsupported album list type")]
     UnsupportedType,
 
@@ -116,19 +121,42 @@ pub(crate) enum BrowseError {
     Catalogue(#[source] CatalogueError),
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum StateError {
+    #[error("invalid state parameters")]
+    InvalidRequest,
+
+    #[error("missing state parameter")]
+    MissingParameter,
+
+    #[error("state target not found")]
+    NotFound,
+
+    #[error("catalogue write failed")]
+    Catalogue(#[source] CatalogueError),
+}
+
+pub(crate) struct AlbumListRequest<'a> {
+    pub(crate) list_type: &'a str,
+    pub(crate) size: Option<&'a str>,
+    pub(crate) offset: Option<&'a str>,
+    pub(crate) from_year: Option<&'a str>,
+    pub(crate) to_year: Option<&'a str>,
+    pub(crate) genre: Option<&'a str>,
+}
+
+pub(crate) struct StarredResult {
+    pub(crate) songs: Vec<models::Child>,
+    pub(crate) albums: Vec<models::AlbumId3>,
+    pub(crate) artists: Vec<models::ArtistId3>,
+}
+
 pub(crate) async fn album_list(
     catalogue: &CatalogueService,
-    list_type: &str,
-    size: Option<&str>,
-    offset: Option<&str>,
+    request: &AlbumListRequest<'_>,
+    user: Option<&Uuid>,
 ) -> Result<Vec<models::AlbumId3>, BrowseError> {
-    let order = match list_type {
-        "alphabeticalByName" => AlbumOrder::Title,
-        "alphabeticalByArtist" => AlbumOrder::Artist,
-        "newest" => AlbumOrder::RecentlyAdded,
-        _ => return Err(BrowseError::UnsupportedType),
-    };
-    let size = match size {
+    let size = match request.size {
         None => DEFAULT_BROWSE_SIZE,
         Some(raw) => raw
             .trim()
@@ -136,34 +164,252 @@ pub(crate) async fn album_list(
             .map_err(|_| BrowseError::InvalidRequest)?,
     }
     .min(MAX_BROWSE_SIZE);
-    let offset = match offset {
+    let offset = match request.offset {
         None => 0,
         Some(raw) => raw
             .trim()
             .parse::<u32>()
             .map_err(|_| BrowseError::InvalidRequest)?,
     };
+    let (order, filter) = album_list_order(request)?;
 
     catalogue
-        .album_list(offset, size, order)
+        .album_list(offset, size, order, filter, user)
         .await
-        .map(|albums| {
-            albums
-                .iter()
-                .map(mapping::album_from_summary)
-                .collect::<Vec<_>>()
-        })
+        .map(|albums| albums.iter().map(mapping::album_from_summary).collect())
         .map_err(BrowseError::Catalogue)
+}
+
+fn album_list_order(
+    request: &AlbumListRequest<'_>,
+) -> Result<(AlbumOrder, AlbumListFilter), BrowseError> {
+    let filter = AlbumListFilter::new();
+
+    match request.list_type {
+        "alphabeticalByName" => Ok((AlbumOrder::Title, filter)),
+        "alphabeticalByArtist" => Ok((AlbumOrder::Artist, filter)),
+        "newest" => Ok((AlbumOrder::RecentlyAdded, filter)),
+        "random" => Ok((AlbumOrder::Random, filter)),
+        "starred" => Ok((AlbumOrder::Starred, filter)),
+        "frequent" => Ok((AlbumOrder::Frequent, filter)),
+        "recent" => Ok((AlbumOrder::Recent, filter)),
+        "highest" => Ok((AlbumOrder::HighestRated, filter)),
+        "byYear" => {
+            let from = request
+                .from_year
+                .ok_or(BrowseError::MissingParameter)?
+                .trim()
+                .parse::<i32>()
+                .map_err(|_| BrowseError::InvalidRequest)?;
+            let to = request
+                .to_year
+                .ok_or(BrowseError::MissingParameter)?
+                .trim()
+                .parse::<i32>()
+                .map_err(|_| BrowseError::InvalidRequest)?;
+            let (from, to, order) = if from > to {
+                (to, from, AlbumOrder::YearDescending)
+            } else {
+                (from, to, AlbumOrder::YearAscending)
+            };
+
+            Ok((order, filter.with_year(Some(from), Some(to))))
+        }
+        "byGenre" => {
+            let genre = request
+                .genre
+                .ok_or(BrowseError::MissingParameter)?
+                .to_owned();
+            if genre.trim().is_empty() {
+                return Err(BrowseError::MissingParameter);
+            }
+
+            Ok((AlbumOrder::Title, filter.with_genre(Some(genre))))
+        }
+        _ => Err(BrowseError::UnsupportedType),
+    }
+}
+
+pub(crate) async fn genres(catalogue: &CatalogueService) -> Result<Vec<models::Genre>, StateError> {
+    catalogue
+        .genres()
+        .await
+        .map(|genres| genres.iter().map(mapping::genre_from_summary).collect())
+        .map_err(StateError::Catalogue)
+}
+
+pub(crate) async fn starred(
+    catalogue: &CatalogueService,
+    user: Uuid,
+    tags: SourceTags,
+) -> Result<StarredResult, StateError> {
+    let starred = catalogue
+        .starred(user)
+        .await
+        .map_err(StateError::Catalogue)?;
+
+    Ok(StarredResult {
+        songs: starred
+            .tracks()
+            .iter()
+            .map(|hit| mapping::child_from_hit(hit, tags))
+            .collect(),
+        albums: starred
+            .albums()
+            .iter()
+            .map(mapping::album_from_summary)
+            .collect(),
+        artists: starred
+            .artists()
+            .iter()
+            .map(mapping::artist_from_summary)
+            .collect(),
+    })
+}
+
+pub(crate) async fn set_starred(
+    catalogue: &CatalogueService,
+    user: Uuid,
+    song_ids: &[String],
+    album_ids: &[String],
+    artist_ids: &[String],
+    starred: bool,
+) -> Result<(), StateError> {
+    if song_ids.is_empty() && album_ids.is_empty() && artist_ids.is_empty() {
+        return Err(StateError::MissingParameter);
+    }
+
+    for raw in song_ids {
+        let Ok(track_id) = raw.parse::<TrackId>() else {
+            continue;
+        };
+        if catalogue
+            .track(&track_id)
+            .await
+            .map_err(StateError::Catalogue)?
+            .is_some()
+        {
+            catalogue
+                .set_starred(user, StateTarget::Track(&track_id), starred)
+                .await
+                .map_err(StateError::Catalogue)?;
+        }
+    }
+
+    for raw in album_ids {
+        let Ok(album_id) = raw.parse::<AlbumId>() else {
+            continue;
+        };
+        if catalogue
+            .album_detail(&album_id, None)
+            .await
+            .map_err(StateError::Catalogue)?
+            .is_some()
+        {
+            catalogue
+                .set_starred(user, StateTarget::Album(&album_id), starred)
+                .await
+                .map_err(StateError::Catalogue)?;
+        }
+    }
+
+    for raw in artist_ids {
+        let Ok(artist_id) = raw.parse::<ArtistId>() else {
+            continue;
+        };
+        if catalogue
+            .artist_detail(&artist_id, None)
+            .await
+            .map_err(StateError::Catalogue)?
+            .is_some()
+        {
+            catalogue
+                .set_starred(user, StateTarget::Artist(&artist_id), starred)
+                .await
+                .map_err(StateError::Catalogue)?;
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn set_rating(
+    catalogue: &CatalogueService,
+    user: Uuid,
+    raw_id: &str,
+    raw_rating: i64,
+) -> Result<(), StateError> {
+    let rating = match raw_rating {
+        0 => None,
+        1..=5 => Some(u8::try_from(raw_rating).expect("bounded rating fits in u8")),
+        _ => return Err(StateError::InvalidRequest),
+    };
+
+    if catalogue
+        .rate_id(user, raw_id, rating)
+        .await
+        .map_err(StateError::Catalogue)?
+    {
+        Ok(())
+    } else {
+        Err(StateError::NotFound)
+    }
+}
+
+pub(crate) async fn scrobble(
+    catalogue: &CatalogueService,
+    user: Uuid,
+    ids: &[String],
+    times: &[String],
+    submission: bool,
+) -> Result<(), StateError> {
+    if ids.is_empty() {
+        return Err(StateError::MissingParameter);
+    }
+    if !times.is_empty() && times.len() != ids.len() {
+        return Err(StateError::InvalidRequest);
+    }
+    if !submission {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now();
+    for (index, raw) in ids.iter().enumerate() {
+        let Ok(track_id) = raw.parse::<TrackId>() else {
+            continue;
+        };
+        if catalogue
+            .track(&track_id)
+            .await
+            .map_err(StateError::Catalogue)?
+            .is_none()
+        {
+            continue;
+        }
+        let played_at = times
+            .get(index)
+            .and_then(|raw| raw.trim().parse::<i64>().ok())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .unwrap_or(now);
+
+        catalogue
+            .record_play(user, &track_id, played_at)
+            .await
+            .map_err(StateError::Catalogue)?;
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn album_detail(
     catalogue: &CatalogueService,
     raw_id: &str,
+    user: Option<&Uuid>,
     tags: SourceTags,
 ) -> Result<models::AlbumId3WithSongs, BrowseError> {
     let album_id: AlbumId = raw_id.parse().map_err(|_| BrowseError::AlbumNotFound)?;
     let detail = catalogue
-        .album_detail(&album_id)
+        .album_detail(&album_id, user)
         .await
         .map_err(BrowseError::Catalogue)?
         .ok_or(BrowseError::AlbumNotFound)?;
@@ -173,9 +419,10 @@ pub(crate) async fn album_detail(
 
 pub(crate) async fn artists(
     catalogue: &CatalogueService,
+    user: Option<&Uuid>,
 ) -> Result<Vec<models::ArtistId3>, BrowseError> {
     catalogue
-        .artist_list(0, u32::MAX)
+        .artist_list(0, u32::MAX, user)
         .await
         .map(|artists| artists.iter().map(mapping::artist_from_summary).collect())
         .map_err(BrowseError::Catalogue)
@@ -184,10 +431,11 @@ pub(crate) async fn artists(
 pub(crate) async fn artist_detail(
     catalogue: &CatalogueService,
     raw_id: &str,
+    user: Option<&Uuid>,
 ) -> Result<models::ArtistWithAlbumsId3, BrowseError> {
     let artist_id: ArtistId = raw_id.parse().map_err(|_| BrowseError::ArtistNotFound)?;
     let detail = catalogue
-        .artist_detail(&artist_id)
+        .artist_detail(&artist_id, user)
         .await
         .map_err(BrowseError::Catalogue)?
         .ok_or(BrowseError::ArtistNotFound)?;
@@ -467,27 +715,73 @@ mod tests {
     async fn album_list_maps_types_and_rejects_unknown() {
         let catalogue = album_catalogue(&["Discovery", "Homework"]).await;
 
-        let albums = album_list(&catalogue, "alphabeticalByName", None, None)
-            .await
-            .expect("the list succeeds");
+        let albums = album_list(
+            &catalogue,
+            &AlbumListRequest {
+                list_type: "alphabeticalByName",
+                size: None,
+                offset: None,
+                from_year: None,
+                to_year: None,
+                genre: None,
+            },
+            None,
+        )
+        .await
+        .expect("the list succeeds");
         let names = albums
             .iter()
             .map(|album| album.name.clone())
             .collect::<Vec<_>>();
         assert_eq!(names, ["Discovery", "Homework"]);
 
-        let recent = album_list(&catalogue, "newest", Some("1"), Some("0"))
-            .await
-            .expect("the list succeeds");
+        let recent = album_list(
+            &catalogue,
+            &AlbumListRequest {
+                list_type: "newest",
+                size: Some("1"),
+                offset: Some("0"),
+                from_year: None,
+                to_year: None,
+                genre: None,
+            },
+            None,
+        )
+        .await
+        .expect("the list succeeds");
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].name, "Homework");
 
+        assert!(
+            album_list(
+                &catalogue,
+                &AlbumListRequest {
+                    list_type: "not-a-type",
+                    size: None,
+                    offset: None,
+                    from_year: None,
+                    to_year: None,
+                    genre: None,
+                },
+                None,
+            )
+            .await
+            .is_err()
+        );
         assert!(matches!(
-            album_list(&catalogue, "random", None, None).await,
-            Err(BrowseError::UnsupportedType)
-        ));
-        assert!(matches!(
-            album_list(&catalogue, "alphabeticalByName", Some("many"), None).await,
+            album_list(
+                &catalogue,
+                &AlbumListRequest {
+                    list_type: "alphabeticalByName",
+                    size: Some("many"),
+                    offset: None,
+                    from_year: None,
+                    to_year: None,
+                    genre: None,
+                },
+                None,
+            )
+            .await,
             Err(BrowseError::InvalidRequest)
         ));
     }
@@ -541,7 +835,7 @@ mod tests {
             .unwrap();
         let catalogue = CatalogueService::with_providers(repository, Vec::new());
 
-        let detail = album_detail(&catalogue, &album.id().to_string(), SourceTags::Off)
+        let detail = album_detail(&catalogue, &album.id().to_string(), None, SourceTags::Off)
             .await
             .expect("the album is found");
 
@@ -557,11 +851,17 @@ mod tests {
         assert_eq!(detail.song[0].disc_number, Some(1));
 
         assert!(matches!(
-            album_detail(&catalogue, "not-a-uuid", SourceTags::Off).await,
+            album_detail(&catalogue, "not-a-uuid", None, SourceTags::Off).await,
             Err(BrowseError::AlbumNotFound)
         ));
         assert!(matches!(
-            album_detail(&catalogue, &Uuid::now_v7().to_string(), SourceTags::Off).await,
+            album_detail(
+                &catalogue,
+                &Uuid::now_v7().to_string(),
+                None,
+                SourceTags::Off
+            )
+            .await,
             Err(BrowseError::AlbumNotFound)
         ));
     }
@@ -577,7 +877,7 @@ mod tests {
         }
         let catalogue = CatalogueService::with_providers(repository, Vec::new());
 
-        let artists = artists(&catalogue).await.expect("the list succeeds");
+        let artists = artists(&catalogue, None).await.expect("the list succeeds");
         let indexes = artist_indexes(artists);
         let names = indexes
             .iter()

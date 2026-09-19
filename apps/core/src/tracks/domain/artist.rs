@@ -6,7 +6,7 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    ValidationError,
+    LibraryState, ValidationError,
     text::{optional, required},
 };
 
@@ -98,6 +98,7 @@ impl Artist {
 pub struct ArtistSummary {
     artist: Artist,
     album_count: u32,
+    state: LibraryState,
 }
 
 impl ArtistSummary {
@@ -105,7 +106,13 @@ impl ArtistSummary {
         Self {
             artist,
             album_count,
+            state: LibraryState::default(),
         }
+    }
+
+    pub fn with_state(mut self, state: LibraryState) -> Self {
+        self.state = state;
+        self
     }
 
     pub fn artist(&self) -> &Artist {
@@ -114,6 +121,10 @@ impl ArtistSummary {
 
     pub fn album_count(&self) -> u32 {
         self.album_count
+    }
+
+    pub fn state(&self) -> LibraryState {
+        self.state
     }
 }
 

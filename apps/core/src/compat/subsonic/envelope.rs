@@ -189,3 +189,90 @@ pub(crate) fn artist_envelope(artist: models::ArtistWithAlbumsId3) -> models::Ge
         )),
     }
 }
+
+pub(crate) fn scan_status_envelope(
+    status: &crate::library::ScanStatus,
+) -> models::GetScanStatusResponse {
+    models::GetScanStatusResponse {
+        subsonic_response: Some(Box::new(
+            models::GetScanStatusResponseSubsonicResponse::GetScanStatusSuccessResponse(Box::new(
+                models::GetScanStatusSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_scan_status_success_response::Status::Ok,
+                    scan_status: Box::new(scan_status(status)),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn start_scan_envelope(
+    status: &crate::library::ScanStatus,
+) -> models::StartScanResponse {
+    models::StartScanResponse {
+        subsonic_response: Some(Box::new(
+            models::StartScanResponseSubsonicResponse::StartScanSuccessResponse(Box::new(
+                models::StartScanSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::start_scan_success_response::Status::Ok,
+                    scan_status: Box::new(scan_status(status)),
+                },
+            )),
+        )),
+    }
+}
+
+fn scan_status(status: &crate::library::ScanStatus) -> models::ScanStatus {
+    models::ScanStatus {
+        scanning: status.scanning,
+        count: Some(status.count as i32),
+    }
+}
+
+pub(crate) fn starred2_envelope(
+    result: super::service::StarredResult,
+) -> models::GetStarred2Response {
+    models::GetStarred2Response {
+        subsonic_response: Some(Box::new(
+            models::GetStarred2ResponseSubsonicResponse::GetStarred2SuccessResponse(Box::new(
+                models::GetStarred2SuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_starred2_success_response::Status::Ok,
+                    starred2: Box::new(models::Starred2 {
+                        artist: (!result.artists.is_empty()).then_some(result.artists),
+                        album: (!result.albums.is_empty()).then_some(result.albums),
+                        song: (!result.songs.is_empty()).then_some(result.songs),
+                    }),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn genres_envelope(genres: Vec<models::Genre>) -> models::GetGenresResponse {
+    models::GetGenresResponse {
+        subsonic_response: Some(Box::new(
+            models::GetGenresResponseSubsonicResponse::GetGenresSuccessResponse(Box::new(
+                models::GetGenresSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_genres_success_response::Status::Ok,
+                    genres: Box::new(models::Genres {
+                        genre: (!genres.is_empty()).then_some(genres),
+                    }),
+                },
+            )),
+        )),
+    }
+}

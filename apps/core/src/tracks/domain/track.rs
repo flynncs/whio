@@ -5,7 +5,7 @@ use std::{
 
 use uuid::Uuid;
 
-use super::{Album, ArtistCredit, SourceIdentity, TrackMetadata};
+use super::{Album, ArtistCredit, LibraryState, SourceIdentity, TrackMetadata};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrackId(Uuid);
@@ -93,6 +93,7 @@ pub struct TrackHit {
     track: Track,
     album: Option<Album>,
     sources: Vec<SourceIdentity>,
+    state: LibraryState,
 }
 
 impl TrackHit {
@@ -101,7 +102,17 @@ impl TrackHit {
             track,
             album,
             sources,
+            state: LibraryState::default(),
         }
+    }
+
+    pub fn with_state(mut self, state: LibraryState) -> Self {
+        self.state = state;
+        self
+    }
+
+    pub fn state(&self) -> LibraryState {
+        self.state
     }
 
     pub fn track(&self) -> &Track {
