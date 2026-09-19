@@ -3,22 +3,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Semaphore;
 
-use super::{direct, local, session, spool::SpoolStrategy};
+use super::{local, session, spool::SpoolStrategy};
 use crate::{
     media::MediaFetcher,
-    playback::{
-        DeliveryError, DeliveryResult, DeliveryStrategy, PlaybackDelivery, ResolvedPlayback,
-    },
+    playback::{DeliveryError, DeliveryResult, PlaybackDelivery, ResolvedPlayback},
 };
 
 pub const DEFAULT_MAX_SESSIONS: usize = 16;
 
-/// direct proxy and bounded spool delivery. owns bytes, ranges, session limits
+/// bounded spool and local-file delivery. owns bytes, ranges, session limits
 /// and cancellation.
 pub struct StreamDelivery {
     spool: SpoolStrategy,
     sessions: Arc<Semaphore>,
-    http: reqwest::Client,
 }
 
 impl StreamDelivery {
@@ -26,12 +23,10 @@ impl StreamDelivery {
         fetcher: Arc<dyn MediaFetcher>,
         directory: std::path::PathBuf,
         max_sessions: usize,
-        http: reqwest::Client,
     ) -> Self {
         Self {
             spool: SpoolStrategy::new(fetcher, directory),
             sessions: Arc::new(Semaphore::new(max_sessions.max(1))),
-            http,
         }
     }
 
@@ -54,10 +49,9 @@ impl PlaybackDelivery for StreamDelivery {
             .try_acquire_owned()
             .map_err(|_| DeliveryError::Overloaded)?;
         let mut delivery = match resolved {
-            ResolvedPlayback::Remote { media, strategy } => match strategy {
-                DeliveryStrategy::Direct => direct::relay(&self.http, media, client_range).await?,
-                DeliveryStrategy::Spool => self.spool.open(media, client_range.as_deref()).await?,
-            },
+            ResolvedPlayback::Remote(media) => {
+                self.spool.open(media, client_range.as_deref()).await?
+            }
             ResolvedPlayback::Local(media) => local::serve(media, client_range).await?,
         };
         // the permit travels with the response body, so a session is only
@@ -140,55 +134,12 @@ mod tests {
         )
     }
 
-    fn resolved(url: &str, strategy: DeliveryStrategy) -> ResolvedPlayback {
-        ResolvedPlayback::Remote {
-            media: media(url),
-            strategy,
-        }
+    fn resolved(url: &str) -> ResolvedPlayback {
+        ResolvedPlayback::Remote(media(url))
     }
 
     fn delivery(fetcher: Arc<dyn MediaFetcher>, max_sessions: usize) -> StreamDelivery {
-        StreamDelivery::new(
-            fetcher,
-            std::env::temp_dir(),
-            max_sessions,
-            reqwest::Client::new(),
-        )
-    }
-
-    async fn media_server() -> String {
-        use axum::http::{
-            HeaderMap,
-            header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
-        };
-        use axum::{Router, response::IntoResponse, routing::get};
-
-        async fn serve(headers: HeaderMap) -> axum::response::Response {
-            if headers.get(RANGE).and_then(|value| value.to_str().ok()) == Some("bytes=2-4") {
-                return (
-                    StatusCode::PARTIAL_CONTENT,
-                    [
-                        (CONTENT_TYPE, "audio/flac"),
-                        (CONTENT_LENGTH, "3"),
-                        (CONTENT_RANGE, "bytes 2-4/10"),
-                    ],
-                    "234",
-                )
-                    .into_response();
-            }
-            (
-                StatusCode::OK,
-                [(CONTENT_TYPE, "audio/flac"), (CONTENT_LENGTH, "10")],
-                "0123456789",
-            )
-                .into_response()
-        }
-
-        let app = Router::new().route("/audio", get(serve));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await });
-        format!("http://{address}")
+        StreamDelivery::new(fetcher, std::env::temp_dir(), max_sessions)
     }
 
     async fn body_bytes(delivery: DeliveryResult) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
@@ -201,36 +152,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_delivery_proxies_full_and_range_slices() {
-        let base = media_server().await;
-        let delivery = delivery(Arc::new(StubFetcher { bytes: Vec::new() }), 16);
-
-        let result = delivery
-            .deliver(
-                &resolved(&format!("{base}/audio"), DeliveryStrategy::Direct),
-                None,
-            )
-            .await
-            .unwrap();
-        let (status, headers, bytes) = body_bytes(result).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(headers["content-type"], "audio/flac");
-        assert_eq!(bytes, b"0123456789");
-
-        let result = delivery
-            .deliver(
-                &resolved(&format!("{base}/audio"), DeliveryStrategy::Direct),
-                Some("bytes=2-4".to_owned()),
-            )
-            .await
-            .unwrap();
-        let (status, headers, bytes) = body_bytes(result).await;
-        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
-        assert_eq!(headers["content-range"], "bytes 2-4/10");
-        assert_eq!(bytes, b"234");
-    }
-
-    #[tokio::test]
     async fn spool_delivery_serves_bytes_and_rejects_bad_ranges() {
         let delivery = delivery(
             Arc::new(StubFetcher {
@@ -240,10 +161,7 @@ mod tests {
         );
 
         let result = delivery
-            .deliver(
-                &resolved("https://media.example.test/audio", DeliveryStrategy::Spool),
-                None,
-            )
+            .deliver(&resolved("https://media.example.test/audio"), None)
             .await
             .unwrap();
         let (status, headers, bytes) = body_bytes(result).await;
@@ -253,7 +171,7 @@ mod tests {
 
         let result = delivery
             .deliver(
-                &resolved("https://media.example.test/audio", DeliveryStrategy::Spool),
+                &resolved("https://media.example.test/audio"),
                 Some("bytes=2-4".to_owned()),
             )
             .await
@@ -265,7 +183,7 @@ mod tests {
 
         let error = delivery
             .deliver(
-                &resolved("https://media.example.test/audio", DeliveryStrategy::Spool),
+                &resolved("https://media.example.test/audio"),
                 Some("bytes=99-100".to_owned()),
             )
             .await
@@ -283,7 +201,7 @@ mod tests {
     #[tokio::test]
     async fn session_limit_rejects_the_second_concurrent_delivery() {
         let delivery = delivery(Arc::new(HangingFetcher), 1);
-        let source = resolved("https://media.example.test/audio", DeliveryStrategy::Spool);
+        let source = resolved("https://media.example.test/audio");
 
         let first = delivery.deliver(&source, None).await.unwrap();
         let error = delivery

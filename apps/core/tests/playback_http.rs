@@ -21,8 +21,8 @@ use whio_core::{
     delivery::StreamDelivery,
     media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
     playback::{
-        DeliveryStrategy, MediaMetadata, PlayableMedia, PlaybackProvider, PlaybackService,
-        PlaybackSource, PlaybackUrl, ResolvedPlayback,
+        MediaMetadata, PlayableMedia, PlaybackProvider, PlaybackService, PlaybackSource,
+        PlaybackUrl, ResolvedPlayback,
     },
     providers::ProviderError,
     request::RequestContext,
@@ -63,14 +63,7 @@ impl PlaybackProvider for StubProvider {
         _context: &RequestContext,
     ) -> Result<Option<ResolvedPlayback>, ProviderError> {
         *self.resolved_source.lock() = Some(source.clone());
-        Ok(self
-            .playback
-            .lock()
-            .take()
-            .map(|media| ResolvedPlayback::Remote {
-                media,
-                strategy: DeliveryStrategy::Spool,
-            }))
+        Ok(self.playback.lock().take().map(ResolvedPlayback::Remote))
     }
 }
 
@@ -162,7 +155,6 @@ fn app_with_media_bytes(bytes: Vec<u8>) -> (Router, Arc<StubProvider>) {
             Arc::new(StubMediaFetcher { bytes }),
             std::env::temp_dir(),
             whio_core::delivery::DEFAULT_MAX_SESSIONS,
-            reqwest::Client::new(),
         )),
     ));
 

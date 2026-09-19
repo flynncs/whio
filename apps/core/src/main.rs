@@ -9,7 +9,7 @@ use whio_core::{
     AppState,
     catalogue::{CatalogueProvider, CatalogueService},
     database::Database,
-    delivery::{StreamDelivery, media_client},
+    delivery::StreamDelivery,
     identity::{
         postgres::PostgresCredentialRepository, repository::CredentialRepository,
         service::CredentialService,
@@ -115,7 +115,6 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             fetcher,
             config.spool_dir.clone(),
             config.max_playback_sessions,
-            media_client(),
         )
         .with_spool_limits(config.max_spool_bytes, config.spool_budget_bytes),
     );

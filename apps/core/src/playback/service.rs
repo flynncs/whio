@@ -59,12 +59,6 @@ impl PlaybackError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DeliveryStrategy {
-    Direct,
-    Spool,
-}
-
 pub enum ArtworkLocation {
     /// validated against the registered upstream origin that produced it.
     Registered(String),
@@ -74,10 +68,7 @@ pub enum ArtworkLocation {
 
 #[derive(Debug)]
 pub enum ResolvedPlayback {
-    Remote {
-        media: PlayableMedia,
-        strategy: DeliveryStrategy,
-    },
+    Remote(PlayableMedia),
     Local(LocalMedia),
 }
 
@@ -288,12 +279,7 @@ mod tests {
                 .lock()
                 .pop_front()
                 .expect("unexpected resolve call")
-                .map(|media| {
-                    Some(ResolvedPlayback::Remote {
-                        media,
-                        strategy: DeliveryStrategy::Direct,
-                    })
-                })
+                .map(|media| Some(ResolvedPlayback::Remote(media)))
         }
     }
 
@@ -459,7 +445,7 @@ mod tests {
         let mut error = PlaybackError::TrackNotFound;
         for source in service.candidates(track).await? {
             match service.resolve_source(&source, None, context).await {
-                Ok(Some(ResolvedPlayback::Remote { media, .. })) => return Ok(media),
+                Ok(Some(ResolvedPlayback::Remote(media))) => return Ok(media),
                 Ok(Some(ResolvedPlayback::Local(_))) => {
                     unreachable!("the queue provider resolves remote media")
                 }

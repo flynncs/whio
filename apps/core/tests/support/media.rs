@@ -36,6 +36,5 @@ pub fn delivery() -> Arc<StreamDelivery> {
         Arc::new(StubMediaFetcher),
         std::env::temp_dir(),
         whio_core::delivery::DEFAULT_MAX_SESSIONS,
-        reqwest::Client::new(),
     ))
 }

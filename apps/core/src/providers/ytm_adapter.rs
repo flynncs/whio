@@ -13,7 +13,7 @@ use whio_resolver_api::{
 
 use crate::{
     catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch},
-    playback::{DeliveryStrategy, PlayableMedia},
+    playback::PlayableMedia,
     playback::{PlaybackProvider, PlaybackSource, ResolvedPlayback},
     providers::ProviderError,
     request::RequestContext,
@@ -116,10 +116,7 @@ impl PlaybackProvider for YtmAdapter {
         let media: PlayableMedia = response
             .try_into()
             .map_err(ProviderError::InvalidPlaybackData)?;
-        Ok(Some(ResolvedPlayback::Remote {
-            media,
-            strategy: DeliveryStrategy::Spool,
-        }))
+        Ok(Some(ResolvedPlayback::Remote(media)))
     }
 }
 
