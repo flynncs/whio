@@ -416,9 +416,13 @@ fn resolve_album(
         let incoming_has_identifier = metadata.musicbrainz_release_group_id().is_some()
             || metadata.musicbrainz_release_id().is_some();
 
-        if existing_has_identifier && incoming_has_identifier {
-            // two different identifiers are two different albums, whatever the text says
-        } else if incoming_has_identifier {
+        let both_identified = existing_has_identifier && incoming_has_identifier;
+
+        if !both_identified {
+            if !incoming_has_identifier {
+                return existing;
+            }
+
             let attached = Album::new(
                 existing.id().clone(),
                 existing.title().to_owned(),
@@ -452,8 +456,6 @@ fn resolve_album(
                 .insert(attached.id().clone(), attached.clone());
 
             return attached;
-        } else {
-            return existing;
         }
     }
 

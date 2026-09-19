@@ -2,9 +2,6 @@ use unicode_normalization::UnicodeNormalization;
 
 use super::ValidationError;
 
-/// mirrors the generated `*_normalized` columns so the in-memory repository
-/// matches the way PostgreSQL does. the database stays authoritative: its
-/// expression is the one the unique indexes are built on.
 pub(crate) fn normalize_for_matching(value: &str) -> String {
     value
         .nfc()
