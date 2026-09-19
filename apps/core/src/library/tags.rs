@@ -65,7 +65,7 @@ pub fn read_tags(path: &Path) -> Result<TrackTags, TagError> {
     let Some(title) = text(tag, |tag| tag.title().map(|value| value.into_owned())) else {
         return Err(TagError::Untagged);
     };
-    let Some(artist) = text(tag, |tag| tag.artist().map(|value| value.into_owned())) else {
+    let Some(artists) = artist_credits(tag) else {
         return Err(TagError::Untagged);
     };
 
@@ -83,7 +83,7 @@ pub fn read_tags(path: &Path) -> Result<TrackTags, TagError> {
 
     Ok(TrackTags {
         title,
-        artists: split_artists(&artist),
+        artists,
         album: text(tag, |tag| tag.album().map(|value| value.into_owned())),
         album_artist: item(tag, &ItemKey::AlbumArtist),
         album_artist_id: item(tag, &ItemKey::MusicBrainzReleaseArtistId),
@@ -147,11 +147,36 @@ fn text(tag: &Tag, read: impl Fn(&Tag) -> Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn split_artists(artist: &str) -> Vec<String> {
-    artist
-        .split([';', '/'])
-        .map(|value| value.trim().to_owned())
+fn artist_credits(tag: &Tag) -> Option<Vec<String>> {
+    let mut names: Vec<String> = tag
+        .get_strings(&ItemKey::TrackArtist)
+        .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    if names.is_empty() {
+        names = tag
+            .get_strings(&ItemKey::TrackArtists)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect();
+    }
+
+    match names.len() {
+        0 => None,
+        1 => Some(split_credits(&names[0])),
+        _ => Some(names),
+    }
+}
+
+fn split_credits(artist: &str) -> Vec<String> {
+    artist
+        .split(';')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
         .collect()
 }
 
@@ -313,5 +338,56 @@ mod tests {
             (IdentityRung::Path, "a/b.flac".to_owned()),
             "a blank isrc is not an identity"
         );
+    }
+
+    #[test]
+    fn credit_splitting_keeps_slashes_and_splits_semicolons() {
+        assert_eq!(split_credits("AC/DC"), vec!["AC/DC"]);
+        assert_eq!(
+            split_credits("Earth, Wind & Fire"),
+            vec!["Earth, Wind & Fire"]
+        );
+        assert_eq!(split_credits(" A ; B ; "), vec!["A", "B"]);
+        assert_eq!(split_credits("  "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn multiple_artist_values_are_kept_in_order_without_splitting() {
+        use lofty::{
+            config::WriteOptions,
+            file::{AudioFile, TaggedFileExt},
+            tag::{ItemValue, TagItem},
+        };
+
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac");
+        let path = std::env::temp_dir().join(format!("whio-artists-{}.flac", uuid::Uuid::now_v7()));
+        std::fs::copy(&fixture, &path).unwrap();
+
+        let mut tagged = Probe::open(&path).unwrap().read().unwrap();
+        {
+            let has_primary = tagged.primary_tag_mut().is_some();
+            let tag = if has_primary {
+                tagged.primary_tag_mut().expect("checked above")
+            } else {
+                tagged.first_tag_mut().expect("the fixture carries a tag")
+            };
+
+            tag.take(&ItemKey::TrackArtist).count();
+            tag.push(TagItem::new(
+                ItemKey::TrackArtist,
+                ItemValue::Text("AC/DC".to_owned()),
+            ));
+            tag.push(TagItem::new(
+                ItemKey::TrackArtist,
+                ItemValue::Text("Daft Punk".to_owned()),
+            ));
+        }
+        tagged.save_to_path(&path, WriteOptions::default()).unwrap();
+
+        let tags = read_tags(&path).unwrap();
+        assert_eq!(tags.artists, vec!["AC/DC", "Daft Punk"]);
+
+        std::fs::remove_file(&path).unwrap();
     }
 }
