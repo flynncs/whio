@@ -91,23 +91,27 @@ impl ArtworkService {
         &self,
         target: CoverArtTarget,
         if_none_match: Option<&str>,
+        size: Option<u32>,
     ) -> Result<ArtworkOutcome, ArtworkError> {
         let Some(resolved) = self.resolve(target).await? else {
             return Ok(ArtworkOutcome::Missing);
         };
 
         match resolved {
-            Resolved::Remote(reference) => self.fetch(&reference, if_none_match).await,
+            Resolved::Remote(reference) => self.fetch(&reference, if_none_match, size).await,
             Resolved::Local { path, picture } => {
                 let metadata = tokio::fs::metadata(&path).await.ok();
-                let etag = local_etag(&path, metadata.as_ref());
+                let etag = sized(local_etag(&path, metadata.as_ref()), size);
                 if fresh(if_none_match, &etag) {
                     return Ok(ArtworkOutcome::NotModified(etag));
                 }
 
+                let (content_type, bytes) =
+                    shrink(picture.content_type, Bytes::from(picture.bytes), size);
+
                 Ok(ArtworkOutcome::Found(Artwork::new(
-                    picture.content_type,
-                    Bytes::from(picture.bytes),
+                    content_type,
+                    bytes,
                     etag,
                 )))
             }
@@ -145,6 +149,7 @@ impl ArtworkService {
         &self,
         reference: &str,
         if_none_match: Option<&str>,
+        size: Option<u32>,
     ) -> Result<ArtworkOutcome, ArtworkError> {
         let url = reqwest::Url::parse(reference)
             .map_err(|_| ArtworkError::Fetch(MediaFetchError::DisallowedDestination))?;
@@ -152,7 +157,7 @@ impl ArtworkService {
             return Ok(ArtworkOutcome::Missing);
         }
 
-        let etag = etag_for(url.as_str());
+        let etag = sized(etag_for(url.as_str()), size);
         if fresh(if_none_match, &etag) {
             return Ok(ArtworkOutcome::NotModified(etag));
         }
@@ -160,6 +165,8 @@ impl ArtworkService {
         let (content_type, bytes) = media::fetch_artwork(&self.client, &url)
             .await
             .map_err(ArtworkError::Fetch)?;
+
+        let (content_type, bytes) = shrink(content_type, bytes, size);
 
         Ok(ArtworkOutcome::Found(Artwork::new(
             content_type,
@@ -335,6 +342,24 @@ impl ArtworkService {
         };
 
         Ok(Some(Resolved::Remote(artwork.reference().to_owned())))
+    }
+}
+
+fn sized(etag: String, size: Option<u32>) -> String {
+    let Some(size) = size else {
+        return etag;
+    };
+
+    match etag.strip_suffix('"') {
+        Some(inner) => format!("{inner}-w{size}\""),
+        None => format!("{etag}-w{size}"),
+    }
+}
+
+fn shrink(content_type: String, bytes: Bytes, size: Option<u32>) -> (String, Bytes) {
+    match size.and_then(|size| crate::artwork::thumbnail::fit(&bytes, size)) {
+        Some(thumbnail) => ("image/jpeg".to_owned(), thumbnail),
+        None => (content_type, bytes),
     }
 }
 
@@ -638,7 +663,7 @@ mod tests {
         let service = service(repository);
 
         let ArtworkOutcome::Found(artwork) = service
-            .load(CoverArtTarget::Track(track_id.clone()), None)
+            .load(CoverArtTarget::Track(track_id.clone()), None, None)
             .await
             .unwrap()
         else {
@@ -650,7 +675,35 @@ mod tests {
 
         assert!(matches!(
             service
-                .load(CoverArtTarget::Track(track_id), Some(&etag))
+                .load(CoverArtTarget::Track(track_id), Some(&etag), None)
+                .await
+                .unwrap(),
+            ArtworkOutcome::NotModified(returned) if returned == etag
+        ));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_thumbnail_does_not_share_the_full_size_etag() {
+        let root = pictured_root("sized");
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        let track_id = add_local_track(&repository, &root, "recording-1").await;
+        let service = service(repository);
+
+        let ArtworkOutcome::Found(artwork) = service
+            .load(CoverArtTarget::Track(track_id.clone()), None, Some(300))
+            .await
+            .unwrap()
+        else {
+            panic!("expected found artwork");
+        };
+        let (_, _, etag) = artwork.into_parts();
+        assert!(etag.ends_with("-w300\""));
+
+        assert!(matches!(
+            service
+                .load(CoverArtTarget::Track(track_id), Some(&etag), Some(300))
                 .await
                 .unwrap(),
             ArtworkOutcome::NotModified(returned) if returned == etag

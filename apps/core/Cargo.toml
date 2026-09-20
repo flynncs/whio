@@ -70,6 +70,7 @@ rayon = "1.12.0"
 unicode-normalization = "0.1"
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

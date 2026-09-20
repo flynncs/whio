@@ -72,6 +72,7 @@ pub(crate) async fn artwork(
     _principal: AuthenticatedPrincipal,
     Path(cover_id): Path<String>,
     headers: HeaderMap,
+    query: crate::http::raw_query::RawQuery,
 ) -> Result<Response, ApiError> {
     use super::artwork::{ArtworkFailure, found_response, not_modified_response};
     use crate::artwork::ArtworkOutcome;
@@ -80,8 +81,9 @@ pub(crate) async fn artwork(
     let if_none_match = headers
         .get(IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok());
+    let size = super::artwork::requested_size(query.get("size"));
 
-    match super::artwork::load(&state, &cover_id, if_none_match).await {
+    match super::artwork::load(&state, &cover_id, if_none_match, size).await {
         Ok(ArtworkOutcome::Found(artwork)) => Ok(found_response(artwork)),
         Ok(ArtworkOutcome::NotModified(etag)) => Ok(not_modified_response(etag)),
         Ok(ArtworkOutcome::Missing) => Err(ApiError::NotFound(context)),

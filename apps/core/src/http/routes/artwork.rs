@@ -23,14 +23,24 @@ pub(crate) async fn load(
     state: &AppState,
     raw_id: &str,
     if_none_match: Option<&str>,
+    size: Option<u32>,
 ) -> Result<ArtworkOutcome, ArtworkFailure> {
     let target = CoverArtTarget::parse(raw_id).map_err(ArtworkFailure::InvalidId)?;
 
     state
         .artwork()
-        .load(target, if_none_match)
+        .load(target, if_none_match, size)
         .await
         .map_err(ArtworkFailure::Service)
+}
+
+pub(crate) fn requested_size(raw: Option<&str>) -> Option<u32> {
+    raw?.trim().parse::<u32>().ok().map(|size| {
+        size.clamp(
+            crate::artwork::thumbnail::MIN_SIZE,
+            crate::artwork::thumbnail::MAX_SIZE,
+        )
+    })
 }
 
 pub(crate) fn found_response(artwork: Artwork) -> Response {

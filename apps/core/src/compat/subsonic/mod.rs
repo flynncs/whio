@@ -359,8 +359,9 @@ pub(crate) async fn get_cover_art(
     let if_none_match = headers
         .get(IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok());
+    let size = artwork::requested_size(query.get("size"));
 
-    match artwork::load(&state, id, if_none_match).await {
+    match artwork::load(&state, id, if_none_match, size).await {
         Ok(ArtworkOutcome::Found(artwork)) => artwork::found_response(artwork),
         Ok(ArtworkOutcome::NotModified(etag)) => artwork::not_modified_response(etag),
         Ok(ArtworkOutcome::Missing) => {
