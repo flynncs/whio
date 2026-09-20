@@ -1079,7 +1079,6 @@ struct AlbumBrowseRow {
     artist_musicbrainz_id: Option<String>,
     track_count: i64,
     duration_ms: i64,
-    cover_art_track_id: Option<Uuid>,
 }
 type TrackSearchRow = (
     Uuid,
@@ -1108,9 +1107,7 @@ const ALBUM_BROWSE_COLUMNS: &str = "a.id, a.title, a.album_artist_id, a.year, a.
      ar.id AS artist_id, ar.name AS artist_name, ar.sort_name AS artist_sort_name, \
      ar.musicbrainz_artist_id AS artist_musicbrainz_id, \
      COUNT(DISTINCT mt.track_id)::BIGINT AS track_count, \
-     COALESCE(SUM(t.duration_ms), 0)::BIGINT AS duration_ms, \
-     (ARRAY_AGG(mt.track_id ORDER BY COALESCE(mt.disc_number, 1), mt.track_number NULLS LAST, \
-      mt.position, mt.track_id))[1] AS cover_art_track_id";
+     COALESCE(SUM(t.duration_ms), 0)::BIGINT AS duration_ms";
 const ALBUM_BROWSE_FROM: &str = "FROM albums AS a \
      LEFT JOIN artists AS ar ON ar.id = a.album_artist_id \
      LEFT JOIN album_tracks AS mt ON mt.album_id = a.id \
@@ -1961,7 +1958,6 @@ fn decode_album_summary(row: AlbumBrowseRow) -> Result<AlbumSummary, TrackReposi
         artist_musicbrainz_id,
         track_count,
         duration_ms,
-        cover_art_track_id,
     } = row;
 
     let album = Album::new(
@@ -1995,7 +1991,6 @@ fn decode_album_summary(row: AlbumBrowseRow) -> Result<AlbumSummary, TrackReposi
         album_artist,
         track_count,
         duration_ms.max(0) as u64,
-        cover_art_track_id.map(TrackId::from_uuid),
         created_at,
     ))
 }

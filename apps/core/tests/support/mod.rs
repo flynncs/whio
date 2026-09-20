@@ -27,7 +27,7 @@ pub use credentials::{
 };
 
 mod media;
-pub use media::delivery;
+pub use media::{delivery, pictured_flac};
 
 // the single place test suites assemble app state; new services are wired
 // here once instead of in every suite

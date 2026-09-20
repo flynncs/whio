@@ -31,6 +31,41 @@ impl MediaFetcher for StubMediaFetcher {
     }
 }
 
+pub fn pictured_flac(directory: &std::path::Path) -> std::path::PathBuf {
+    use lofty::file::{AudioFile, TaggedFileExt};
+
+    let destination = directory.join("a.flac");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac"),
+        &destination,
+    )
+    .unwrap();
+
+    let mut tagged = lofty::probe::Probe::open(&destination)
+        .unwrap()
+        .read()
+        .unwrap();
+    {
+        let has_primary = tagged.primary_tag_mut().is_some();
+        let tag = if has_primary {
+            tagged.primary_tag_mut().expect("checked above")
+        } else {
+            tagged.first_tag_mut().expect("the fixture carries a tag")
+        };
+        tag.push_picture(lofty::picture::Picture::new_unchecked(
+            lofty::picture::PictureType::CoverFront,
+            Some(lofty::picture::MimeType::Jpeg),
+            None,
+            vec![0xFF, 0xD8, 0xFF, 0xE0],
+        ));
+    }
+    tagged
+        .save_to_path(&destination, lofty::config::WriteOptions::default())
+        .unwrap();
+
+    destination
+}
+
 pub fn delivery() -> Arc<StreamDelivery> {
     Arc::new(StreamDelivery::new(
         Arc::new(StubMediaFetcher),

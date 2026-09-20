@@ -144,6 +144,7 @@ async fn subsonic_browse_lists_albums_artists_and_songs() {
     assert_eq!(album["songCount"], json!(2));
     assert_eq!(album["duration"], json!(3));
     let album_id = album["id"].as_str().unwrap();
+    assert_eq!(album["coverArt"], json!(format!("al-{album_id}")));
 
     let body = get(
         app.clone(),
@@ -168,6 +169,10 @@ async fn subsonic_browse_lists_albums_artists_and_songs() {
     assert_eq!(index["artist"][0]["name"], json!("Daft Punk"));
     assert_eq!(index["artist"][0]["albumCount"], json!(1));
     let artist_id = index["artist"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        index["artist"][0]["coverArt"],
+        json!(format!("ar-{artist_id}"))
+    );
 
     let body = get(
         app.clone(),
@@ -216,6 +221,7 @@ async fn navidrome_browse_lists_albums_artists_and_songs() {
     assert_eq!(body[0]["songCount"], json!(2));
     assert!(body[0]["createdAt"].as_str().is_some_and(|v| !v.is_empty()));
     let album_id = body[0]["id"].as_str().unwrap();
+    assert_eq!(body[0]["coverArt"], json!(format!("al-{album_id}")));
 
     let (status, _, body) = get_authed(
         app.clone(),
@@ -246,6 +252,7 @@ async fn navidrome_browse_lists_albums_artists_and_songs() {
     assert_eq!(body[0]["name"], json!("Daft Punk"));
     assert_eq!(body[0]["albumCount"], json!(1));
     let artist_id = body[0]["id"].as_str().unwrap();
+    assert_eq!(body[0]["coverArt"], json!(format!("ar-{artist_id}")));
 
     let (status, _, body) = get_authed(
         app.clone(),

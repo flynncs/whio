@@ -138,3 +138,149 @@ async fn public_artwork_outside_the_allowed_hosts_is_not_fetched() {
     // reaches the image server
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+async fn pictured_app() -> (axum::Router, String, String, String) {
+    use whio_core::tracks::{AlbumMetadata, AlbumTrack, ArtistCredit, SourceFileFacts};
+
+    let (credential, _user, _key) = credentials();
+    let root = std::env::temp_dir().join(format!("whio-http-art-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let file = support::pictured_flac(&root);
+
+    let repository = Arc::new(InMemoryTrackRepository::default());
+    let source = SourceIdentity::new(
+        ProviderId::new("local".to_owned()).unwrap(),
+        SourceScope::Named(root.display().to_string()),
+        "recording-1".to_owned(),
+    )
+    .unwrap();
+    let track = repository
+        .get_or_create(source.clone(), metadata())
+        .await
+        .unwrap();
+    repository
+        .set_source_file_facts(
+            &source,
+            &SourceFileFacts {
+                path: Some("a.flac".to_owned()),
+                size_bytes: std::fs::metadata(&file).unwrap().len(),
+                modified_at: None,
+                missing_at: None,
+                content_type: None,
+                suffix: Some("flac".to_owned()),
+                acoustid_fingerprint: None,
+            },
+        )
+        .await
+        .unwrap();
+    let artist = repository
+        .resolve_or_create_artist(&ArtistCredit::new("Artist".to_owned(), None).unwrap())
+        .await
+        .unwrap();
+    let album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Album".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Artist".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            album.id(),
+            track.id(),
+            &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let catalogue = Arc::new(CatalogueService::new(
+        Arc::clone(&repository) as Arc<dyn TrackRepository>
+    ));
+    let playback = Arc::new(PlaybackService::new(repository, Vec::new(), delivery()));
+
+    (
+        router(credential, catalogue, playback),
+        format!("al-{}", album.id()),
+        format!("ar-{}", artist.id()),
+        track.id().to_string(),
+    )
+}
+
+fn subsonic_cover_art_request(id: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/rest/getCoverArt.view?u=test-user&v=1.16.1&c=test&p={TEST_PASSWORD}&id={id}"
+        ))
+        .header("x-request-id", "request-123")
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn album_and_artist_ids_serve_embedded_art_with_validators() {
+    let (app, album_id, artist_id, track_id) = pictured_app().await;
+
+    for id in [&album_id, &artist_id, &track_id] {
+        let response = app
+            .clone()
+            .oneshot(subsonic_cover_art_request(id))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "id: {id}");
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/jpeg"
+        );
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .expect("etag")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=86400"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/rest/getCoverArt.view?u=test-user&v=1.16.1&c=test&p={TEST_PASSWORD}&id={id}"
+                    ))
+                    .header("x-request-id", "request-123")
+                    .header(header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "id: {id}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_albums_and_malformed_ids_do_not_serve_artwork() {
+    let (app, _, _, _) = pictured_app().await;
+
+    let response = app
+        .clone()
+        .oneshot(subsonic_cover_art_request(&format!(
+            "al-{}",
+            Uuid::now_v7()
+        )))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = app
+        .oneshot(subsonic_cover_art_request("al-not-a-uuid"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

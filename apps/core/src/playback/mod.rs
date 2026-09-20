@@ -7,5 +7,5 @@ mod source;
 pub use delivery::{DeliveryError, DeliveryResult};
 pub use domain::{LocalMedia, MediaMetadata, PlayableMedia, PlaybackUrl, ValidationError};
 pub use ports::{PlaybackDelivery, PlaybackProvider};
-pub use service::{ArtworkLocation, PlaybackError, PlaybackService, ResolvedPlayback};
+pub use service::{PlaybackError, PlaybackService, ResolvedArtwork, ResolvedPlayback};
 pub use source::{LocalSource, PlaybackSource, YoutubeSource};

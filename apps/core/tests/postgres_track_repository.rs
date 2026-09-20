@@ -872,7 +872,6 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
     let albums = repository.search_albums("disc", 10, None).await.unwrap();
     assert_eq!(albums.len(), 1);
     assert_eq!(albums[0].album().id(), album.id());
-    assert_eq!(albums[0].cover_art_track_id(), Some(owned.id()));
     assert_eq!(albums[0].track_count(), 1);
 
     let artists = repository.search_artists("daft", 10, None).await.unwrap();

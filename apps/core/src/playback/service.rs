@@ -1,14 +1,18 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use uuid::Uuid;
 
 use crate::{
+    library::{EmbeddedPicture, read_cover_art},
     playback::{
         DeliveryError, DeliveryResult, LocalMedia, PlayableMedia, PlaybackDelivery, PlaybackSource,
     },
-    providers::ProviderError,
+    providers::{ProviderError, resolve_path},
     request::RequestContext,
-    tracks::{ArtworkRef, ProviderKind, TrackId, TrackRepository, TrackRepositoryError},
+    tracks::{
+        AlbumEntry, AlbumId, ArtistId, ArtworkRef, ProviderKind, SourceScope, TrackId,
+        TrackRepository, TrackRepositoryError,
+    },
 };
 
 use super::PlaybackProvider;
@@ -59,11 +63,15 @@ impl PlaybackError {
     }
 }
 
-pub enum ArtworkLocation {
+pub enum ResolvedArtwork {
     /// validated against the registered upstream origin that produced it.
     Registered(String),
     /// a public URL that must be validated against the artwork host suffixes.
     Public(String),
+    Local {
+        path: PathBuf,
+        picture: EmbeddedPicture,
+    },
 }
 
 #[derive(Debug)]
@@ -121,7 +129,151 @@ impl PlaybackService {
         track_id: &TrackId,
         user: Option<&Uuid>,
         context: &RequestContext,
-    ) -> Result<Option<ArtworkLocation>, PlaybackError> {
+    ) -> Result<Option<ResolvedArtwork>, PlaybackError> {
+        if let Some(location) = self.track_location(track_id).await? {
+            return Ok(Some(location));
+        }
+
+        self.stored_location(track_id, user, context).await
+    }
+
+    pub async fn album_artwork(
+        &self,
+        album_id: &AlbumId,
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> Result<Option<ResolvedArtwork>, PlaybackError> {
+        let entries = self.album_entries(album_id).await?;
+
+        if let Some(location) = self.embedded_location(&entries).await? {
+            return Ok(Some(location));
+        }
+
+        self.stored_location_for(&entries, user, context).await
+    }
+
+    pub async fn artist_artwork(
+        &self,
+        artist_id: &ArtistId,
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> Result<Option<ResolvedArtwork>, PlaybackError> {
+        let albums = self
+            .track_repository
+            .find_albums_for_artist(artist_id, user.copied())
+            .await
+            .map_err(PlaybackError::Repository)?;
+        let mut albums_entries = Vec::with_capacity(albums.len());
+        for summary in &albums {
+            albums_entries.push(self.album_entries(summary.album().id()).await?);
+        }
+
+        for entries in &albums_entries {
+            if let Some(location) = self.embedded_location(entries).await? {
+                return Ok(Some(location));
+            }
+        }
+        for entries in &albums_entries {
+            if let Some(location) = self.stored_location_for(entries, user, context).await? {
+                return Ok(Some(location));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn album_entries(&self, album_id: &AlbumId) -> Result<Vec<AlbumEntry>, PlaybackError> {
+        self.track_repository
+            .find_album_entries(album_id, None)
+            .await
+            .map_err(PlaybackError::Repository)
+    }
+
+    async fn embedded_location(
+        &self,
+        entries: &[AlbumEntry],
+    ) -> Result<Option<ResolvedArtwork>, PlaybackError> {
+        for entry in entries {
+            if let Some(location) = self.track_location(entry.track().id()).await? {
+                return Ok(Some(location));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn stored_location_for(
+        &self,
+        entries: &[AlbumEntry],
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> Result<Option<ResolvedArtwork>, PlaybackError> {
+        for entry in entries {
+            if let Some(location) = self
+                .stored_location(entry.track().id(), user, context)
+                .await?
+            {
+                return Ok(Some(location));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn track_location(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Option<ResolvedArtwork>, PlaybackError> {
+        for candidate in self.candidates(track_id).await? {
+            let PlaybackSource::Local(source) = &candidate else {
+                continue;
+            };
+            let Some(facts) = self
+                .track_repository
+                .find_source_file_facts(source.identity())
+                .await
+                .map_err(PlaybackError::Repository)?
+            else {
+                continue;
+            };
+            if facts.missing_at.is_some() {
+                continue;
+            }
+            let Some(relative) = facts.path.as_deref() else {
+                continue;
+            };
+            let SourceScope::Named(root) = source.identity().source_scope() else {
+                continue;
+            };
+            let Some(path) = resolve_path(root, relative) else {
+                continue;
+            };
+            let read = tokio::task::spawn_blocking({
+                let path = path.clone();
+                move || read_cover_art(&path)
+            })
+            .await
+            .map_err(|_| PlaybackError::Unavailable)?;
+
+            match read {
+                Ok(Some(picture)) => return Ok(Some(ResolvedArtwork::Local { path, picture })),
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::debug!(%error, path = %path.display(), "embedded cover art could not be read");
+                    continue;
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn stored_location(
+        &self,
+        track_id: &TrackId,
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> Result<Option<ResolvedArtwork>, PlaybackError> {
         let Some((source, artwork)) = self
             .track_repository
             .find_artwork(track_id)
@@ -132,7 +284,7 @@ impl PlaybackService {
         };
 
         match &artwork {
-            ArtworkRef::Url(url) => Ok(Some(ArtworkLocation::Public(url.clone()))),
+            ArtworkRef::Url(url) => Ok(Some(ResolvedArtwork::Public(url.clone()))),
             ArtworkRef::Upstream(_) => {
                 let Some(source) = PlaybackSource::from_identity(source) else {
                     return Ok(None);
@@ -144,7 +296,7 @@ impl PlaybackService {
                     .resolve_artwork(&source, &artwork, user, context)
                     .await
                     .map_err(PlaybackError::Provider)
-                    .map(|url| url.map(ArtworkLocation::Registered))
+                    .map(|url| url.map(ResolvedArtwork::Registered))
             }
         }
     }
@@ -253,7 +405,8 @@ mod tests {
         playback::{MediaMetadata, PlayableMedia, PlaybackUrl},
         request::RequestId,
         tracks::{
-            InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, Track, TrackMetadata,
+            AlbumMetadata, AlbumTrack, ArtistCredit, ArtworkRef, InMemoryTrackRepository,
+            ProviderId, SourceFileFacts, SourceIdentity, SourceScope, Track, TrackMetadata,
         },
     };
 
@@ -611,5 +764,292 @@ mod tests {
 
         assert!(matches!(result, Err(PlaybackError::TrackNotFound)));
         assert_eq!(*delivery.attempts.lock(), 0);
+    }
+
+    fn pictured_root(label: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("whio-artwork-{label}-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        crate::library::write_pictured_flac(
+            &root.join("a.flac"),
+            vec![lofty::picture::Picture::new_unchecked(
+                lofty::picture::PictureType::CoverFront,
+                Some(lofty::picture::MimeType::Jpeg),
+                None,
+                vec![0xFF, 0xD8, 0xFF, 0xE0],
+            )],
+        );
+
+        root
+    }
+
+    fn plain_root(label: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("whio-artwork-{label}-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac"),
+            root.join("a.flac"),
+        )
+        .unwrap();
+
+        root
+    }
+
+    fn local_source(root: &std::path::Path, external_id: &str) -> SourceIdentity {
+        SourceIdentity::new(
+            ProviderId::new("local".to_owned()).unwrap(),
+            SourceScope::Named(root.display().to_string()),
+            external_id.to_owned(),
+        )
+        .unwrap()
+    }
+
+    fn local_facts(relative: &str) -> SourceFileFacts {
+        SourceFileFacts {
+            path: Some(relative.to_owned()),
+            size_bytes: 10,
+            modified_at: None,
+            missing_at: None,
+            content_type: None,
+            suffix: Some("flac".to_owned()),
+            acoustid_fingerprint: None,
+        }
+    }
+
+    fn artwork_service(repository: Arc<dyn TrackRepository>) -> PlaybackService {
+        PlaybackService::new(repository, Vec::new(), Arc::new(FakeDelivery::default()))
+    }
+
+    #[tokio::test]
+    async fn an_embedded_picture_is_a_tracks_cover_art_without_stored_artwork() {
+        let root = pictured_root("track");
+        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+        let source = local_source(&root, "recording-1");
+        let track = repository
+            .get_or_create(source.clone(), track_metadata("Title"))
+            .await
+            .unwrap();
+        repository
+            .set_source_file_facts(&source, &local_facts("a.flac"))
+            .await
+            .unwrap();
+        let service = artwork_service(repository);
+
+        let location = service
+            .artwork(track.id(), None, &context())
+            .await
+            .unwrap()
+            .expect("embedded art");
+
+        assert!(
+            matches!(location, ResolvedArtwork::Local { ref path, .. } if path == &root.join("a.flac"))
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn album_art_walks_members_and_falls_back_to_stored_artwork() {
+        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+
+        let plain_root = plain_root("plain");
+        let plain_source = local_source(&plain_root, "recording-plain");
+        let plain = repository
+            .get_or_create(plain_source.clone(), track_metadata("Plain"))
+            .await
+            .unwrap();
+        repository
+            .set_source_file_facts(&plain_source, &local_facts("a.flac"))
+            .await
+            .unwrap();
+
+        let remote_source = SourceIdentity::new(
+            ProviderId::new("youtube_music".to_owned()).unwrap(),
+            SourceScope::Global,
+            "vid-1".to_owned(),
+        )
+        .unwrap();
+        let remote = repository
+            .get_or_create(remote_source.clone(), track_metadata("Remote"))
+            .await
+            .unwrap();
+        repository
+            .set_source_artwork(
+                &remote_source,
+                &ArtworkRef::url("https://art.test/remote.jpg".to_owned()).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let album = repository
+            .resolve_or_create_album(&AlbumMetadata::new("Album".to_owned()).unwrap())
+            .await
+            .unwrap();
+        repository
+            .set_album_track(
+                album.id(),
+                plain.id(),
+                &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+            )
+            .await
+            .unwrap();
+        repository
+            .set_album_track(
+                album.id(),
+                remote.id(),
+                &AlbumTrack::new(Some(1), Some(2), 1).unwrap(),
+            )
+            .await
+            .unwrap();
+        let service = artwork_service(repository);
+
+        let location = service
+            .album_artwork(album.id(), None, &context())
+            .await
+            .unwrap()
+            .expect("stored remote art");
+        assert!(
+            matches!(location, ResolvedArtwork::Public(url) if url == "https://art.test/remote.jpg")
+        );
+
+        std::fs::remove_dir_all(&plain_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn album_art_prefers_embedded_art_over_an_earlier_stored_thumbnail() {
+        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+
+        let remote_source = SourceIdentity::new(
+            ProviderId::new("youtube_music".to_owned()).unwrap(),
+            SourceScope::Global,
+            "vid-1".to_owned(),
+        )
+        .unwrap();
+        let remote = repository
+            .get_or_create(remote_source.clone(), track_metadata("Remote"))
+            .await
+            .unwrap();
+        repository
+            .set_source_artwork(
+                &remote_source,
+                &ArtworkRef::url("https://art.test/remote.jpg".to_owned()).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let root = pictured_root("prefer-local");
+        let source = local_source(&root, "recording-1");
+        let local = repository
+            .get_or_create(source.clone(), track_metadata("Local"))
+            .await
+            .unwrap();
+        repository
+            .set_source_file_facts(&source, &local_facts("a.flac"))
+            .await
+            .unwrap();
+
+        let album = repository
+            .resolve_or_create_album(&AlbumMetadata::new("Album".to_owned()).unwrap())
+            .await
+            .unwrap();
+        repository
+            .set_album_track(
+                album.id(),
+                remote.id(),
+                &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+            )
+            .await
+            .unwrap();
+        repository
+            .set_album_track(
+                album.id(),
+                local.id(),
+                &AlbumTrack::new(Some(1), Some(2), 1).unwrap(),
+            )
+            .await
+            .unwrap();
+        let service = artwork_service(repository);
+
+        let location = service
+            .album_artwork(album.id(), None, &context())
+            .await
+            .unwrap()
+            .expect("embedded art");
+
+        assert!(
+            matches!(location, ResolvedArtwork::Local { ref path, .. } if path == &root.join("a.flac"))
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn artist_art_comes_from_the_first_album_with_art() {
+        let root = pictured_root("artist");
+        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+        let source = local_source(&root, "recording-1");
+        let track = repository
+            .get_or_create(source.clone(), track_metadata("Title"))
+            .await
+            .unwrap();
+        repository
+            .set_source_file_facts(&source, &local_facts("a.flac"))
+            .await
+            .unwrap();
+        let artist = repository
+            .resolve_or_create_artist(&ArtistCredit::new("Artist".to_owned(), None).unwrap())
+            .await
+            .unwrap();
+        let album = repository
+            .resolve_or_create_album(
+                &AlbumMetadata::new("Album".to_owned())
+                    .unwrap()
+                    .with_album_artist(ArtistCredit::new("Artist".to_owned(), None).unwrap()),
+            )
+            .await
+            .unwrap();
+        repository
+            .set_album_track(
+                album.id(),
+                track.id(),
+                &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+            )
+            .await
+            .unwrap();
+        let service = artwork_service(repository);
+
+        let location = service
+            .artist_artwork(artist.id(), None, &context())
+            .await
+            .unwrap()
+            .expect("album art");
+
+        assert!(
+            matches!(location, ResolvedArtwork::Local { ref path, .. } if path == &root.join("a.flac"))
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn artwork_is_absent_without_pictures_or_stored_artwork() {
+        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+        let service = artwork_service(repository);
+
+        assert!(
+            service
+                .album_artwork(&crate::tracks::AlbumId::new(), None, &context())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            service
+                .artist_artwork(&crate::tracks::ArtistId::new(), None, &context())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

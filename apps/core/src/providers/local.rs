@@ -91,7 +91,7 @@ impl PlaybackProvider for LocalPlaybackProvider {
 
 /// a stored path is relative to the root it was scanned under. anything that
 /// could leave that root is not a path this scanner wrote.
-fn resolve_path(root: &str, relative: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_path(root: &str, relative: &str) -> Option<PathBuf> {
     let relative = Path::new(relative);
 
     if relative.is_absolute()

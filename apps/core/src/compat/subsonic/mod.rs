@@ -339,8 +339,10 @@ pub(crate) async fn get_cover_art(
     Extension(context): Extension<RequestContext>,
     auth: SubsonicAuth,
     query: RawQuery,
+    headers: HeaderMap,
 ) -> Response {
     use crate::http::routes::artwork;
+    use axum::http::header::IF_NONE_MATCH;
 
     let principal = match authenticate(&state, &context, auth).await {
         Ok(principal) => principal,
@@ -351,16 +353,29 @@ pub(crate) async fn get_cover_art(
     };
 
     let user_uuid = principal.user_id.as_uuid();
+    let if_none_match = headers
+        .get(IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok());
 
-    match artwork::load(&state, &context, id, &user_uuid).await {
-        Ok(Some(artwork)) => artwork.into_response(),
-        Ok(None) => {
+    match artwork::load(&state, &context, id, &user_uuid, if_none_match).await {
+        Ok(artwork::ArtworkOutcome::Found(artwork)) => artwork.into_response(),
+        Ok(artwork::ArtworkOutcome::NotModified(etag)) => artwork::Artwork::not_modified(etag),
+        Ok(artwork::ArtworkOutcome::Missing) => {
             let mut response = Json(failed_envelope(
                 models::error::Code::Variant70,
                 "Cover art was not found.",
             ))
             .into_response();
             *response.status_mut() = StatusCode::NOT_FOUND;
+            response
+        }
+        Err(artwork::ArtworkFailure::InvalidId(_)) => {
+            let mut response = Json(failed_envelope(
+                models::error::Code::Variant0,
+                "Invalid cover art ID.",
+            ))
+            .into_response();
+            *response.status_mut() = StatusCode::BAD_REQUEST;
             response
         }
         Err(_) => {

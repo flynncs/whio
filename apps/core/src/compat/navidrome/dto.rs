@@ -75,6 +75,8 @@ pub(crate) struct Album {
     pub(crate) song_count: u32,
     pub(crate) duration: f32,
     pub(crate) size: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cover_art: Option<String>,
     pub(crate) year: Option<i32>,
     pub(crate) min_year: i32,
     pub(crate) max_year: i32,
@@ -119,6 +121,8 @@ pub(crate) struct Artist {
     pub(crate) song_count: u32,
     pub(crate) size: i64,
     pub(crate) missing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cover_art: Option<String>,
     pub(crate) sort_artist_name: String,
     pub(crate) order_artist_name: String,
     pub(crate) mbz_artist_id: Option<String>,

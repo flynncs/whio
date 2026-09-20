@@ -908,14 +908,11 @@ fn album_summary(indexes: &TrackIndexes, album: &Album, user: Option<Uuid>) -> A
     let album_artist = album
         .album_artist_id()
         .and_then(|artist_id| indexes.artists_by_id.get(artist_id).cloned());
-    let cover_art_track_id = memberships.first().map(|(track_id, _)| track_id.clone());
-
     AlbumSummary::new(
         album.clone(),
         album_artist,
         track_count,
         duration_ms,
-        cover_art_track_id,
         album_created_at(indexes, album),
     )
     .with_state(album_state(indexes, album.id(), user))

@@ -11,7 +11,7 @@ use crate::{
     request::RequestContext,
     tracks::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistSummary,
-        GenreSummary, TrackId,
+        CoverArtTarget, GenreSummary, TrackId,
     },
 };
 
@@ -52,7 +52,7 @@ fn song_from(hit: &SearchHit, tags: SourceTags) -> Song {
         album_artist: None,
         track_number: None,
         disc_number: None,
-        cover_art: Some(track.id().to_string()),
+        cover_art: Some(CoverArtTarget::song(track.id()).encode()),
         duration: track
             .duration_ms()
             .map(|ms| ms as f32 / 1000.0)
@@ -106,6 +106,7 @@ fn album_from_summary(summary: &AlbumSummary) -> Album {
         song_count: summary.track_count(),
         duration: summary.duration_ms() as f32 / 1000.0,
         size: 0,
+        cover_art: Some(CoverArtTarget::album(album.id()).encode()),
         year: album.year(),
         min_year: album.year().unwrap_or(0),
         max_year: album.year().unwrap_or(0),
@@ -139,6 +140,7 @@ fn artist_from_summary(summary: &ArtistSummary) -> Artist {
         song_count: 0,
         size: 0,
         missing: false,
+        cover_art: Some(CoverArtTarget::artist(artist.id()).encode()),
         sort_artist_name: artist
             .sort_name()
             .map_or_else(|| artist.name().to_lowercase(), str::to_owned),

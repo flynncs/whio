@@ -70,21 +70,23 @@ pub(crate) async fn artwork(
     State(state): State<AppState>,
     Extension(context): Extension<RequestContext>,
     principal: AuthenticatedPrincipal,
-    Path(track_id): Path<String>,
+    Path(cover_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let user_uuid = principal.0.user_id.as_uuid();
+    use super::artwork::{Artwork, ArtworkFailure, ArtworkOutcome};
+    use axum::http::header::IF_NONE_MATCH;
 
-    match super::artwork::load(&state, &context, &track_id, &user_uuid).await {
-        Ok(Some(artwork)) => Ok(artwork.into_response()),
-        Ok(None) => Err(ApiError::NotFound(context)),
-        Err(super::artwork::ArtworkFailure::InvalidId(error)) => {
-            Err(ApiError::InvalidTrackId { context, error })
-        }
-        Err(super::artwork::ArtworkFailure::Playback(error)) => {
-            Err(ApiError::PlaybackStream { context, error })
-        }
-        Err(super::artwork::ArtworkFailure::Fetch(error)) => {
-            Err(ApiError::Artwork { context, error })
-        }
+    let user_uuid = principal.0.user_id.as_uuid();
+    let if_none_match = headers
+        .get(IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok());
+
+    match super::artwork::load(&state, &context, &cover_id, &user_uuid, if_none_match).await {
+        Ok(ArtworkOutcome::Found(artwork)) => Ok(artwork.into_response()),
+        Ok(ArtworkOutcome::NotModified(etag)) => Ok(Artwork::not_modified(etag)),
+        Ok(ArtworkOutcome::Missing) => Err(ApiError::NotFound(context)),
+        Err(ArtworkFailure::InvalidId(error)) => Err(ApiError::InvalidTrackId { context, error }),
+        Err(ArtworkFailure::Playback(error)) => Err(ApiError::PlaybackStream { context, error }),
+        Err(ArtworkFailure::Fetch(error)) => Err(ApiError::Artwork { context, error }),
     }
 }

@@ -4,8 +4,8 @@ use crate::{
     catalogue::{AlbumDetail, ArtistDetail, SearchHit},
     compat::SourceTags,
     tracks::{
-        Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary, GenreSummary,
-        LibraryState, SourceIdentity, Track,
+        Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary,
+        CoverArtTarget, GenreSummary, LibraryState, SourceIdentity, Track,
     },
 };
 
@@ -54,7 +54,7 @@ fn child_from_track(
         album: album_title.map(str::to_owned),
         artist: (!track.artists().is_empty()).then(|| tags.artist(track.artists(), sources)),
         track: membership.and_then(AlbumTrack::track_number).map(i32::from),
-        cover_art: Some(track.id().to_string()),
+        cover_art: Some(CoverArtTarget::song(track.id()).encode()),
         duration: track.duration_ms().map(|ms| (ms / 1000) as i32),
         disc_number: membership.and_then(AlbumTrack::disc_number).map(i32::from),
         album_id: album_id.map(AlbumId::to_string),
@@ -132,6 +132,7 @@ fn artist_id3(artist: &Artist, album_count: Option<u32>, state: LibraryState) ->
         id: artist.id().to_string(),
         name: artist.name().to_owned(),
         album_count: album_count.map(|count| count as i32),
+        cover_art: Some(CoverArtTarget::artist(artist.id()).encode()),
         music_brainz_id: artist.musicbrainz_artist_id().map(str::to_owned),
         sort_name: artist.sort_name().map(str::to_owned),
         starred: state.starred_at().map(|at| at.fixed_offset()),
@@ -180,9 +181,7 @@ fn album_fields(summary: &AlbumSummary) -> AlbumFields {
         artist_id: artist.map(|artist| artist.id().to_string()),
         artists,
         display_artist: artist.map(|artist| artist.name().to_owned()),
-        cover_art: summary
-            .cover_art_track_id()
-            .map(std::string::ToString::to_string),
+        cover_art: Some(CoverArtTarget::album(album.id()).encode()),
         song_count: summary.track_count() as i32,
         duration: (summary.duration_ms() / 1000) as i32,
         created: summary.created_at().fixed_offset(),
@@ -354,13 +353,11 @@ mod tests {
     #[test]
     fn an_album_summary_maps_its_artist_and_totals() {
         let artist = Artist::new(ArtistId::new(), "Daft Punk".to_owned(), None, None).unwrap();
-        let track_id = TrackId::new();
         let summary = AlbumSummary::new(
             album(),
             Some(artist.clone()),
             2,
             400_000,
-            Some(track_id.clone()),
             chrono::Utc::now(),
         );
 
@@ -376,7 +373,7 @@ mod tests {
         assert_eq!(mapped.duration, 400);
         assert_eq!(
             mapped.cover_art.as_deref(),
-            Some(track_id.to_string().as_str())
+            Some(format!("al-{}", mapped.id).as_str())
         );
     }
 }

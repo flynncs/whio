@@ -2,6 +2,7 @@ use std::path::Path;
 
 use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::{Accessor, ItemKey};
 use lofty::probe::Probe;
 use lofty::tag::Tag;
@@ -117,6 +118,96 @@ pub fn read_tags(path: &Path) -> Result<TrackTags, TagError> {
         artist_ids,
         duration_ms: Some(duration_ms),
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedPicture {
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+pub fn read_cover_art(path: &Path) -> Result<Option<EmbeddedPicture>, TagError> {
+    let tagged = Probe::open(path)
+        .map_err(|_| TagError::Unreadable)?
+        .options(ParseOptions::new().read_properties(false))
+        .read()
+        .map_err(|_| TagError::Unreadable)?;
+
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    let Some(tag) = tag else {
+        return Ok(None);
+    };
+
+    let mut fallback = None;
+    for picture in tag.pictures() {
+        if picture.data().len() as u64 > crate::media::MAX_ARTWORK_BYTES {
+            continue;
+        }
+        let Some(content_type) = picture_content_type(picture) else {
+            continue;
+        };
+        let embedded = EmbeddedPicture {
+            content_type,
+            bytes: picture.data().to_vec(),
+        };
+        if picture.pic_type() == PictureType::CoverFront {
+            return Ok(Some(embedded));
+        }
+        if fallback.is_none() {
+            fallback = Some(embedded);
+        }
+    }
+
+    Ok(fallback)
+}
+
+fn picture_content_type(picture: &Picture) -> Option<String> {
+    if let Some(mime) = picture.mime_type()
+        && !matches!(mime, MimeType::Unknown(_))
+    {
+        return Some(mime.as_str().to_owned());
+    }
+
+    sniff_picture(picture.data())
+}
+
+fn sniff_picture(data: &[u8]) -> Option<String> {
+    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg".to_owned())
+    } else if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("image/png".to_owned())
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some("image/gif".to_owned())
+    } else if data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some("image/webp".to_owned())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn write_pictured_flac(destination: &Path, pictures: Vec<Picture>) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac");
+    std::fs::copy(fixture, destination).expect("the fixture copies");
+
+    let mut tagged = Probe::open(destination)
+        .expect("the fixture opens")
+        .read()
+        .expect("the fixture reads");
+    {
+        let has_primary = tagged.primary_tag_mut().is_some();
+        let tag = if has_primary {
+            tagged.primary_tag_mut().expect("checked above")
+        } else {
+            tagged.first_tag_mut().expect("the fixture carries a tag")
+        };
+        for picture in pictures {
+            tag.push_picture(picture);
+        }
+    }
+    tagged
+        .save_to_path(destination, lofty::config::WriteOptions::default())
+        .expect("the pictured file saves");
 }
 
 pub fn identity_for(tags: &TrackTags, relative_path: &str) -> (IdentityRung, String) {
@@ -419,6 +510,87 @@ mod tests {
         let tags = read_tags(&path).unwrap();
         assert!(tags.artists.is_empty());
         assert_eq!(tags.title, "Fixture Song");
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    fn temp_flac(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("whio-{label}-{}.flac", uuid::Uuid::now_v7()))
+    }
+
+    fn cover(data: Vec<u8>, mime: Option<MimeType>) -> Picture {
+        Picture::new_unchecked(PictureType::CoverFront, mime, None, data)
+    }
+
+    #[test]
+    fn a_file_without_pictures_has_no_cover_art() {
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac");
+
+        assert_eq!(read_cover_art(&fixture).unwrap(), None);
+    }
+
+    #[test]
+    fn an_embedded_front_cover_reads_back_with_its_mime_type() {
+        let path = temp_flac("cover");
+        let bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        write_pictured_flac(&path, vec![cover(bytes.clone(), Some(MimeType::Jpeg))]);
+
+        let picture = read_cover_art(&path).unwrap().expect("cover art");
+        assert_eq!(picture.content_type, "image/jpeg");
+        assert_eq!(picture.bytes, bytes);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_front_cover_wins_over_an_earlier_picture() {
+        let path = temp_flac("front");
+        write_pictured_flac(
+            &path,
+            vec![
+                Picture::new_unchecked(
+                    PictureType::Other,
+                    Some(MimeType::Png),
+                    None,
+                    vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+                ),
+                cover(vec![0xFF, 0xD8, 0xFF], Some(MimeType::Jpeg)),
+            ],
+        );
+
+        let picture = read_cover_art(&path).unwrap().expect("cover art");
+        assert_eq!(picture.content_type, "image/jpeg");
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_picture_without_a_declared_mime_type_is_sniffed() {
+        let path = temp_flac("sniff");
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend_from_slice(&[0x00; 8]);
+        write_pictured_flac(&path, vec![cover(png.clone(), None)]);
+
+        let picture = read_cover_art(&path).unwrap().expect("cover art");
+        assert_eq!(picture.content_type, "image/png");
+        assert_eq!(picture.bytes, png);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn an_oversize_picture_is_skipped() {
+        let path = temp_flac("oversize");
+        write_pictured_flac(
+            &path,
+            vec![cover(
+                vec![0xFF; crate::media::MAX_ARTWORK_BYTES as usize + 1],
+                Some(MimeType::Jpeg),
+            )],
+        );
+
+        assert_eq!(read_cover_art(&path).unwrap(), None);
 
         std::fs::remove_file(&path).unwrap();
     }

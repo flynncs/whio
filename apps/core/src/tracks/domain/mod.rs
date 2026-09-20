@@ -13,7 +13,7 @@ pub use album::{
     AlbumTrack,
 };
 pub use artist::{Artist, ArtistCredit, ArtistId, ArtistSummary};
-pub use artwork::ArtworkRef;
+pub use artwork::{ArtworkRef, CoverArtTarget};
 pub use error::ValidationError;
 pub use metadata::TrackMetadata;
 pub use source::{
