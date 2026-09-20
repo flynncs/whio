@@ -34,29 +34,23 @@ impl TrackRepository for PostgresTrackRepository {
         let credits = resolve_credits(&self.pool, metadata.artists()).await?;
 
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
+        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits).await?;
+        tx.commit().await.map_err(repository_error)?;
 
-        let track_id = match resolve_identified_track(&mut tx, &metadata).await? {
-            Some(identified) => {
-                let previous = find_track_id_by_source_for_update(&mut tx, &source).await?;
-                attach_source(&mut tx, &identified, &source).await?;
+        Ok(Track::new(track_id, metadata))
+    }
 
-                if let Some(previous) = previous
-                    && previous != identified
-                {
-                    delete_track_if_source_less(&mut tx, &previous).await?;
-                }
+    async fn index_source(
+        &self,
+        source: SourceIdentity,
+        metadata: TrackMetadata,
+        facts: &SourceFileFacts,
+    ) -> Result<Track, TrackRepositoryError> {
+        let credits = resolve_credits(&self.pool, metadata.artists()).await?;
 
-                identified
-            }
-            None => match find_track_id_by_source_for_update(&mut tx, &source).await? {
-                Some(current) => current,
-                None => create_with_source(&mut tx, &source, &metadata).await?,
-            },
-        };
-
-        update_track_metadata(&mut tx, &track_id, &metadata).await?;
-        replace_artist_credits(&mut tx, &track_id, &credits).await?;
-
+        let mut tx = self.pool.begin().await.map_err(repository_error)?;
+        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits).await?;
+        set_source_file_facts_in(&mut tx, &source, facts).await?;
         tx.commit().await.map_err(repository_error)?;
 
         Ok(Track::new(track_id, metadata))
@@ -213,27 +207,9 @@ impl TrackRepository for PostgresTrackRepository {
         source: &SourceIdentity,
         facts: &SourceFileFacts,
     ) -> Result<(), TrackRepositoryError> {
-        sqlx::query(
-            r#"UPDATE track_sources
-            SET path = $1, size_bytes = $2, modified_at = $3, missing_at = $4,
-                content_type = $5, suffix = $6, acoustid_fingerprint = $7
-            WHERE provider_id = $8 AND source_scope = $9 AND external_id = $10
-            "#,
-        )
-        .bind(facts.path.as_deref())
-        .bind(facts.size_bytes as i64)
-        .bind(facts.modified_at)
-        .bind(facts.missing_at)
-        .bind(facts.content_type.as_deref())
-        .bind(facts.suffix.as_deref())
-        .bind(facts.acoustid_fingerprint.as_deref())
-        .bind(source.provider_id().as_str())
-        .bind(encode_source_scope(source.source_scope()))
-        .bind(source.external_id())
-        .execute(&self.pool)
-        .await
-        .map(|_| ())
-        .map_err(repository_error)
+        let mut connection = self.pool.acquire().await.map_err(repository_error)?;
+
+        set_source_file_facts_in(&mut connection, source, facts).await
     }
 
     async fn find_source_file_facts(
@@ -2135,6 +2111,65 @@ fn decode_source(
 
     SourceIdentity::new(provider_id, source_scope, external_id)
         .map_err(|_| TrackRepositoryError::InvalidData)
+}
+
+async fn set_source_file_facts_in(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+    facts: &SourceFileFacts,
+) -> Result<(), TrackRepositoryError> {
+    sqlx::query(
+        r#"UPDATE track_sources
+        SET path = $1, size_bytes = $2, modified_at = $3, missing_at = $4,
+            content_type = $5, suffix = $6, acoustid_fingerprint = $7
+        WHERE provider_id = $8 AND source_scope = $9 AND external_id = $10
+        "#,
+    )
+    .bind(facts.path.as_deref())
+    .bind(facts.size_bytes as i64)
+    .bind(facts.modified_at)
+    .bind(facts.missing_at)
+    .bind(facts.content_type.as_deref())
+    .bind(facts.suffix.as_deref())
+    .bind(facts.acoustid_fingerprint.as_deref())
+    .bind(source.provider_id().as_str())
+    .bind(encode_source_scope(source.source_scope()))
+    .bind(source.external_id())
+    .execute(&mut *connection)
+    .await
+    .map(|_| ())
+    .map_err(repository_error)
+}
+
+async fn get_or_create_in(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+    metadata: &TrackMetadata,
+    credits: &[(String, ArtistId)],
+) -> Result<TrackId, TrackRepositoryError> {
+    let track_id = match resolve_identified_track(connection, metadata).await? {
+        Some(identified) => {
+            let previous = find_track_id_by_source_for_update(connection, source).await?;
+            attach_source(connection, &identified, source).await?;
+
+            if let Some(previous) = previous
+                && previous != identified
+            {
+                delete_track_if_source_less(connection, &previous).await?;
+            }
+
+            identified
+        }
+        None => match find_track_id_by_source_for_update(connection, source).await? {
+            Some(current) => current,
+            None => create_with_source(connection, source, metadata).await?,
+        },
+    };
+
+    update_track_metadata(connection, &track_id, metadata).await?;
+    replace_artist_credits(connection, &track_id, credits).await?;
+
+    Ok(track_id)
 }
 
 async fn resolve_identified_track(

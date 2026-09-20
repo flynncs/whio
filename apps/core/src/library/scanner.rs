@@ -164,8 +164,9 @@ async fn index_track(
     album: Option<AlbumMetadata>,
     membership: Option<AlbumTrack>,
 ) -> Result<(), ScanError> {
-    let stored = repository.get_or_create(source.clone(), metadata).await?;
-    repository.set_source_file_facts(source, facts).await?;
+    let stored = repository
+        .index_source(source.clone(), metadata, facts)
+        .await?;
 
     if let Some(album) = &album {
         let album = repository.resolve_or_create_album(album).await?;

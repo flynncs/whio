@@ -1026,6 +1026,67 @@ async fn one_recording_id_admits_one_track(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires PostgreSQL"]
+async fn a_rejected_file_leaves_no_source_behind(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let source = local_source("bad.flac");
+
+    let facts = |suffix: String| SourceFileFacts {
+        path: Some("bad.flac".to_owned()),
+        size_bytes: 10,
+        modified_at: None,
+        missing_at: None,
+        content_type: None,
+        suffix: Some(suffix),
+        acoustid_fingerprint: None,
+    };
+
+    let refused = repository
+        .index_source(
+            source.clone(),
+            metadata("Song", &["Artist"], Some(1_000)),
+            &facts("x".repeat(40)),
+        )
+        .await;
+    assert!(refused.is_err(), "the suffix exceeds its bound");
+
+    assert!(
+        repository
+            .find_source_file_facts(&source)
+            .await
+            .unwrap()
+            .is_none(),
+        "a rejected write leaves no source row"
+    );
+    assert!(
+        repository
+            .search_tracks("song", 10, None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "and no track"
+    );
+
+    repository
+        .index_source(
+            source.clone(),
+            metadata("Song", &["Artist"], Some(1_000)),
+            &facts("flac".to_owned()),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        repository
+            .find_source_file_facts(&source)
+            .await
+            .unwrap()
+            .is_some(),
+        "the same file indexes once its facts are valid"
+    );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
 async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool);
 

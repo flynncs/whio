@@ -36,6 +36,20 @@ pub trait TrackRepository: Send + Sync {
         metadata: TrackMetadata,
     ) -> Result<Track, TrackRepositoryError>;
 
+    /// attach one file to its track in a single write, so a rejected set of
+    /// facts cannot leave a source behind without them.
+    async fn index_source(
+        &self,
+        source: SourceIdentity,
+        metadata: TrackMetadata,
+        facts: &SourceFileFacts,
+    ) -> Result<Track, TrackRepositoryError> {
+        let track = self.get_or_create(source.clone(), metadata).await?;
+        self.set_source_file_facts(&source, facts).await?;
+
+        Ok(track)
+    }
+
     async fn find_sources(
         &self,
         track_id: &TrackId,
