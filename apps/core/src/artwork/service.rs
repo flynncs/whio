@@ -120,7 +120,22 @@ impl ArtworkService {
         };
 
         match target {
-            CoverArtTarget::Track(track_id) => self.track_artwork(repository, &track_id).await,
+            CoverArtTarget::Track(track_id) => {
+                if let Some(resolved) = self.track_artwork(repository, &track_id).await? {
+                    return Ok(Some(resolved));
+                }
+
+                let uuid = *track_id.as_uuid();
+                if let Some(resolved) = self
+                    .album_artwork(repository, &AlbumId::from_uuid(uuid))
+                    .await?
+                {
+                    return Ok(Some(resolved));
+                }
+
+                self.artist_artwork(repository, &ArtistId::from_uuid(uuid))
+                    .await
+            }
             CoverArtTarget::Album(album_id) => self.album_artwork(repository, &album_id).await,
             CoverArtTarget::Artist(artist_id) => self.artist_artwork(repository, &artist_id).await,
         }
@@ -520,6 +535,28 @@ mod tests {
 
         let resolved = service(repository)
             .resolve(CoverArtTarget::Album(album))
+            .await
+            .unwrap()
+            .expect("stored remote art");
+
+        assert!(matches!(
+            resolved,
+            Resolved::Remote(reference) if reference == "https://art.test/remote.jpg"
+        ));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_bare_album_id_resolves_album_art() {
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        let root = plain_root("bare");
+        let plain = add_local_track(&repository, &root, "recording-plain").await;
+        let remote = add_stored_remote_track(&repository, "vid-1").await;
+        let album = album_with(&repository, None, &[plain, remote]).await;
+
+        let resolved = service(repository)
+            .resolve(CoverArtTarget::Track(TrackId::from_uuid(*album.as_uuid())))
             .await
             .unwrap()
             .expect("stored remote art");
