@@ -33,11 +33,7 @@ impl TrackRepository for PostgresTrackRepository {
     ) -> Result<Track, TrackRepositoryError> {
         let credits = resolve_credits(&self.pool, metadata.artists()).await?;
 
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        let mut tx = self.pool.begin().await.map_err(repository_error)?;
 
         let track_id = find_track_id_by_source_for_update(&mut tx, &source).await?;
 
@@ -58,9 +54,7 @@ impl TrackRepository for PostgresTrackRepository {
         update_track_metadata(&mut tx, &track_id, &metadata).await?;
         replace_artist_credits(&mut tx, &track_id, &credits).await?;
 
-        tx.commit()
-            .await
-            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        tx.commit().await.map_err(repository_error)?;
 
         Ok(Track::new(track_id, metadata))
     }
@@ -79,7 +73,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(track_id.as_uuid())
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         rows.into_iter()
             .map(|(provider_id, source_scope, external_id)| {
@@ -104,7 +98,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(track_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let Some((title, duration_ms, recording_id, isrc, genre)) = row else {
             return Ok(None);
@@ -121,7 +115,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(track_id.as_uuid())
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let artists = credits
             .into_iter()
@@ -173,7 +167,7 @@ impl TrackRepository for PostgresTrackRepository {
         .execute(&self.pool)
         .await
         .map(|_| ())
-        .map_err(|_| TrackRepositoryError::Unavailable)
+        .map_err(repository_error)
     }
 
     async fn find_artwork(
@@ -191,7 +185,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(track_id.as_uuid())
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let mut best: Option<(SourceIdentity, ArtworkRef)> = None;
         for (provider_id, source_scope, external_id, reference) in rows {
@@ -236,7 +230,7 @@ impl TrackRepository for PostgresTrackRepository {
         .execute(&self.pool)
         .await
         .map(|_| ())
-        .map_err(|_| TrackRepositoryError::Unavailable)
+        .map_err(repository_error)
     }
 
     async fn find_source_file_facts(
@@ -266,7 +260,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(source.external_id())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         Ok(row.map(
             |(path, size_bytes, modified_at, missing_at, content_type, suffix, fingerprint)| {
@@ -314,7 +308,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(encode_source_scope(source_scope))
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let mut scanned = Vec::with_capacity(rows.len());
         for (
@@ -382,7 +376,7 @@ impl TrackRepository for PostgresTrackRepository {
         .execute(&self.pool)
         .await
         .map(|_| ())
-        .map_err(|_| TrackRepositoryError::Unavailable)
+        .map_err(repository_error)
     }
 
     async fn set_album_track(
@@ -391,18 +385,14 @@ impl TrackRepository for PostgresTrackRepository {
         track_id: &TrackId,
         membership: &AlbumTrack,
     ) -> Result<(), TrackRepositoryError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        let mut tx = self.pool.begin().await.map_err(repository_error)?;
 
         sqlx::query("DELETE FROM album_tracks WHERE track_id = $1 AND album_id <> $2")
             .bind(track_id.as_uuid())
             .bind(album_id.as_uuid())
             .execute(&mut *tx)
             .await
-            .map_err(|_| TrackRepositoryError::Unavailable)?;
+            .map_err(repository_error)?;
 
         sqlx::query(
             r#"
@@ -421,11 +411,9 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(i32::try_from(membership.position()).map_err(|_| TrackRepositoryError::InvalidData)?)
         .execute(&mut *tx)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
-        tx.commit()
-            .await
-            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        tx.commit().await.map_err(repository_error)?;
 
         Ok(())
     }
@@ -436,7 +424,7 @@ impl TrackRepository for PostgresTrackRepository {
             .execute(&self.pool)
             .await
             .map(|_| ())
-            .map_err(|_| TrackRepositoryError::Unavailable)
+            .map_err(repository_error)
     }
 
     async fn find_album(&self, album_id: &AlbumId) -> Result<Option<Album>, TrackRepositoryError> {
@@ -446,7 +434,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(album_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         row.map(decode_album).transpose()
     }
@@ -467,7 +455,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(track_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         row.map(decode_album).transpose()
     }
@@ -488,7 +476,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(album_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let Some(summary) = row.map(decode_album_summary).transpose()? else {
             return Ok(None);
@@ -510,7 +498,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(artist_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         row.map(decode_artist).transpose()
     }
@@ -545,7 +533,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(album_id.as_uuid())
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         rows.into_iter()
             .map(|(provider_id, source_scope, external_id)| {
@@ -586,7 +574,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(album_id.as_uuid())
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let track_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
         let mut credits = credits_for_tracks(&self.pool, &track_ids).await?;
@@ -640,7 +628,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(artist_id.as_uuid())
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let mut summaries = rows
             .into_iter()
@@ -705,7 +693,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(user)
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let mut summaries = rows
             .into_iter()
@@ -735,7 +723,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(i64::from(offset))
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let mut summaries = rows
             .into_iter()
@@ -750,7 +738,7 @@ impl TrackRepository for PostgresTrackRepository {
         let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM albums")
             .fetch_one(&self.pool)
             .await
-            .map_err(|_| TrackRepositoryError::Unavailable)?;
+            .map_err(repository_error)?;
 
         u32::try_from(count).map_err(|_| TrackRepositoryError::InvalidData)
     }
@@ -759,7 +747,7 @@ impl TrackRepository for PostgresTrackRepository {
         let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM artists")
             .fetch_one(&self.pool)
             .await
-            .map_err(|_| TrackRepositoryError::Unavailable)?;
+            .map_err(repository_error)?;
 
         u32::try_from(count).map_err(|_| TrackRepositoryError::InvalidData)
     }
@@ -802,7 +790,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         hits_from_rows(&self.pool, rows, user).await
     }
@@ -834,7 +822,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let mut summaries = rows
             .into_iter()
@@ -866,7 +854,7 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         let mut summaries = rows
             .into_iter()
@@ -890,7 +878,7 @@ impl TrackRepository for PostgresTrackRepository {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         rows.into_iter()
             .map(|(genre, songs, albums)| {
@@ -911,21 +899,21 @@ impl TrackRepository for PostgresTrackRepository {
         .bind(user)
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
         let album_ids = sqlx::query_scalar::<_, Uuid>(
             "SELECT album_id FROM album_favorites WHERE user_id = $1 ORDER BY starred_at DESC, album_id",
         )
         .bind(user)
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
         let artist_ids = sqlx::query_scalar::<_, Uuid>(
             "SELECT artist_id FROM artist_favorites WHERE user_id = $1 ORDER BY starred_at DESC, artist_id",
         )
         .bind(user)
         .fetch_all(&self.pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
 
         Ok(Starred::new(
             tracks_by_ids(&self.pool, &track_ids, user).await?,
@@ -1045,7 +1033,7 @@ impl TrackRepository for PostgresTrackRepository {
         .execute(&self.pool)
         .await
         .map(|_| ())
-        .map_err(|_| TrackRepositoryError::Unavailable)
+        .map_err(repository_error)
     }
 }
 
@@ -1255,7 +1243,7 @@ async fn track_states(
     .bind(track_ids)
     .fetch_all(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     rows.into_iter()
         .map(|(id, starred_at, rating, play_count, last_played_at)| {
@@ -1298,7 +1286,7 @@ async fn album_states(
     .bind(album_ids)
     .fetch_all(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     rows.into_iter()
         .map(|(id, starred_at, rating, play_count, last_played_at)| {
@@ -1343,7 +1331,7 @@ async fn artist_states(
     .bind(artist_ids)
     .fetch_all(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     rows.into_iter()
         .map(|(id, starred_at, rating, play_count, last_played_at)| {
@@ -1398,7 +1386,7 @@ async fn ordered_album_ids(
         .bind(i64::from(offset))
         .fetch_all(pool)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)
+        .map_err(repository_error)
 }
 
 async fn album_summaries_by_ids(
@@ -1421,7 +1409,7 @@ async fn album_summaries_by_ids(
     .bind(album_ids)
     .fetch_all(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     let states = album_states(pool, user, album_ids).await?;
     let mut by_id = rows
@@ -1460,7 +1448,7 @@ async fn artist_summaries_by_ids(
     .bind(artist_ids)
     .fetch_all(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     let states = artist_states(pool, user, artist_ids).await?;
     let mut by_id = rows
@@ -1568,7 +1556,7 @@ async fn tracks_by_ids(
     .bind(track_ids)
     .fetch_all(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     let hits = hits_from_rows(pool, rows, Some(user)).await?;
     let mut by_id = hits
@@ -1599,7 +1587,7 @@ async fn set_starred_row(
         .execute(pool)
         .await
         .map(|_| ())
-        .map_err(|_| TrackRepositoryError::Unavailable)
+        .map_err(repository_error)
 }
 
 async fn set_rating_row(
@@ -1622,7 +1610,7 @@ async fn set_rating_row(
                 .execute(pool)
                 .await
                 .map(|_| ())
-                .map_err(|_| TrackRepositoryError::Unavailable)
+                .map_err(repository_error)
         }
         None => {
             let statement = format!("DELETE FROM {table} WHERE user_id = $1 AND {column} = $2");
@@ -1632,7 +1620,7 @@ async fn set_rating_row(
                 .execute(pool)
                 .await
                 .map(|_| ())
-                .map_err(|_| TrackRepositoryError::Unavailable)
+                .map_err(repository_error)
         }
     }
 }
@@ -1683,7 +1671,7 @@ async fn find_or_attach_artist(
     .bind(existing.id().as_uuid())
     .fetch_optional(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     match row {
         Some(row) => Ok(Some(decode_artist(row)?)),
@@ -1701,7 +1689,7 @@ async fn find_artist_by_identifier(
     .bind(identifier)
     .fetch_optional(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     row.map(decode_artist).transpose()
 }
@@ -1721,7 +1709,7 @@ async fn find_artist_by_name(
     .bind(name)
     .fetch_optional(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     row.map(decode_artist).transpose()
 }
@@ -1743,7 +1731,7 @@ async fn insert_artist(
     .bind(credit.musicbrainz_artist_id())
     .fetch_optional(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     row.map(decode_artist).transpose()
 }
@@ -1823,7 +1811,7 @@ async fn find_or_attach_album(
     .bind(existing.id().as_uuid())
     .fetch_optional(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     match row {
         Some(row) => Ok(Some(decode_album(row)?)),
@@ -1841,7 +1829,7 @@ async fn find_album_by_release_group(
     .bind(identifier)
     .fetch_optional(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     row.map(decode_album).transpose()
 }
@@ -1856,7 +1844,7 @@ async fn find_album_by_release(
     .bind(identifier)
     .fetch_optional(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     row.map(decode_album).transpose()
 }
@@ -1880,7 +1868,7 @@ async fn find_album_by_text(
     .bind(title)
     .fetch_optional(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     row.map(decode_album).transpose()
 }
@@ -1911,7 +1899,7 @@ async fn insert_album(
     .bind(metadata.musicbrainz_release_id())
     .fetch_optional(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     row.map(decode_album).transpose()
 }
@@ -2064,7 +2052,7 @@ async fn credits_for_tracks(
     .bind(track_ids)
     .fetch_all(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     let mut by_track: HashMap<Uuid, Vec<ArtistCredit>> = HashMap::new();
     for (track_id, name, identifier) in rows {
@@ -2096,7 +2084,7 @@ async fn sources_for_tracks(
     .bind(track_ids)
     .fetch_all(pool)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     let mut by_track: HashMap<Uuid, Vec<SourceIdentity>> = HashMap::new();
     for (track_id, provider_id, source_scope, external_id) in rows {
@@ -2162,7 +2150,7 @@ async fn find_track_id_by_source_for_update(
     .fetch_optional(&mut *connection)
     .await
     .map(|track_id| track_id.map(TrackId::from_uuid))
-    .map_err(|_| TrackRepositoryError::Unavailable)
+    .map_err(repository_error)
 }
 
 async fn insert_candidate_track(
@@ -2185,7 +2173,7 @@ async fn insert_candidate_track(
     .execute(&mut *connection)
     .await
     .map(|_| ())
-    .map_err(|_| TrackRepositoryError::Unavailable)
+    .map_err(repository_error)
 }
 
 async fn try_insert_source(
@@ -2216,7 +2204,7 @@ async fn try_insert_source(
     .fetch_optional(&mut *connection)
     .await
     .map(|track_id| track_id.is_some())
-    .map_err(|_| TrackRepositoryError::Unavailable)
+    .map_err(repository_error)
 }
 
 async fn resolve_concurrent_winner(
@@ -2233,7 +2221,7 @@ async fn resolve_concurrent_winner(
     .bind(candidate_track_id.as_uuid())
     .execute(&mut *connection)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     if result.rows_affected() != 1 {
         return Err(TrackRepositoryError::InvalidData);
@@ -2269,7 +2257,7 @@ async fn update_track_metadata(
     .bind(track_id.as_uuid())
     .execute(&mut *connection)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     if result.rows_affected() != 1 {
         return Err(TrackRepositoryError::InvalidData);
@@ -2292,7 +2280,7 @@ async fn replace_artist_credits(
     .bind(track_id.as_uuid())
     .execute(&mut *connection)
     .await
-    .map_err(|_| TrackRepositoryError::Unavailable)?;
+    .map_err(repository_error)?;
 
     for (position, (name, artist_id)) in credits.iter().enumerate() {
         let position = i32::try_from(position).map_err(|_| TrackRepositoryError::InvalidData)?;
@@ -2309,7 +2297,7 @@ async fn replace_artist_credits(
         .bind(artist_id.as_uuid())
         .execute(&mut *connection)
         .await
-        .map_err(|_| TrackRepositoryError::Unavailable)?;
+        .map_err(repository_error)?;
     }
 
     Ok(())
@@ -2334,6 +2322,18 @@ fn encode_duration_ms(duration_ms: Option<u64>) -> Result<Option<i64>, TrackRepo
         .map(i64::try_from)
         .transpose()
         .map_err(|_| TrackRepositoryError::InvalidData)
+}
+
+fn repository_error(error: sqlx::Error) -> TrackRepositoryError {
+    if let sqlx::Error::Database(database) = &error
+        && (database.is_unique_violation()
+            || database.is_check_violation()
+            || database.is_foreign_key_violation())
+    {
+        return TrackRepositoryError::InvalidData;
+    }
+
+    TrackRepositoryError::Unavailable
 }
 
 fn encode_source_scope(source_scope: &SourceScope) -> String {
