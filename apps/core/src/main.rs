@@ -103,9 +103,15 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         credential_repository,
         config.credential_key.clone(),
     ));
+    let catalogue_providers: Vec<Arc<dyn CatalogueProvider>> = match &config.youtube_resolver {
+        YoutubeResolverConfig::Disabled => Vec::new(),
+        YoutubeResolverConfig::Enabled { .. } => {
+            vec![Arc::clone(&ytm) as Arc<dyn CatalogueProvider>]
+        }
+    };
     let catalogue = Arc::new(CatalogueService::with_providers(
         track_repository.clone(),
-        vec![Arc::clone(&ytm) as Arc<dyn CatalogueProvider>],
+        catalogue_providers,
     ));
     let youtube_media_suffixes = vec![config.youtube_media_suffix.clone()];
     let fetcher = Arc::new(HttpMediaFetcher::with_allowed_host_suffixes(

@@ -974,6 +974,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_library_without_providers_answers_a_miss_with_nothing() {
+        let catalogue = CatalogueService::new(Arc::new(InMemoryTrackRepository::default()));
+
+        let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
+
+        assert!(outcome.tracks.is_empty());
+    }
+
+    #[tokio::test]
     async fn owned_tracks_outrank_fresh_provider_discoveries() {
         let repository = Arc::new(InMemoryTrackRepository::default());
         repository
