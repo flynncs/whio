@@ -5,8 +5,8 @@ use crate::tracks::{ArtworkRef, Track, TrackMetadata};
 
 use super::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
-    AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, GenreSummary, LibraryState,
-    ProviderId, SourceIdentity, SourceScope, Starred, StateTarget, TrackHit, TrackId,
+    AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, DuplicateCandidate, GenreSummary,
+    LibraryState, ProviderId, SourceIdentity, SourceScope, Starred, StateTarget, TrackHit, TrackId,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +48,15 @@ pub trait TrackRepository: Send + Sync {
         self.set_source_file_facts(&source, facts).await?;
 
         Ok(track)
+    }
+
+    /// tracks with more than one local file. a report, not an action: nothing
+    /// here deletes or flags a file, and the recommendation is recomputed.
+    async fn duplicate_candidates(
+        &self,
+        _limit: u32,
+    ) -> Result<Vec<DuplicateCandidate>, TrackRepositoryError> {
+        Ok(Vec::new())
     }
 
     async fn find_sources(

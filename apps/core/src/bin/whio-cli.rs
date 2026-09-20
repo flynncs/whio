@@ -5,7 +5,10 @@ use uuid::Uuid;
 use whio_core::{
     database::Database,
     identity::{provisioning, secrets::CredentialKey},
+    tracks::{DuplicateCandidate, PostgresTrackRepository, TrackRepository},
 };
+
+const DEFAULT_DUPLICATE_LIMIT: u32 = 50;
 
 #[derive(Debug, Error)]
 enum CliError {
@@ -29,6 +32,9 @@ enum CliError {
 
     #[error("credential id is not a valid UUID")]
     InvalidCredentialId,
+
+    #[error(transparent)]
+    Repository(#[from] whio_core::tracks::TrackRepositoryError),
 }
 
 #[tokio::main]
@@ -88,6 +94,16 @@ async fn main() -> Result<(), CliError> {
             let id = raw_id.parse().map_err(|_| CliError::InvalidCredentialId)?;
             Operation::Revoke { id }
         }
+        "duplicates" => {
+            let limit = match args.next() {
+                Some(raw) => raw.parse().map_err(|_| {
+                    CliError::Usage(format!("duplicates limit `{raw}` is not a number"))
+                })?,
+                None => DEFAULT_DUPLICATE_LIMIT,
+            };
+            ensure_no_extra_args(&mut args)?;
+            Operation::Duplicates { limit }
+        }
         _ => {
             return Err(CliError::Usage(format!(
                 "unknown command `{command}` (try --help)"
@@ -124,6 +140,11 @@ async fn main() -> Result<(), CliError> {
                 )));
             }
         }
+        Operation::Duplicates { limit } => {
+            let repository = PostgresTrackRepository::new(database.pool());
+            let candidates = repository.duplicate_candidates(limit).await?;
+            print_duplicates(&candidates);
+        }
     }
 
     Ok(())
@@ -141,6 +162,72 @@ enum Operation {
     Revoke {
         id: Uuid,
     },
+    Duplicates {
+        limit: u32,
+    },
+}
+
+fn print_duplicates(candidates: &[DuplicateCandidate]) {
+    if candidates.is_empty() {
+        println!("no track has more than one local file");
+        return;
+    }
+
+    let wasted: u64 = candidates
+        .iter()
+        .map(DuplicateCandidate::wasted_bytes)
+        .sum();
+
+    println!(
+        "{} tracks hold more than one local file; the copies a keep-rule would retire total {}",
+        candidates.len(),
+        human_bytes(wasted)
+    );
+
+    for candidate in candidates {
+        println!(
+            "\n{} — {}",
+            candidate.artists().join("; "),
+            candidate.title()
+        );
+
+        let keep = candidate.keep().map(|(source, reason)| {
+            println!("  reason: {}", reason.as_str());
+            source.source().clone()
+        });
+
+        for source in candidate.sources() {
+            let marker = if Some(source.source()) == keep.as_ref() {
+                "keep  "
+            } else {
+                "retire"
+            };
+
+            println!(
+                "  {marker}  {:>10}  {:<6}  {}",
+                human_bytes(source.size_bytes()),
+                source.suffix().unwrap_or("-"),
+                source.path()
+            );
+        }
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn load_dotenv() -> Result<Vec<(String, String)>, CliError> {
@@ -214,7 +301,8 @@ fn print_help() {
          Usage:\n\
          \\twhio-cli [--database-url <url>] [--credential-key <key>] create-user <username> [display-name]\n\
          \\twhio-cli [--database-url <url>] [--credential-key <key>] mint-app-password <username> [label]\n\
-         \\twhio-cli [--database-url <url>] revoke <credential-id>\n\n\
+         \\twhio-cli [--database-url <url>] revoke <credential-id>\n\
+         \\twhio-cli [--database-url <url>] duplicates [limit]\n\n\
          Configuration (first match wins):\n\
          \\t--database-url / --credential-key flags\n\
          \\tWHIO_DATABASE_URL / WHIO_CREDENTIAL_KEY environment variables\n\

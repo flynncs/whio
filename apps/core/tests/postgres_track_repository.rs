@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 use whio_core::tracks::{
-    AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef,
+    AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef, KeepReason,
     PostgresTrackRepository, ProviderId, SourceFileFacts, SourceIdentity, SourceScope, StateTarget,
     TrackId, TrackMetadata, TrackRepository, TrackRepositoryError,
 };
@@ -881,6 +881,18 @@ async fn search_finds_a_title_across_typographic_variants(pool: PgPool) {
     }
 }
 
+fn facts(path: &str, size_bytes: u64, suffix: &str) -> SourceFileFacts {
+    SourceFileFacts {
+        path: Some(path.to_owned()),
+        size_bytes,
+        modified_at: None,
+        missing_at: None,
+        content_type: None,
+        suffix: Some(suffix.to_owned()),
+        acoustid_fingerprint: None,
+    }
+}
+
 fn identified(title: &str, recording_id: &str) -> TrackMetadata {
     metadata(title, &["Artist"], Some(1_000))
         .with_recording_id(Some(recording_id.to_owned()))
@@ -1030,21 +1042,11 @@ async fn a_rejected_file_leaves_no_source_behind(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool);
     let source = local_source("bad.flac");
 
-    let facts = |suffix: String| SourceFileFacts {
-        path: Some("bad.flac".to_owned()),
-        size_bytes: 10,
-        modified_at: None,
-        missing_at: None,
-        content_type: None,
-        suffix: Some(suffix),
-        acoustid_fingerprint: None,
-    };
-
     let refused = repository
         .index_source(
             source.clone(),
             metadata("Song", &["Artist"], Some(1_000)),
-            &facts("x".repeat(40)),
+            &facts("bad.flac", 10, &"x".repeat(40)),
         )
         .await;
     assert!(refused.is_err(), "the suffix exceeds its bound");
@@ -1070,7 +1072,7 @@ async fn a_rejected_file_leaves_no_source_behind(pool: PgPool) {
         .index_source(
             source.clone(),
             metadata("Song", &["Artist"], Some(1_000)),
-            &facts("flac".to_owned()),
+            &facts("bad.flac", 10, "flac"),
         )
         .await
         .unwrap();
@@ -1083,6 +1085,54 @@ async fn a_rejected_file_leaves_no_source_behind(pool: PgPool) {
             .is_some(),
         "the same file indexes once its facts are valid"
     );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn duplicate_candidates_report_local_copies(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+
+    let first = repository
+        .index_source(
+            local_source("a/song.flac"),
+            identified("Song", "rec-1"),
+            &facts("a/song.flac", 900, "flac"),
+        )
+        .await
+        .unwrap();
+    repository
+        .index_source(
+            local_source("b/song.mp3"),
+            identified("Song", "rec-1"),
+            &facts("b/song.mp3", 100, "mp3"),
+        )
+        .await
+        .unwrap();
+    repository
+        .index_source(
+            local_source("c/other.flac"),
+            identified("Other", "rec-2"),
+            &facts("c/other.flac", 500, "flac"),
+        )
+        .await
+        .unwrap();
+
+    let candidates = repository.duplicate_candidates(10).await.unwrap();
+    assert_eq!(
+        candidates.len(),
+        1,
+        "only the track holding two files is reported"
+    );
+
+    let candidate = &candidates[0];
+    assert_eq!(candidate.track_id(), first.id());
+    assert_eq!(candidate.title(), "Song");
+    assert_eq!(candidate.sources().len(), 2);
+    assert_eq!(candidate.wasted_bytes(), 100);
+
+    let (keep, reason) = candidate.keep().unwrap();
+    assert_eq!(keep.path(), "a/song.flac");
+    assert_eq!(reason, KeepReason::LosslessOverLossy);
 }
 
 #[sqlx::test]

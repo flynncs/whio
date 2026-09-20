@@ -6,10 +6,10 @@ use uuid::Uuid;
 
 use crate::tracks::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
-    AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, GenreSummary,
-    LOCAL_PROVIDER_ID, LibraryState, ProviderId, SourceFileFacts, SourceIdentity, SourceScope,
-    Starred, StateTarget, Track, TrackHit, TrackId, TrackMetadata, TrackRepository,
-    TrackRepositoryError,
+    AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, DuplicateCandidate,
+    DuplicateSource, GenreSummary, LOCAL_PROVIDER_ID, LibraryState, ProviderId, SourceFileFacts,
+    SourceIdentity, SourceScope, Starred, StateTarget, Track, TrackHit, TrackId, TrackMetadata,
+    TrackRepository, TrackRepositoryError,
 };
 
 use super::domain::normalize_for_matching;
@@ -54,6 +54,86 @@ impl TrackRepository for PostgresTrackRepository {
         tx.commit().await.map_err(repository_error)?;
 
         Ok(Track::new(track_id, metadata))
+    }
+
+    async fn duplicate_candidates(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<DuplicateCandidate>, TrackRepositoryError> {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                Option<i64>,
+                String,
+                String,
+                String,
+                String,
+                String,
+                Option<i64>,
+                Option<String>,
+            ),
+        >(
+            r#"
+            WITH duplicated AS (
+                SELECT track_id
+                FROM track_sources
+                WHERE provider_id = $2
+                GROUP BY track_id
+                HAVING count(*) > 1
+                ORDER BY track_id
+                LIMIT $1
+            )
+            SELECT t.id, t.title, t.duration_ms,
+                   coalesce((
+                       SELECT string_agg(credits.name, '; ' ORDER BY credits.position)
+                       FROM track_artist_credits AS credits
+                       WHERE credits.track_id = t.id
+                   ), ''),
+                   s.provider_id, s.source_scope, s.external_id,
+                   coalesce(s.path, ''), s.size_bytes, s.suffix
+            FROM tracks AS t
+            JOIN track_sources AS s ON s.track_id = t.id
+            WHERE s.provider_id = $2
+              AND t.id IN (SELECT track_id FROM duplicated)
+            ORDER BY t.title_normalized, t.id, s.path
+            "#,
+        )
+        .bind(i64::from(limit))
+        .bind(LOCAL_PROVIDER_ID)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        let mut candidates: Vec<DuplicateCandidate> = Vec::new();
+
+        for row in rows {
+            let track_id = TrackId::from_uuid(row.0);
+            let source = DuplicateSource::new(
+                decode_source(row.4, row.5, row.6)?,
+                row.7,
+                row.8.unwrap_or_default().max(0) as u64,
+                row.9,
+            );
+
+            match candidates.last_mut() {
+                Some(last) if last.track_id() == &track_id => last.push_source(source),
+                _ => candidates.push(DuplicateCandidate::new(
+                    track_id,
+                    row.1,
+                    row.2.and_then(|ms| u64::try_from(ms).ok()),
+                    row.3
+                        .split("; ")
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                    vec![source],
+                )),
+            }
+        }
+
+        Ok(candidates)
     }
 
     async fn find_sources(

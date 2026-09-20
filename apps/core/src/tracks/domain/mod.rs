@@ -1,6 +1,7 @@
 mod album;
 mod artist;
 mod artwork;
+mod duplicates;
 mod error;
 mod metadata;
 mod source;
@@ -14,6 +15,7 @@ pub use album::{
 };
 pub use artist::{Artist, ArtistCredit, ArtistId, ArtistSummary};
 pub use artwork::ArtworkRef;
+pub use duplicates::{DuplicateCandidate, DuplicateSource, KeepReason};
 pub use error::ValidationError;
 pub use metadata::TrackMetadata;
 pub use source::{
