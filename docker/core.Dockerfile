@@ -14,7 +14,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 WORKDIR /workspace/apps/core
 
-CMD ["cargo", "watch", "--poll", "--why", "-w", ".", "-w", "../resolver-client-generated", "-x", "run"]
+CMD ["cargo", "watch", "--poll", "--why", "-w", ".", "-w", "../resolver-client-generated", "-w", "../subsonic-types-generated", "-x", "run"]
 
 FROM rust-base AS builder
 
