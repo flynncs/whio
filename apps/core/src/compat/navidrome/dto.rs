@@ -37,7 +37,7 @@ pub(crate) struct SongListQuery {
     #[serde(rename = "_start")]
     pub(crate) start: Option<u32>,
     #[serde(rename = "_end")]
-    pub(crate) end: Option<u32>,
+    pub(crate) end: Option<i64>,
 }
 
 #[derive(Serialize)]

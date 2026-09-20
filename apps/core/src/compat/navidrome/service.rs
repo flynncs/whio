@@ -185,7 +185,10 @@ pub(crate) async fn search_songs(
     }
 
     let start = query.start.unwrap_or(0);
-    let end = query.end.unwrap_or_else(|| start.saturating_add(24));
+    let end = match query.end {
+        Some(end) if end >= 0 => end as u32,
+        _ => start.saturating_add(24),
+    };
     if end < start {
         return Err(SongError::InvalidSearch);
     }
@@ -564,7 +567,7 @@ mod tests {
         )
     }
 
-    fn query(title: Option<&str>, start: Option<u32>, end: Option<u32>) -> SongListQuery {
+    fn query(title: Option<&str>, start: Option<u32>, end: Option<i64>) -> SongListQuery {
         SongListQuery {
             title: title.map(str::to_owned),
             album_id: None,
@@ -689,6 +692,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unbounded_end_is_not_a_search_error() {
+        let auth = auth();
+        let songs = search_songs(
+            &catalogue(vec![Ok(vec![candidate()])]),
+            &auth.service,
+            &context(),
+            &auth.token,
+            &query(Some("song"), Some(0), Some(-1)),
+            SourceTags::Off,
+        )
+        .await
+        .expect("an unbounded end is accepted");
+        assert_eq!(songs.len(), 1);
+    }
+
+    #[tokio::test]
     async fn bounded_search_window_pages_offsets_and_rejects_beyond() {
         let auth = auth();
         let result = search_songs(
@@ -708,7 +727,7 @@ mod tests {
             auth: &TestAuth,
             context: &RequestContext,
             start: u32,
-            end: u32,
+            end: i64,
         ) -> Vec<Song> {
             search_songs(
                 catalogue,
