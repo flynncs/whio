@@ -30,32 +30,36 @@ use envelope::{
 };
 
 pub(crate) fn router() -> Router<AppState> {
-    Router::new()
-        .route("/ping.view", get(ping).post(ping))
-        .route("/getUser.view", get(get_user).post(get_user))
-        .route("/search3.view", get(search3).post(search3))
-        .route("/getAlbumList2.view", get(get_album_list2))
-        .route("/getAlbum.view", get(get_album))
-        .route("/getArtists.view", get(get_artists))
-        .route("/getArtist.view", get(get_artist))
-        .route("/getStarred2.view", get(get_starred2).post(get_starred2))
-        .route("/getGenres.view", get(get_genres).post(get_genres))
-        .route(
-            "/getScanStatus.view",
-            get(get_scan_status).post(get_scan_status),
-        )
-        .route("/startScan.view", get(start_scan).post(start_scan))
-        .route("/star.view", get(star).post(star))
-        .route("/unstar.view", get(unstar).post(unstar))
-        .route("/setRating.view", get(set_rating).post(set_rating))
-        .route("/scrobble.view", get(scrobble).post(scrobble))
-        .route("/stream.view", get(stream))
-        .route("/getCoverArt.view", get(get_cover_art))
-        .route(
-            "/getOpenSubsonicExtensions.view",
+    [
+        ("/ping", get(ping).post(ping)),
+        ("/getUser", get(get_user).post(get_user)),
+        ("/search3", get(search3).post(search3)),
+        ("/getAlbumList2", get(get_album_list2)),
+        ("/getAlbum", get(get_album)),
+        ("/getArtists", get(get_artists)),
+        ("/getArtist", get(get_artist)),
+        ("/getStarred2", get(get_starred2).post(get_starred2)),
+        ("/getGenres", get(get_genres).post(get_genres)),
+        ("/getScanStatus", get(get_scan_status).post(get_scan_status)),
+        ("/startScan", get(start_scan).post(start_scan)),
+        ("/star", get(star).post(star)),
+        ("/unstar", get(unstar).post(unstar)),
+        ("/setRating", get(set_rating).post(set_rating)),
+        ("/scrobble", get(scrobble).post(scrobble)),
+        ("/stream", get(stream)),
+        ("/getCoverArt", get(get_cover_art)),
+        (
+            "/getOpenSubsonicExtensions",
             get(get_open_subsonic_extensions).post(get_open_subsonic_extensions),
-        )
-        .fallback(unsupported)
+        ),
+    ]
+    .into_iter()
+    .fold(Router::new(), |router, (path, methods)| {
+        router
+            .route(&format!("{path}.view"), methods.clone())
+            .route(path, methods)
+    })
+    .fallback(unsupported)
 }
 
 // grammar failures never reach these handlers: the SubsonicAuth rejection is
