@@ -16,15 +16,29 @@ WORKDIR /workspace/apps/core
 
 CMD ["cargo", "watch", "--poll", "--why", "-w", ".", "-w", "../resolver-client-generated", "-w", "../subsonic-types-generated", "-x", "run"]
 
-FROM rust-base AS builder
+FROM rust-base AS deps
 
 COPY apps/core/Cargo.toml apps/core/Cargo.lock ./apps/core/
+COPY apps/resolver-client-generated/Cargo.toml ./apps/resolver-client-generated/
+COPY apps/subsonic-types-generated/Cargo.toml ./apps/subsonic-types-generated/
+
+RUN mkdir -p apps/core/src/bin apps/resolver-client-generated/src apps/subsonic-types-generated/src \
+    && printf 'fn main() {}\n' > apps/core/src/main.rs \
+    && printf 'fn main() {}\n' > apps/core/src/bin/whio-cli.rs \
+    && touch apps/core/src/lib.rs apps/resolver-client-generated/src/lib.rs apps/subsonic-types-generated/src/lib.rs
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --release --locked --manifest-path apps/core/Cargo.toml --bins
+
+FROM deps AS builder
+
 COPY apps/core/src ./apps/core/src
 COPY apps/core/migrations ./apps/core/migrations
-COPY apps/resolver-client-generated/Cargo.toml ./apps/resolver-client-generated/
 COPY apps/resolver-client-generated/src ./apps/resolver-client-generated/src
-COPY apps/subsonic-types-generated/Cargo.toml ./apps/subsonic-types-generated/
 COPY apps/subsonic-types-generated/src ./apps/subsonic-types-generated/src
+
+RUN find apps/core/src apps/resolver-client-generated/src apps/subsonic-types-generated/src -type f -exec touch {} +
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
