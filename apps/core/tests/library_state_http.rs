@@ -12,7 +12,7 @@ use whio_core::{
     AppState,
     catalogue::CatalogueService,
     library::ScanService,
-    playback::{PlaybackProvider, PlaybackService},
+    playback::{PlaybackProvider, StreamingService},
     providers::YtmAdapter,
     tracks::{
         AlbumMetadata, AlbumTrack, ArtistCredit, InMemoryTrackRepository, ProviderId,
@@ -105,7 +105,7 @@ async fn seeded_app() -> Seeded {
     let scanner = ScanService::new(repository.clone(), vec![root]);
     scanner.start();
     let catalogue = Arc::new(CatalogueService::new(repository.clone()));
-    let playback = Arc::new(PlaybackService::new(
+    let playback = Arc::new(StreamingService::new(
         repository,
         vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
         delivery(),

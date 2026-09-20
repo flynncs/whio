@@ -1,7 +1,4 @@
-use std::{
-    path::{Component, Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -10,6 +7,7 @@ use crate::{
     playback::{LocalMedia, PlaybackProvider, PlaybackSource, ResolvedPlayback},
     providers::ProviderError,
     request::RequestContext,
+    source_path::local_path,
     tracks::{ProviderKind, SourceScope, TrackRepository, TrackRepositoryError},
 };
 
@@ -57,7 +55,7 @@ impl PlaybackProvider for LocalPlaybackProvider {
         let Some(relative) = facts.path.as_deref() else {
             return Ok(None);
         };
-        let Some(absolute) = resolve_path(root, relative) else {
+        let Some(absolute) = local_path(root, relative) else {
             return Ok(None);
         };
 
@@ -89,22 +87,6 @@ impl PlaybackProvider for LocalPlaybackProvider {
     }
 }
 
-/// a stored path is relative to the root it was scanned under. anything that
-/// could leave that root is not a path this scanner wrote.
-pub(crate) fn resolve_path(root: &str, relative: &str) -> Option<PathBuf> {
-    let relative = Path::new(relative);
-
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        return None;
-    }
-
-    Some(Path::new(root).join(relative))
-}
-
 fn content_type_for_suffix(suffix: &str) -> Option<&'static str> {
     match suffix {
         "flac" => Some("audio/flac"),
@@ -129,6 +111,8 @@ fn repository_error(error: TrackRepositoryError) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
     use crate::{
         request::RequestId,

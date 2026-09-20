@@ -44,7 +44,7 @@ pub(crate) enum ApiError {
     },
     Artwork {
         context: RequestContext,
-        error: crate::media::MediaFetchError,
+        error: crate::artwork::ArtworkError,
     },
 }
 
@@ -138,12 +138,12 @@ impl IntoResponse for ApiError {
                 error => playback_error_response(error, context),
             },
             ApiError::Artwork { context, error } => {
-                let (status, code, message) = media_error_details(&error);
+                let (status, code, message) = artwork_error_details(&error);
 
                 tracing::error!(
                     error = %error,
                     request_id = context.request_id().as_str(),
-                    "artwork fetch failed"
+                    "artwork resolution failed"
                 );
 
                 error_response(status, code, message, context)
@@ -209,6 +209,31 @@ fn playback_error_details(error: &PlaybackError) -> (StatusCode, &'static str, &
             StatusCode::BAD_GATEWAY,
             "stream_failure",
             "The upstream media response was invalid",
+        ),
+    }
+}
+
+fn artwork_error_details(
+    error: &crate::artwork::ArtworkError,
+) -> (StatusCode, &'static str, &'static str) {
+    use crate::artwork::ArtworkError;
+    use crate::media::MediaFetchError;
+
+    match error {
+        ArtworkError::Fetch(MediaFetchError::Request(_)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "artwork_unavailable",
+            "Artwork is temporarily unavailable",
+        ),
+        ArtworkError::Fetch(_) => (
+            StatusCode::BAD_GATEWAY,
+            "artwork_failure",
+            "The upstream artwork response was invalid",
+        ),
+        ArtworkError::Repository(_) | ArtworkError::Unavailable => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "An unexpected error occurred",
         ),
     }
 }

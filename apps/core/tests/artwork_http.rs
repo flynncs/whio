@@ -12,15 +12,16 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::credentials::{MemoryCredentialStore, TEST_PASSWORD};
-use support::{NATIVE_AUTH_QUERY, delivery, router};
+use support::{NATIVE_AUTH_QUERY, delivery, router_with_artwork};
 use whio_core::{
+    artwork::ArtworkService,
     catalogue::CatalogueService,
     identity::{
         domain::{User, UserId},
         secrets::CredentialKey,
         service::CredentialService,
     },
-    playback::PlaybackService,
+    playback::StreamingService,
     tracks::{
         ArtworkRef, InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope,
         TrackMetadata, TrackRepository,
@@ -89,10 +90,14 @@ async fn public_app(url: &str) -> (axum::Router, String) {
     let catalogue = Arc::new(CatalogueService::new(
         Arc::clone(&repository) as Arc<dyn TrackRepository>
     ));
-    let playback = Arc::new(PlaybackService::new(repository, Vec::new(), delivery()));
+    let artwork = Arc::new(ArtworkService::new(
+        Arc::clone(&repository) as Arc<dyn TrackRepository>,
+        whio_core::media::default_artwork_host_suffixes(),
+    ));
+    let playback = Arc::new(StreamingService::new(repository, Vec::new(), delivery()));
 
     (
-        router(credential, catalogue, playback),
+        router_with_artwork(credential, catalogue, playback, artwork),
         track.id().to_string(),
     )
 }
@@ -197,10 +202,14 @@ async fn pictured_app() -> (axum::Router, String, String, String) {
     let catalogue = Arc::new(CatalogueService::new(
         Arc::clone(&repository) as Arc<dyn TrackRepository>
     ));
-    let playback = Arc::new(PlaybackService::new(repository, Vec::new(), delivery()));
+    let artwork = Arc::new(ArtworkService::new(
+        Arc::clone(&repository) as Arc<dyn TrackRepository>,
+        whio_core::media::default_artwork_host_suffixes(),
+    ));
+    let playback = Arc::new(StreamingService::new(repository, Vec::new(), delivery()));
 
     (
-        router(credential, catalogue, playback),
+        router_with_artwork(credential, catalogue, playback, artwork),
         format!("al-{}", album.id()),
         format!("ar-{}", artist.id()),
         track.id().to_string(),

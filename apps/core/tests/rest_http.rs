@@ -17,7 +17,7 @@ use tower::ServiceExt;
 use whio_core::{
     catalogue::CatalogueService,
     identity::secrets::generate_app_secret,
-    playback::{PlaybackProvider, PlaybackService},
+    playback::{PlaybackProvider, StreamingService},
     providers::YtmAdapter,
     tracks::InMemoryTrackRepository,
 };
@@ -25,7 +25,7 @@ use whio_core::{
 fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
     let repository = Arc::new(InMemoryTrackRepository::default());
     let catalogue = Arc::new(CatalogueService::new(repository.clone()));
-    let playback = Arc::new(PlaybackService::new(
+    let playback = Arc::new(StreamingService::new(
         repository,
         vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
         delivery(),

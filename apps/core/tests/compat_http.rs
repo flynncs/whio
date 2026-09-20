@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
     catalogue::CatalogueService,
-    playback::{PlaybackProvider, PlaybackService},
+    playback::{PlaybackProvider, StreamingService},
     providers::YtmAdapter,
     tracks::InMemoryTrackRepository,
 };
@@ -20,7 +20,7 @@ use support::{credential_service_with_known_app_password, delivery, router};
 fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
     let repository = Arc::new(InMemoryTrackRepository::default());
     let catalogue = Arc::new(CatalogueService::new(repository.clone()));
-    let playback = Arc::new(PlaybackService::new(
+    let playback = Arc::new(StreamingService::new(
         repository,
         vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
         delivery(),
@@ -118,7 +118,7 @@ async fn browse_app(
         .unwrap();
 
     let catalogue = Arc::new(CatalogueService::new(repository.clone()));
-    let playback = Arc::new(PlaybackService::new(
+    let playback = Arc::new(StreamingService::new(
         repository,
         vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
         delivery(),

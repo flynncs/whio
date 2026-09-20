@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::Router;
 
+pub mod artwork;
 pub mod catalogue;
 pub mod compat;
 pub mod database;
@@ -12,22 +13,22 @@ pub mod media;
 pub mod playback;
 pub mod providers;
 pub mod request;
+mod source_path;
 pub mod tracks;
 
 use crate::{
-    catalogue::CatalogueService, compat::SourceTags, identity::service::CredentialService,
-    library::ScanService, playback::PlaybackService,
+    artwork::ArtworkService, catalogue::CatalogueService, compat::SourceTags,
+    identity::service::CredentialService, library::ScanService, playback::StreamingService,
 };
 
 #[derive(Clone)]
 pub struct AppState {
+    artwork: Arc<ArtworkService>,
     catalogue: Arc<CatalogueService>,
     credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
-    playback: Arc<PlaybackService>,
+    streaming: Arc<StreamingService>,
     scanner: Arc<ScanService>,
-    artwork_client: reqwest::Client,
-    artwork_host_suffixes: Vec<String>,
     source_tags: SourceTags,
 }
 
@@ -35,25 +36,22 @@ impl AppState {
     pub fn new(
         credential: Arc<CredentialService>,
         catalogue: Arc<CatalogueService>,
-        playback: Arc<PlaybackService>,
+        streaming: Arc<StreamingService>,
     ) -> Self {
-        Self::build(credential, catalogue, playback, None)
+        Self::build(credential, catalogue, streaming, None)
     }
 
     pub fn with_database(
         credential: Arc<CredentialService>,
         catalogue: Arc<CatalogueService>,
-        playback: Arc<PlaybackService>,
+        streaming: Arc<StreamingService>,
         database: Arc<database::Database>,
     ) -> Self {
-        Self::build(credential, catalogue, playback, Some(database))
+        Self::build(credential, catalogue, streaming, Some(database))
     }
 
-    /// host suffixes accepted for public provider artwork. replaces the default
-    /// set for both validation and redirects.
-    pub fn with_artwork_host_suffixes(mut self, suffixes: Vec<String>) -> Self {
-        self.artwork_client = media::client(media::artwork_redirect_policy(suffixes.clone()));
-        self.artwork_host_suffixes = suffixes;
+    pub fn with_artwork(mut self, artwork: Arc<ArtworkService>) -> Self {
+        self.artwork = artwork;
         self
     }
 
@@ -74,20 +72,16 @@ impl AppState {
     fn build(
         credential: Arc<CredentialService>,
         catalogue: Arc<CatalogueService>,
-        playback: Arc<PlaybackService>,
+        streaming: Arc<StreamingService>,
         database: Option<Arc<database::Database>>,
     ) -> Self {
-        let artwork_host_suffixes = media::default_artwork_host_suffixes();
         Self {
+            artwork: Arc::new(ArtworkService::disabled()),
             credential,
             catalogue,
             database,
-            playback,
+            streaming,
             scanner: ScanService::disabled(),
-            artwork_client: media::client(media::artwork_redirect_policy(
-                artwork_host_suffixes.clone(),
-            )),
-            artwork_host_suffixes,
             source_tags: SourceTags::Off,
         }
     }
@@ -104,20 +98,16 @@ impl AppState {
         &self.credential
     }
 
-    pub(crate) fn playback(&self) -> &PlaybackService {
-        &self.playback
+    pub(crate) fn streaming(&self) -> &StreamingService {
+        &self.streaming
+    }
+
+    pub(crate) fn artwork(&self) -> &ArtworkService {
+        &self.artwork
     }
 
     pub(crate) fn scanner(&self) -> &ScanService {
         &self.scanner
-    }
-
-    pub(crate) fn artwork_client(&self) -> &reqwest::Client {
-        &self.artwork_client
-    }
-
-    pub(crate) fn artwork_host_suffixes(&self) -> &[String] {
-        &self.artwork_host_suffixes
     }
 
     pub(crate) fn source_tags(&self) -> SourceTags {

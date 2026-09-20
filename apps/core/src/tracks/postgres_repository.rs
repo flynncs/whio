@@ -162,11 +162,10 @@ impl TrackRepository for PostgresTrackRepository {
     ) -> Result<(), TrackRepositoryError> {
         sqlx::query(
             r#"UPDATE track_sources
-            SET artwork_kind = $1, artwork_ref = $2
-            WHERE provider_id = $3 AND source_scope = $4 AND external_id = $5
+            SET artwork_ref = $1
+            WHERE provider_id = $2 AND source_scope = $3 AND external_id = $4
             "#,
         )
-        .bind(artwork.kind())
         .bind(artwork.reference())
         .bind(source.provider_id().as_str())
         .bind(encode_source_scope(source.source_scope()))
@@ -181,11 +180,10 @@ impl TrackRepository for PostgresTrackRepository {
         &self,
         track_id: &TrackId,
     ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
-        let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
-            r#"SELECT provider_id, source_scope, external_id, artwork_kind, artwork_ref
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            r#"SELECT provider_id, source_scope, external_id, artwork_ref
             FROM track_sources
             WHERE track_id = $1
-              AND artwork_kind IS NOT NULL
               AND artwork_ref IS NOT NULL
             ORDER BY created_at, id
             "#,
@@ -196,9 +194,9 @@ impl TrackRepository for PostgresTrackRepository {
         .map_err(|_| TrackRepositoryError::Unavailable)?;
 
         let mut best: Option<(SourceIdentity, ArtworkRef)> = None;
-        for (provider_id, source_scope, external_id, kind, reference) in rows {
+        for (provider_id, source_scope, external_id, reference) in rows {
             let source = decode_source(provider_id, source_scope, external_id)?;
-            let artwork = ArtworkRef::from_stored(&kind, reference)
+            let artwork = ArtworkRef::from_stored(reference)
                 .map_err(|_| TrackRepositoryError::InvalidData)?;
 
             let outranks = best.as_ref().is_none_or(|(current, _)| {

@@ -2,6 +2,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    artwork::CoverArtTarget,
     catalogue::{
         CatalogueError, CatalogueSearch, CatalogueService, SearchHit, SearchLimit, SearchOffset,
         SearchQuery,
@@ -11,7 +12,7 @@ use crate::{
     request::RequestContext,
     tracks::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistSummary,
-        CoverArtTarget, GenreSummary, TrackId,
+        GenreSummary, TrackId,
     },
 };
 

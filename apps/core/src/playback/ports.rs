@@ -5,7 +5,7 @@ use crate::{
     playback::{DeliveryError, DeliveryResult, PlaybackSource, ResolvedPlayback},
     providers::ProviderError,
     request::RequestContext,
-    tracks::{ArtworkRef, ProviderKind},
+    tracks::ProviderKind,
 };
 
 #[async_trait]
@@ -25,16 +25,6 @@ pub trait PlaybackProvider: Send + Sync {
         _user: Option<&Uuid>,
     ) -> ProviderError {
         ProviderError::ProviderUnavailable
-    }
-
-    async fn resolve_artwork(
-        &self,
-        _source: &PlaybackSource,
-        _artwork: &ArtworkRef,
-        _user: Option<&Uuid>,
-        _context: &RequestContext,
-    ) -> Result<Option<String>, ProviderError> {
-        Ok(None)
     }
 }
 

@@ -11,10 +11,11 @@ use axum::Router;
 use uuid::Uuid;
 use whio_core::{
     AppState,
+    artwork::ArtworkService,
     catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch, CatalogueService},
     compat::SourceTags,
     identity::service::CredentialService,
-    playback::{PlaybackProvider, PlaybackService, PlaybackSource, ResolvedPlayback},
+    playback::{PlaybackProvider, PlaybackSource, ResolvedPlayback, StreamingService},
     providers::ProviderError,
     request::RequestContext,
     tracks::{InMemoryTrackRepository, ProviderKind},
@@ -34,7 +35,7 @@ pub use media::{delivery, pictured_flac};
 pub fn router(
     credential: Arc<CredentialService>,
     catalogue: Arc<CatalogueService>,
-    playback: Arc<PlaybackService>,
+    playback: Arc<StreamingService>,
 ) -> Router {
     router_with_source_tags(credential, catalogue, playback, SourceTags::Off)
 }
@@ -42,10 +43,19 @@ pub fn router(
 pub fn router_with_source_tags(
     credential: Arc<CredentialService>,
     catalogue: Arc<CatalogueService>,
-    playback: Arc<PlaybackService>,
+    playback: Arc<StreamingService>,
     tags: SourceTags,
 ) -> Router {
     whio_core::router(AppState::new(credential, catalogue, playback).with_source_tags(tags))
+}
+
+pub fn router_with_artwork(
+    credential: Arc<CredentialService>,
+    catalogue: Arc<CatalogueService>,
+    playback: Arc<StreamingService>,
+    artwork: Arc<ArtworkService>,
+) -> Router {
+    whio_core::router(AppState::new(credential, catalogue, playback).with_artwork(artwork))
 }
 
 struct StubProvider {
@@ -82,7 +92,7 @@ impl PlaybackProvider for StubProvider {
 
 pub fn services(
     responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>,
-) -> (Arc<CatalogueService>, Arc<PlaybackService>) {
+) -> (Arc<CatalogueService>, Arc<StreamingService>) {
     let provider = Arc::new(StubProvider {
         responses: Mutex::new(responses.into()),
     });
@@ -91,7 +101,7 @@ pub fn services(
         track_repository.clone(),
         vec![provider.clone() as Arc<dyn CatalogueProvider>],
     ));
-    let playback = Arc::new(PlaybackService::new(
+    let playback = Arc::new(StreamingService::new(
         track_repository,
         vec![provider as Arc<dyn PlaybackProvider>],
         delivery(),

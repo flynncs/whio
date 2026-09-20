@@ -1,11 +1,12 @@
 use whio_subsonic_api::models;
 
 use crate::{
+    artwork::CoverArtTarget,
     catalogue::{AlbumDetail, ArtistDetail, SearchHit},
     compat::SourceTags,
     tracks::{
-        Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary,
-        CoverArtTarget, GenreSummary, LibraryState, SourceIdentity, Track,
+        Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary, GenreSummary,
+        LibraryState, SourceIdentity, Track,
     },
 };
 

@@ -11,7 +11,7 @@ use support::{NATIVE_AUTH_QUERY, credential_service, router};
 use tower::ServiceExt;
 use whio_core::{
     catalogue::CatalogueService,
-    playback::{PlaybackProvider, PlaybackService},
+    playback::{PlaybackProvider, StreamingService},
     providers::LocalPlaybackProvider,
     tracks::{
         InMemoryTrackRepository, ProviderId, SourceFileFacts, SourceIdentity, SourceScope, TrackId,
@@ -66,7 +66,7 @@ async fn app() -> (Router, TrackId, PathBuf) {
         .unwrap();
 
     let catalogue = Arc::new(CatalogueService::with_providers(repository.clone(), vec![]));
-    let playback = Arc::new(PlaybackService::new(
+    let playback = Arc::new(StreamingService::new(
         repository.clone(),
         vec![Arc::new(LocalPlaybackProvider::new(repository.clone())) as Arc<dyn PlaybackProvider>],
         support::delivery(),

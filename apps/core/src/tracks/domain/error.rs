@@ -20,7 +20,4 @@ pub enum ValidationError {
 
     #[error("duration_ms must not be negative")]
     InvalidDuration,
-
-    #[error("artwork kind is not recognised")]
-    InvalidArtworkKind,
 }

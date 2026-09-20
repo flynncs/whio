@@ -21,8 +21,8 @@ use whio_core::{
     delivery::StreamDelivery,
     media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
     playback::{
-        MediaMetadata, PlayableMedia, PlaybackProvider, PlaybackService, PlaybackSource,
-        PlaybackUrl, ResolvedPlayback,
+        MediaMetadata, PlayableMedia, PlaybackProvider, PlaybackSource, PlaybackUrl,
+        ResolvedPlayback, StreamingService,
     },
     providers::ProviderError,
     request::RequestContext,
@@ -148,7 +148,7 @@ fn app_with_media_bytes(bytes: Vec<u8>) -> (Router, Arc<StubProvider>) {
         track_repository.clone(),
         vec![provider.clone() as Arc<dyn CatalogueProvider>],
     ));
-    let playback = Arc::new(PlaybackService::new(
+    let playback = Arc::new(StreamingService::new(
         track_repository,
         vec![provider.clone() as Arc<dyn PlaybackProvider>],
         Arc::new(StreamDelivery::new(

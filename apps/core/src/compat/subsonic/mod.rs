@@ -325,7 +325,7 @@ pub(crate) async fn stream(
         .map(str::to_owned);
 
     match state
-        .playback()
+        .streaming()
         .stream(&track_id, Some(&user_uuid), &context, client_range)
         .await
     {
@@ -341,26 +341,25 @@ pub(crate) async fn get_cover_art(
     query: RawQuery,
     headers: HeaderMap,
 ) -> Response {
+    use crate::artwork::ArtworkOutcome;
     use crate::http::routes::artwork;
     use axum::http::header::IF_NONE_MATCH;
 
-    let principal = match authenticate(&state, &context, auth).await {
-        Ok(principal) => principal,
-        Err(response) => return response,
-    };
+    if let Err(response) = authenticate(&state, &context, auth).await {
+        return response;
+    }
     let Some(id) = query.get("id") else {
         return SubsonicError::MissingParameter.into_response();
     };
 
-    let user_uuid = principal.user_id.as_uuid();
     let if_none_match = headers
         .get(IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok());
 
-    match artwork::load(&state, &context, id, &user_uuid, if_none_match).await {
-        Ok(artwork::ArtworkOutcome::Found(artwork)) => artwork.into_response(),
-        Ok(artwork::ArtworkOutcome::NotModified(etag)) => artwork::Artwork::not_modified(etag),
-        Ok(artwork::ArtworkOutcome::Missing) => {
+    match artwork::load(&state, id, if_none_match).await {
+        Ok(ArtworkOutcome::Found(artwork)) => artwork::found_response(artwork),
+        Ok(ArtworkOutcome::NotModified(etag)) => artwork::not_modified_response(etag),
+        Ok(ArtworkOutcome::Missing) => {
             let mut response = Json(failed_envelope(
                 models::error::Code::Variant70,
                 "Cover art was not found.",

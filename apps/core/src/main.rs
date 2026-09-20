@@ -15,7 +15,7 @@ use whio_core::{
         service::CredentialService,
     },
     media::{self, HttpMediaFetcher},
-    playback::{PlaybackProvider, PlaybackService},
+    playback::{PlaybackProvider, StreamingService},
     providers::{LocalPlaybackProvider, ProviderError, YtmAdapter},
     tracks::{PostgresTrackRepository, TrackRepository},
 };
@@ -125,7 +125,11 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
     let local = Arc::new(LocalPlaybackProvider::new(track_repository.clone()));
     let scanner =
         whio_core::library::ScanService::new(track_repository.clone(), config.media_roots.clone());
-    let playback = Arc::new(PlaybackService::new(
+    let artwork = Arc::new(whio_core::artwork::ArtworkService::new(
+        track_repository.clone(),
+        config.artwork_host_suffixes.clone(),
+    ));
+    let streaming = Arc::new(StreamingService::new(
         track_repository,
         vec![
             local as Arc<dyn PlaybackProvider>,
@@ -135,9 +139,9 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
     ));
 
     Ok(
-        AppState::with_database(credential, catalogue, playback, database)
+        AppState::with_database(credential, catalogue, streaming, database)
+            .with_artwork(artwork)
             .with_scanner(scanner)
-            .with_artwork_host_suffixes(config.artwork_host_suffixes.clone())
             .with_source_tags(config.source_tags),
     )
 }

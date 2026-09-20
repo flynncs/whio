@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
     catalogue::{CatalogueProvider, CatalogueService},
-    playback::{PlaybackProvider, PlaybackService},
+    playback::{PlaybackProvider, StreamingService},
     providers::YtmAdapter,
     tracks::{
         InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
@@ -47,7 +47,7 @@ async fn app() -> (axum::Router, String) {
         repository.clone(),
         vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn CatalogueProvider>],
     ));
-    let playback = Arc::new(PlaybackService::new(
+    let playback = Arc::new(StreamingService::new(
         repository,
         vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
         delivery(),
