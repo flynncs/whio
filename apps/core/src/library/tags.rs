@@ -16,13 +16,6 @@ pub enum TagError {
     Untagged,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdentityRung {
-    MusicBrainzRecording,
-    Isrc,
-    Path,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackTags {
     pub title: String,
@@ -210,20 +203,6 @@ pub(crate) fn write_pictured_flac(destination: &Path, pictures: Vec<Picture>) {
         .expect("the pictured file saves");
 }
 
-pub fn identity_for(tags: &TrackTags, relative_path: &str) -> (IdentityRung, String) {
-    if let Some(recording_id) = non_empty(tags.recording_id.as_deref()) {
-        return (IdentityRung::MusicBrainzRecording, recording_id.to_owned());
-    }
-    if let Some(isrc) = non_empty(tags.isrc.as_deref()) {
-        return (IdentityRung::Isrc, isrc.to_owned());
-    }
-    (IdentityRung::Path, relative_path.to_owned())
-}
-
-fn non_empty(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
-}
-
 fn item(tag: &Tag, key: &ItemKey) -> Option<String> {
     tag.get_string(key)
         .map(|value| value.trim().to_owned())
@@ -299,34 +278,6 @@ fn parse_compilation(value: &str) -> Option<bool> {
 mod tests {
     use super::*;
 
-    fn tags(recording_id: Option<&str>, isrc: Option<&str>) -> TrackTags {
-        TrackTags {
-            title: "Song".to_owned(),
-            artists: vec!["Artist".to_owned()],
-            album: None,
-            album_artist: None,
-            album_artist_id: None,
-            release_group_id: None,
-            release_id: None,
-            recording_id: recording_id.map(str::to_owned),
-            isrc: isrc.map(str::to_owned),
-            track_number: None,
-            track_total: None,
-            disc_number: None,
-            disc_total: None,
-            year: None,
-            genre: None,
-            label: None,
-            release_type: None,
-            release_status: None,
-            country: None,
-            compilation: None,
-            acoustid_fingerprint: None,
-            artist_ids: Vec::new(),
-            duration_ms: None,
-        }
-    }
-
     #[test]
     fn compilation_flags_parse_the_common_spellings() {
         for value in ["1", "true", "TRUE", " yes "] {
@@ -397,36 +348,6 @@ mod tests {
         assert_eq!(tags.artist_ids, vec!["artist-one", "artist-two"]);
 
         std::fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
-    fn identity_prefers_the_recording_id_then_isrc_then_the_path() {
-        assert_eq!(
-            identity_for(&tags(Some("recording-1"), Some("isrc-1")), "a/b.flac"),
-            (IdentityRung::MusicBrainzRecording, "recording-1".to_owned())
-        );
-        assert_eq!(
-            identity_for(&tags(None, Some("isrc-1")), "a/b.flac"),
-            (IdentityRung::Isrc, "isrc-1".to_owned())
-        );
-        assert_eq!(
-            identity_for(&tags(None, None), "a/b.flac"),
-            (IdentityRung::Path, "a/b.flac".to_owned())
-        );
-    }
-
-    #[test]
-    fn identity_ignores_blank_values() {
-        assert_eq!(
-            identity_for(&tags(Some("   "), Some("isrc-1")), "a/b.flac"),
-            (IdentityRung::Isrc, "isrc-1".to_owned()),
-            "a blank recording id is not an identity"
-        );
-        assert_eq!(
-            identity_for(&tags(None, Some("  ")), "a/b.flac"),
-            (IdentityRung::Path, "a/b.flac".to_owned()),
-            "a blank isrc is not an identity"
-        );
     }
 
     #[test]

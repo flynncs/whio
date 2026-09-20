@@ -10,7 +10,7 @@ use crate::tracks::{
     SourceScope, TrackMetadata, TrackRepository, TrackRepositoryError,
 };
 
-use super::tags::{TagError, identity_for, read_tags};
+use super::tags::{TagError, read_tags};
 
 const AUDIO_EXTENSIONS: &[&str] = &[
     "flac", "mp3", "m4a", "mp4", "ogg", "oga", "opus", "wav", "aiff", "aif", "ape", "wv", "mpc",
@@ -204,7 +204,7 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
 
     match read_tags(&file.absolute) {
         Ok(tags) => {
-            let (_, external_id) = identity_for(&tags, &file.relative);
+            let external_id = file.relative.clone();
             let album = match album_metadata(&tags) {
                 Ok(album) => album,
                 Err(()) => return Prepared::Untagged,
@@ -360,7 +360,6 @@ fn is_audio(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::IdentityRung;
     use super::*;
     use crate::tracks::InMemoryTrackRepository;
 
@@ -467,10 +466,6 @@ mod tests {
             Some("11111111-2222-3333-4444-555555555555")
         );
         assert!(tags.duration_ms.is_some_and(|ms| ms > 0));
-
-        let (rung, id) = identity_for(&tags, "a.flac");
-        assert_eq!(rung, IdentityRung::MusicBrainzRecording);
-        assert_eq!(id, "11111111-2222-3333-4444-555555555555");
     }
 
     #[tokio::test]

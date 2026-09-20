@@ -64,29 +64,47 @@ impl TrackRepository for InMemoryTrackRepository {
             .lock()
             .map_err(|_| TrackRepositoryError::Unavailable)?;
 
-        if let Some(track_id) = indexes.by_source.get(&source).cloned() {
-            let entry = indexes
-                .by_track_id
-                .get_mut(&track_id)
-                .ok_or(TrackRepositoryError::Unavailable)?;
+        let track_id = match identified_track(&indexes, &metadata) {
+            Some(identified) => {
+                if let Some(previous) = indexes.by_source.get(&source).cloned()
+                    && previous != identified
+                {
+                    detach_source(&mut indexes, &source, &previous);
+                    drop_source_less_track(&mut indexes, &previous);
+                }
 
-            // the fresher observation wins for display metadata
-            entry.track = Track::new(track_id.clone(), metadata);
+                attach_source(&mut indexes, &source, &identified);
 
-            return Ok(entry.track.clone());
-        }
+                identified
+            }
+            None => match indexes.by_source.get(&source).cloned() {
+                Some(current) => current,
+                None => {
+                    let track_id = TrackId::new();
+                    let track = Track::new(track_id.clone(), metadata.clone());
 
-        let track_id = TrackId::new();
-        let track = Track::new(track_id.clone(), metadata);
-        let entry = TrackEntry {
-            track: track.clone(),
-            sources: vec![source.clone()],
+                    indexes.by_track_id.insert(
+                        track_id.clone(),
+                        TrackEntry {
+                            track,
+                            sources: vec![source.clone()],
+                        },
+                    );
+                    indexes.by_source.insert(source, track_id.clone());
+
+                    track_id
+                }
+            },
         };
 
-        indexes.by_source.insert(source, track_id.clone());
-        indexes.by_track_id.insert(track_id, entry);
+        let entry = indexes
+            .by_track_id
+            .get_mut(&track_id)
+            .ok_or(TrackRepositoryError::Unavailable)?;
 
-        return Ok(track);
+        entry.track = Track::new(track_id, metadata);
+
+        Ok(entry.track.clone())
     }
 
     async fn find_sources(
@@ -740,6 +758,52 @@ fn owned(sources: &[SourceIdentity]) -> bool {
         .any(|source| source.provider_id().kind() == Some(ProviderKind::Local))
 }
 
+fn identified_track(indexes: &TrackIndexes, metadata: &TrackMetadata) -> Option<TrackId> {
+    if let Some(recording_id) = metadata.musicbrainz_recording_id()
+        && let Some((track_id, _)) = indexes
+            .by_track_id
+            .iter()
+            .find(|(_, entry)| entry.track.musicbrainz_recording_id() == Some(recording_id))
+    {
+        return Some(track_id.clone());
+    }
+
+    let isrc = metadata.isrc()?;
+    let mut matches = indexes
+        .by_track_id
+        .iter()
+        .filter(|(_, entry)| entry.track.isrc() == Some(isrc));
+    let only = matches.next()?;
+
+    matches.next().is_none().then(|| only.0.clone())
+}
+
+fn attach_source(indexes: &mut TrackIndexes, source: &SourceIdentity, track_id: &TrackId) {
+    if let Some(entry) = indexes.by_track_id.get_mut(track_id)
+        && !entry.sources.contains(source)
+    {
+        entry.sources.push(source.clone());
+    }
+
+    indexes.by_source.insert(source.clone(), track_id.clone());
+}
+
+fn detach_source(indexes: &mut TrackIndexes, source: &SourceIdentity, track_id: &TrackId) {
+    if let Some(entry) = indexes.by_track_id.get_mut(track_id) {
+        entry.sources.retain(|existing| existing != source);
+    }
+}
+
+fn drop_source_less_track(indexes: &mut TrackIndexes, track_id: &TrackId) {
+    if indexes
+        .by_track_id
+        .get(track_id)
+        .is_some_and(|entry| entry.sources.is_empty())
+    {
+        indexes.by_track_id.remove(track_id);
+    }
+}
+
 fn track_matches(track: &Track, needle: &str) -> bool {
     normalize_for_matching(track.title()).contains(needle)
         || track
@@ -1333,6 +1397,16 @@ mod tests {
         TrackMetadata::from_names(title.to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
     }
 
+    fn identified(title: &str, recording_id: &str) -> TrackMetadata {
+        metadata(title)
+            .with_recording_id(Some(recording_id.to_owned()))
+            .unwrap()
+    }
+
+    fn with_isrc(title: &str, isrc: &str) -> TrackMetadata {
+        metadata(title).with_isrc(Some(isrc.to_owned())).unwrap()
+    }
+
     #[tokio::test]
     async fn repository_maintains_stable_bidirectional_mappings() {
         let repository = InMemoryTrackRepository::default();
@@ -1359,6 +1433,164 @@ mod tests {
             repository.find_sources(first_track.id()).await.unwrap(),
             vec![first_source]
         );
+    }
+
+    #[tokio::test]
+    async fn two_files_of_one_recording_share_a_track() {
+        let repository = InMemoryTrackRepository::default();
+        let first = source("local", "album-a/01 song.flac");
+        let second = source("local", "album-b/01 song.flac");
+
+        let first_track = repository
+            .get_or_create(first.clone(), identified("Song", "rec-1"))
+            .await
+            .unwrap();
+        let second_track = repository
+            .get_or_create(second.clone(), identified("Song", "rec-1"))
+            .await
+            .unwrap();
+
+        assert_eq!(first_track.id(), second_track.id());
+        assert_eq!(
+            repository.find_sources(first_track.id()).await.unwrap(),
+            vec![first, second]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_moved_file_keeps_its_track() {
+        let repository = InMemoryTrackRepository::default();
+
+        let before = repository
+            .get_or_create(
+                source("local", "old/01 song.flac"),
+                identified("Song", "rec-1"),
+            )
+            .await
+            .unwrap();
+        let after = repository
+            .get_or_create(
+                source("local", "new/01 song.flac"),
+                identified("Song", "rec-1"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(before.id(), after.id());
+        assert!(
+            repository
+                .find_sources(before.id())
+                .await
+                .unwrap()
+                .contains(&source("local", "new/01 song.flac")),
+            "the new path is a source of the surviving track"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unidentified_file_keeps_its_own_track() {
+        let repository = InMemoryTrackRepository::default();
+
+        let first = repository
+            .get_or_create(source("local", "a.flac"), metadata("Song"))
+            .await
+            .unwrap();
+        let second = repository
+            .get_or_create(source("local", "b.flac"), metadata("Song"))
+            .await
+            .unwrap();
+
+        assert_ne!(
+            first.id(),
+            second.id(),
+            "a file with no identifier cannot be matched to another"
+        );
+    }
+
+    #[tokio::test]
+    async fn gaining_an_identifier_already_held_moves_the_source() {
+        let repository = InMemoryTrackRepository::default();
+        let owned = source("local", "album-a/01 song.flac");
+
+        let identified_track = repository
+            .get_or_create(
+                source("local", "album-b/01 song.flac"),
+                identified("Song", "rec-1"),
+            )
+            .await
+            .unwrap();
+        let plain_track = repository
+            .get_or_create(owned.clone(), metadata("Song"))
+            .await
+            .unwrap();
+        assert_ne!(plain_track.id(), identified_track.id());
+
+        let merged = repository
+            .get_or_create(owned.clone(), identified("Song", "rec-1"))
+            .await
+            .unwrap();
+
+        assert_eq!(merged.id(), identified_track.id());
+        assert_eq!(
+            repository.find_sources(merged.id()).await.unwrap(),
+            vec![source("local", "album-b/01 song.flac"), owned]
+        );
+        assert!(
+            repository
+                .find_track(plain_track.id())
+                .await
+                .unwrap()
+                .is_none(),
+            "the vacated track had no other source"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_isrc_matches_only_when_it_is_unambiguous() {
+        let repository = InMemoryTrackRepository::default();
+
+        let first = repository
+            .get_or_create(source("local", "a.flac"), with_isrc("Song", "ISRC-1"))
+            .await
+            .unwrap();
+        let second = repository
+            .get_or_create(source("local", "b.flac"), with_isrc("Song", "ISRC-1"))
+            .await
+            .unwrap();
+        assert_eq!(first.id(), second.id());
+
+        let ambiguous = repository
+            .get_or_create(source("local", "c.flac"), with_isrc("Song", "ISRC-1"))
+            .await
+            .unwrap();
+        assert_eq!(ambiguous.id(), first.id());
+    }
+
+    #[tokio::test]
+    async fn a_recording_id_outranks_an_isrc() {
+        let repository = InMemoryTrackRepository::default();
+
+        let by_isrc = repository
+            .get_or_create(source("local", "a.flac"), with_isrc("Song", "ISRC-1"))
+            .await
+            .unwrap();
+        let by_recording = repository
+            .get_or_create(source("local", "b.flac"), identified("Song", "rec-1"))
+            .await
+            .unwrap();
+        assert_ne!(by_isrc.id(), by_recording.id());
+
+        let both = metadata("Song")
+            .with_recording_id(Some("rec-1".to_owned()))
+            .unwrap()
+            .with_isrc(Some("ISRC-1".to_owned()))
+            .unwrap();
+        let resolved = repository
+            .get_or_create(source("local", "c.flac"), both)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.id(), by_recording.id());
     }
 
     #[tokio::test]

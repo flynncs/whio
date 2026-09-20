@@ -35,20 +35,23 @@ impl TrackRepository for PostgresTrackRepository {
 
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
 
-        let track_id = find_track_id_by_source_for_update(&mut tx, &source).await?;
+        let track_id = match resolve_identified_track(&mut tx, &metadata).await? {
+            Some(identified) => {
+                let previous = find_track_id_by_source_for_update(&mut tx, &source).await?;
+                attach_source(&mut tx, &identified, &source).await?;
 
-        let track_id = if let Some(track_id) = track_id {
-            track_id
-        } else {
-            let candidate_track_id = TrackId::new();
+                if let Some(previous) = previous
+                    && previous != identified
+                {
+                    delete_track_if_source_less(&mut tx, &previous).await?;
+                }
 
-            insert_candidate_track(&mut tx, &candidate_track_id, &metadata).await?;
-
-            if try_insert_source(&mut tx, &candidate_track_id, &source).await? {
-                candidate_track_id
-            } else {
-                resolve_concurrent_winner(&mut tx, &candidate_track_id, &source).await?
+                identified
             }
+            None => match find_track_id_by_source_for_update(&mut tx, &source).await? {
+                Some(current) => current,
+                None => create_with_source(&mut tx, &source, &metadata).await?,
+            },
         };
 
         update_track_metadata(&mut tx, &track_id, &metadata).await?;
@@ -2134,6 +2137,130 @@ fn decode_source(
         .map_err(|_| TrackRepositoryError::InvalidData)
 }
 
+async fn resolve_identified_track(
+    connection: &mut PgConnection,
+    metadata: &TrackMetadata,
+) -> Result<Option<TrackId>, TrackRepositoryError> {
+    if let Some(track_id) =
+        find_track_id_by_recording_id(connection, metadata.musicbrainz_recording_id()).await?
+    {
+        return Ok(Some(track_id));
+    }
+
+    find_track_id_by_isrc(connection, metadata.isrc()).await
+}
+
+async fn find_track_id_by_recording_id(
+    connection: &mut PgConnection,
+    recording_id: Option<&str>,
+) -> Result<Option<TrackId>, TrackRepositoryError> {
+    let Some(recording_id) = recording_id else {
+        return Ok(None);
+    };
+
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM tracks WHERE musicbrainz_recording_id = $1")
+        .bind(recording_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map(|row| row.map(TrackId::from_uuid))
+        .map_err(repository_error)
+}
+
+async fn find_track_id_by_isrc(
+    connection: &mut PgConnection,
+    isrc: Option<&str>,
+) -> Result<Option<TrackId>, TrackRepositoryError> {
+    let Some(isrc) = isrc else {
+        return Ok(None);
+    };
+
+    let rows =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM tracks WHERE isrc = $1 ORDER BY id LIMIT 2")
+            .bind(isrc)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(repository_error)?;
+
+    Ok(match rows.as_slice() {
+        [only] => Some(TrackId::from_uuid(*only)),
+        _ => None,
+    })
+}
+
+async fn create_with_source(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+    metadata: &TrackMetadata,
+) -> Result<TrackId, TrackRepositoryError> {
+    let candidate = TrackId::new();
+
+    if !insert_candidate_track(connection, &candidate, metadata).await? {
+        let winner = find_track_id_by_recording_id(connection, metadata.musicbrainz_recording_id())
+            .await?
+            .ok_or(TrackRepositoryError::Unavailable)?;
+
+        attach_source(connection, &winner, source).await?;
+
+        return Ok(winner);
+    }
+
+    if try_insert_source(connection, &candidate, source).await? {
+        return Ok(candidate);
+    }
+
+    resolve_concurrent_winner(connection, &candidate, source).await
+}
+
+async fn attach_source(
+    connection: &mut PgConnection,
+    track_id: &TrackId,
+    source: &SourceIdentity,
+) -> Result<(), TrackRepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO track_sources (
+            id,
+            track_id,
+            provider_id,
+            source_scope,
+            external_id
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (provider_id, source_scope, external_id)
+        DO UPDATE SET track_id = EXCLUDED.track_id
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(track_id.as_uuid())
+    .bind(source.provider_id().as_str())
+    .bind(encode_source_scope(source.source_scope()))
+    .bind(source.external_id())
+    .execute(&mut *connection)
+    .await
+    .map(|_| ())
+    .map_err(repository_error)
+}
+
+async fn delete_track_if_source_less(
+    connection: &mut PgConnection,
+    track_id: &TrackId,
+) -> Result<(), TrackRepositoryError> {
+    sqlx::query(
+        r#"
+        DELETE FROM tracks
+        WHERE id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM track_sources WHERE track_sources.track_id = tracks.id
+          )
+        "#,
+    )
+    .bind(track_id.as_uuid())
+    .execute(&mut *connection)
+    .await
+    .map(|_| ())
+    .map_err(repository_error)
+}
+
 async fn find_track_id_by_source_for_update(
     connection: &mut PgConnection,
     source: &SourceIdentity,
@@ -2161,11 +2288,14 @@ async fn insert_candidate_track(
     connection: &mut PgConnection,
     track_id: &TrackId,
     metadata: &TrackMetadata,
-) -> Result<(), TrackRepositoryError> {
-    sqlx::query(
+) -> Result<bool, TrackRepositoryError> {
+    sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO tracks (id, title, duration_ms, musicbrainz_recording_id, isrc, genre)
         VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (musicbrainz_recording_id) WHERE musicbrainz_recording_id IS NOT NULL
+        DO NOTHING
+        RETURNING id
         "#,
     )
     .bind(track_id.as_uuid())
@@ -2174,9 +2304,9 @@ async fn insert_candidate_track(
     .bind(metadata.musicbrainz_recording_id())
     .bind(metadata.isrc())
     .bind(metadata.genre())
-    .execute(&mut *connection)
+    .fetch_optional(&mut *connection)
     .await
-    .map(|_| ())
+    .map(|row| row.is_some())
     .map_err(repository_error)
 }
 

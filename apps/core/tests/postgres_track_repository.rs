@@ -881,6 +881,149 @@ async fn search_finds_a_title_across_typographic_variants(pool: PgPool) {
     }
 }
 
+fn identified(title: &str, recording_id: &str) -> TrackMetadata {
+    metadata(title, &["Artist"], Some(1_000))
+        .with_recording_id(Some(recording_id.to_owned()))
+        .unwrap()
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn two_files_of_one_recording_share_a_track(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let first = local_source("album-a/01 song.flac");
+    let second = local_source("album-b/01 song.flac");
+
+    let first_track = repository
+        .get_or_create(first.clone(), identified("Song", "rec-1"))
+        .await
+        .unwrap();
+    let second_track = repository
+        .get_or_create(second.clone(), identified("Song", "rec-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(first_track.id(), second_track.id());
+
+    let sources = repository.find_sources(first_track.id()).await.unwrap();
+    assert_eq!(sources.len(), 2, "both files are sources of the one track");
+    assert!(sources.contains(&first));
+    assert!(sources.contains(&second));
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_moved_file_keeps_its_track(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let moved = local_source("new/01 song.flac");
+
+    let before = repository
+        .get_or_create(
+            local_source("old/01 song.flac"),
+            identified("Song", "rec-1"),
+        )
+        .await
+        .unwrap();
+    let after = repository
+        .get_or_create(moved.clone(), identified("Song", "rec-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(before.id(), after.id());
+    assert!(
+        repository
+            .find_sources(before.id())
+            .await
+            .unwrap()
+            .contains(&moved)
+    );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn an_unidentified_file_keeps_its_own_track(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+
+    let first = repository
+        .get_or_create(
+            local_source("a.flac"),
+            metadata("Song", &["Artist"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+    let second = repository
+        .get_or_create(
+            local_source("b.flac"),
+            metadata("Song", &["Artist"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(first.id(), second.id());
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn gaining_an_identifier_already_held_moves_the_source(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let owned = local_source("album-a/01 song.flac");
+
+    let identified_track = repository
+        .get_or_create(
+            local_source("album-b/01 song.flac"),
+            identified("Song", "rec-1"),
+        )
+        .await
+        .unwrap();
+    let plain_track = repository
+        .get_or_create(owned.clone(), metadata("Song", &["Artist"], Some(1_000)))
+        .await
+        .unwrap();
+    assert_ne!(plain_track.id(), identified_track.id());
+
+    let merged = repository
+        .get_or_create(owned.clone(), identified("Song", "rec-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(merged.id(), identified_track.id());
+    assert!(
+        repository
+            .find_sources(merged.id())
+            .await
+            .unwrap()
+            .contains(&owned)
+    );
+    assert!(
+        repository
+            .find_track(plain_track.id())
+            .await
+            .unwrap()
+            .is_none(),
+        "the vacated track had no other source"
+    );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn one_recording_id_admits_one_track(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+
+    repository
+        .get_or_create(local_source("a.flac"), identified("Song", "rec-1"))
+        .await
+        .unwrap();
+
+    let refused = sqlx::query(
+        "INSERT INTO tracks (id, title, musicbrainz_recording_id) VALUES ($1, 'Other', 'rec-1')",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await;
+
+    assert!(refused.is_err(), "a second track may not claim rec-1");
+}
+
 #[sqlx::test]
 #[ignore = "requires PostgreSQL"]
 async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
