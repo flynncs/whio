@@ -9,6 +9,7 @@ pub mod database;
 pub mod delivery;
 pub mod identity;
 pub mod library;
+pub mod library_state;
 pub mod media;
 pub mod playback;
 pub mod providers;
@@ -18,7 +19,8 @@ pub mod tracks;
 
 use crate::{
     artwork::ArtworkService, catalogue::CatalogueService, compat::SourceTags,
-    identity::service::CredentialService, library::ScanService, playback::StreamingService,
+    identity::service::CredentialService, library::ScanService, library_state::LibraryStateService,
+    playback::StreamingService,
 };
 
 #[derive(Clone)]
@@ -27,6 +29,7 @@ pub struct AppState {
     catalogue: Arc<CatalogueService>,
     credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
+    library_state: Arc<LibraryStateService>,
     streaming: Arc<StreamingService>,
     scanner: Arc<ScanService>,
     source_tags: SourceTags,
@@ -55,6 +58,11 @@ impl AppState {
         self
     }
 
+    pub fn with_library_state(mut self, library_state: Arc<LibraryStateService>) -> Self {
+        self.library_state = library_state;
+        self
+    }
+
     pub fn with_source_tags(mut self, tags: SourceTags) -> Self {
         self.source_tags = tags;
         self
@@ -80,6 +88,7 @@ impl AppState {
             credential,
             catalogue,
             database,
+            library_state: Arc::new(LibraryStateService::disabled()),
             streaming,
             scanner: ScanService::disabled(),
             source_tags: SourceTags::Off,
@@ -104,6 +113,10 @@ impl AppState {
 
     pub(crate) fn artwork(&self) -> &ArtworkService {
         &self.artwork
+    }
+
+    pub(crate) fn library_state(&self) -> &LibraryStateService {
+        &self.library_state
     }
 
     pub(crate) fn scanner(&self) -> &ScanService {

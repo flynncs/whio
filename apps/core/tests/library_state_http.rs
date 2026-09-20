@@ -105,13 +105,19 @@ async fn seeded_app() -> Seeded {
     let scanner = ScanService::new(repository.clone(), vec![root]);
     scanner.start();
     let catalogue = Arc::new(CatalogueService::new(repository.clone()));
+    let library_state = Arc::new(whio_core::library_state::LibraryStateService::new(
+        repository.clone(),
+    ));
     let playback = Arc::new(StreamingService::new(
         repository,
         vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
         delivery(),
     ));
-    let app =
-        whio_core::router(AppState::new(credential, catalogue, playback).with_scanner(scanner));
+    let app = whio_core::router(
+        AppState::new(credential, catalogue, playback)
+            .with_library_state(library_state)
+            .with_scanner(scanner),
+    );
 
     Seeded {
         app,

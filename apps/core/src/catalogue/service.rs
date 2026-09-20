@@ -13,8 +13,8 @@ use crate::{
     request::RequestContext,
     tracks::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, AlbumTrack, ArtistId,
-        ArtistSummary, GenreSummary, LibraryState, ProviderKind, SourceIdentity, Starred,
-        StateTarget, Track, TrackId, TrackRepository, TrackRepositoryError,
+        ArtistSummary, GenreSummary, LibraryState, ProviderKind, SourceIdentity, Track, TrackId,
+        TrackRepository, TrackRepositoryError,
     },
 };
 
@@ -120,90 +120,6 @@ impl CatalogueService {
     pub async fn genres(&self) -> Result<Vec<GenreSummary>, CatalogueError> {
         self.track_repository
             .list_genres()
-            .await
-            .map_err(CatalogueError::Repository)
-    }
-
-    pub async fn starred(&self, user: Uuid) -> Result<Starred, CatalogueError> {
-        self.track_repository
-            .starred(user)
-            .await
-            .map_err(CatalogueError::Repository)
-    }
-
-    pub async fn set_starred(
-        &self,
-        user: Uuid,
-        target: StateTarget<'_>,
-        starred: bool,
-    ) -> Result<(), CatalogueError> {
-        self.track_repository
-            .set_starred(user, target, starred)
-            .await
-            .map_err(CatalogueError::Repository)
-    }
-
-    pub async fn set_rating(
-        &self,
-        user: Uuid,
-        target: StateTarget<'_>,
-        rating: Option<u8>,
-    ) -> Result<(), CatalogueError> {
-        self.track_repository
-            .set_rating(user, target, rating)
-            .await
-            .map_err(CatalogueError::Repository)
-    }
-
-    pub async fn rate_id(
-        &self,
-        user: Uuid,
-        raw_id: &str,
-        rating: Option<u8>,
-    ) -> Result<bool, CatalogueError> {
-        if let Ok(track_id) = raw_id.parse::<TrackId>()
-            && self.track(&track_id).await?.is_some()
-        {
-            self.set_rating(user, StateTarget::Track(&track_id), rating)
-                .await?;
-            return Ok(true);
-        }
-        if let Ok(album_id) = raw_id.parse::<AlbumId>()
-            && self
-                .track_repository
-                .find_album(&album_id)
-                .await
-                .map_err(CatalogueError::Repository)?
-                .is_some()
-        {
-            self.set_rating(user, StateTarget::Album(&album_id), rating)
-                .await?;
-            return Ok(true);
-        }
-        if let Ok(artist_id) = raw_id.parse::<ArtistId>()
-            && self
-                .track_repository
-                .find_artist(&artist_id, Some(user))
-                .await
-                .map_err(CatalogueError::Repository)?
-                .is_some()
-        {
-            self.set_rating(user, StateTarget::Artist(&artist_id), rating)
-                .await?;
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    pub async fn record_play(
-        &self,
-        user: Uuid,
-        track_id: &TrackId,
-        played_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), CatalogueError> {
-        self.track_repository
-            .record_play(user, track_id, played_at)
             .await
             .map_err(CatalogueError::Repository)
     }

@@ -516,7 +516,7 @@ pub(crate) async fn get_starred2(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::starred(state.catalogue(), user, state.source_tags()).await {
+    match service::starred(state.library_state(), user, state.source_tags()).await {
         Ok(result) => Json(starred2_envelope(result)).into_response(),
         Err(error) => state_failure_response(&context, error),
     }
@@ -533,7 +533,7 @@ pub(crate) async fn get_genres(
 
     match service::genres(state.catalogue()).await {
         Ok(genres) => Json(genres_envelope(genres)).into_response(),
-        Err(error) => state_failure_response(&context, error),
+        Err(error) => browse_failure_response(&context, error),
     }
 }
 
@@ -622,7 +622,16 @@ async fn star_request(
         .map(str::to_owned)
         .collect::<Vec<_>>();
 
-    match service::set_starred(state.catalogue(), user, &songs, &albums, &artists, starred).await {
+    match service::set_starred(
+        state.library_state(),
+        user,
+        &songs,
+        &albums,
+        &artists,
+        starred,
+    )
+    .await
+    {
         Ok(()) => Json(ok_envelope()).into_response(),
         Err(error) => state_failure_response(context, error),
     }
@@ -649,7 +658,7 @@ pub(crate) async fn set_rating(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::set_rating(state.catalogue(), user, id, rating).await {
+    match service::set_rating(state.library_state(), user, id, rating).await {
         Ok(()) => Json(ok_envelope()).into_response(),
         Err(error) => state_failure_response(&context, error),
     }
@@ -680,7 +689,7 @@ pub(crate) async fn scrobble(
         .get("submission")
         .is_none_or(|raw| !matches!(raw.trim().to_ascii_lowercase().as_str(), "false" | "0"));
 
-    match service::scrobble(state.catalogue(), user, &ids, &times, submission).await {
+    match service::scrobble(state.library_state(), user, &ids, &times, submission).await {
         Ok(()) => Json(ok_envelope()).into_response(),
         Err(error) => state_failure_response(&context, error),
     }
@@ -703,11 +712,11 @@ fn state_failure_response(context: &RequestContext, error: service::StateError) 
             models::error::Code::Variant70,
             "Not found.",
         ),
-        service::StateError::Catalogue(error) => {
+        service::StateError::State(error) => {
             tracing::error!(
                 error = %error,
                 request_id = context.request_id().as_str(),
-                "catalogue write failed"
+                "library state write failed"
             );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,

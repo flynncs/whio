@@ -8,6 +8,7 @@ use crate::{
         CatalogueError, CatalogueSearch, CatalogueService, SearchLimit, SearchOffset, SearchQuery,
     },
     compat::SourceTags,
+    library_state::{LibraryStateError, LibraryStateService},
     request::RequestContext,
     tracks::{AlbumId, AlbumListFilter, AlbumOrder, ArtistId, StateTarget, TrackId},
 };
@@ -132,8 +133,8 @@ pub(crate) enum StateError {
     #[error("state target not found")]
     NotFound,
 
-    #[error("catalogue write failed")]
-    Catalogue(#[source] CatalogueError),
+    #[error("library state write failed")]
+    State(#[source] LibraryStateError),
 }
 
 pub(crate) struct AlbumListRequest<'a> {
@@ -230,23 +231,22 @@ fn album_list_order(
     }
 }
 
-pub(crate) async fn genres(catalogue: &CatalogueService) -> Result<Vec<models::Genre>, StateError> {
+pub(crate) async fn genres(
+    catalogue: &CatalogueService,
+) -> Result<Vec<models::Genre>, BrowseError> {
     catalogue
         .genres()
         .await
         .map(|genres| genres.iter().map(mapping::genre_from_summary).collect())
-        .map_err(StateError::Catalogue)
+        .map_err(BrowseError::Catalogue)
 }
 
 pub(crate) async fn starred(
-    catalogue: &CatalogueService,
+    state: &LibraryStateService,
     user: Uuid,
     tags: SourceTags,
 ) -> Result<StarredResult, StateError> {
-    let starred = catalogue
-        .starred(user)
-        .await
-        .map_err(StateError::Catalogue)?;
+    let starred = state.starred(user).await.map_err(StateError::State)?;
 
     Ok(StarredResult {
         songs: starred
@@ -268,7 +268,7 @@ pub(crate) async fn starred(
 }
 
 pub(crate) async fn set_starred(
-    catalogue: &CatalogueService,
+    state: &LibraryStateService,
     user: Uuid,
     song_ids: &[String],
     album_ids: &[String],
@@ -283,58 +283,35 @@ pub(crate) async fn set_starred(
         let Ok(track_id) = raw.parse::<TrackId>() else {
             continue;
         };
-        if catalogue
-            .track(&track_id)
+        state
+            .set_starred(user, StateTarget::Track(&track_id), starred)
             .await
-            .map_err(StateError::Catalogue)?
-            .is_some()
-        {
-            catalogue
-                .set_starred(user, StateTarget::Track(&track_id), starred)
-                .await
-                .map_err(StateError::Catalogue)?;
-        }
+            .map_err(StateError::State)?;
     }
-
     for raw in album_ids {
         let Ok(album_id) = raw.parse::<AlbumId>() else {
             continue;
         };
-        if catalogue
-            .album_detail(&album_id, None)
+        state
+            .set_starred(user, StateTarget::Album(&album_id), starred)
             .await
-            .map_err(StateError::Catalogue)?
-            .is_some()
-        {
-            catalogue
-                .set_starred(user, StateTarget::Album(&album_id), starred)
-                .await
-                .map_err(StateError::Catalogue)?;
-        }
+            .map_err(StateError::State)?;
     }
-
     for raw in artist_ids {
         let Ok(artist_id) = raw.parse::<ArtistId>() else {
             continue;
         };
-        if catalogue
-            .artist_detail(&artist_id, None)
+        state
+            .set_starred(user, StateTarget::Artist(&artist_id), starred)
             .await
-            .map_err(StateError::Catalogue)?
-            .is_some()
-        {
-            catalogue
-                .set_starred(user, StateTarget::Artist(&artist_id), starred)
-                .await
-                .map_err(StateError::Catalogue)?;
-        }
+            .map_err(StateError::State)?;
     }
 
     Ok(())
 }
 
 pub(crate) async fn set_rating(
-    catalogue: &CatalogueService,
+    state: &LibraryStateService,
     user: Uuid,
     raw_id: &str,
     raw_rating: i64,
@@ -345,10 +322,10 @@ pub(crate) async fn set_rating(
         _ => return Err(StateError::InvalidRequest),
     };
 
-    if catalogue
+    if state
         .rate_id(user, raw_id, rating)
         .await
-        .map_err(StateError::Catalogue)?
+        .map_err(StateError::State)?
     {
         Ok(())
     } else {
@@ -357,7 +334,7 @@ pub(crate) async fn set_rating(
 }
 
 pub(crate) async fn scrobble(
-    catalogue: &CatalogueService,
+    state: &LibraryStateService,
     user: Uuid,
     ids: &[String],
     times: &[String],
@@ -378,24 +355,16 @@ pub(crate) async fn scrobble(
         let Ok(track_id) = raw.parse::<TrackId>() else {
             continue;
         };
-        if catalogue
-            .track(&track_id)
-            .await
-            .map_err(StateError::Catalogue)?
-            .is_none()
-        {
-            continue;
-        }
         let played_at = times
             .get(index)
             .and_then(|raw| raw.trim().parse::<i64>().ok())
             .and_then(chrono::DateTime::from_timestamp_millis)
             .unwrap_or(now);
 
-        catalogue
+        state
             .record_play(user, &track_id, played_at)
             .await
-            .map_err(StateError::Catalogue)?;
+            .map_err(StateError::State)?;
     }
 
     Ok(())

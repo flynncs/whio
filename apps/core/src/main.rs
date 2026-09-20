@@ -129,6 +129,9 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         track_repository.clone(),
         config.artwork_host_suffixes.clone(),
     ));
+    let library_state = Arc::new(whio_core::library_state::LibraryStateService::new(
+        track_repository.clone(),
+    ));
     let streaming = Arc::new(StreamingService::new(
         track_repository,
         vec![
@@ -141,6 +144,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
     Ok(
         AppState::with_database(credential, catalogue, streaming, database)
             .with_artwork(artwork)
+            .with_library_state(library_state)
             .with_scanner(scanner)
             .with_source_tags(config.source_tags),
     )
