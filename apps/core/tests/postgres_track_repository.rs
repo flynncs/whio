@@ -347,6 +347,51 @@ async fn artist_ladder_is_identifier_then_normalised_name(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires PostgreSQL"]
+async fn typographic_variants_resolve_to_one_artist(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+
+    let curly = repository
+        .resolve_or_create_artist(&credit("Don\u{2019}t Stop", None))
+        .await
+        .unwrap();
+    let straight = repository
+        .resolve_or_create_artist(&credit("Don't Stop", None))
+        .await
+        .unwrap();
+    assert_eq!(curly.id(), straight.id());
+
+    let en_dash = repository
+        .resolve_or_create_artist(&credit("Sun \u{2013} Ra", None))
+        .await
+        .unwrap();
+    let hyphen = repository
+        .resolve_or_create_artist(&credit("Sun - Ra", None))
+        .await
+        .unwrap();
+    assert_eq!(en_dash.id(), hyphen.id());
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn typographic_variants_resolve_to_one_album(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let artist = credit("Cage the Elephant", None);
+
+    let curly = repository
+        .resolve_or_create_album(
+            &album("It\u{2019}s Just Forever").with_album_artist(artist.clone()),
+        )
+        .await
+        .unwrap();
+    let straight = repository
+        .resolve_or_create_album(&album("It's Just Forever").with_album_artist(artist))
+        .await
+        .unwrap();
+    assert_eq!(curly.id(), straight.id());
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
 async fn album_ladder_prefers_identifiers_then_normalised_text(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool);
     let artist = credit("Daft Punk", None);
@@ -810,6 +855,30 @@ async fn performer_credits_link_to_artist_rows(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(pharrell, 1, "the same name-only artist is reused");
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn search_finds_a_title_across_typographic_variants(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+
+    let track = repository
+        .get_or_create(
+            local_source("path-a"),
+            metadata(
+                "It\u{2019}s Just Forever",
+                &["Cage the Elephant"],
+                Some(1_000),
+            ),
+        )
+        .await
+        .unwrap();
+
+    for query in ["it's just forever", "it\u{2019}s just forever", "IT'S JUST"] {
+        let hits = repository.search_tracks(query, 10, None).await.unwrap();
+        assert_eq!(hits.len(), 1, "query {query:?} found nothing");
+        assert_eq!(hits[0].track().id(), track.id());
+    }
 }
 
 #[sqlx::test]

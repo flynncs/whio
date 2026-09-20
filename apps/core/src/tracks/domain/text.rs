@@ -5,11 +5,20 @@ use super::ValidationError;
 pub(crate) fn normalize_for_matching(value: &str) -> String {
     value
         .nfc()
+        .map(fold_typographic)
         .collect::<String>()
         .to_lowercase()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn fold_typographic(character: char) -> char {
+    match character {
+        '\u{2019}' | '\u{2018}' | '\u{02bc}' => '\'',
+        '\u{2013}' | '\u{2014}' | '\u{2011}' => '-',
+        other => other,
+    }
 }
 
 pub(crate) fn required(
@@ -60,6 +69,22 @@ mod tests {
         assert_eq!(normalize_for_matching("  À  B "), "à b");
         assert_eq!(normalize_for_matching("Discovery"), "discovery");
         assert_eq!(normalize_for_matching("a\t\n b"), "a b");
+    }
+
+    #[test]
+    fn normalization_folds_typographic_variants_to_ascii() {
+        assert_eq!(
+            normalize_for_matching("It\u{2019}s Just Forever"),
+            normalize_for_matching("It's Just Forever")
+        );
+        assert_eq!(
+            normalize_for_matching("Don\u{2018}t Be Consumed"),
+            "don't be consumed"
+        );
+        assert_eq!(normalize_for_matching("a\u{02bc}b"), "a'b");
+        assert_eq!(normalize_for_matching("Song \u{2013} Live"), "song - live");
+        assert_eq!(normalize_for_matching("Song \u{2014} Live"), "song - live");
+        assert_eq!(normalize_for_matching("Song \u{2011} Live"), "song - live");
     }
 
     #[test]

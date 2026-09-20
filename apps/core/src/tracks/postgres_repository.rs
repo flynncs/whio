@@ -772,7 +772,11 @@ impl TrackRepository for PostgresTrackRepository {
                    FROM track_artist_credits AS credits
                    WHERE credits.track_id = t.id
                      AND strpos(
-                         lower(regexp_replace(normalize(credits.name, NFC), '\s+', ' ', 'g')),
+                         translate(
+                             lower(regexp_replace(normalize(credits.name, NFC), '\s+', ' ', 'g')),
+                             U&'\2019\2018\02BC\2013\2014\2011',
+                             U&'\0027\0027\0027\002D\002D\002D'
+                         ),
                          $1
                      ) > 0
                )
