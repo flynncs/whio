@@ -100,7 +100,7 @@ impl ScanService {
 
             if request != REQUEST_NONE {
                 if let Err(error) = self.run_once(request == REQUEST_FULL).await {
-                    tracing::warn!(%error, "library scan failed");
+                    tracing::warn!(error = ?error, "library scan failed");
                 }
                 continue;
             }

@@ -32,7 +32,7 @@ pub enum ScanError {
     #[error("media root could not be read")]
     Unreadable,
 
-    #[error("track repository failed")]
+    #[error("track repository failed: {0}")]
     Repository(#[from] TrackRepositoryError),
 }
 
@@ -123,26 +123,29 @@ pub async fn scan_with(
                         album,
                         membership,
                     } = *track;
-                    seen.push(relative);
 
                     let source = SourceIdentity::new(provider.clone(), scope.clone(), external_id)
                         .expect("scanned identity is non-empty");
-                    let stored = repository.get_or_create(source.clone(), metadata).await?;
-                    repository.set_source_file_facts(&source, &facts).await?;
 
-                    if let Some(album) = &album {
-                        let album = repository.resolve_or_create_album(album).await?;
-                        if let Some(membership) = membership {
-                            repository
-                                .set_album_track(album.id(), stored.id(), &membership)
-                                .await?;
+                    match index_track(repository, &source, &facts, metadata, album, membership)
+                        .await
+                    {
+                        Ok(()) => {
+                            seen.push(relative);
+                            report.indexed += 1;
                         }
-                        repository.set_album_source(album.id(), &source).await?;
-                    } else {
-                        repository.clear_album_track(stored.id()).await?;
+                        Err(error) => {
+                            tracing::warn!(path = %relative, error = ?error, "library scan could not index a file");
+                            seen.push(relative);
+                            if matches!(
+                                error,
+                                ScanError::Repository(TrackRepositoryError::Unavailable)
+                            ) {
+                                return Err(error);
+                            }
+                            report.failed += 1;
+                        }
                     }
-
-                    report.indexed += 1;
                 }
             }
         }
@@ -151,6 +154,32 @@ pub async fn scan_with(
     }
 
     Ok(report)
+}
+
+async fn index_track(
+    repository: &Arc<dyn TrackRepository>,
+    source: &SourceIdentity,
+    facts: &SourceFileFacts,
+    metadata: TrackMetadata,
+    album: Option<AlbumMetadata>,
+    membership: Option<AlbumTrack>,
+) -> Result<(), ScanError> {
+    let stored = repository.get_or_create(source.clone(), metadata).await?;
+    repository.set_source_file_facts(source, facts).await?;
+
+    if let Some(album) = &album {
+        let album = repository.resolve_or_create_album(album).await?;
+        if let Some(membership) = membership {
+            repository
+                .set_album_track(album.id(), stored.id(), &membership)
+                .await?;
+        }
+        repository.set_album_source(album.id(), source).await?;
+    } else {
+        repository.clear_album_track(stored.id()).await?;
+    }
+
+    Ok(())
 }
 
 fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepared {
