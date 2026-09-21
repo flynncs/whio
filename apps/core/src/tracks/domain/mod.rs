@@ -1,6 +1,7 @@
 mod album;
 mod artist;
 mod artwork;
+mod dedup;
 mod duplicates;
 mod error;
 mod metadata;
@@ -16,6 +17,9 @@ pub use album::{
 };
 pub use artist::{Artist, ArtistCredit, ArtistId, ArtistSummary};
 pub use artwork::ArtworkRef;
+pub use dedup::{
+    MATCHER_VERSION, MatchDecision, MatchRecord, MatchStatus, ParsedTitle, RecordingIndex, from_ytm,
+};
 pub use duplicates::{
     DuplicateCandidate, DuplicateSource, KeepReason, SplitArtist, SplitArtistRow,
 };
