@@ -401,6 +401,7 @@ mod tests {
         AlbumMetadata, AlbumTrack, ArtistCredit, ArtistId, ArtworkRef, InMemoryTrackRepository,
         ProviderId, SourceFileFacts, SourceIdentity, TrackId, TrackMetadata,
     };
+    use crate::tracks::{CatalogueWrite, SourceLookup};
 
     fn pictured_root(label: &str) -> std::path::PathBuf {
         let root =

@@ -195,6 +195,7 @@ impl StreamingService {
 
 #[cfg(test)]
 mod tests {
+    use crate::tracks::{CatalogueWrite, DuplicateReport, LibraryRead, SourceLookup, StateStore};
     use std::collections::{HashMap, VecDeque};
 
     use async_trait::async_trait;
@@ -282,26 +283,21 @@ mod tests {
     struct FailingTrackRepository;
 
     #[async_trait]
-    impl TrackRepository for FailingTrackRepository {
-        async fn get_or_create(
-            &self,
-            _source: SourceIdentity,
-            _metadata: TrackMetadata,
-        ) -> Result<Track, TrackRepositoryError> {
-            Err(TrackRepositoryError::Unavailable)
-        }
-
-        async fn find_sources(
-            &self,
-            _track_id: &TrackId,
-        ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
-            Err(TrackRepositoryError::Unavailable)
-        }
-
+    impl LibraryRead for FailingTrackRepository {
         async fn find_track(
             &self,
             _track_id: &TrackId,
         ) -> Result<Option<Track>, TrackRepositoryError> {
+            Err(TrackRepositoryError::Unavailable)
+        }
+    }
+
+    #[async_trait]
+    impl SourceLookup for FailingTrackRepository {
+        async fn find_sources(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
             Err(TrackRepositoryError::Unavailable)
         }
     }
@@ -312,22 +308,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl TrackRepository for MultiSourceRepository {
-        async fn get_or_create(
-            &self,
-            source: SourceIdentity,
-            metadata: TrackMetadata,
-        ) -> Result<Track, TrackRepositoryError> {
-            self.inner.get_or_create(source, metadata).await
-        }
-
-        async fn find_sources(
-            &self,
-            _track_id: &TrackId,
-        ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
-            Ok(self.sources.clone())
-        }
-
+    impl LibraryRead for MultiSourceRepository {
         async fn find_track(
             &self,
             track_id: &TrackId,
@@ -335,6 +316,50 @@ mod tests {
             self.inner.find_track(track_id).await
         }
     }
+
+    #[async_trait]
+    impl SourceLookup for MultiSourceRepository {
+        async fn find_sources(
+            &self,
+            _track_id: &TrackId,
+        ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
+            Ok(self.sources.clone())
+        }
+    }
+
+    #[async_trait]
+    impl CatalogueWrite for MultiSourceRepository {
+        async fn get_or_create(
+            &self,
+            source: SourceIdentity,
+            metadata: TrackMetadata,
+        ) -> Result<Track, TrackRepositoryError> {
+            self.inner.get_or_create(source, metadata).await
+        }
+    }
+
+    #[async_trait]
+    impl StateStore for MultiSourceRepository {}
+
+    #[async_trait]
+    impl DuplicateReport for MultiSourceRepository {}
+
+    #[async_trait]
+    impl CatalogueWrite for FailingTrackRepository {
+        async fn get_or_create(
+            &self,
+            _source: SourceIdentity,
+            _metadata: TrackMetadata,
+        ) -> Result<Track, TrackRepositoryError> {
+            Err(TrackRepositoryError::Unavailable)
+        }
+    }
+
+    #[async_trait]
+    impl StateStore for FailingTrackRepository {}
+
+    #[async_trait]
+    impl DuplicateReport for FailingTrackRepository {}
 
     fn global(external_id: &str) -> SourceIdentity {
         SourceIdentity::new(

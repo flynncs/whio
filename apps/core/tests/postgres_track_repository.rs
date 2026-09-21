@@ -6,9 +6,10 @@ use sqlx::PgPool;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 use whio_core::tracks::{
-    AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef, KeepReason,
-    MatchQuality, PostgresTrackRepository, ProviderId, SourceFileFacts, SourceIdentity,
-    SourceScope, StateTarget, TrackId, TrackMetadata, TrackRepository, TrackRepositoryError,
+    AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef,
+    CatalogueWrite, DuplicateReport, KeepReason, LibraryRead, MatchQuality,
+    PostgresTrackRepository, ProviderId, SourceFileFacts, SourceIdentity, SourceLookup,
+    SourceScope, StateStore, StateTarget, TrackId, TrackMetadata, TrackRepositoryError,
 };
 
 fn source(external_id: &str) -> SourceIdentity {

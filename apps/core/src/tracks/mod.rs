@@ -1,7 +1,7 @@
 mod domain;
-mod in_memory_repository;
-mod postgres_repository;
-mod repository;
+mod memory;
+mod pg;
+mod ports;
 
 pub(crate) use domain::best_field_quality;
 pub use domain::{
@@ -13,6 +13,9 @@ pub use domain::{
     SourceScope, SplitArtist, SplitArtistRow, Starred, StateTarget, Track, TrackHit, TrackId,
     TrackMetadata, ValidationError, YOUTUBE_MUSIC_PROVIDER_ID, checked_rating, from_ytm,
 };
-pub use in_memory_repository::InMemoryTrackRepository;
-pub use postgres_repository::PostgresTrackRepository;
-pub use repository::{SourceFileFacts, TrackRepository, TrackRepositoryError};
+pub use memory::InMemoryTrackRepository;
+pub use pg::PostgresTrackRepository;
+pub use ports::{
+    CatalogueWrite, DuplicateReport, LibraryRead, SourceFileFacts, SourceLookup, StateStore,
+    TrackRepository, TrackRepositoryError,
+};

@@ -170,6 +170,7 @@ mod tests {
         AlbumMetadata, ArtistCredit, InMemoryTrackRepository, ProviderId, SourceIdentity,
         SourceScope, TrackMetadata,
     };
+    use crate::tracks::{CatalogueWrite, LibraryRead, StateStore};
 
     fn local_source(external_id: &str) -> SourceIdentity {
         SourceIdentity::new(

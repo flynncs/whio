@@ -69,6 +69,8 @@ async fn image_server(bytes: &'static [u8]) -> String {
 }
 
 async fn public_app(url: &str) -> (axum::Router, String) {
+    use whio_core::tracks::{CatalogueWrite, SourceLookup};
+
     let (credential, _user, _key) = credentials();
     let repository = Arc::new(InMemoryTrackRepository::default());
 
@@ -145,7 +147,9 @@ async fn public_artwork_outside_the_allowed_hosts_is_not_fetched() {
 }
 
 async fn pictured_app() -> (axum::Router, String, String, String) {
-    use whio_core::tracks::{AlbumMetadata, AlbumTrack, ArtistCredit, SourceFileFacts};
+    use whio_core::tracks::{
+        AlbumMetadata, AlbumTrack, ArtistCredit, CatalogueWrite, SourceFileFacts,
+    };
 
     let (credential, _user, _key) = credentials();
     let root = std::env::temp_dir().join(format!("whio-http-art-{}", Uuid::now_v7()));

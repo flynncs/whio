@@ -439,13 +439,14 @@ fn index_letter(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracks::CatalogueWrite;
     use crate::{
         catalogue::{CatalogueCandidate, CatalogueProvider},
         providers::ProviderError,
         request::{RequestContext, RequestId},
         tracks::{
             AlbumMetadata, AlbumTrack, ArtistCredit, InMemoryTrackRepository, ProviderId,
-            SourceIdentity, SourceScope, TrackMetadata, TrackRepository,
+            SourceIdentity, SourceScope, TrackMetadata,
         },
     };
     use async_trait::async_trait;

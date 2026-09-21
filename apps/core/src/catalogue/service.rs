@@ -528,6 +528,7 @@ async fn materialize(
 
 #[cfg(test)]
 mod tests {
+    use crate::tracks::{CatalogueWrite, DuplicateReport, LibraryRead, SourceLookup, StateStore};
     use std::{
         collections::VecDeque,
         sync::{
@@ -559,7 +560,7 @@ mod tests {
     struct FailingTrackRepository;
 
     #[async_trait]
-    impl TrackRepository for FailingTrackRepository {
+    impl CatalogueWrite for FailingTrackRepository {
         async fn get_or_create(
             &self,
             _source: SourceIdentity,
@@ -567,14 +568,10 @@ mod tests {
         ) -> Result<Track, TrackRepositoryError> {
             Err(TrackRepositoryError::Unavailable)
         }
+    }
 
-        async fn find_sources(
-            &self,
-            _track_id: &crate::tracks::TrackId,
-        ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
-            Err(TrackRepositoryError::Unavailable)
-        }
-
+    #[async_trait]
+    impl LibraryRead for FailingTrackRepository {
         async fn find_track(
             &self,
             _track_id: &crate::tracks::TrackId,
@@ -582,6 +579,22 @@ mod tests {
             Err(TrackRepositoryError::Unavailable)
         }
     }
+
+    #[async_trait]
+    impl SourceLookup for FailingTrackRepository {
+        async fn find_sources(
+            &self,
+            _track_id: &crate::tracks::TrackId,
+        ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
+            Err(TrackRepositoryError::Unavailable)
+        }
+    }
+
+    #[async_trait]
+    impl StateStore for FailingTrackRepository {}
+
+    #[async_trait]
+    impl DuplicateReport for FailingTrackRepository {}
 
     impl StubProvider {
         fn new(responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>) -> Self {

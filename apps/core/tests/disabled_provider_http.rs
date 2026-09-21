@@ -15,8 +15,8 @@ use whio_core::{
     playback::{PlaybackProvider, StreamingService},
     providers::YtmAdapter,
     tracks::{
-        InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
-        TrackRepository,
+        CatalogueWrite, InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope,
+        TrackMetadata,
     },
 };
 

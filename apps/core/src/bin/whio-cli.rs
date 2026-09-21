@@ -6,7 +6,7 @@ use whio_core::{
     database::Database,
     identity::{provisioning, secrets::CredentialKey},
     tracks::{
-        DuplicateCandidate, PostgresTrackRepository, SplitArtist, SplitArtistRow, TrackRepository,
+        DuplicateCandidate, DuplicateReport, PostgresTrackRepository, SplitArtist, SplitArtistRow,
     },
 };
 
