@@ -75,7 +75,11 @@ pub trait LibraryRead: Send + Sync {
         Ok(Vec::new())
     }
 
-    async fn count_albums(&self, _user: Option<Uuid>) -> Result<u32, TrackRepositoryError> {
+    async fn count_albums(
+        &self,
+        _user: Option<Uuid>,
+        _filter: AlbumListFilter,
+    ) -> Result<u32, TrackRepositoryError> {
         Ok(0)
     }
 

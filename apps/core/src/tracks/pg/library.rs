@@ -362,13 +362,36 @@ impl LibraryRead for PgStore {
         Ok(summaries)
     }
 
-    async fn count_albums(&self, user: Option<Uuid>) -> Result<u32, TrackRepositoryError> {
+    async fn count_albums(
+        &self,
+        user: Option<Uuid>,
+        filter: AlbumListFilter,
+    ) -> Result<u32, TrackRepositoryError> {
         let library_ids = self.library_provider_ids();
         let count = sqlx::query_scalar::<_, i64>(&format!(
-            "SELECT COUNT(*)::BIGINT FROM albums AS a WHERE {COUNT_ALBUM_ENGAGED}"
+            r#"
+            SELECT COUNT(*)::BIGINT FROM albums AS a
+            WHERE {COUNT_ALBUM_ENGAGED}
+              AND (NOT $3 OR EXISTS (
+                      SELECT 1 FROM album_favorites
+                      WHERE album_favorites.album_id = a.id AND album_favorites.user_id = $2
+                  ))
+              AND ($4::TEXT IS NULL OR EXISTS (
+                      SELECT 1 FROM album_tracks AS genre_tracks
+                      JOIN tracks AS genre_track ON genre_track.id = genre_tracks.track_id
+                      WHERE genre_tracks.album_id = a.id
+                        AND lower(genre_track.genre) = lower($4)
+                  ))
+              AND ($5::SMALLINT IS NULL OR a.year >= $5)
+              AND ($6::SMALLINT IS NULL OR a.year <= $6)
+            "#
         ))
         .bind(&library_ids)
         .bind(user)
+        .bind(filter.is_starred())
+        .bind(filter.genre())
+        .bind(filter.year_from().and_then(|year| i16::try_from(year).ok()))
+        .bind(filter.year_to().and_then(|year| i16::try_from(year).ok()))
         .fetch_one(&self.pool)
         .await
         .map_err(repository_error)?;

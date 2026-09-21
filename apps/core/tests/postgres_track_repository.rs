@@ -901,7 +901,10 @@ async fn browse_shows_only_engaged_albums_and_artists(pool: PgPool) {
     );
 
     assert_eq!(
-        repository.count_albums(Some(user)).await.unwrap(),
+        repository
+            .count_albums(Some(user), AlbumListFilter::default())
+            .await
+            .unwrap(),
         2,
         "the count agrees with the list"
     );
@@ -1555,7 +1558,13 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
             .is_empty()
     );
 
-    assert_eq!(repository.count_albums(None).await.unwrap(), 1);
+    assert_eq!(
+        repository
+            .count_albums(None, AlbumListFilter::default())
+            .await
+            .unwrap(),
+        1
+    );
     assert!(repository.count_artists(None).await.unwrap() >= 1);
 }
 

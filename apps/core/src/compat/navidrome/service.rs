@@ -294,7 +294,7 @@ pub(crate) async fn album_list(
         }
         None => {
             let total = catalogue
-                .album_count(Some(&user))
+                .album_count(Some(&user), filter.clone())
                 .await
                 .map_err(SongError::Catalogue)?;
             let albums = catalogue

@@ -166,7 +166,11 @@ impl LibraryRead for InMemoryTrackRepository {
             .collect())
     }
 
-    async fn count_albums(&self, _user: Option<Uuid>) -> Result<u32, TrackRepositoryError> {
+    async fn count_albums(
+        &self,
+        _user: Option<Uuid>,
+        _filter: AlbumListFilter,
+    ) -> Result<u32, TrackRepositoryError> {
         let indexes = self
             .indexes
             .lock()
