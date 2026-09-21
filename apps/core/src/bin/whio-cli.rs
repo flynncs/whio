@@ -5,7 +5,9 @@ use uuid::Uuid;
 use whio_core::{
     database::Database,
     identity::{provisioning, secrets::CredentialKey},
-    tracks::{DuplicateCandidate, PostgresTrackRepository, TrackRepository},
+    tracks::{
+        DuplicateCandidate, PostgresTrackRepository, SplitArtist, SplitArtistRow, TrackRepository,
+    },
 };
 
 const DEFAULT_DUPLICATE_LIMIT: u32 = 50;
@@ -144,6 +146,9 @@ async fn main() -> Result<(), CliError> {
             let repository = PostgresTrackRepository::new(database.pool());
             let candidates = repository.duplicate_candidates(limit).await?;
             print_duplicates(&candidates);
+
+            let split = repository.split_artists(limit).await?;
+            print_split_artists(&split);
         }
     }
 
@@ -211,6 +216,38 @@ fn print_duplicates(candidates: &[DuplicateCandidate]) {
             );
         }
     }
+}
+
+fn print_split_artists(artists: &[SplitArtist]) {
+    if artists.is_empty() {
+        return;
+    }
+
+    println!(
+        "\n{} artist names are held by more than one row",
+        artists.len()
+    );
+
+    for artist in artists {
+        let header = artist
+            .rows()
+            .first()
+            .map_or(artist.name(), SplitArtistRow::name);
+
+        println!("\n{header}");
+
+        for row in artist.rows() {
+            println!(
+                "  {}  {:<4}  {} tracks, {} albums",
+                row.artist_id().as_uuid(),
+                if row.is_identified() { "id" } else { "none" },
+                row.track_count(),
+                row.album_count()
+            );
+        }
+    }
+
+    println!("\nA-046 keeps these rows apart on purpose; merging them is a decision, not a fix.");
 }
 
 fn human_bytes(bytes: u64) -> String {

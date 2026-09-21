@@ -15,7 +15,9 @@ pub use album::{
 };
 pub use artist::{Artist, ArtistCredit, ArtistId, ArtistSummary};
 pub use artwork::ArtworkRef;
-pub use duplicates::{DuplicateCandidate, DuplicateSource, KeepReason};
+pub use duplicates::{
+    DuplicateCandidate, DuplicateSource, KeepReason, SplitArtist, SplitArtistRow,
+};
 pub use error::ValidationError;
 pub use metadata::TrackMetadata;
 pub use source::{

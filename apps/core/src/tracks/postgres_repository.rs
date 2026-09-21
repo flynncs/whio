@@ -8,8 +8,8 @@ use crate::tracks::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
     AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, DuplicateCandidate,
     DuplicateSource, GenreSummary, LOCAL_PROVIDER_ID, LibraryState, ProviderId, SourceFileFacts,
-    SourceIdentity, SourceScope, Starred, StateTarget, Track, TrackHit, TrackId, TrackMetadata,
-    TrackRepository, TrackRepositoryError,
+    SourceIdentity, SourceScope, SplitArtist, SplitArtistRow, Starred, StateTarget, Track,
+    TrackHit, TrackId, TrackMetadata, TrackRepository, TrackRepositoryError,
 };
 
 use super::domain::normalize_for_matching;
@@ -134,6 +134,53 @@ impl TrackRepository for PostgresTrackRepository {
         }
 
         Ok(candidates)
+    }
+
+    async fn split_artists(&self, limit: u32) -> Result<Vec<SplitArtist>, TrackRepositoryError> {
+        let rows = sqlx::query_as::<_, (String, Uuid, String, bool, i64, i64)>(
+            r#"
+            WITH split AS (
+                SELECT name_normalized
+                FROM artists
+                GROUP BY name_normalized
+                HAVING count(*) > 1
+                ORDER BY name_normalized
+                LIMIT $1
+            )
+            SELECT ar.name_normalized, ar.id, ar.name,
+                   ar.musicbrainz_artist_id IS NOT NULL,
+                   (SELECT count(*) FROM track_artist_credits AS credits
+                    WHERE credits.artist_id = ar.id),
+                   (SELECT count(*) FROM albums AS releases
+                    WHERE releases.album_artist_id = ar.id)
+            FROM artists AS ar
+            WHERE ar.name_normalized IN (SELECT name_normalized FROM split)
+            ORDER BY ar.name_normalized, ar.musicbrainz_artist_id NULLS LAST
+            "#,
+        )
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        let mut artists: Vec<SplitArtist> = Vec::new();
+
+        for (normalized, artist_id, name, identified, track_count, album_count) in rows {
+            let row = SplitArtistRow::new(
+                ArtistId::from_uuid(artist_id),
+                name,
+                identified,
+                track_count.max(0) as u64,
+                album_count.max(0) as u64,
+            );
+
+            match artists.last_mut() {
+                Some(last) if last.name() == normalized => last.push_row(row),
+                _ => artists.push(SplitArtist::new(normalized, vec![row])),
+            }
+        }
+
+        Ok(artists)
     }
 
     async fn find_sources(

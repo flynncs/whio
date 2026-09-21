@@ -259,3 +259,78 @@ mod tests {
         assert_eq!(candidate.wasted_bytes(), 0);
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitArtistRow {
+    artist_id: super::ArtistId,
+    name: String,
+    identified: bool,
+    track_count: u64,
+    album_count: u64,
+}
+
+impl SplitArtistRow {
+    pub fn new(
+        artist_id: super::ArtistId,
+        name: String,
+        identified: bool,
+        track_count: u64,
+        album_count: u64,
+    ) -> Self {
+        Self {
+            artist_id,
+            name,
+            identified,
+            track_count,
+            album_count,
+        }
+    }
+
+    pub fn artist_id(&self) -> &super::ArtistId {
+        &self.artist_id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn is_identified(&self) -> bool {
+        self.identified
+    }
+
+    pub fn track_count(&self) -> u64 {
+        self.track_count
+    }
+
+    pub fn album_count(&self) -> u64 {
+        self.album_count
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitArtist {
+    name: String,
+    rows: Vec<SplitArtistRow>,
+}
+
+impl SplitArtist {
+    pub fn new(name: String, rows: Vec<SplitArtistRow>) -> Self {
+        Self { name, rows }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn rows(&self) -> &[SplitArtistRow] {
+        &self.rows
+    }
+
+    pub fn push_row(&mut self, row: SplitArtistRow) {
+        self.rows.push(row);
+    }
+
+    pub fn has_identifier(&self) -> bool {
+        self.rows.iter().any(SplitArtistRow::is_identified)
+    }
+}

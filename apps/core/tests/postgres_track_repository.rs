@@ -1137,6 +1137,47 @@ async fn duplicate_candidates_report_local_copies(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires PostgreSQL"]
+async fn split_artists_report_rows_sharing_a_name(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+
+    let identified = repository
+        .resolve_or_create_artist(&credit("Daft Punk", Some("mb-1")))
+        .await
+        .unwrap();
+    let plain = repository
+        .resolve_or_create_artist(&credit("Daft Punk", None))
+        .await
+        .unwrap();
+    repository
+        .resolve_or_create_artist(&credit("Aphex Twin", None))
+        .await
+        .unwrap();
+
+    let split = repository.split_artists(10).await.unwrap();
+    assert_eq!(split.len(), 1, "only the shared name is reported");
+
+    let artist = &split[0];
+    assert_eq!(artist.name(), "daft punk");
+    assert_eq!(artist.rows().len(), 2);
+    assert!(artist.has_identifier());
+
+    let with_id = artist
+        .rows()
+        .iter()
+        .find(|row| row.is_identified())
+        .expect("the id-bearing row is reported");
+    assert_eq!(with_id.artist_id(), identified.id());
+
+    let without_id = artist
+        .rows()
+        .iter()
+        .find(|row| !row.is_identified())
+        .expect("the name-only row is reported");
+    assert_eq!(without_id.artist_id(), plain.id());
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
 async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool);
 
