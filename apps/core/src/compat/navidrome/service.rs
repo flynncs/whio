@@ -294,7 +294,7 @@ pub(crate) async fn album_list(
         }
         None => {
             let total = catalogue
-                .album_count()
+                .album_count(Some(&user))
                 .await
                 .map_err(SongError::Catalogue)?;
             let albums = catalogue
@@ -334,7 +334,7 @@ pub(crate) async fn artist_list(
     let user = authorize(credential, token).await?;
     let (offset, limit) = page(start, end);
     let total = catalogue
-        .artist_count()
+        .artist_count(Some(&user))
         .await
         .map_err(SongError::Catalogue)?;
     let artists = catalogue

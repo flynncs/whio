@@ -19,8 +19,9 @@ use super::decode::{
     track_states,
 };
 use super::schema::{
-    ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS,
-    AlbumBrowseRow, AlbumRow, ArtistRow, CREDIT_NORMALIZED, TrackSearchRow,
+    ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_ENGAGED, ALBUM_OWNED,
+    ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS, ARTIST_ENGAGED, AlbumBrowseRow, AlbumRow, ArtistRow,
+    COUNT_ALBUM_ENGAGED, COUNT_ARTIST_ENGAGED, CREDIT_NORMALIZED, TrackSearchRow,
 };
 use crate::tracks::domain::{album_quality, normalize_for_matching, track_quality};
 
@@ -259,6 +260,8 @@ impl LibraryRead for PgStore {
         filter: AlbumListFilter,
         user: Option<Uuid>,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
+        let library_ids = self.library_provider_ids();
+
         if matches!(
             order,
             AlbumOrder::Frequent
@@ -274,11 +277,17 @@ impl LibraryRead for PgStore {
             return album_summaries_by_ids(&self.pool, &ids, Some(user)).await;
         }
 
+        let scope = match order {
+            AlbumOrder::RecentlyAdded => ALBUM_OWNED,
+            _ => ALBUM_ENGAGED,
+        };
+
         let rows = sqlx::query_as::<_, AlbumBrowseRow>(&format!(
             r#"
             SELECT {ALBUM_BROWSE_COLUMNS}
             {ALBUM_BROWSE_FROM}
-            WHERE (NOT $3 OR EXISTS (
+            WHERE {scope}
+              AND (NOT $3 OR EXISTS (
                       SELECT 1 FROM album_favorites
                       WHERE album_favorites.album_id = a.id AND album_favorites.user_id = $7
                   ))
@@ -303,6 +312,8 @@ impl LibraryRead for PgStore {
         .bind(filter.year_from().and_then(|year| i16::try_from(year).ok()))
         .bind(filter.year_to().and_then(|year| i16::try_from(year).ok()))
         .bind(user)
+        .bind(&library_ids)
+        .bind(user)
         .fetch_all(&self.pool)
         .await
         .map_err(repository_error)?;
@@ -322,20 +333,25 @@ impl LibraryRead for PgStore {
         limit: u32,
         user: Option<Uuid>,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
-        let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64)>(
-            r#"
+        let library_ids = self.library_provider_ids();
+        let rows =
+            sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64)>(&format!(
+                r#"
             SELECT ar.id, ar.name, ar.sort_name, ar.musicbrainz_artist_id,
                    (SELECT COUNT(*) FROM albums WHERE album_artist_id = ar.id)::BIGINT
             FROM artists AS ar
+            WHERE {ARTIST_ENGAGED}
             ORDER BY ar.name_normalized, ar.id
             LIMIT $1 OFFSET $2
-            "#,
-        )
-        .bind(i64::from(limit))
-        .bind(i64::from(offset))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(repository_error)?;
+            "#
+            ))
+            .bind(i64::from(limit))
+            .bind(i64::from(offset))
+            .bind(&library_ids)
+            .bind(user)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(repository_error)?;
 
         let mut summaries = rows
             .into_iter()
@@ -346,20 +362,30 @@ impl LibraryRead for PgStore {
         Ok(summaries)
     }
 
-    async fn count_albums(&self) -> Result<u32, TrackRepositoryError> {
-        let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM albums")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(repository_error)?;
+    async fn count_albums(&self, user: Option<Uuid>) -> Result<u32, TrackRepositoryError> {
+        let library_ids = self.library_provider_ids();
+        let count = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT COUNT(*)::BIGINT FROM albums AS a WHERE {COUNT_ALBUM_ENGAGED}"
+        ))
+        .bind(&library_ids)
+        .bind(user)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(repository_error)?;
 
         u32::try_from(count).map_err(|_| TrackRepositoryError::InvalidData)
     }
 
-    async fn count_artists(&self) -> Result<u32, TrackRepositoryError> {
-        let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::BIGINT FROM artists")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(repository_error)?;
+    async fn count_artists(&self, user: Option<Uuid>) -> Result<u32, TrackRepositoryError> {
+        let library_ids = self.library_provider_ids();
+        let count = sqlx::query_scalar::<_, i64>(&format!(
+            "SELECT COUNT(*)::BIGINT FROM artists AS ar WHERE {COUNT_ARTIST_ENGAGED}"
+        ))
+        .bind(&library_ids)
+        .bind(user)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(repository_error)?;
 
         u32::try_from(count).map_err(|_| TrackRepositoryError::InvalidData)
     }

@@ -65,6 +65,144 @@ pub(crate) const CREDIT_NORMALIZED: &str = "translate(lower(regexp_replace(norma
      '\\s+', ' ', 'g')), U&'\\2019\\2018\\02BC\\2013\\2014\\2011', \
      U&'\\0027\\0027\\0027\\002D\\002D\\002D')";
 
+// the browse scope. a provider entity is browsable when it is engaged: owned,
+// or starred, rated or played by the viewer. each query inlines the clause with
+// its own parameter positions, so the numbers here match that query's binds.
+
+// list_albums: $8 is the library provider id list, $9 the viewer.
+pub(crate) const ALBUM_ENGAGED: &str = "(EXISTS (
+        SELECT 1 FROM album_tracks AS engaged_mt
+        JOIN tracks AS t ON t.id = engaged_mt.track_id
+        WHERE engaged_mt.album_id = a.id
+          AND (EXISTS (
+                  SELECT 1 FROM track_sources AS owned
+                  WHERE owned.track_id = t.id AND owned.provider_id = ANY($8::TEXT[])
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_favorites AS fav
+                  WHERE fav.track_id = t.id AND fav.user_id = $9
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_ratings AS rating
+                  WHERE rating.track_id = t.id AND rating.user_id = $9
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_play_stats AS play
+                  WHERE play.track_id = t.id AND play.user_id = $9 AND play.play_count > 0
+              ))
+    )
+    OR EXISTS (
+        SELECT 1 FROM album_favorites AS fav
+        WHERE fav.album_id = a.id AND fav.user_id = $9
+    )
+    OR EXISTS (
+        SELECT 1 FROM album_ratings AS rating
+        WHERE rating.album_id = a.id AND rating.user_id = $9
+    ))";
+
+// "recently added" means added to the library, so a provider album a search
+// merely materialised does not qualify. $8 as above; $9 is unused but keeps the
+// bind count identical to ALBUM_ENGAGED.
+pub(crate) const ALBUM_OWNED: &str = "($9::UUID IS NOT NULL OR $9::UUID IS NULL) AND EXISTS (
+        SELECT 1 FROM album_tracks AS owned_mt
+        JOIN track_sources AS owned ON owned.track_id = owned_mt.track_id
+        WHERE owned_mt.album_id = a.id
+          AND owned.provider_id = ANY($8::TEXT[])
+    )";
+
+// list_artists: $3 is the library provider id list, $4 the viewer.
+pub(crate) const ARTIST_ENGAGED: &str = "(EXISTS (
+        SELECT 1 FROM track_artist_credits AS engaged_credit
+        JOIN tracks AS t ON t.id = engaged_credit.track_id
+        WHERE engaged_credit.artist_id = ar.id
+          AND (EXISTS (
+                  SELECT 1 FROM track_sources AS owned
+                  WHERE owned.track_id = t.id AND owned.provider_id = ANY($3::TEXT[])
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_favorites AS fav
+                  WHERE fav.track_id = t.id AND fav.user_id = $4
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_ratings AS rating
+                  WHERE rating.track_id = t.id AND rating.user_id = $4
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_play_stats AS play
+                  WHERE play.track_id = t.id AND play.user_id = $4 AND play.play_count > 0
+              ))
+    )
+    OR EXISTS (
+        SELECT 1 FROM artist_favorites AS fav
+        WHERE fav.artist_id = ar.id AND fav.user_id = $4
+    )
+    OR EXISTS (
+        SELECT 1 FROM artist_ratings AS rating
+        WHERE rating.artist_id = ar.id AND rating.user_id = $4
+    ))";
+
+// count_albums: $1 is the library provider id list, $2 the viewer.
+pub(crate) const COUNT_ALBUM_ENGAGED: &str = "(EXISTS (
+        SELECT 1 FROM album_tracks AS engaged_mt
+        JOIN tracks AS t ON t.id = engaged_mt.track_id
+        WHERE engaged_mt.album_id = a.id
+          AND (EXISTS (
+                  SELECT 1 FROM track_sources AS owned
+                  WHERE owned.track_id = t.id AND owned.provider_id = ANY($1::TEXT[])
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_favorites AS fav
+                  WHERE fav.track_id = t.id AND fav.user_id = $2
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_ratings AS rating
+                  WHERE rating.track_id = t.id AND rating.user_id = $2
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_play_stats AS play
+                  WHERE play.track_id = t.id AND play.user_id = $2 AND play.play_count > 0
+              ))
+    )
+    OR EXISTS (
+        SELECT 1 FROM album_favorites AS fav
+        WHERE fav.album_id = a.id AND fav.user_id = $2
+    )
+    OR EXISTS (
+        SELECT 1 FROM album_ratings AS rating
+        WHERE rating.album_id = a.id AND rating.user_id = $2
+    ))";
+
+// count_artists: $1 and $2 as above.
+pub(crate) const COUNT_ARTIST_ENGAGED: &str = "(EXISTS (
+        SELECT 1 FROM track_artist_credits AS engaged_credit
+        JOIN tracks AS t ON t.id = engaged_credit.track_id
+        WHERE engaged_credit.artist_id = ar.id
+          AND (EXISTS (
+                  SELECT 1 FROM track_sources AS owned
+                  WHERE owned.track_id = t.id AND owned.provider_id = ANY($1::TEXT[])
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_favorites AS fav
+                  WHERE fav.track_id = t.id AND fav.user_id = $2
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_ratings AS rating
+                  WHERE rating.track_id = t.id AND rating.user_id = $2
+              )
+              OR EXISTS (
+                  SELECT 1 FROM track_play_stats AS play
+                  WHERE play.track_id = t.id AND play.user_id = $2 AND play.play_count > 0
+              ))
+    )
+    OR EXISTS (
+        SELECT 1 FROM artist_favorites AS fav
+        WHERE fav.artist_id = ar.id AND fav.user_id = $2
+    )
+    OR EXISTS (
+        SELECT 1 FROM artist_ratings AS rating
+        WHERE rating.artist_id = ar.id AND rating.user_id = $2
+    ))";
+
 pub(crate) type StateRow = (
     Uuid,
     Option<chrono::DateTime<chrono::Utc>>,

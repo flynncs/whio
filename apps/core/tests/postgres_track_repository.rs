@@ -632,21 +632,21 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
 
     let third = repository
         .get_or_create(
-            source("track-c"),
+            local_source("track-c.flac"),
             metadata("Third", &["Daft Punk"], Some(3_000)),
         )
         .await
         .unwrap();
     let first = repository
         .get_or_create(
-            source("track-a"),
+            local_source("track-a.flac"),
             metadata("First", &["Daft Punk"], Some(1_000)),
         )
         .await
         .unwrap();
     let later = repository
         .get_or_create(
-            source("track-b"),
+            local_source("track-b.flac"),
             metadata("Later", &["Daft Punk"], Some(2_000)),
         )
         .await
@@ -717,13 +717,22 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
         "the previous album no longer holds the track"
     );
 
-    repository.clear_album_track(third.id()).await.unwrap();
-    assert!(
+    repository
+        .set_album_track(
+            discovery.id(),
+            third.id(),
+            &AlbumTrack::new(Some(1), Some(3), 2).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
         repository
             .find_album_for_track(third.id())
             .await
             .unwrap()
-            .is_none()
+            .expect("re-filing back moves it again")
+            .id(),
+        discovery.id()
     );
 
     let summaries = repository
@@ -734,14 +743,18 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
         .iter()
         .map(|summary| summary.album().title().to_owned())
         .collect::<Vec<_>>();
-    assert_eq!(names, ["Discovery", "Homework"]);
+    assert_eq!(
+        names,
+        ["Discovery"],
+        "Homework lost its only track, so it is not browsable"
+    );
     let listed = summaries
         .iter()
         .find(|summary| summary.album().id() == discovery.id())
         .expect("the album is listed");
     assert_eq!(listed.album_artist().unwrap().id(), artist.id());
-    assert_eq!(listed.track_count(), 2);
-    assert_eq!(listed.duration_ms(), 3_000);
+    assert_eq!(listed.track_count(), 3);
+    assert_eq!(listed.duration_ms(), 6_000);
 
     assert_eq!(
         repository
@@ -758,6 +771,141 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
     assert_eq!(artists[0].album_count(), 2);
 }
 
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn browse_shows_only_engaged_albums_and_artists(pool: PgPool) {
+    let user = Uuid::now_v7();
+    insert_user(&pool, user, "engaged-listener").await;
+    let repository = PostgresTrackRepository::new(pool);
+
+    let owned_album = repository
+        .resolve_or_create_album(&album("Owned").with_album_artist(credit("Owner", None)))
+        .await
+        .unwrap();
+    let played_album = repository
+        .resolve_or_create_album(&album("Played").with_album_artist(credit("Player", None)))
+        .await
+        .unwrap();
+    let untouched_album = repository
+        .resolve_or_create_album(&album("Untouched").with_album_artist(credit("Stranger", None)))
+        .await
+        .unwrap();
+
+    let owned_track = repository
+        .get_or_create(
+            local_source("owned.flac"),
+            metadata("Owned Song", &["Owner"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+    let played_track = repository
+        .get_or_create(
+            source("played-video"),
+            metadata("Played Song", &["Player"], Some(2_000)),
+        )
+        .await
+        .unwrap();
+    let untouched_track = repository
+        .get_or_create(
+            source("untouched-video"),
+            metadata("Untouched Song", &["Stranger"], Some(3_000)),
+        )
+        .await
+        .unwrap();
+
+    for (album_row, track) in [
+        (&owned_album, &owned_track),
+        (&played_album, &played_track),
+        (&untouched_album, &untouched_track),
+    ] {
+        repository
+            .set_album_track(
+                album_row.id(),
+                track.id(),
+                &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    repository
+        .record_play(user, played_track.id(), chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let listed = |order: AlbumOrder| {
+        let repository = &repository;
+        async move {
+            repository
+                .list_albums(0, 25, order, AlbumListFilter::default(), Some(user))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|summary| summary.album().title().to_owned())
+                .collect::<Vec<_>>()
+        }
+    };
+
+    for order in [
+        AlbumOrder::Title,
+        AlbumOrder::Artist,
+        AlbumOrder::Random,
+        AlbumOrder::YearAscending,
+        AlbumOrder::YearDescending,
+        AlbumOrder::Starred,
+        AlbumOrder::HighestRated,
+        AlbumOrder::Recent,
+        AlbumOrder::Frequent,
+    ] {
+        let names = listed(order).await;
+        assert!(
+            !names.iter().any(|name| name == "Untouched"),
+            "{order:?} must not show an album nothing engaged with, got {names:?}"
+        );
+    }
+
+    let played = listed(AlbumOrder::Recent).await;
+    assert!(
+        played.iter().any(|name| name == "Played"),
+        "a played provider album belongs in recently played, got {played:?}"
+    );
+
+    let newest = listed(AlbumOrder::RecentlyAdded).await;
+    assert!(
+        !newest.iter().any(|name| name == "Played"),
+        "a played provider album is not recently added, got {newest:?}"
+    );
+    assert!(
+        newest.iter().any(|name| name == "Owned"),
+        "an owned album is recently added, got {newest:?}"
+    );
+
+    let artists = repository
+        .list_artists(0, 25, Some(user))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.artist().name().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        !artists.iter().any(|name| name == "Stranger"),
+        "an artist nothing engaged with is not listed, got {artists:?}"
+    );
+    assert!(
+        artists.iter().any(|name| name == "Owner"),
+        "got {artists:?}"
+    );
+    assert!(
+        artists.iter().any(|name| name == "Player"),
+        "got {artists:?}"
+    );
+
+    assert_eq!(
+        repository.count_albums(Some(user)).await.unwrap(),
+        2,
+        "the count agrees with the list"
+    );
+}
 #[sqlx::test]
 #[ignore = "requires PostgreSQL"]
 async fn recording_identifiers_round_trip_on_the_track(pool: PgPool) {
@@ -1407,8 +1555,8 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
             .is_empty()
     );
 
-    assert_eq!(repository.count_albums().await.unwrap(), 1);
-    assert!(repository.count_artists().await.unwrap() >= 1);
+    assert_eq!(repository.count_albums(None).await.unwrap(), 1);
+    assert!(repository.count_artists(None).await.unwrap() >= 1);
 }
 
 #[sqlx::test]

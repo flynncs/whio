@@ -151,16 +151,16 @@ impl CatalogueService {
             .map_err(CatalogueError::Repository)
     }
 
-    pub async fn album_count(&self) -> Result<u32, CatalogueError> {
+    pub async fn album_count(&self, user: Option<&Uuid>) -> Result<u32, CatalogueError> {
         self.library
-            .count_albums()
+            .count_albums(user.copied())
             .await
             .map_err(CatalogueError::Repository)
     }
 
-    pub async fn artist_count(&self) -> Result<u32, CatalogueError> {
+    pub async fn artist_count(&self, user: Option<&Uuid>) -> Result<u32, CatalogueError> {
         self.library
-            .count_artists()
+            .count_artists(user.copied())
             .await
             .map_err(CatalogueError::Repository)
     }
