@@ -142,6 +142,7 @@ pub struct AlbumMetadata {
     label: Option<String>,
     musicbrainz_release_group_id: Option<String>,
     musicbrainz_release_id: Option<String>,
+    provider: Option<SourceIdentity>,
 }
 
 impl AlbumMetadata {
@@ -154,7 +155,17 @@ impl AlbumMetadata {
             label: None,
             musicbrainz_release_group_id: None,
             musicbrainz_release_id: None,
+            provider: None,
         })
+    }
+
+    pub fn with_provider(mut self, provider: Option<SourceIdentity>) -> Self {
+        self.provider = provider;
+        self
+    }
+
+    pub fn provider(&self) -> Option<&SourceIdentity> {
+        self.provider.as_ref()
     }
 
     pub fn with_album_artist(mut self, album_artist: ArtistCredit) -> Self {

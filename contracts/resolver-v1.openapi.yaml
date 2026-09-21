@@ -113,9 +113,18 @@ paths:
                       external_id: example-source-id
                     title: Instant Crush
                     artists:
-                      - Daft Punk
+                      - name: Daft Punk
+                        source:
+                          provider_id: example_music
+                          external_id: example-artist-id
                     duration_ms: 337000
-                    album: Random Access Memories
+                    album:
+                      title: Random Access Memories
+                      source:
+                        provider_id: example_music
+                        external_id: example-album-id
+                      year: 2013
+                      release_type: Album
                     artwork_url: https://art.example.test/random-access-memories.jpg
         "400":
           $ref: "#/components/responses/BadRequest"
@@ -422,26 +431,59 @@ components:
           type: array
           minItems: 1
           items:
-            type: string
-            minLength: 1
-            maxLength: 500
+            $ref: "#/components/schemas/CatalogueArtist"
         duration_ms:
           type:
             - integer
             - "null"
           minimum: 0
         album:
-          type:
-            - string
-            - "null"
-          minLength: 1
-          maxLength: 500
+          $ref: "#/components/schemas/CatalogueAlbum"
         artwork_url:
           type:
             - string
             - "null"
           format: uri
           description: Public artwork URL that the core fetches and proxies to clients.
+
+    CatalogueArtist:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 500
+        source:
+          $ref: "#/components/schemas/SourceIdentity"
+          description: The artist's identity at the provider, when the provider supplies one. Absent for a name-only credit.
+
+    CatalogueAlbum:
+      type: object
+      additionalProperties: false
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        source:
+          $ref: "#/components/schemas/SourceIdentity"
+          description: The album's identity at the provider, when the provider supplies one.
+        year:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        release_type:
+          type:
+            - string
+            - "null"
+          minLength: 1
+          maxLength: 100
 
     PlaybackResolveRequest:
       type: object

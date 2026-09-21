@@ -539,6 +539,7 @@ async fn materialize(
         let artwork = candidate.artwork().cloned();
         let album_metadata = candidate.album().cloned();
         let metadata = candidate.metadata().clone();
+        let credits = metadata.artists().to_vec();
 
         let track = catalogue
             .get_or_create(source.clone(), metadata)
@@ -546,15 +547,17 @@ async fn materialize(
             .map_err(CatalogueError::Repository)?;
 
         let album = match &album_metadata {
-            Some(metadata) => {
+            Some(album_metadata) => {
                 let album = catalogue
-                    .resolve_or_create_album(metadata)
+                    .resolve_or_create_album(album_metadata)
                     .await
                     .map_err(CatalogueError::Repository)?;
-                catalogue
-                    .set_album_source(album.id(), &source)
-                    .await
-                    .map_err(CatalogueError::Repository)?;
+                if let Some(provider) = album_metadata.provider() {
+                    catalogue
+                        .set_album_source(album.id(), provider)
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+                }
                 catalogue
                     .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
                     .await
@@ -571,6 +574,19 @@ async fn materialize(
                 None
             }
         };
+
+        for credit in &credits {
+            if let Some(provider) = credit.provider() {
+                let artist = catalogue
+                    .resolve_or_create_artist(credit)
+                    .await
+                    .map_err(CatalogueError::Repository)?;
+                catalogue
+                    .set_artist_source(artist.id(), provider)
+                    .await
+                    .map_err(CatalogueError::Repository)?;
+            }
+        }
 
         if let Some(artwork) = artwork
             && let Err(error) = sources.set_source_artwork(&source, &artwork).await
@@ -1091,7 +1107,8 @@ mod tests {
         let source = base.source().clone();
         let album_metadata = AlbumMetadata::new("Discovery".to_owned())
             .unwrap()
-            .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap());
+            .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap())
+            .with_provider(Some(source.clone()));
         let candidate = CatalogueCandidate::new(source, base.metadata().clone())
             .with_album(Some(album_metadata.clone()));
         let resolver = StubProvider::new(vec![Ok(vec![candidate])]);
@@ -1117,6 +1134,77 @@ mod tests {
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].track().id(), outcome.tracks[0].track().id());
+    }
+
+    #[tokio::test]
+    async fn provider_album_and_artist_identity_round_trip_through_materialize() {
+        use whio_resolver_api::models::{
+            CatalogueAlbum as AlbumDto, CatalogueArtist as ArtistDto,
+            CatalogueCandidate as CandidateDto, SourceIdentity as SourceIdentityDto,
+        };
+
+        fn provider_source(external_id: &str) -> SourceIdentity {
+            SourceIdentity::new(
+                ProviderId::new("youtube_music".to_owned()).unwrap(),
+                SourceScope::Global,
+                external_id.to_owned(),
+            )
+            .unwrap()
+        }
+
+        let dto = CandidateDto {
+            source: Box::new(SourceIdentityDto::new(
+                "youtube_music".to_owned(),
+                "video-1".to_owned(),
+            )),
+            title: "brutal".to_owned(),
+            artists: vec![ArtistDto {
+                name: "Olivia Rodrigo".to_owned(),
+                source: Some(Box::new(SourceIdentityDto::new(
+                    "youtube_music".to_owned(),
+                    "artist-1".to_owned(),
+                ))),
+            }],
+            duration_ms: Some(Some(144_000)),
+            album: Some(Box::new(AlbumDto {
+                title: "SOUR".to_owned(),
+                source: Some(Box::new(SourceIdentityDto::new(
+                    "youtube_music".to_owned(),
+                    "album-1".to_owned(),
+                ))),
+                year: Some(Some(2021)),
+                release_type: Some(Some("Album".to_owned())),
+            })),
+            artwork_url: None,
+        };
+        let candidate = CatalogueCandidate::try_from(dto).unwrap();
+
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        let resolver = StubProvider::new(vec![Ok(vec![candidate.clone()])]);
+        let catalogue = Fixture {
+            store: repository.clone(),
+        }
+        .service(vec![provider(resolver)]);
+
+        catalogue.search(&search(), None, &context()).await.unwrap();
+
+        let album = repository
+            .resolve_or_create_album(candidate.album().expect("the album metadata"))
+            .await
+            .unwrap();
+        assert_eq!(
+            repository.find_album_sources(album.id()).await.unwrap(),
+            vec![provider_source("album-1")],
+            "materialize stores the album's own identity, not the song's"
+        );
+
+        let credit = &candidate.metadata().artists()[0];
+        let artist = repository.resolve_or_create_artist(credit).await.unwrap();
+        assert_eq!(
+            repository.find_artist_sources(artist.id()).await.unwrap(),
+            vec![provider_source("artist-1")],
+            "materialize stores the artist's provider identity"
+        );
     }
 
     fn local_source() -> SourceIdentity {

@@ -48,7 +48,7 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
                     "external_id": "abc123",
                 },
                 "title": "Instant Crush",
-                "artists": ["Daft Punk"],
+                "artists": [{"name": "Daft Punk"}],
                 "duration_ms": 337000,
             },
         )
@@ -70,7 +70,11 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
 
         results = YouTubeMusicCatalogue(client).search("Daft Punk", limit=5)
 
-        self.assertEqual(results.results[0].album, "Random Access Memories")
+        self.assertEqual(results.results[0].album.title, "Random Access Memories")
+        self.assertEqual(
+            results.results[0].album.source.external_id,
+            "album-1",
+        )
         self.assertEqual(
             str(results.results[0].artwork_url), "https://art.test/large.jpg"
         )

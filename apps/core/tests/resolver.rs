@@ -13,6 +13,7 @@ use whio_core::{
     tracks::{ProviderId, SourceIdentity, SourceScope, ValidationError as TrackValidationError},
 };
 use whio_resolver_api::models::{
+    CatalogueAlbum as CatalogueAlbumDto, CatalogueArtist as CatalogueArtistDto,
     CatalogueCandidate as CatalogueCandidateDto, MediaMetadata as MediaMetadataDto,
     PlaybackResolveResponse as PlaybackResolveResponseDto, SourceIdentity as SourceIdentityDto,
 };
@@ -24,9 +25,23 @@ fn candidate_dto() -> CatalogueCandidateDto {
             "example-source-id".to_owned(),
         )),
         title: "Instant Crush".to_owned(),
-        artists: vec!["Daft Punk".to_owned()],
+        artists: vec![CatalogueArtistDto {
+            name: "Daft Punk".to_owned(),
+            source: Some(Box::new(SourceIdentityDto::new(
+                "example_music".to_owned(),
+                "artist-1".to_owned(),
+            ))),
+        }],
         duration_ms: Some(Some(337_000)),
-        album: None,
+        album: Some(Box::new(CatalogueAlbumDto {
+            title: "Random Access Memories".to_owned(),
+            source: Some(Box::new(SourceIdentityDto::new(
+                "example_music".to_owned(),
+                "album-1".to_owned(),
+            ))),
+            year: Some(Some(2013)),
+            release_type: Some(Some("Album".to_owned())),
+        })),
         artwork_url: None,
     }
 }
@@ -85,6 +100,21 @@ fn valid_candidate_dto_maps_to_domain_candidate() {
         ["Daft Punk"]
     );
     assert_eq!(candidate.duration_ms(), Some(337_000));
+    assert_eq!(
+        candidate.artists()[0]
+            .provider()
+            .map(|provider| provider.external_id()),
+        Some("artist-1"),
+        "a provider artist identity survives the adapter"
+    );
+    assert_eq!(
+        candidate
+            .album()
+            .and_then(|album| album.provider())
+            .map(|provider| provider.external_id()),
+        Some("album-1"),
+        "a provider album identity survives the adapter"
+    );
 }
 
 #[test]

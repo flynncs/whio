@@ -85,6 +85,29 @@ impl CatalogueWrite for PgStore {
         .map_err(repository_error)
     }
 
+    async fn set_artist_source(
+        &self,
+        artist_id: &ArtistId,
+        source: &SourceIdentity,
+    ) -> Result<(), TrackRepositoryError> {
+        sqlx::query(
+            r#"
+            INSERT INTO artist_sources (id, artist_id, provider_id, source_scope, external_id)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (provider_id, source_scope, external_id) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(artist_id.as_uuid())
+        .bind(source.provider_id().as_str())
+        .bind(encode_source_scope(source.source_scope()))
+        .bind(source.external_id())
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(repository_error)
+    }
+
     async fn set_album_track(
         &self,
         album_id: &AlbumId,

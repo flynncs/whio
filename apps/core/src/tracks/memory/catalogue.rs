@@ -110,6 +110,28 @@ impl CatalogueWrite for InMemoryTrackRepository {
         Ok(())
     }
 
+    async fn set_artist_source(
+        &self,
+        artist_id: &ArtistId,
+        source: &SourceIdentity,
+    ) -> Result<(), TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        if !indexes.artists_by_id.contains_key(artist_id) {
+            return Err(TrackRepositoryError::InvalidData);
+        }
+
+        let sources = indexes.artist_sources.entry(artist_id.clone()).or_default();
+        if !sources.contains(source) {
+            sources.push(source.clone());
+        }
+
+        Ok(())
+    }
+
     async fn set_album_track(
         &self,
         album_id: &AlbumId,

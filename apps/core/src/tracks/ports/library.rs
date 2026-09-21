@@ -149,6 +149,13 @@ pub trait SourceLookup: Send + Sync {
         Ok(Vec::new())
     }
 
+    async fn find_artist_sources(
+        &self,
+        _artist_id: &ArtistId,
+    ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
     async fn set_source_artwork(
         &self,
         _source: &SourceIdentity,

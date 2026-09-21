@@ -18,7 +18,7 @@ pub struct CatalogueCandidate {
     #[serde(rename = "title")]
     pub title: String,
     #[serde(rename = "artists")]
-    pub artists: Vec<String>,
+    pub artists: Vec<models::CatalogueArtist>,
     #[serde(
         rename = "duration_ms",
         default,
@@ -26,13 +26,8 @@ pub struct CatalogueCandidate {
         skip_serializing_if = "Option::is_none"
     )]
     pub duration_ms: Option<Option<i32>>,
-    #[serde(
-        rename = "album",
-        default,
-        with = "::serde_with::rust::double_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub album: Option<Option<String>>,
+    #[serde(rename = "album", skip_serializing_if = "Option::is_none")]
+    pub album: Option<Box<models::CatalogueAlbum>>,
     /// Public artwork URL that the core fetches and proxies to clients.
     #[serde(
         rename = "artwork_url",
@@ -47,7 +42,7 @@ impl CatalogueCandidate {
     pub fn new(
         source: models::SourceIdentity,
         title: String,
-        artists: Vec<String>,
+        artists: Vec<models::CatalogueArtist>,
     ) -> CatalogueCandidate {
         CatalogueCandidate {
             source: Box::new(source),

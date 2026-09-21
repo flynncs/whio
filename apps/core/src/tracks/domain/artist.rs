@@ -6,7 +6,7 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    LibraryState, MatchQuality, ValidationError,
+    LibraryState, MatchQuality, SourceIdentity, ValidationError,
     text::{optional, required},
 };
 
@@ -145,6 +145,7 @@ impl ArtistSummary {
 pub struct ArtistCredit {
     name: String,
     musicbrainz_artist_id: Option<String>,
+    provider: Option<SourceIdentity>,
 }
 
 impl ArtistCredit {
@@ -159,7 +160,13 @@ impl ArtistCredit {
                 musicbrainz_artist_id,
                 MAX_IDENTIFIER,
             )?,
+            provider: None,
         })
+    }
+
+    pub fn with_provider(mut self, provider: Option<SourceIdentity>) -> Self {
+        self.provider = provider;
+        self
     }
 
     pub fn name(&self) -> &str {
@@ -169,6 +176,10 @@ impl ArtistCredit {
     pub fn musicbrainz_artist_id(&self) -> Option<&str> {
         self.musicbrainz_artist_id.as_deref()
     }
+
+    pub fn provider(&self) -> Option<&SourceIdentity> {
+        self.provider.as_ref()
+    }
 }
 
 impl From<&Artist> for ArtistCredit {
@@ -176,6 +187,7 @@ impl From<&Artist> for ArtistCredit {
         Self {
             name: artist.name.clone(),
             musicbrainz_artist_id: artist.musicbrainz_artist_id.clone(),
+            provider: None,
         }
     }
 }

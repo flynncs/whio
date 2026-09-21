@@ -68,23 +68,28 @@ class CatalogueSearchRequest(BaseModel):
     offset: int = Field(0, ge=0, le=1000)
 
 
-class Artist(RootModel[str]):
-    root: str = Field(..., max_length=500, min_length=1)
-
-
-class CatalogueCandidate(BaseModel):
+class CatalogueArtist(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    source: SourceIdentity
-    title: str = Field(..., max_length=500, min_length=1)
-    artists: list[Artist] = Field(..., min_length=1)
-    duration_ms: int | None = Field(None, ge=0)
-    album: str | None = Field(None, max_length=500, min_length=1)
-    artwork_url: AnyUrl | None = Field(
+    name: str = Field(..., max_length=500, min_length=1)
+    source: SourceIdentity | None = Field(
         None,
-        description='Public artwork URL that the core fetches and proxies to clients.',
+        description="The artist's identity at the provider, when the provider supplies one. Absent for a name-only credit.",
     )
+
+
+class CatalogueAlbum(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    title: str = Field(..., max_length=500, min_length=1)
+    source: SourceIdentity | None = Field(
+        None,
+        description="The album's identity at the provider, when the provider supplies one.",
+    )
+    year: int | None = Field(None, ge=0)
+    release_type: str | None = Field(None, max_length=100, min_length=1)
 
 
 class PlaybackResolveRequest(BaseModel):
@@ -131,6 +136,31 @@ class CapabilitiesResponse(BaseModel):
     providers: list[ProviderCapabilities] = Field(..., min_length=1)
 
 
+class CatalogueCandidate(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    source: SourceIdentity
+    title: str = Field(..., max_length=500, min_length=1)
+    artists: list[CatalogueArtist] = Field(..., min_length=1)
+    duration_ms: int | None = Field(None, ge=0)
+    album: CatalogueAlbum | None = None
+    artwork_url: AnyUrl | None = Field(
+        None,
+        description='Public artwork URL that the core fetches and proxies to clients.',
+    )
+
+
+class PlaybackResolveResponse(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    url: AnyUrl
+    headers: dict[str, str]
+    expires_at: AwareDatetime | None = None
+    media: MediaMetadata
+
+
 class CatalogueSearchResponse(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -142,13 +172,3 @@ class CatalogueSearchResponse(BaseModel):
         le=1000,
     )
     results: list[CatalogueCandidate]
-
-
-class PlaybackResolveResponse(BaseModel):
-    model_config = ConfigDict(
-        extra='forbid',
-    )
-    url: AnyUrl
-    headers: dict[str, str]
-    expires_at: AwareDatetime | None = None
-    media: MediaMetadata

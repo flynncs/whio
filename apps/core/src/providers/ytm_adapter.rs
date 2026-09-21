@@ -157,8 +157,9 @@ fn map_playback_error(error: TransportError<ResolvePlaybackError>) -> ProviderEr
 mod mapping {
     use chrono::Utc;
     use whio_resolver_api::models::{
+        CatalogueAlbum as CatalogueAlbumDto, CatalogueArtist as CatalogueArtistDto,
         CatalogueCandidate as CatalogueCandidateDto, MediaMetadata as MediaMetadataDto,
-        PlaybackResolveResponse as PlaybackResolveResponseDto,
+        PlaybackResolveResponse as PlaybackResolveResponseDto, SourceIdentity as SourceIdentityDto,
     };
 
     use crate::{
@@ -167,10 +168,35 @@ mod mapping {
             MediaMetadata, PlayableMedia, PlaybackUrl, ValidationError as PlaybackValidationError,
         },
         tracks::{
-            AlbumMetadata, ArtworkRef, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
-            ValidationError,
+            AlbumMetadata, ArtistCredit, ArtworkRef, ProviderId, SourceIdentity, SourceScope,
+            TrackMetadata, ValidationError,
         },
     };
+
+    fn provider_source(
+        source: Option<Box<SourceIdentityDto>>,
+    ) -> Result<Option<SourceIdentity>, ValidationError> {
+        source
+            .map(|source| {
+                SourceIdentity::new(
+                    ProviderId::new(source.provider_id)?,
+                    SourceScope::Global,
+                    source.external_id,
+                )
+            })
+            .transpose()
+    }
+
+    fn artist_credit(artist: CatalogueArtistDto) -> Result<ArtistCredit, ValidationError> {
+        Ok(ArtistCredit::new(artist.name, None)?.with_provider(provider_source(artist.source)?))
+    }
+
+    fn album_metadata(album: CatalogueAlbumDto) -> Result<AlbumMetadata, ValidationError> {
+        AlbumMetadata::new(album.title)?
+            .with_provider(provider_source(album.source)?)
+            .with_year(album.year.flatten())?
+            .with_release_type(album.release_type.flatten())
+    }
 
     impl TryFrom<CatalogueCandidateDto> for CatalogueCandidate {
         type Error = ValidationError;
@@ -190,12 +216,16 @@ mod mapping {
                 .transpose()
                 .map_err(|_| ValidationError::InvalidDuration)?;
 
-            let album_title = candidate.album.flatten();
-            let metadata =
-                TrackMetadata::from_names(candidate.title, candidate.artists, duration_ms)?;
-            let album = match album_title {
-                Some(title) => {
-                    let mut album = AlbumMetadata::new(title)?;
+            let artists = candidate
+                .artists
+                .into_iter()
+                .map(artist_credit)
+                .collect::<Result<Vec<_>, _>>()?;
+            let metadata = TrackMetadata::new(candidate.title, artists, duration_ms)?;
+
+            let album = match candidate.album {
+                Some(album) => {
+                    let mut album = album_metadata(*album)?;
                     if let Some(artist) = metadata.artists().first() {
                         album = album.with_album_artist(artist.clone());
                     }
@@ -309,7 +339,13 @@ mod mapping {
                     "example-source-id".to_owned(),
                 )),
                 title: "Instant Crush".to_owned(),
-                artists: vec!["Daft Punk".to_owned()],
+                artists: vec![CatalogueArtistDto {
+                    name: "Daft Punk".to_owned(),
+                    source: Some(Box::new(SourceIdentityDto::new(
+                        "example_music".to_owned(),
+                        "artist-1".to_owned(),
+                    ))),
+                }],
                 duration_ms: Some(Some(337_000)),
                 album: None,
                 artwork_url: None,
@@ -352,7 +388,15 @@ mod mapping {
         #[test]
         fn dto_album_and_artwork_reach_the_candidate() {
             let mut dto = candidate();
-            dto.album = Some(Some("Random Access Memories".to_owned()));
+            dto.album = Some(Box::new(CatalogueAlbumDto {
+                title: "Random Access Memories".to_owned(),
+                source: Some(Box::new(SourceIdentityDto::new(
+                    "example_music".to_owned(),
+                    "album-1".to_owned(),
+                ))),
+                year: Some(Some(2013)),
+                release_type: Some(Some("Album".to_owned())),
+            }));
             dto.artwork_url = Some(Some("https://art.test/ram.jpg".to_owned()));
 
             let candidate = CatalogueCandidate::try_from(dto).unwrap();
@@ -360,6 +404,18 @@ mod mapping {
             let album = candidate.album().expect("the dto album becomes metadata");
             assert_eq!(album.title(), "Random Access Memories");
             assert_eq!(album.album_artist().unwrap().name(), "Daft Punk");
+            assert_eq!(album.year(), Some(2013));
+            assert_eq!(album.release_type(), Some("Album"));
+            assert_eq!(
+                album.provider().map(|provider| provider.external_id()),
+                Some("album-1")
+            );
+            assert_eq!(
+                candidate.artists()[0]
+                    .provider()
+                    .map(|provider| provider.external_id()),
+                Some("artist-1")
+            );
             assert_eq!(
                 candidate.artwork(),
                 Some(&ArtworkRef::url("https://art.test/ram.jpg".to_owned()).unwrap())

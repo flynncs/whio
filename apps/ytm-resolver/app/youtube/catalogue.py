@@ -7,7 +7,8 @@ from ytmusicapi.exceptions import YTMusicServerError
 
 from app.errors import ProviderUnavailableError
 from app.generated.resolver_v1 import (
-    Artist,
+    CatalogueAlbum,
+    CatalogueArtist,
     CatalogueCandidate,
     CatalogueSearchResponse,
     SourceIdentity,
@@ -42,18 +43,32 @@ def normalize_song_result(result: Mapping[str, Any]) -> CatalogueCandidate:
             provider_id="youtube_music", external_id=result["videoId"]
         ),
         title=result["title"],
-        artists=[Artist(artist["name"]) for artist in result.get("artists", [])],
+        artists=[parse_artist(artist) for artist in result.get("artists", [])],
         duration_ms=parse_duration_ms(result.get("duration")),
         album=parse_album(result.get("album")),
         artwork_url=parse_artwork_url(result.get("thumbnails")),
     )
 
 
-def parse_album(value: Any) -> str | None:
+def parse_artist(value: Mapping[str, Any]) -> CatalogueArtist:
+    return CatalogueArtist(name=value["name"], source=parse_source(value.get("id")))
+
+
+def parse_album(value: Any) -> CatalogueAlbum | None:
     if isinstance(value, Mapping):
-        name = value.get("name")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
+        title = value.get("name")
+        if isinstance(title, str) and title.strip():
+            return CatalogueAlbum(
+                title=title.strip(), source=parse_source(value.get("id"))
+            )
+    return None
+
+
+def parse_source(external_id: Any) -> SourceIdentity | None:
+    if isinstance(external_id, str) and external_id.strip():
+        return SourceIdentity(
+            provider_id="youtube_music", external_id=external_id.strip()
+        )
     return None
 
 

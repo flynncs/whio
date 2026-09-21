@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 
 use crate::tracks::{
-    AlbumId, ArtworkRef, ProviderId, SourceFileFacts, SourceIdentity, SourceScope, TrackId,
-    TrackRepositoryError,
+    AlbumId, ArtistId, ArtworkRef, ProviderId, SourceFileFacts, SourceIdentity, SourceScope,
+    TrackId, TrackRepositoryError,
 };
 
 use crate::tracks::SourceLookup;
@@ -48,6 +48,30 @@ impl SourceLookup for PgStore {
             "#,
         )
         .bind(album_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        rows.into_iter()
+            .map(|(provider_id, source_scope, external_id)| {
+                decode_source(provider_id, source_scope, external_id)
+            })
+            .collect()
+    }
+
+    async fn find_artist_sources(
+        &self,
+        artist_id: &ArtistId,
+    ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            SELECT provider_id, source_scope, external_id
+            FROM artist_sources
+            WHERE artist_id = $1
+            ORDER BY created_at, id
+            "#,
+        )
+        .bind(artist_id.as_uuid())
         .fetch_all(&self.pool)
         .await
         .map_err(repository_error)?;

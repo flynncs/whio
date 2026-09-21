@@ -45,6 +45,7 @@ struct TrackIndexes {
     pub(super) album_by_release: HashMap<String, AlbumId>,
     pub(super) album_by_text: HashMap<(Option<ArtistId>, String), AlbumId>,
     pub(super) album_sources: HashMap<AlbumId, Vec<SourceIdentity>>,
+    pub(super) artist_sources: HashMap<ArtistId, Vec<SourceIdentity>>,
     pub(super) album_tracks: HashMap<AlbumId, Vec<(TrackId, AlbumTrack)>>,
     pub(super) album_created_at: HashMap<AlbumId, chrono::DateTime<chrono::Utc>>,
     pub(super) track_favorites: HashMap<(Uuid, TrackId), StarredAt>,

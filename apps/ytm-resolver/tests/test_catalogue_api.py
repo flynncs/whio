@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.api.catalogue import get_catalogue
 from app.errors import ProviderUnavailableError
 from app.generated.resolver_v1 import (
-    Artist,
+    CatalogueArtist,
     CatalogueCandidate,
     CatalogueSearchResponse,
     SourceIdentity,
@@ -25,7 +25,7 @@ class CatalogueRoutesTest(unittest.TestCase):
                     external_id="abc123",
                 ),
                 title="Instant Crush",
-                artists=[Artist("Daft Punk")],
+                artists=[CatalogueArtist(name="Daft Punk")],
                 duration_ms=337000,
             )
         ])
@@ -53,7 +53,7 @@ class CatalogueRoutesTest(unittest.TestCase):
                             "external_id": "abc123",
                         },
                         "title": "Instant Crush",
-                        "artists": ["Daft Punk"],
+                        "artists": [{"name": "Daft Punk"}],
                         "duration_ms": 337000,
                     }
                 ]

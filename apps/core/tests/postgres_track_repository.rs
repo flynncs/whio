@@ -621,6 +621,45 @@ async fn album_sources_and_membership_round_trip(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires PostgreSQL"]
+async fn provider_album_and_artist_identity_round_trip(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let album_source = source("MPREb_album");
+    let artist_source = source("UC_artist");
+    let credit = ArtistCredit::new("Olivia Rodrigo".to_owned(), None)
+        .unwrap()
+        .with_provider(Some(artist_source.clone()));
+    let album_metadata = AlbumMetadata::new("SOUR".to_owned())
+        .unwrap()
+        .with_provider(Some(album_source.clone()));
+
+    let album = repository
+        .resolve_or_create_album(&album_metadata)
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &album_source)
+        .await
+        .unwrap();
+    let artist = repository.resolve_or_create_artist(&credit).await.unwrap();
+    repository
+        .set_artist_source(artist.id(), &artist_source)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository.find_album_sources(album.id()).await.unwrap(),
+        vec![album_source],
+        "the album's own provider identity is stored"
+    );
+    assert_eq!(
+        repository.find_artist_sources(artist.id()).await.unwrap(),
+        vec![artist_source],
+        "the artist's provider identity is stored"
+    );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
 async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool);
     let artist = repository

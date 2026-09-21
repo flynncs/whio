@@ -39,6 +39,22 @@ impl SourceLookup for InMemoryTrackRepository {
             .unwrap_or_default())
     }
 
+    async fn find_artist_sources(
+        &self,
+        artist_id: &ArtistId,
+    ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes
+            .artist_sources
+            .get(artist_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
     async fn set_source_artwork(
         &self,
         source: &SourceIdentity,

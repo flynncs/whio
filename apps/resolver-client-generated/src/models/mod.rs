@@ -1,5 +1,9 @@
 pub mod capabilities_response;
 pub use self::capabilities_response::CapabilitiesResponse;
+pub mod catalogue_album;
+pub use self::catalogue_album::CatalogueAlbum;
+pub mod catalogue_artist;
+pub use self::catalogue_artist::CatalogueArtist;
 pub mod catalogue_candidate;
 pub use self::catalogue_candidate::CatalogueCandidate;
 pub mod catalogue_search_request;
