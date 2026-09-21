@@ -5,6 +5,7 @@ mod dedup;
 mod duplicate_report;
 mod error;
 mod metadata;
+mod playlist;
 mod provider_state;
 mod retention;
 mod search;
@@ -28,6 +29,7 @@ pub use duplicate_report::{
 };
 pub use error::ValidationError;
 pub use metadata::TrackMetadata;
+pub use playlist::{Playlist, PlaylistId};
 pub use provider_state::ProviderEntityState;
 pub use retention::{EvictionReport, RetentionReport};
 pub use search::{MatchQuality, SearchConfidence, SearchTerms};

@@ -7,6 +7,7 @@ use crate::tracks::ProviderRegistry;
 mod catalogue;
 pub(crate) mod decode;
 mod library;
+mod playlists;
 mod reports;
 pub(crate) mod schema;
 mod sources;

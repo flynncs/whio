@@ -8,8 +8,9 @@ use uuid::Uuid;
 use crate::tracks::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
     AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, GenreSummary,
-    LibraryState, MatchQuality, ProviderEntityState, ProviderId, ProviderKind, SearchTerms,
-    SourceFileFacts, Starred, StateTarget, Track, TrackHit, TrackMetadata, checked_rating,
+    LibraryState, MatchQuality, Playlist, PlaylistId, ProviderEntityState, ProviderId,
+    ProviderKind, SearchTerms, SourceFileFacts, Starred, StateTarget, Track, TrackHit,
+    TrackMetadata, checked_rating,
     domain::{album_quality, normalize_for_matching, track_quality},
 };
 
@@ -17,6 +18,7 @@ use super::{SourceIdentity, SourceScope, TrackId, TrackRepositoryError};
 
 mod catalogue;
 mod library;
+mod playlists;
 mod reports;
 mod sources;
 mod state;
@@ -29,6 +31,30 @@ type StarredAt = chrono::DateTime<chrono::Utc>;
 struct TrackEntry {
     pub(super) track: Track,
     pub(super) sources: Vec<SourceIdentity>,
+}
+
+struct StoredPlaylist {
+    pub(super) user: Uuid,
+    pub(super) name: String,
+    pub(super) comment: Option<String>,
+    pub(super) public: bool,
+    pub(super) created_at: chrono::DateTime<chrono::Utc>,
+    pub(super) updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl StoredPlaylist {
+    fn playlist(&self, id: &PlaylistId, track_count: u32) -> Playlist {
+        Playlist::new(
+            id.clone(),
+            self.name.clone(),
+            self.comment.clone(),
+            self.public,
+            self.created_at,
+            self.updated_at,
+            track_count,
+        )
+        .expect("a stored playlist stays valid")
+    }
 }
 
 #[derive(Default)]
@@ -56,6 +82,8 @@ struct TrackIndexes {
     pub(super) album_ratings: HashMap<(Uuid, AlbumId), u8>,
     pub(super) artist_ratings: HashMap<(Uuid, ArtistId), u8>,
     pub(super) track_plays: HashMap<(Uuid, TrackId), (u32, Option<StarredAt>)>,
+    pub(super) playlists: HashMap<PlaylistId, StoredPlaylist>,
+    pub(super) playlist_tracks: HashMap<PlaylistId, Vec<TrackId>>,
 }
 
 #[derive(Default)]
