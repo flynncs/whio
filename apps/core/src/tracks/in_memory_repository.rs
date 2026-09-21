@@ -9,8 +9,9 @@ use uuid::Uuid;
 use crate::tracks::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
     AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, GenreSummary,
-    LibraryState, ProviderId, ProviderKind, SourceFileFacts, Starred, StateTarget, Track, TrackHit,
-    TrackMetadata, checked_rating, domain::normalize_for_matching,
+    LibraryState, MatchQuality, ProviderId, ProviderKind, SearchTerms, SourceFileFacts, Starred,
+    StateTarget, Track, TrackHit, TrackMetadata, checked_rating,
+    domain::{album_quality, normalize_for_matching, track_quality},
 };
 
 use super::{SourceIdentity, SourceScope, TrackId, TrackRepository, TrackRepositoryError};
@@ -529,39 +530,50 @@ impl TrackRepository for InMemoryTrackRepository {
             .indexes
             .lock()
             .map_err(|_| TrackRepositoryError::Unavailable)?;
-        let needle = normalize_for_matching(query);
+        let terms = SearchTerms::new(query);
 
-        let mut hits = indexes
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut ranked = indexes
             .by_track_id
             .values()
-            .filter(|entry| track_matches(&entry.track, &needle))
-            .map(|entry| {
+            .filter_map(|entry| {
+                track_quality(&terms, entry.track.title(), entry.track.artists())
+                    .map(|quality| (quality, entry))
+            })
+            .collect::<Vec<_>>();
+
+        ranked.sort_by(|(left_quality, left), (right_quality, right)| {
+            left_quality
+                .cmp(right_quality)
+                .then_with(|| owned(&right.sources).cmp(&owned(&left.sources)))
+                .then_with(|| {
+                    normalize_for_matching(left.track.title())
+                        .cmp(&normalize_for_matching(right.track.title()))
+                })
+                .then_with(|| {
+                    left.track
+                        .id()
+                        .to_string()
+                        .cmp(&right.track.id().to_string())
+                })
+        });
+        ranked.truncate(limit as usize);
+
+        Ok(ranked
+            .into_iter()
+            .map(|(quality, entry)| {
                 TrackHit::new(
                     entry.track.clone(),
                     album_for_track(&indexes, entry.track.id()),
                     entry.sources.clone(),
                 )
                 .with_state(track_state(&indexes, entry.track.id(), user))
+                .with_match_quality(Some(quality))
             })
-            .collect::<Vec<_>>();
-
-        hits.sort_by(|left, right| {
-            (!owned(left.sources()))
-                .cmp(&(!owned(right.sources())))
-                .then_with(|| {
-                    normalize_for_matching(left.track().title())
-                        .cmp(&normalize_for_matching(right.track().title()))
-                })
-                .then_with(|| {
-                    left.track()
-                        .id()
-                        .to_string()
-                        .cmp(&right.track().id().to_string())
-                })
-        });
-        hits.truncate(limit as usize);
-
-        Ok(hits)
+            .collect())
     }
 
     async fn search_albums(
@@ -574,19 +586,39 @@ impl TrackRepository for InMemoryTrackRepository {
             .indexes
             .lock()
             .map_err(|_| TrackRepositoryError::Unavailable)?;
-        let needle = normalize_for_matching(query);
+        let terms = SearchTerms::new(query);
 
-        let mut albums = ordered_albums(
-            &indexes,
-            |album| album_matches(&indexes, album, &needle),
-            AlbumOrder::Title,
-            user,
-        );
-        albums.truncate(limit as usize);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        Ok(albums
+        let mut ranked = indexes
+            .albums_by_id
+            .values()
+            .filter_map(|album| {
+                let album_artist = album
+                    .album_artist_id()
+                    .and_then(|artist_id| indexes.artists_by_id.get(artist_id))
+                    .map(Artist::name);
+                album_quality(&terms, album.title(), album_artist).map(|quality| (quality, album))
+            })
+            .collect::<Vec<_>>();
+
+        ranked.sort_by(|(left_quality, left), (right_quality, right)| {
+            left_quality
+                .cmp(right_quality)
+                .then_with(|| {
+                    normalize_for_matching(left.title()).cmp(&normalize_for_matching(right.title()))
+                })
+                .then_with(|| left.id().to_string().cmp(&right.id().to_string()))
+        });
+        ranked.truncate(limit as usize);
+
+        Ok(ranked
             .into_iter()
-            .map(|album| album_summary(&indexes, album, user))
+            .map(|(quality, album)| {
+                album_summary(&indexes, album, user).with_match_quality(Some(quality))
+            })
             .collect())
     }
 
@@ -600,24 +632,91 @@ impl TrackRepository for InMemoryTrackRepository {
             .indexes
             .lock()
             .map_err(|_| TrackRepositoryError::Unavailable)?;
-        let needle = normalize_for_matching(query);
+        let terms = SearchTerms::new(query);
 
-        let mut artists = indexes
-            .artists_by_id
-            .values()
-            .filter(|artist| normalize_for_matching(artist.name()).contains(&needle))
-            .collect::<Vec<_>>();
-        artists.sort_by(|left, right| {
-            normalize_for_matching(left.name())
-                .cmp(&normalize_for_matching(right.name()))
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut by_name: HashMap<String, (MatchQuality, &Artist)> = HashMap::new();
+        for artist in indexes.artists_by_id.values() {
+            let Some(quality) = terms.classify(artist.name()) else {
+                continue;
+            };
+            let key = normalize_for_matching(artist.name());
+            by_name
+                .entry(key)
+                .and_modify(|current| {
+                    if preferred_artist(&indexes, artist, current.1) {
+                        *current = (quality, artist);
+                    }
+                })
+                .or_insert((quality, artist));
+        }
+
+        let mut ranked = by_name.into_values().collect::<Vec<_>>();
+        ranked.sort_by(|(left_quality, left), (right_quality, right)| {
+            left_quality
+                .cmp(right_quality)
+                .then_with(|| {
+                    normalize_for_matching(left.name()).cmp(&normalize_for_matching(right.name()))
+                })
                 .then_with(|| left.id().to_string().cmp(&right.id().to_string()))
         });
-        artists.truncate(limit as usize);
+        ranked.truncate(limit as usize);
 
-        Ok(artists
+        Ok(ranked
             .into_iter()
-            .map(|artist| artist_summary(&indexes, artist, user))
+            .map(|(quality, artist)| {
+                artist_summary(&indexes, artist, user).with_match_quality(Some(quality))
+            })
             .collect())
+    }
+
+    async fn candidate_tracks(
+        &self,
+        titles: &[String],
+        limit: u32,
+    ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        let keys = titles
+            .iter()
+            .map(|title| normalize_for_matching(title))
+            .filter(|key| !key.is_empty())
+            .collect::<HashSet<_>>();
+
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut hits = indexes
+            .by_track_id
+            .values()
+            .filter(|entry| keys.contains(&normalize_for_matching(entry.track.title())))
+            .map(|entry| {
+                TrackHit::new(
+                    entry.track.clone(),
+                    album_for_track(&indexes, entry.track.id()),
+                    entry.sources.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            normalize_for_matching(left.track().title())
+                .cmp(&normalize_for_matching(right.track().title()))
+                .then_with(|| {
+                    left.track()
+                        .id()
+                        .to_string()
+                        .cmp(&right.track().id().to_string())
+                })
+        });
+        hits.truncate(limit as usize);
+
+        Ok(hits)
     }
 
     async fn list_genres(&self) -> Result<Vec<GenreSummary>, TrackRepositoryError> {
@@ -804,23 +903,14 @@ fn drop_source_less_track(indexes: &mut TrackIndexes, track_id: &TrackId) {
     }
 }
 
-fn track_matches(track: &Track, needle: &str) -> bool {
-    normalize_for_matching(track.title()).contains(needle)
-        || track
-            .artists()
-            .iter()
-            .any(|artist| normalize_for_matching(artist.name()).contains(needle))
-}
-
-fn album_matches(indexes: &TrackIndexes, album: &Album, needle: &str) -> bool {
-    if normalize_for_matching(album.title()).contains(needle) {
-        return true;
-    }
-
-    album
-        .album_artist_id()
-        .and_then(|artist_id| indexes.artists_by_id.get(artist_id))
-        .is_some_and(|artist| normalize_for_matching(artist.name()).contains(needle))
+fn preferred_artist(indexes: &TrackIndexes, candidate: &Artist, current: &Artist) -> bool {
+    candidate
+        .musicbrainz_artist_id()
+        .is_some()
+        .cmp(&current.musicbrainz_artist_id().is_some())
+        .then_with(|| album_count(indexes, candidate.id()).cmp(&album_count(indexes, current.id())))
+        .then_with(|| current.id().to_string().cmp(&candidate.id().to_string()))
+        .is_gt()
 }
 
 fn detach_track(
@@ -2089,6 +2179,195 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn search_ranks_match_quality_before_ownership() {
+        let repository = InMemoryTrackRepository::default();
+        let exact = repository
+            .get_or_create(
+                source("local", "path-exact"),
+                TrackMetadata::from_names(
+                    "Zebra".to_owned(),
+                    vec!["Daft Punk".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let prefix = repository
+            .get_or_create(
+                source("local", "path-prefix"),
+                TrackMetadata::from_names(
+                    "Zebra Crossing".to_owned(),
+                    vec!["Other".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let word = repository
+            .get_or_create(
+                source("youtube_music", "vid-word"),
+                TrackMetadata::from_names(
+                    "The Zebra".to_owned(),
+                    vec!["Other".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let hits = repository.search_tracks("zebra", 10, None).await.unwrap();
+        let ordered = hits
+            .iter()
+            .map(|hit| (hit.track().id().clone(), hit.match_quality()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered,
+            vec![
+                (exact.id().clone(), Some(MatchQuality::Exact)),
+                (prefix.id().clone(), Some(MatchQuality::Prefix)),
+                (word.id().clone(), Some(MatchQuality::WordBoundary)),
+            ],
+            "an owned prefix does not outrank a remote word-boundary match"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_uses_ownership_inside_a_tier() {
+        let repository = InMemoryTrackRepository::default();
+        let remote = repository
+            .get_or_create(
+                source("youtube_music", "vid-exact"),
+                TrackMetadata::from_names(
+                    "Zebra".to_owned(),
+                    vec!["Other".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let owned = repository
+            .get_or_create(
+                source("local", "path-exact"),
+                TrackMetadata::from_names(
+                    "Zebra".to_owned(),
+                    vec!["Other".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let hits = repository.search_tracks("zebra", 10, None).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].track().id(), owned.id());
+        assert_eq!(hits[1].track().id(), remote.id());
+    }
+
+    #[tokio::test]
+    async fn search_does_not_match_inside_a_word() {
+        let repository = InMemoryTrackRepository::default();
+        repository
+            .get_or_create(
+                source("local", "path-american"),
+                TrackMetadata::from_names(
+                    "all-american bitch".to_owned(),
+                    vec!["Olivia Rodrigo".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            repository
+                .search_tracks("me", 10, None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a short token must not match inside american"
+        );
+        assert!(
+            repository
+                .search_tracks("american", 10, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            repository
+                .search_tracks("bitch", 10, None)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a whole word still matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_artists_collapses_rows_sharing_a_name() {
+        let repository = InMemoryTrackRepository::default();
+        let identified = repository
+            .resolve_or_create_artist(&credit("Cage the Elephant", Some("mb-1")))
+            .await
+            .unwrap();
+        repository
+            .resolve_or_create_artist(&credit("Cage The Elephant", None))
+            .await
+            .unwrap();
+
+        let artists = repository.search_artists("cage", 10, None).await.unwrap();
+        assert_eq!(artists.len(), 1, "the two rows present as one result");
+        assert_eq!(artists[0].artist().id(), identified.id());
+        assert!(artists[0].artist().musicbrainz_artist_id().is_some());
+    }
+
+    #[tokio::test]
+    async fn candidate_tracks_batches_normalized_title_lookups() {
+        let repository = InMemoryTrackRepository::default();
+        let first = repository
+            .get_or_create(
+                source("local", "path-a"),
+                TrackMetadata::from_names(
+                    "It\u{2019}s Just Forever".to_owned(),
+                    vec!["Cage the Elephant".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        repository
+            .get_or_create(
+                source("local", "path-b"),
+                TrackMetadata::from_names(
+                    "Other".to_owned(),
+                    vec!["Other".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let hits = repository
+            .candidate_tracks(&["It's Just Forever".to_owned(), "missing".to_owned()], 25)
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].track().id(), first.id());
+        assert!(hits[0].match_quality().is_none());
     }
 
     #[tokio::test]

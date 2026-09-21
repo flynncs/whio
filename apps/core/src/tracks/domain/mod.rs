@@ -4,6 +4,7 @@ mod artwork;
 mod duplicates;
 mod error;
 mod metadata;
+mod search;
 mod source;
 mod state;
 mod text;
@@ -20,6 +21,8 @@ pub use duplicates::{
 };
 pub use error::ValidationError;
 pub use metadata::TrackMetadata;
+pub use search::{MatchQuality, SearchConfidence, SearchTerms};
+pub(crate) use search::{album_quality, best_field_quality, track_quality};
 pub use source::{
     LOCAL_PROVIDER_ID, ProviderId, ProviderKind, SourceIdentity, SourceScope,
     YOUTUBE_MUSIC_PROVIDER_ID,

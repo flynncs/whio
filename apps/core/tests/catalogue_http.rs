@@ -102,6 +102,8 @@ async fn search_returns_whio_tracks() {
     assert_eq!(track["title"], "Instant Crush");
     assert_eq!(track["artists"], json!(["Daft Punk"]));
     assert_eq!(track["duration_ms"], 337_000);
+    assert_eq!(body["confidence"], "none");
+    assert!(track.get("match_quality").is_none());
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    LibraryState, ValidationError,
+    LibraryState, MatchQuality, ValidationError,
     text::{optional, required},
 };
 
@@ -99,6 +99,7 @@ pub struct ArtistSummary {
     artist: Artist,
     album_count: u32,
     state: LibraryState,
+    match_quality: Option<MatchQuality>,
 }
 
 impl ArtistSummary {
@@ -107,12 +108,22 @@ impl ArtistSummary {
             artist,
             album_count,
             state: LibraryState::default(),
+            match_quality: None,
         }
     }
 
     pub fn with_state(mut self, state: LibraryState) -> Self {
         self.state = state;
         self
+    }
+
+    pub fn with_match_quality(mut self, match_quality: Option<MatchQuality>) -> Self {
+        self.match_quality = match_quality;
+        self
+    }
+
+    pub fn match_quality(&self) -> Option<MatchQuality> {
+        self.match_quality
     }
 
     pub fn artist(&self) -> &Artist {

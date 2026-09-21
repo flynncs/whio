@@ -6,7 +6,7 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    Artist, ArtistCredit, ArtistId, LibraryState, Track, ValidationError,
+    Artist, ArtistCredit, ArtistId, LibraryState, MatchQuality, Track, ValidationError,
     text::{optional, required},
 };
 
@@ -286,6 +286,7 @@ pub struct AlbumSummary {
     duration_ms: u64,
     created_at: chrono::DateTime<chrono::Utc>,
     state: LibraryState,
+    match_quality: Option<MatchQuality>,
 }
 
 impl AlbumSummary {
@@ -303,12 +304,22 @@ impl AlbumSummary {
             duration_ms,
             created_at,
             state: LibraryState::default(),
+            match_quality: None,
         }
     }
 
     pub fn with_state(mut self, state: LibraryState) -> Self {
         self.state = state;
         self
+    }
+
+    pub fn with_match_quality(mut self, match_quality: Option<MatchQuality>) -> Self {
+        self.match_quality = match_quality;
+        self
+    }
+
+    pub fn match_quality(&self) -> Option<MatchQuality> {
+        self.match_quality
     }
 
     pub fn state(&self) -> LibraryState {

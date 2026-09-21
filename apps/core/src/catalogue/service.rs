@@ -13,8 +13,8 @@ use crate::{
     request::RequestContext,
     tracks::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, AlbumTrack, ArtistId,
-        ArtistSummary, GenreSummary, LibraryState, ProviderKind, SourceIdentity, Track, TrackId,
-        TrackRepository, TrackRepositoryError,
+        ArtistSummary, GenreSummary, LibraryState, SearchConfidence, SearchTerms, SourceIdentity,
+        Track, TrackId, TrackRepository, TrackRepositoryError, best_field_quality,
     },
 };
 
@@ -38,6 +38,7 @@ pub struct SearchOutcome {
     pub tracks: Vec<SearchHit>,
     pub albums: Vec<AlbumSummary>,
     pub artists: Vec<ArtistSummary>,
+    pub confidence: SearchConfidence,
 }
 
 pub struct AlbumDetail {
@@ -339,6 +340,9 @@ impl CatalogueService {
     ) -> Result<SearchOutcome, CatalogueError> {
         let limit = search.limit().get() as usize;
         let offset = search.offset().get() as usize;
+        let terms = SearchTerms::new(search.query().as_str());
+        let confidence = library_confidence(&terms, &known);
+
         let mut positions: HashMap<TrackId, usize> = HashMap::new();
         let mut unique: Vec<SearchHit> = Vec::new();
         for hit in known.into_iter().chain(fresh) {
@@ -350,7 +354,6 @@ impl CatalogueService {
                 }
             }
         }
-        unique.sort_by_key(|hit| !is_owned(hit.sources()));
 
         if !any_success
             && (unique.is_empty() && albums.is_empty() && artists.is_empty())
@@ -362,23 +365,73 @@ impl CatalogueService {
             return Err(error);
         }
 
+        let (mut library_hits, provider_hits): (Vec<SearchHit>, Vec<SearchHit>) = unique
+            .into_iter()
+            .partition(|hit| hit.match_quality().is_some());
+        if !provider_hits.is_empty() {
+            library_hits.truncate(library_window(provider_target(search)) as usize);
+        }
+        let ordered = match confidence {
+            SearchConfidence::Strong => library_hits
+                .into_iter()
+                .chain(provider_hits)
+                .collect::<Vec<_>>(),
+            SearchConfidence::Weak | SearchConfidence::None => provider_hits
+                .into_iter()
+                .chain(library_hits)
+                .collect::<Vec<_>>(),
+        };
+
         Ok(SearchOutcome {
-            tracks: unique.into_iter().skip(offset).take(limit).collect(),
+            tracks: ordered.into_iter().skip(offset).take(limit).collect(),
             albums: albums.into_iter().skip(offset).take(limit).collect(),
             artists: artists.into_iter().skip(offset).take(limit).collect(),
+            confidence,
         })
     }
 }
 
+fn library_confidence(terms: &SearchTerms, hits: &[SearchHit]) -> SearchConfidence {
+    if hits.is_empty() {
+        return SearchConfidence::None;
+    }
+    if terms.low_signal() {
+        return SearchConfidence::Weak;
+    }
+
+    let best = best_field_quality(
+        terms,
+        hits.iter().flat_map(|hit| {
+            std::iter::once(hit.track().title())
+                .chain(hit.track().artists().iter().map(|artist| artist.name()))
+        }),
+    );
+
+    match best {
+        Some(quality) if quality.is_confident() => SearchConfidence::Strong,
+        _ => SearchConfidence::Weak,
+    }
+}
+
+#[cfg(test)]
 fn is_owned(sources: &[SourceIdentity]) -> bool {
     sources
         .iter()
-        .any(|source| source.provider_id().kind() == Some(ProviderKind::Local))
+        .any(|source| source.provider_id().kind() == Some(crate::tracks::ProviderKind::Local))
 }
 
 const PROVIDER_BUDGET: Duration = Duration::from_secs(45);
 const MAX_SOURCE_CONCURRENCY: usize = 4;
 const PROVIDER_PAGE_LIMIT: u32 = 25;
+const PROVIDER_WINDOW_DIVISOR: u32 = 4;
+
+fn library_window(window: u32) -> u32 {
+    if window <= 1 {
+        return window;
+    }
+
+    window - window.div_ceil(PROVIDER_WINDOW_DIVISOR)
+}
 
 /// Providers page independently, so the aggregate window is built by walking
 /// each provider from its first page until it has produced enough candidates.
@@ -944,10 +997,14 @@ mod tests {
     }
 
     fn local_source() -> SourceIdentity {
+        local_source_at("path-a")
+    }
+
+    fn local_source_at(path: &str) -> SourceIdentity {
         SourceIdentity::new(
             ProviderId::new("local".to_owned()).unwrap(),
             SourceScope::Named("/music".to_owned()),
-            "path-a".to_owned(),
+            path.to_owned(),
         )
         .unwrap()
     }
@@ -1002,5 +1059,122 @@ mod tests {
         assert_eq!(titles, ["Zebra", "Apple"]);
         assert!(is_owned(outcome.tracks[0].sources()));
         assert!(!is_owned(outcome.tracks[1].sources()));
+    }
+
+    #[tokio::test]
+    async fn a_strong_library_match_is_reported_as_strong() {
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        repository
+            .get_or_create(local_source(), named_metadata("Zebra"))
+            .await
+            .unwrap();
+        let catalogue = CatalogueService::new(repository);
+        let search = CatalogueSearch::new(
+            SearchQuery::new("zebra".to_owned()).unwrap(),
+            SearchLimit::new(10).unwrap(),
+        );
+
+        let outcome = catalogue.search(&search, None, &context()).await.unwrap();
+
+        assert_eq!(outcome.confidence, SearchConfidence::Strong);
+        assert_eq!(outcome.tracks[0].match_quality().unwrap().as_str(), "exact");
+    }
+
+    #[tokio::test]
+    async fn a_stopword_query_is_weak_confidence() {
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        repository
+            .get_or_create(local_source(), named_metadata("The End"))
+            .await
+            .unwrap();
+        let catalogue = CatalogueService::new(repository);
+        let search = CatalogueSearch::new(
+            SearchQuery::new("the".to_owned()).unwrap(),
+            SearchLimit::new(10).unwrap(),
+        );
+
+        let outcome = catalogue.search(&search, None, &context()).await.unwrap();
+
+        assert_eq!(outcome.tracks.len(), 1);
+        assert_eq!(outcome.confidence, SearchConfidence::Weak);
+    }
+
+    #[tokio::test]
+    async fn a_weak_query_puts_provider_discoveries_first() {
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        repository
+            .get_or_create(local_source(), named_metadata("The End"))
+            .await
+            .unwrap();
+        let resolver = StubProvider::new(vec![Ok(vec![candidate("vid-1", "Provider Song")])]);
+        let catalogue = CatalogueService::with_providers(repository, vec![provider(resolver)]);
+        let search = CatalogueSearch::new(
+            SearchQuery::new("the".to_owned()).unwrap(),
+            SearchLimit::new(10).unwrap(),
+        );
+
+        let outcome = catalogue.search(&search, None, &context()).await.unwrap();
+
+        assert_eq!(outcome.confidence, SearchConfidence::Weak);
+        assert!(outcome.tracks[0].match_quality().is_none());
+        assert!(outcome.tracks[0].sources()[0].provider_id().as_str() == "youtube_music");
+    }
+
+    #[tokio::test]
+    async fn the_library_cannot_exhaust_the_page() {
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        for index in 0..10u32 {
+            repository
+                .get_or_create(
+                    local_source_at(&format!("path-{index}")),
+                    named_metadata(&format!("Library {index}")),
+                )
+                .await
+                .unwrap();
+        }
+        let resolver = StubProvider::new(vec![Ok((0..10)
+            .map(|index| candidate(&format!("p-{index}"), &format!("Provider {index}")))
+            .collect())]);
+        let catalogue = CatalogueService::with_providers(repository, vec![provider(resolver)]);
+
+        let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
+
+        assert_eq!(outcome.tracks.len(), 10);
+        assert_eq!(outcome.confidence, SearchConfidence::Strong);
+        let provider_hits = outcome
+            .tracks
+            .iter()
+            .filter(|hit| hit.match_quality().is_none())
+            .count();
+        assert!(
+            provider_hits >= 3,
+            "the library left room for provider discoveries, found {provider_hits}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_library_fills_the_page_when_providers_return_nothing() {
+        let repository = Arc::new(InMemoryTrackRepository::default());
+        for index in 0..10u32 {
+            repository
+                .get_or_create(
+                    local_source_at(&format!("path-{index}")),
+                    named_metadata(&format!("Library {index}")),
+                )
+                .await
+                .unwrap();
+        }
+        let resolver = StubProvider::new(vec![Ok(Vec::new())]);
+        let catalogue = CatalogueService::with_providers(repository, vec![provider(resolver)]);
+
+        let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
+
+        assert_eq!(outcome.tracks.len(), 10);
+        assert!(
+            outcome
+                .tracks
+                .iter()
+                .all(|hit| hit.match_quality().is_some())
+        );
     }
 }

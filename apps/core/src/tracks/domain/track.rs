@@ -5,7 +5,7 @@ use std::{
 
 use uuid::Uuid;
 
-use super::{Album, ArtistCredit, LibraryState, SourceIdentity, TrackMetadata};
+use super::{Album, ArtistCredit, LibraryState, MatchQuality, SourceIdentity, TrackMetadata};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrackId(Uuid);
@@ -94,6 +94,7 @@ pub struct TrackHit {
     album: Option<Album>,
     sources: Vec<SourceIdentity>,
     state: LibraryState,
+    match_quality: Option<MatchQuality>,
 }
 
 impl TrackHit {
@@ -103,6 +104,7 @@ impl TrackHit {
             album,
             sources,
             state: LibraryState::default(),
+            match_quality: None,
         }
     }
 
@@ -111,8 +113,17 @@ impl TrackHit {
         self
     }
 
+    pub fn with_match_quality(mut self, match_quality: Option<MatchQuality>) -> Self {
+        self.match_quality = match_quality;
+        self
+    }
+
     pub fn state(&self) -> LibraryState {
         self.state
+    }
+
+    pub fn match_quality(&self) -> Option<MatchQuality> {
+        self.match_quality
     }
 
     pub fn track(&self) -> &Track {
@@ -135,6 +146,9 @@ impl TrackHit {
         self.track = other.track;
         if other.album.is_some() {
             self.album = other.album;
+        }
+        if other.match_quality.is_some() {
+            self.match_quality = other.match_quality;
         }
         for source in other.sources {
             if !self.sources.contains(&source) {

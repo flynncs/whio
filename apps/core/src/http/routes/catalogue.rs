@@ -38,6 +38,7 @@ impl TryFrom<SearchRequest> for CatalogueSearch {
 #[derive(Serialize)]
 pub(crate) struct SearchResponse {
     results: Vec<TrackResponse>,
+    confidence: String,
 }
 
 #[derive(Serialize)]
@@ -46,6 +47,8 @@ pub(crate) struct TrackResponse {
     title: String,
     artists: Vec<String>,
     duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    match_quality: Option<String>,
 }
 
 impl From<Track> for TrackResponse {
@@ -62,13 +65,19 @@ impl From<Track> for TrackResponse {
             title,
             artists,
             duration_ms,
+            match_quality: None,
         }
     }
 }
 
 impl From<SearchHit> for TrackResponse {
     fn from(hit: SearchHit) -> Self {
-        Self::from(hit.into_track())
+        let match_quality = hit
+            .match_quality()
+            .map(|quality| quality.as_str().to_owned());
+        let mut response = Self::from(hit.into_track());
+        response.match_quality = match_quality;
+        response
     }
 }
 
@@ -101,5 +110,6 @@ pub(crate) async fn search(
 
     Ok(Json(SearchResponse {
         results: outcome.tracks.into_iter().map(Into::into).collect(),
+        confidence: outcome.confidence.as_str().to_owned(),
     }))
 }

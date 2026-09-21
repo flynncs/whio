@@ -7,8 +7,8 @@ use tokio::sync::Barrier;
 use uuid::Uuid;
 use whio_core::tracks::{
     AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef, KeepReason,
-    PostgresTrackRepository, ProviderId, SourceFileFacts, SourceIdentity, SourceScope, StateTarget,
-    TrackId, TrackMetadata, TrackRepository, TrackRepositoryError,
+    MatchQuality, PostgresTrackRepository, ProviderId, SourceFileFacts, SourceIdentity,
+    SourceScope, StateTarget, TrackId, TrackMetadata, TrackRepository, TrackRepositoryError,
 };
 
 fn source(external_id: &str) -> SourceIdentity {
@@ -879,6 +879,160 @@ async fn search_finds_a_title_across_typographic_variants(pool: PgPool) {
         assert_eq!(hits.len(), 1, "query {query:?} found nothing");
         assert_eq!(hits[0].track().id(), track.id());
     }
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn search_ranks_match_quality_before_ownership(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let exact = repository
+        .get_or_create(
+            local_source("a"),
+            metadata("Zebra", &["Daft Punk"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+    let prefix = repository
+        .get_or_create(
+            local_source("b"),
+            metadata("Zebra Crossing", &["Other"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+    let word = repository
+        .get_or_create(source("c"), metadata("The Zebra", &["Other"], Some(1_000)))
+        .await
+        .unwrap();
+
+    let hits = repository.search_tracks("zebra", 10, None).await.unwrap();
+    let ordered = hits
+        .iter()
+        .map(|hit| (hit.track().id().clone(), hit.match_quality()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ordered,
+        vec![
+            (exact.id().clone(), Some(MatchQuality::Exact)),
+            (prefix.id().clone(), Some(MatchQuality::Prefix)),
+            (word.id().clone(), Some(MatchQuality::WordBoundary)),
+        ]
+    );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn search_does_not_match_inside_a_word(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    repository
+        .get_or_create(
+            local_source("a"),
+            metadata("all-american bitch", &["Olivia Rodrigo"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        repository
+            .search_tracks("me", 10, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .search_tracks("american", 10, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        repository
+            .search_tracks("bitch", 10, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn search_puts_an_artist_only_match_last(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let titled = repository
+        .get_or_create(
+            local_source("a"),
+            metadata("The End", &["Other"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+    let artist_only = repository
+        .get_or_create(
+            source("c"),
+            metadata("2024", &["Cage the Elephant"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+
+    let hits = repository.search_tracks("the", 10, None).await.unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].track().id(), titled.id());
+    assert_eq!(hits[0].match_quality(), Some(MatchQuality::Prefix));
+    assert_eq!(hits[1].track().id(), artist_only.id());
+    assert_eq!(hits[1].match_quality(), Some(MatchQuality::ArtistOnly));
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn search_artists_collapses_rows_sharing_a_name(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let identified = repository
+        .resolve_or_create_artist(&credit("Cage the Elephant", Some("mb-1")))
+        .await
+        .unwrap();
+    repository
+        .resolve_or_create_artist(&credit("Cage The Elephant", None))
+        .await
+        .unwrap();
+
+    let artists = repository.search_artists("cage", 10, None).await.unwrap();
+    assert_eq!(artists.len(), 1);
+    assert_eq!(artists[0].artist().id(), identified.id());
+    assert!(artists[0].artist().musicbrainz_artist_id().is_some());
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn candidate_tracks_resolves_a_page_of_titles(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let first = repository
+        .get_or_create(
+            local_source("a"),
+            metadata(
+                "It\u{2019}s Just Forever",
+                &["Cage the Elephant"],
+                Some(1_000),
+            ),
+        )
+        .await
+        .unwrap();
+    repository
+        .get_or_create(
+            local_source("b"),
+            metadata("Other", &["Other"], Some(1_000)),
+        )
+        .await
+        .unwrap();
+
+    let hits = repository
+        .candidate_tracks(&["It's Just Forever".to_owned(), "missing".to_owned()], 25)
+        .await
+        .unwrap();
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].track().id(), first.id());
+    assert!(hits[0].match_quality().is_none());
 }
 
 fn facts(path: &str, size_bytes: u64, suffix: &str) -> SourceFileFacts {

@@ -272,6 +272,14 @@ pub trait TrackRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    async fn candidate_tracks(
+        &self,
+        _titles: &[String],
+        _limit: u32,
+    ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
     async fn list_genres(&self) -> Result<Vec<GenreSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }
