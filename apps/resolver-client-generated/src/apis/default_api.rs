@@ -13,6 +13,18 @@ use crate::{apis::ResponseContent, models};
 use reqwest;
 use serde::{de::Error as _, Deserialize, Serialize};
 
+/// struct for typed errors of method [`fetch_catalogue_album`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FetchCatalogueAlbumError {
+    Status400(models::ErrorResponse),
+    Status404(models::ErrorResponse),
+    Status422(models::ErrorResponse),
+    Status500(models::ErrorResponse),
+    Status503(models::ErrorResponse),
+    UnknownValue(serde_json::Value),
+}
+
 /// struct for typed errors of method [`get_capabilities`]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -58,6 +70,57 @@ pub enum SearchCatalogueError {
     Status500(models::ErrorResponse),
     Status503(models::ErrorResponse),
     UnknownValue(serde_json::Value),
+}
+
+pub async fn fetch_catalogue_album(
+    configuration: &configuration::Configuration,
+    catalogue_entity_request: models::CatalogueEntityRequest,
+    x_request_id: Option<&str>,
+) -> Result<models::CatalogueCandidatesResponse, Error<FetchCatalogueAlbumError>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_body_catalogue_entity_request = catalogue_entity_request;
+    let p_header_x_request_id = x_request_id;
+
+    let uri_str = format!("{}/v1/catalogue/album", configuration.base_path);
+    let mut req_builder = configuration
+        .client
+        .request(reqwest::Method::POST, &uri_str);
+
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+    if let Some(param_value) = p_header_x_request_id {
+        req_builder = req_builder.header("X-Request-ID", param_value.to_string());
+    }
+    req_builder = req_builder.json(&p_body_catalogue_entity_request);
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_str(&content)).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::CatalogueCandidatesResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::CatalogueCandidatesResponse`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<FetchCatalogueAlbumError> = serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
 }
 
 pub async fn get_capabilities(

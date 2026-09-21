@@ -5,6 +5,7 @@ from requests.exceptions import RequestException
 from ytmusicapi.exceptions import YTMusicServerError
 
 from app.errors import ProviderUnavailableError
+from app.generated.resolver_v1 import SourceIdentity
 from app.youtube.catalogue import (
     YouTubeMusicCatalogue,
     parse_duration_ms,
@@ -23,6 +24,58 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
 
                 with self.assertRaises(ProviderUnavailableError):
                     YouTubeMusicCatalogue(client).search("Daft Punk", limit=5)
+
+    def test_fetch_album_normalizes_tracks_with_the_album_identity(self) -> None:
+        client = Mock()
+        client.get_album.return_value = {
+            "title": "SOUR",
+            "year": 2021,
+            "type": "Album",
+            "trackCount": 11,
+            "artists": [{"name": "Olivia Rodrigo", "id": "artist-1"}],
+            "thumbnails": [
+                {"url": "https://art.test/sour.jpg", "width": 544, "height": 544}
+            ],
+            "tracks": [
+                {
+                    "videoId": "v1",
+                    "title": "brutal",
+                    "duration_seconds": 144,
+                    "artists": [{"name": "Olivia Rodrigo", "id": "artist-1"}],
+                },
+                {
+                    "videoId": "v2",
+                    "title": "traitor",
+                    "duration_seconds": 229,
+                    "artists": [],
+                },
+            ],
+        }
+        source = SourceIdentity(
+            provider_id="youtube_music", external_id="MPREb_album"
+        )
+
+        response = YouTubeMusicCatalogue(client).fetch_album(source)
+
+        client.get_album.assert_called_once_with("MPREb_album")
+        album = response.results[0].album
+        self.assertEqual(album.title, "SOUR")
+        self.assertEqual(album.source.external_id, "MPREb_album")
+        self.assertEqual(album.year, 2021)
+        self.assertEqual(album.release_type, "Album")
+        self.assertEqual(
+            response.results[0].artists[0].source.external_id, "artist-1"
+        )
+        self.assertEqual(response.results[0].duration_ms, 144000)
+        self.assertEqual(response.results[1].duration_ms, 229000)
+        self.assertEqual(
+            response.results[1].artists[0].name,
+            "Olivia Rodrigo",
+            "a track with no credit falls back to the album's artists",
+        )
+        self.assertEqual(
+            str(response.results[0].artwork_url), "https://art.test/sour.jpg"
+        )
 
     def test_search_calls_youtube_music_and_normalizes_results(self) -> None:
         client = Mock()

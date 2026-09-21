@@ -6,9 +6,12 @@ use whio_resolver_api::{
     apis::{
         Error as TransportError,
         configuration::Configuration,
-        default_api::{ResolvePlaybackError, SearchCatalogueError},
+        default_api::{FetchCatalogueAlbumError, ResolvePlaybackError, SearchCatalogueError},
     },
-    models::{CatalogueSearchRequest, PlaybackResolveRequest, SourceIdentity as SourceIdentityDto},
+    models::{
+        CatalogueEntityRequest, CatalogueSearchRequest, PlaybackResolveRequest,
+        SourceIdentity as SourceIdentityDto,
+    },
 };
 
 use crate::{
@@ -17,7 +20,7 @@ use crate::{
     playback::{PlaybackProvider, PlaybackSource, ResolvedPlayback},
     providers::ProviderError,
     request::RequestContext,
-    tracks::ProviderKind,
+    tracks::{ProviderKind, SourceIdentity},
 };
 
 pub struct YtmAdapter {
@@ -82,6 +85,36 @@ impl CatalogueProvider for YtmAdapter {
             })
             .collect()
     }
+
+    async fn fetch_album(
+        &self,
+        source: &SourceIdentity,
+        context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        let Some(transport) = self.transport.as_ref() else {
+            return Err(ProviderError::Disabled);
+        };
+        let body = CatalogueEntityRequest::new(SourceIdentityDto::new(
+            source.provider_id().as_str().to_owned(),
+            source.external_id().to_owned(),
+        ));
+        let response = whio_resolver_api::apis::default_api::fetch_catalogue_album(
+            transport,
+            body,
+            Some(context.request_id().as_str()),
+        )
+        .await
+        .map_err(map_album_error)?;
+        response
+            .results
+            .into_iter()
+            .map(|candidate| {
+                candidate
+                    .try_into()
+                    .map_err(ProviderError::InvalidCatalogueData)
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -128,6 +161,23 @@ fn map_search_error(error: TransportError<SearchCatalogueError>) -> ProviderErro
         TransportError::Io(error) => ProviderError::request(error),
         TransportError::ResponseError(response) => match response.status {
             reqwest::StatusCode::BAD_REQUEST => ProviderError::InvalidRequest,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR => ProviderError::Internal,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE => ProviderError::ProviderUnavailable,
+            _ => ProviderError::ProviderUnavailable,
+        },
+    }
+}
+
+fn map_album_error(error: TransportError<FetchCatalogueAlbumError>) -> ProviderError {
+    match error {
+        TransportError::Reqwest(error) => ProviderError::request(error),
+        TransportError::Serde(error) => ProviderError::malformed(error),
+        TransportError::SerdePathToError(error) => ProviderError::malformed(error),
+        TransportError::Io(error) => ProviderError::request(error),
+        TransportError::ResponseError(response) => match response.status {
+            reqwest::StatusCode::BAD_REQUEST => ProviderError::InvalidRequest,
+            reqwest::StatusCode::NOT_FOUND => ProviderError::SourceNotFound,
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY => ProviderError::UnsupportedProvider,
             reqwest::StatusCode::INTERNAL_SERVER_ERROR => ProviderError::Internal,
             reqwest::StatusCode::SERVICE_UNAVAILABLE => ProviderError::ProviderUnavailable,
             _ => ProviderError::ProviderUnavailable,

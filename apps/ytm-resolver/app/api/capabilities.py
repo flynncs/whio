@@ -18,6 +18,7 @@ async def get_capabilities() -> CapabilitiesResponse:
                 provider_id="youtube_music",
                 capabilities=[
                     CapabilityId("catalogue.search"),
+                    CapabilityId("catalogue.album"),
                     CapabilityId("playback.resolve"),
                 ],
             )

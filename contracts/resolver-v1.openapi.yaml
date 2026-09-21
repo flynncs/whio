@@ -133,6 +133,43 @@ paths:
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 
+  /v1/catalogue/album:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: fetchCatalogueAlbum
+      summary: Fetch one album's full tracklist by its provider identity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogueEntityRequest"
+            example:
+              source:
+                provider_id: example_music
+                external_id: example-album-id
+      responses:
+        "200":
+          description: The album's normalized tracks
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueCandidatesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/SourceNotFound"
+        "422":
+          $ref: "#/components/responses/UnsupportedProvider"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
   /v1/playback/resolve:
     parameters:
       - $ref: "#/components/parameters/RequestId"
@@ -484,6 +521,26 @@ components:
             - "null"
           minLength: 1
           maxLength: 100
+
+    CatalogueEntityRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+      properties:
+        source:
+          $ref: "#/components/schemas/SourceIdentity"
+
+    CatalogueCandidatesResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogueCandidate"
 
     PlaybackResolveRequest:
       type: object

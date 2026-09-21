@@ -172,3 +172,19 @@ async fn disabled_adapter_resolve_reports_disabled() {
         Err(ProviderError::Disabled)
     ));
 }
+
+#[tokio::test]
+async fn disabled_adapter_fetch_album_reports_disabled() {
+    let adapter = YtmAdapter::disabled();
+    let source = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        "MPREb_album".to_owned(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        adapter.fetch_album(&source, &context()).await,
+        Err(ProviderError::Disabled)
+    ));
+}

@@ -10,6 +10,7 @@ from app.generated.resolver_v1 import (
     CatalogueAlbum,
     CatalogueArtist,
     CatalogueCandidate,
+    CatalogueCandidatesResponse,
     CatalogueSearchResponse,
     SourceIdentity,
 )
@@ -36,6 +37,29 @@ class YouTubeMusicCatalogue:
             next_offset=end if len(results) >= end and end <= 1000 else None,
         )
 
+    def fetch_album(self, source: SourceIdentity) -> CatalogueCandidatesResponse:
+        try:
+            album = self._client.get_album(source.external_id)
+        except (YTMusicServerError, RequestException) as error:
+            raise ProviderUnavailableError(
+                "The provider is temporarily unavailable"
+            ) from error
+        album_identity = CatalogueAlbum(
+            title=album["title"],
+            source=source,
+            year=parse_year(album.get("year")),
+            release_type=parse_release_type(album.get("type")),
+        )
+        artwork_url = parse_artwork_url(album.get("thumbnails"))
+        album_artists = album.get("artists")
+
+        return CatalogueCandidatesResponse(
+            results=[
+                normalize_album_track(track, album_identity, album_artists, artwork_url)
+                for track in album.get("tracks", [])
+            ]
+        )
+
 
 def normalize_song_result(result: Mapping[str, Any]) -> CatalogueCandidate:
     return CatalogueCandidate(
@@ -47,6 +71,26 @@ def normalize_song_result(result: Mapping[str, Any]) -> CatalogueCandidate:
         duration_ms=parse_duration_ms(result.get("duration")),
         album=parse_album(result.get("album")),
         artwork_url=parse_artwork_url(result.get("thumbnails")),
+    )
+
+
+def normalize_album_track(
+    track: Mapping[str, Any],
+    album: CatalogueAlbum,
+    album_artists: Any,
+    artwork_url: str | None,
+) -> CatalogueCandidate:
+    artists = track.get("artists") or album_artists or []
+
+    return CatalogueCandidate(
+        source=SourceIdentity(
+            provider_id="youtube_music", external_id=track["videoId"]
+        ),
+        title=track["title"],
+        artists=[parse_artist(artist) for artist in artists],
+        duration_ms=parse_duration_seconds(track.get("duration_seconds")),
+        album=album,
+        artwork_url=artwork_url,
     )
 
 
@@ -69,6 +113,26 @@ def parse_source(external_id: Any) -> SourceIdentity | None:
         return SourceIdentity(
             provider_id="youtube_music", external_id=external_id.strip()
         )
+    return None
+
+
+def parse_year(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def parse_release_type(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def parse_duration_seconds(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value * 1000
     return None
 
 

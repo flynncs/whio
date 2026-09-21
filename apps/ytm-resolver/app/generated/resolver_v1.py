@@ -92,6 +92,13 @@ class CatalogueAlbum(BaseModel):
     release_type: str | None = Field(None, max_length=100, min_length=1)
 
 
+class CatalogueEntityRequest(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    source: SourceIdentity
+
+
 class PlaybackResolveRequest(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -149,6 +156,13 @@ class CatalogueCandidate(BaseModel):
         None,
         description='Public artwork URL that the core fetches and proxies to clients.',
     )
+
+
+class CatalogueCandidatesResponse(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    results: list[CatalogueCandidate]
 
 
 class PlaybackResolveResponse(BaseModel):

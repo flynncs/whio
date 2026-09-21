@@ -35,6 +35,7 @@ class MetadataRoutesTest(unittest.TestCase):
                         "provider_id": "youtube_music",
                         "capabilities": [
                             "catalogue.search",
+                            "catalogue.album",
                             "playback.resolve",
                         ],
                     }

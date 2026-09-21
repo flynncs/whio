@@ -6,8 +6,10 @@ from fastapi.testclient import TestClient
 from app.api.catalogue import get_catalogue
 from app.errors import ProviderUnavailableError
 from app.generated.resolver_v1 import (
+    CatalogueAlbum,
     CatalogueArtist,
     CatalogueCandidate,
+    CatalogueCandidatesResponse,
     CatalogueSearchResponse,
     SourceIdentity,
 )
@@ -58,6 +60,58 @@ class CatalogueRoutesTest(unittest.TestCase):
                     }
                 ]
             },
+        )
+
+    def test_fetch_album_matches_the_contract(self) -> None:
+        album_source = SourceIdentity(
+            provider_id="youtube_music", external_id="MPREb_album"
+        )
+        self.catalogue.fetch_album.return_value = CatalogueCandidatesResponse(
+            results=[
+                CatalogueCandidate(
+                    source=SourceIdentity(
+                        provider_id="youtube_music", external_id="v1"
+                    ),
+                    title="brutal",
+                    artists=[
+                        CatalogueArtist(
+                            name="Olivia Rodrigo",
+                            source=SourceIdentity(
+                                provider_id="youtube_music",
+                                external_id="artist-1",
+                            ),
+                        )
+                    ],
+                    duration_ms=144000,
+                    album=CatalogueAlbum(
+                        title="SOUR",
+                        source=album_source,
+                        year=2021,
+                        release_type="Album",
+                    ),
+                )
+            ]
+        )
+
+        response = self.client.post(
+            "/v1/catalogue/album",
+            json={
+                "source": {
+                    "provider_id": "youtube_music",
+                    "external_id": "MPREb_album",
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.catalogue.fetch_album.assert_called_once()
+        self.assertEqual(
+            response.json()["results"][0]["album"]["source"]["external_id"],
+            "MPREb_album",
+        )
+        self.assertEqual(
+            response.json()["results"][0]["artists"][0]["source"]["external_id"],
+            "artist-1",
         )
 
     def test_provider_failure_matches_the_contract(self) -> None:
