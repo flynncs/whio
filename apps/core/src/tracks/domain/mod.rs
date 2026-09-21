@@ -6,6 +6,7 @@ mod duplicate_report;
 mod error;
 mod metadata;
 mod provider_state;
+mod retention;
 mod search;
 mod source;
 mod source_kind;
@@ -28,6 +29,7 @@ pub use duplicate_report::{
 pub use error::ValidationError;
 pub use metadata::TrackMetadata;
 pub use provider_state::ProviderEntityState;
+pub use retention::{EvictionReport, RetentionReport};
 pub use search::{MatchQuality, SearchConfidence, SearchTerms};
 pub(crate) use search::{album_quality, best_field_quality, track_quality};
 pub use source::{

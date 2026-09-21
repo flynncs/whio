@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::tracks::{LibraryState, Starred, StateTarget, TrackId};
+use crate::tracks::{EvictionReport, LibraryState, RetentionReport, Starred, StateTarget, TrackId};
 
 use super::TrackRepositoryError;
 
@@ -69,5 +69,16 @@ pub trait DuplicateReport: Send + Sync {
         _limit: u32,
     ) -> Result<Vec<crate::tracks::SplitArtist>, TrackRepositoryError> {
         Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+pub trait Retention: Send + Sync {
+    async fn retention_report(&self) -> Result<RetentionReport, TrackRepositoryError> {
+        Ok(RetentionReport::default())
+    }
+
+    async fn evict_unengaged(&self) -> Result<EvictionReport, TrackRepositoryError> {
+        Ok(EvictionReport::default())
     }
 }

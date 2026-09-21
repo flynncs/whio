@@ -6,7 +6,8 @@ use whio_core::{
     database::Database,
     identity::{provisioning, secrets::CredentialKey},
     tracks::{
-        DuplicateCandidate, DuplicateReport, PostgresTrackRepository, SplitArtist, SplitArtistRow,
+        DuplicateCandidate, DuplicateReport, EvictionReport, PostgresTrackRepository, Retention,
+        RetentionReport, SplitArtist, SplitArtistRow,
     },
 };
 
@@ -106,6 +107,19 @@ async fn main() -> Result<(), CliError> {
             ensure_no_extra_args(&mut args)?;
             Operation::Duplicates { limit }
         }
+        "retention" => {
+            let evict = match args.next() {
+                Some(flag) if flag == "--evict" => true,
+                Some(other) => {
+                    return Err(CliError::Usage(format!(
+                        "unknown retention flag `{other}` (try --evict)"
+                    )));
+                }
+                None => false,
+            };
+            ensure_no_extra_args(&mut args)?;
+            Operation::Retention { evict }
+        }
         _ => {
             return Err(CliError::Usage(format!(
                 "unknown command `{command}` (try --help)"
@@ -150,6 +164,16 @@ async fn main() -> Result<(), CliError> {
             let split = repository.split_artists(limit).await?;
             print_split_artists(&split);
         }
+        Operation::Retention { evict } => {
+            let repository = PostgresTrackRepository::new(database.pool());
+            let report = repository.retention_report().await?;
+            print_retention(&report);
+
+            if evict {
+                let evicted = repository.evict_unengaged().await?;
+                print_eviction(&evicted);
+            }
+        }
     }
 
     Ok(())
@@ -169,6 +193,9 @@ enum Operation {
     },
     Duplicates {
         limit: u32,
+    },
+    Retention {
+        evict: bool,
     },
 }
 
@@ -248,6 +275,35 @@ fn print_split_artists(artists: &[SplitArtist]) {
     }
 
     println!("\nA-046 keeps these rows apart on purpose; merging them is a decision, not a fix.");
+}
+
+fn print_retention(report: &RetentionReport) {
+    println!(
+        "{} tracks, {} albums and {} artists are provider-only and unengaged",
+        report.evictable_tracks, report.evictable_albums, report.evictable_artists
+    );
+    println!(
+        "held alive by plays alone: {} tracks, {} albums, {} artists",
+        report.play_held_tracks, report.play_held_albums, report.play_held_artists
+    );
+
+    match (report.oldest_played_at, report.newest_played_at) {
+        (Some(oldest), Some(newest)) => println!(
+            "played-only recency: {} .. {}",
+            oldest.to_rfc3339(),
+            newest.to_rfc3339()
+        ),
+        _ => println!("played-only recency: none"),
+    }
+
+    println!("run `whio-cli retention --evict` to delete the unengaged rows");
+}
+
+fn print_eviction(report: &EvictionReport) {
+    println!(
+        "evicted {} tracks, {} albums and {} artists",
+        report.tracks, report.albums, report.artists
+    );
 }
 
 fn human_bytes(bytes: u64) -> String {
@@ -339,7 +395,8 @@ fn print_help() {
          \\twhio-cli [--database-url <url>] [--credential-key <key>] create-user <username> [display-name]\n\
          \\twhio-cli [--database-url <url>] [--credential-key <key>] mint-app-password <username> [label]\n\
          \\twhio-cli [--database-url <url>] revoke <credential-id>\n\
-         \\twhio-cli [--database-url <url>] duplicates [limit]\n\n\
+         \\twhio-cli [--database-url <url>] duplicates [limit]\n\
+         \\twhio-cli [--database-url <url>] retention [--evict]\n\n\
          Configuration (first match wins):\n\
          \\t--database-url / --credential-key flags\n\
          \\tWHIO_DATABASE_URL / WHIO_CREDENTIAL_KEY environment variables\n\

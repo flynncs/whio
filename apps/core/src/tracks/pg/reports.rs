@@ -2,14 +2,164 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::tracks::{
-    ArtistId, DuplicateCandidate, DuplicateSource, LOCAL_PROVIDER_ID, SplitArtist, SplitArtistRow,
-    TrackId, TrackRepositoryError,
+    ArtistId, DuplicateCandidate, DuplicateSource, EvictionReport, LOCAL_PROVIDER_ID,
+    RetentionReport, SplitArtist, SplitArtistRow, TrackId, TrackRepositoryError,
 };
 
-use crate::tracks::DuplicateReport;
+use crate::tracks::{DuplicateReport, Retention};
 
 use super::PgStore;
 use super::decode::{decode_source, repository_error};
+
+fn track_engaged(id: &str) -> String {
+    format!(
+        "(EXISTS (SELECT 1 FROM track_sources AS ts WHERE ts.track_id = {id} AND ts.provider_id = ANY($1))
+          OR EXISTS (SELECT 1 FROM track_favorites AS tf WHERE tf.track_id = {id})
+          OR EXISTS (SELECT 1 FROM track_ratings AS tr WHERE tr.track_id = {id})
+          OR EXISTS (SELECT 1 FROM track_play_stats AS tp WHERE tp.track_id = {id} AND tp.play_count > 0)
+          OR EXISTS (SELECT 1 FROM playlist_entries AS pe WHERE pe.track_id = {id}))"
+    )
+}
+
+fn track_engaged_without_plays(id: &str) -> String {
+    format!(
+        "(EXISTS (SELECT 1 FROM track_sources AS ts WHERE ts.track_id = {id} AND ts.provider_id = ANY($1))
+          OR EXISTS (SELECT 1 FROM track_favorites AS tf WHERE tf.track_id = {id})
+          OR EXISTS (SELECT 1 FROM track_ratings AS tr WHERE tr.track_id = {id})
+          OR EXISTS (SELECT 1 FROM playlist_entries AS pe WHERE pe.track_id = {id}))"
+    )
+}
+
+fn album_unengaged(member_engaged: &str) -> String {
+    format!(
+        "(NOT EXISTS (SELECT 1 FROM album_tracks AS amt WHERE amt.album_id = a.id AND {member_engaged})
+          AND NOT EXISTS (SELECT 1 FROM album_favorites AS af WHERE af.album_id = a.id)
+          AND NOT EXISTS (SELECT 1 FROM album_ratings AS arv WHERE arv.album_id = a.id))"
+    )
+}
+
+fn artist_unengaged(member_engaged: &str) -> String {
+    format!(
+        "(NOT EXISTS (SELECT 1 FROM track_artist_credits AS ac WHERE ac.artist_id = ar.id AND {member_engaged})
+          AND NOT EXISTS (SELECT 1 FROM artist_favorites AS af WHERE af.artist_id = ar.id)
+          AND NOT EXISTS (SELECT 1 FROM artist_ratings AS arv WHERE arv.artist_id = ar.id))"
+    )
+}
+
+#[async_trait]
+impl Retention for PgStore {
+    async fn retention_report(&self) -> Result<RetentionReport, TrackRepositoryError> {
+        let engaged = track_engaged("t.id");
+        let engaged_without_plays = track_engaged_without_plays("t.id");
+        let album_evictable = album_unengaged(&track_engaged("amt.track_id"));
+        let album_play_held = album_unengaged(&track_engaged_without_plays("amt.track_id"));
+        let artist_evictable = artist_unengaged(&track_engaged("ac.track_id"));
+        let artist_play_held = artist_unengaged(&track_engaged_without_plays("ac.track_id"));
+
+        let query = format!(
+            r#"
+            SELECT
+                (SELECT count(*) FROM tracks AS t WHERE NOT {engaged})::BIGINT,
+                (SELECT count(*) FROM albums AS a WHERE {album_evictable})::BIGINT,
+                (SELECT count(*) FROM artists AS ar WHERE {artist_evictable})::BIGINT,
+                (SELECT count(*) FROM tracks AS t
+                 WHERE NOT {engaged_without_plays}
+                   AND EXISTS (SELECT 1 FROM track_play_stats AS tp
+                               WHERE tp.track_id = t.id AND tp.play_count > 0))::BIGINT,
+                (SELECT count(*) FROM albums AS a
+                 WHERE {album_play_held}
+                   AND EXISTS (SELECT 1 FROM album_tracks AS amt
+                               JOIN track_play_stats AS tp
+                                 ON tp.track_id = amt.track_id AND tp.play_count > 0
+                               WHERE amt.album_id = a.id))::BIGINT,
+                (SELECT count(*) FROM artists AS ar
+                 WHERE {artist_play_held}
+                   AND EXISTS (SELECT 1 FROM track_artist_credits AS ac
+                               JOIN track_play_stats AS tp
+                                 ON tp.track_id = ac.track_id AND tp.play_count > 0
+                               WHERE ac.artist_id = ar.id))::BIGINT,
+                (SELECT min(tp.last_played_at) FROM track_play_stats AS tp
+                 JOIN tracks AS t ON t.id = tp.track_id
+                 WHERE tp.play_count > 0 AND NOT {engaged_without_plays}),
+                (SELECT max(tp.last_played_at) FROM track_play_stats AS tp
+                 JOIN tracks AS t ON t.id = tp.track_id
+                 WHERE tp.play_count > 0 AND NOT {engaged_without_plays})
+            "#
+        );
+
+        let row = sqlx::query_as::<
+            _,
+            (
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ),
+        >(&query)
+        .bind(self.library_provider_ids())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        Ok(RetentionReport {
+            evictable_tracks: row.0.max(0) as u64,
+            evictable_albums: row.1.max(0) as u64,
+            evictable_artists: row.2.max(0) as u64,
+            play_held_tracks: row.3.max(0) as u64,
+            play_held_albums: row.4.max(0) as u64,
+            play_held_artists: row.5.max(0) as u64,
+            oldest_played_at: row.6,
+            newest_played_at: row.7,
+        })
+    }
+
+    async fn evict_unengaged(&self) -> Result<EvictionReport, TrackRepositoryError> {
+        let library_ids = self.library_provider_ids();
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+
+        let tracks = sqlx::query(&format!(
+            "DELETE FROM tracks AS t WHERE NOT {}",
+            track_engaged("t.id")
+        ))
+        .bind(&library_ids)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?
+        .rows_affected();
+
+        let albums = sqlx::query(&format!(
+            "DELETE FROM albums AS a WHERE {}",
+            album_unengaged(&track_engaged("amt.track_id"))
+        ))
+        .bind(&library_ids)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?
+        .rows_affected();
+
+        let artists = sqlx::query(&format!(
+            "DELETE FROM artists AS ar WHERE {}",
+            artist_unengaged(&track_engaged("ac.track_id"))
+        ))
+        .bind(&library_ids)
+        .execute(&mut *transaction)
+        .await
+        .map_err(repository_error)?
+        .rows_affected();
+
+        transaction.commit().await.map_err(repository_error)?;
+
+        Ok(EvictionReport {
+            tracks,
+            albums,
+            artists,
+        })
+    }
+}
 
 #[async_trait]
 impl DuplicateReport for PgStore {

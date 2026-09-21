@@ -6,7 +6,7 @@ mod state;
 pub use catalogue::CatalogueWrite;
 pub use error::{SourceFileFacts, TrackRepositoryError};
 pub use library::{LibraryRead, SourceLookup};
-pub use state::{DuplicateReport, StateStore};
+pub use state::{DuplicateReport, Retention, StateStore};
 
 use async_trait::async_trait;
 
