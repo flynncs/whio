@@ -20,7 +20,7 @@ fn paths(mode: &str) -> (String, String, String) {
         "homelab" => (
             format!("{dir}/homelab-library.jsonl"),
             format!("{dir}/homelab-ytm-cache.json"),
-            format!("{dir}/homelab-mb-url-labels.json"),
+            format!("{dir}/mb-url-labels.json"),
         ),
         _ => (
             format!("{dir}/data/library.tsv"),
@@ -111,6 +111,7 @@ struct Metrics {
     negative_no_target: usize,
     resolved_recording_absent: usize,
     status: HashMap<String, usize>,
+    reason: HashMap<String, usize>,
 }
 
 impl Metrics {
@@ -135,6 +136,7 @@ impl Metrics {
             "precision_lower_bound": self.precision_lower_bound(),
             "recall_lower_bound": self.recall_lower_bound(),
             "status": self.status,
+            "reason": self.reason,
         })
     }
 }
@@ -177,15 +179,7 @@ fn evaluate() {
     let mut splits = [Metrics::default(), Metrics::default()];
     for (query, entry) in cache.as_object().unwrap() {
         let metrics = &mut splits[bucket(query)];
-        for result in entry["results"].as_array().unwrap() {
-            let Some(label) = labels
-                .get(result["videoId"].as_str().unwrap_or_default())
-                .filter(|label| !label.is_null())
-            else {
-                continue;
-            };
-            let recording = label["recording_id"].as_str().unwrap_or_default();
-            let expected = by_recording.get(recording);
+        for result in entry["results"].as_array().into_iter().flatten() {
             let decision = index.match_record(&from_ytm(result), 0);
             *overall
                 .status
@@ -195,6 +189,22 @@ fn evaluate() {
                 .status
                 .entry(decision.status().as_str().to_owned())
                 .or_default() += 1;
+            *overall
+                .reason
+                .entry(decision.reason().to_owned())
+                .or_default() += 1;
+            *metrics
+                .reason
+                .entry(decision.reason().to_owned())
+                .or_default() += 1;
+            let Some(label) = labels
+                .get(result["videoId"].as_str().unwrap_or_default())
+                .filter(|label| !label.is_null())
+            else {
+                continue;
+            };
+            let recording = label["recording_id"].as_str().unwrap_or_default();
+            let expected = by_recording.get(recording);
             let target = decision.target();
             match expected {
                 Some(ids) if ids.iter().any(|id| Some(id.as_str()) == target) => {
