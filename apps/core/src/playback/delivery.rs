@@ -15,15 +15,6 @@ pub struct DeliveryResult {
 /// failures raised while moving bytes: upstream media, spool and resource limits.
 #[derive(Debug, thiserror::Error)]
 pub enum DeliveryError {
-    #[error("upstream media was not found")]
-    UpstreamNotFound,
-
-    #[error("upstream rejected the credentials")]
-    UpstreamUnauthorized,
-
-    #[error("upstream media server is unavailable")]
-    UpstreamUnavailable,
-
     #[error("media fetch failed")]
     Media(#[from] MediaFetchError),
 

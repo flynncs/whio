@@ -173,20 +173,14 @@ fn playback_error_response(error: PlaybackError, context: RequestContext) -> Axu
 
 fn playback_error_details(error: &PlaybackError) -> (StatusCode, &'static str, &'static str) {
     match error {
-        PlaybackError::TrackNotFound
-        | PlaybackError::SourceNotFound
-        | PlaybackError::Delivery(DeliveryError::UpstreamNotFound) => (
+        PlaybackError::TrackNotFound | PlaybackError::SourceNotFound => (
             StatusCode::NOT_FOUND,
             "track_not_found",
             "The track was not found",
         ),
         PlaybackError::CredentialsStale
         | PlaybackError::Unavailable
-        | PlaybackError::Delivery(
-            DeliveryError::UpstreamUnauthorized
-            | DeliveryError::UpstreamUnavailable
-            | DeliveryError::Overloaded,
-        ) => (
+        | PlaybackError::Delivery(DeliveryError::Overloaded) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "playback_unavailable",
             "Playback is temporarily unavailable",

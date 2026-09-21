@@ -2,7 +2,7 @@ mod album;
 mod artist;
 mod artwork;
 mod dedup;
-mod duplicates;
+mod duplicate_report;
 mod error;
 mod metadata;
 mod search;
@@ -20,7 +20,7 @@ pub use artwork::ArtworkRef;
 pub use dedup::{
     MATCHER_VERSION, MatchDecision, MatchRecord, MatchStatus, ParsedTitle, RecordingIndex, from_ytm,
 };
-pub use duplicates::{
+pub use duplicate_report::{
     DuplicateCandidate, DuplicateSource, KeepReason, SplitArtist, SplitArtistRow,
 };
 pub use error::ValidationError;

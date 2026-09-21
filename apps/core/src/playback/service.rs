@@ -163,13 +163,7 @@ impl StreamingService {
             match self.delivery.deliver(&resolved, range.clone()).await {
                 Ok(delivery) => return Ok(Some(delivery)),
                 Err(error) if attempt < MAX_MEDIA_ATTEMPTS && error.allows_retry() => continue,
-                Err(DeliveryError::UpstreamUnauthorized) => {
-                    return Err(self.credential_rejected(source, user).await);
-                }
-                Err(DeliveryError::UpstreamNotFound) => {
-                    return Err(PlaybackError::SourceNotFound);
-                }
-                Err(DeliveryError::UpstreamUnavailable | DeliveryError::Overloaded) => {
+                Err(DeliveryError::Overloaded) => {
                     return Err(PlaybackError::Unavailable);
                 }
                 Err(error) => return Err(PlaybackError::Delivery(error)),
@@ -517,7 +511,9 @@ mod tests {
         });
         let provider = responses(vec![Ok(playable_media()), Ok(playable_media())]);
         let delivery = Arc::new(FakeDelivery::with_outcomes(vec![
-            Err(DeliveryError::UpstreamUnavailable),
+            Err(DeliveryError::Media(MediaFetchError::UnexpectedStatus(
+                StatusCode::SERVICE_UNAVAILABLE,
+            ))),
             Ok(()),
         ]));
         let service = StreamingService::new(

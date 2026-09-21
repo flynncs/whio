@@ -400,21 +400,17 @@ pub(crate) async fn get_cover_art(
 
 fn stream_failure_response(context: &RequestContext, error: PlaybackError) -> Response {
     let (status, code, message) = match &error {
-        PlaybackError::TrackNotFound
-        | PlaybackError::SourceNotFound
-        | PlaybackError::Delivery(DeliveryError::UpstreamNotFound) => (
+        PlaybackError::TrackNotFound | PlaybackError::SourceNotFound => (
             StatusCode::NOT_FOUND,
             models::error::Code::Variant70,
             "Track was not found.",
         ),
-        PlaybackError::CredentialsStale
-        | PlaybackError::Delivery(DeliveryError::UpstreamUnauthorized) => (
+        PlaybackError::CredentialsStale => (
             StatusCode::UNAUTHORIZED,
             models::error::Code::Variant40,
             "Upstream credentials have expired.",
         ),
-        PlaybackError::Unavailable
-        | PlaybackError::Delivery(DeliveryError::UpstreamUnavailable) => (
+        PlaybackError::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             models::error::Code::Variant0,
             "Playback is temporarily unavailable.",
