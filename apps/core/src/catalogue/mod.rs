@@ -3,6 +3,8 @@ mod domain;
 mod ports;
 mod service;
 
+pub use dedup::DedupMode;
+
 pub use domain::{
     CatalogueCandidate, CatalogueSearch, MAX_SEARCH_OFFSET, SearchLimit, SearchOffset, SearchQuery,
     ValidationError,

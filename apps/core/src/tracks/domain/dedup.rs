@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::text::normalize_for_matching;
 
-pub const MATCHER_VERSION: &str = "v2.1";
+pub const MATCHER_VERSION: &str = "v2.2";
 
 const MAX_BUCKET: usize = 64;
 const MAX_FUZZY: usize = 32;
@@ -23,6 +23,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("acoustic version", "acoustic"),
     ("live version", "live"),
     ("remix version", "remix"),
+    ("demo version", "demo"),
     ("rmx", "remix"),
     ("re-recorded", "rerecorded"),
 ];

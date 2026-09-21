@@ -1614,3 +1614,64 @@ async fn dedup_candidates_return_local_matches_and_strip_qualifiers(pool: PgPool
     );
     assert_eq!(ids.len(), 2, "the provider track is not a dedup candidate");
 }
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_identity(pool: PgPool) {
+    use whio_core::{
+        catalogue::{CatalogueSearch, CatalogueService, SearchLimit, SearchQuery},
+        request::{RequestContext, RequestId},
+    };
+    let root = std::env::temp_dir().join(format!("whio-pg-dedup-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("song.flac"), b"media").unwrap();
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let local_source = SourceIdentity::new(
+        ProviderId::new("local".into()).unwrap(),
+        SourceScope::Named(root.display().to_string()),
+        "song.flac".into(),
+    )
+    .unwrap();
+    let local = repository
+        .index_source(
+            local_source,
+            metadata("Song", &["Artist"], Some(240000)),
+            &SourceFileFacts {
+                path: Some("song.flac".into()),
+                size_bytes: 5,
+                modified_at: None,
+                missing_at: None,
+                content_type: None,
+                suffix: Some("flac".into()),
+                acoustid_fingerprint: None,
+            },
+        )
+        .await
+        .unwrap();
+    let remote = repository
+        .get_or_create(source("video"), metadata("Song", &["Artist"], Some(240000)))
+        .await
+        .unwrap();
+    let user = Uuid::now_v7();
+    let service = CatalogueService::new(repository.clone());
+    let search = CatalogueSearch::new(
+        SearchQuery::new("Song".into()).unwrap(),
+        SearchLimit::new(25).unwrap(),
+    );
+    let context = RequestContext::new(RequestId::new("pg-dedup".into()).unwrap());
+    let outcome = service.search(&search, None, &context).await.unwrap();
+    assert_eq!(outcome.tracks.len(), 1);
+    assert_eq!(outcome.tracks[0].track().id(), local.id());
+    assert!(repository.find_track(remote.id()).await.unwrap().is_some());
+    std::fs::remove_dir_all(&root).unwrap();
+    let outcome = service
+        .search(&search, Some(&user), &context)
+        .await
+        .unwrap();
+    assert!(
+        outcome
+            .tracks
+            .iter()
+            .any(|hit| hit.track().id() == remote.id())
+    );
+}

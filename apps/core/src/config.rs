@@ -39,6 +39,7 @@ pub(crate) struct Config {
     pub(crate) youtube_media_suffix: String,
     pub(crate) artwork_host_suffixes: Vec<String>,
     pub(crate) source_tags: SourceTags,
+    pub(crate) dedup_mode: whio_core::catalogue::DedupMode,
     pub(crate) media_roots: Vec<std::path::PathBuf>,
 }
 
@@ -271,7 +272,25 @@ impl Config {
             Some(raw) => parse_media_roots(raw)?,
         };
 
+        let dedup_mode = match vars
+            .get("WHIO_DEDUP_MODE")
+            .map(String::as_str)
+            .unwrap_or("suppress")
+        {
+            "off" => whio_core::catalogue::DedupMode::Off,
+            "shadow" => whio_core::catalogue::DedupMode::Shadow,
+            "suppress" => whio_core::catalogue::DedupMode::Suppress,
+            raw => {
+                return Err(invalid(
+                    "WHIO_DEDUP_MODE",
+                    raw,
+                    "must be off, shadow or suppress",
+                ));
+            }
+        };
+
         Ok(Self {
+            dedup_mode,
             bind_address,
             database_url: database_raw.to_owned(),
             log_level,
@@ -384,6 +403,25 @@ mod tests {
         vars.entry(CREDENTIAL_KEY.to_owned())
             .or_insert_with(|| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned());
         Config::from_map(&vars)
+    }
+
+    #[test]
+    fn dedup_defaults_to_suppression_and_accepts_rollback_modes() {
+        use whio_core::catalogue::DedupMode;
+        assert_eq!(parse_config(&[]).unwrap().dedup_mode, DedupMode::Suppress);
+        assert_eq!(
+            parse_config(&[("WHIO_DEDUP_MODE", "off")])
+                .unwrap()
+                .dedup_mode,
+            DedupMode::Off
+        );
+        assert_eq!(
+            parse_config(&[("WHIO_DEDUP_MODE", "shadow")])
+                .unwrap()
+                .dedup_mode,
+            DedupMode::Shadow
+        );
+        assert!(parse_config(&[("WHIO_DEDUP_MODE", "unknown")]).is_err());
     }
 
     #[test]

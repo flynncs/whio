@@ -109,10 +109,10 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             vec![Arc::clone(&ytm) as Arc<dyn CatalogueProvider>]
         }
     };
-    let catalogue = Arc::new(CatalogueService::with_providers(
-        track_repository.clone(),
-        catalogue_providers,
-    ));
+    let catalogue = Arc::new(
+        CatalogueService::with_providers(track_repository.clone(), catalogue_providers)
+            .with_dedup_mode(config.dedup_mode),
+    );
     let youtube_media_suffixes = vec![config.youtube_media_suffix.clone()];
     let fetcher = Arc::new(HttpMediaFetcher::with_allowed_host_suffixes(
         media::client(media::host_suffix_redirect_policy(

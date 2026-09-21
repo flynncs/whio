@@ -37,6 +37,7 @@ don't edit `apps/resolver-client-generated/` or
 - `WHIO_SPOOL_DIR`: defaults to the system temp dir. stale `whio-*.part` files are purged at startup
 - `WHIO_YOUTUBE_MEDIA_SUFFIX`: defaults to `googlevideo.com`. host suffix accepted for resolved YouTube media
 - `WHIO_ARTWORK_HOST_SUFFIXES`: comma-separated, defaults to `googleusercontent.com,ytimg.com`. public artwork hosts core will fetch and proxy
+- `WHIO_DEDUP_MODE`: defaults to `suppress`. substitute an available local track for a conservatively matched YTM search result. `shadow` logs decisions without substitution; `off` skips matching. saved track IDs and source associations are unchanged.
 - `WHIO_SOURCE_TAGS`: defaults to `off`. `artist` prefixes each search result's artist with the provider it came from (`[ND]`, `[YTM]`). display only, and nothing is stored
 
 local compose sets everything except the credential key, which lives in a

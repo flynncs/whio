@@ -1,0 +1,279 @@
+use std::{path::PathBuf, sync::Arc};
+use uuid::Uuid;
+use whio_core::{
+    catalogue::{CatalogueSearch, CatalogueService, DedupMode, SearchLimit, SearchQuery},
+    request::{RequestContext, RequestId},
+    tracks::{
+        AlbumMetadata, AlbumTrack, InMemoryTrackRepository, ProviderId, SourceFileFacts,
+        SourceIdentity, SourceScope, Track, TrackMetadata, TrackRepository,
+    },
+};
+
+struct Fixture {
+    repository: Arc<dyn TrackRepository>,
+    root: PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!("whio-dedup-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        Self {
+            repository: Arc::new(InMemoryTrackRepository::default()),
+            root,
+        }
+    }
+
+    async fn local(&self, title: &str, name: &str) -> Track {
+        std::fs::write(self.root.join(name), b"test media").unwrap();
+        let source = SourceIdentity::new(
+            ProviderId::new("local".into()).unwrap(),
+            SourceScope::Named(self.root.display().to_string()),
+            name.into(),
+        )
+        .unwrap();
+        self.repository
+            .index_source(
+                source,
+                metadata(title),
+                &SourceFileFacts {
+                    path: Some(name.into()),
+                    size_bytes: 10,
+                    modified_at: None,
+                    missing_at: None,
+                    content_type: None,
+                    suffix: Some("flac".into()),
+                    acoustid_fingerprint: None,
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn remote(&self, title: &str) -> Track {
+        let source = SourceIdentity::new(
+            ProviderId::new("youtube_music".into()).unwrap(),
+            SourceScope::Global,
+            "remote-video".into(),
+        )
+        .unwrap();
+        self.repository
+            .get_or_create(source, metadata(title))
+            .await
+            .unwrap()
+    }
+
+    async fn search(&self, mode: DedupMode) -> Vec<whio_core::tracks::TrackHit> {
+        let service = CatalogueService::new(self.repository.clone()).with_dedup_mode(mode);
+        service
+            .search(
+                &CatalogueSearch::new(
+                    SearchQuery::new("Song".into()).unwrap(),
+                    SearchLimit::new(25).unwrap(),
+                ),
+                None,
+                &RequestContext::new(RequestId::new("dedup-test".into()).unwrap()),
+            )
+            .await
+            .unwrap()
+            .tracks
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn metadata(title: &str) -> TrackMetadata {
+    TrackMetadata::from_names(title.into(), vec!["Artist".into()], Some(240000)).unwrap()
+}
+
+#[tokio::test]
+async fn cached_remote_is_replaced_and_its_identity_and_local_album_survive() {
+    let f = Fixture::new();
+    let local = f.local("Song", "song.flac").await;
+    let remote = f.remote("Song").await;
+    let album = f
+        .repository
+        .resolve_or_create_album(&AlbumMetadata::new("Local Album".into()).unwrap())
+        .await
+        .unwrap();
+    f.repository
+        .set_album_track(album.id(), local.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    let hits = f.search(DedupMode::Suppress).await;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].track().id(), local.id());
+    assert_eq!(hits[0].album().unwrap().title(), "Local Album");
+    assert!(
+        f.repository
+            .find_track(remote.id())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        f.repository.find_sources(local.id()).await.unwrap().len(),
+        1
+    );
+    assert_eq!(
+        f.repository.find_sources(remote.id()).await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn off_and_shadow_leave_both_results_visible() {
+    let f = Fixture::new();
+    f.local("Song", "song.flac").await;
+    f.remote("Song").await;
+    for mode in [DedupMode::Off, DedupMode::Shadow] {
+        assert_eq!(f.search(mode).await.len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn deleted_or_empty_local_file_keeps_remote_result() {
+    let f = Fixture::new();
+    f.local("Song", "song.flac").await;
+    let remote = f.remote("Song").await;
+    std::fs::remove_file(f.root.join("song.flac")).unwrap();
+    assert!(
+        f.search(DedupMode::Suppress)
+            .await
+            .iter()
+            .any(|hit| hit.track().id() == remote.id())
+    );
+    std::fs::write(f.root.join("song.flac"), b"").unwrap();
+    assert!(
+        f.search(DedupMode::Suppress)
+            .await
+            .iter()
+            .any(|hit| hit.track().id() == remote.id())
+    );
+}
+
+#[tokio::test]
+async fn ambiguity_and_alternate_recordings_stay_separate() {
+    for title in [
+        "Song (Live)",
+        "Song (Acoustic)",
+        "Song (Radio Edit)",
+        "Song (Blue Room)",
+    ] {
+        let f = Fixture::new();
+        f.local(title, "song.flac").await;
+        let remote = f.remote("Song").await;
+        assert!(
+            f.search(DedupMode::Suppress)
+                .await
+                .iter()
+                .any(|hit| hit.track().id() == remote.id()),
+            "{title}"
+        );
+    }
+    let f = Fixture::new();
+    f.local("Song", "one.flac").await;
+    f.local("Song", "two.flac").await;
+    let remote = f.remote("Song").await;
+    assert!(
+        f.search(DedupMode::Suppress)
+            .await
+            .iter()
+            .any(|hit| hit.track().id() == remote.id())
+    );
+}
+
+struct OneResult;
+
+#[async_trait::async_trait]
+impl whio_core::catalogue::CatalogueProvider for OneResult {
+    async fn search(
+        &self,
+        _search: &CatalogueSearch,
+        _user: Option<&Uuid>,
+        _context: &RequestContext,
+    ) -> Result<Vec<whio_core::catalogue::CatalogueCandidate>, whio_core::providers::ProviderError>
+    {
+        let source = SourceIdentity::new(
+            ProviderId::new("youtube_music".into()).unwrap(),
+            SourceScope::Global,
+            "fresh-video".into(),
+        )
+        .unwrap();
+        Ok(vec![
+            whio_core::catalogue::CatalogueCandidate::new(source, metadata("Song")).with_album(
+                Some(AlbumMetadata::new("Remote Compilation".into()).unwrap()),
+            ),
+        ])
+    }
+}
+
+#[tokio::test]
+async fn fresh_provider_result_uses_local_state_without_changing_album_or_sources() {
+    let f = Fixture::new();
+    let local = f.local("Song", "song.flac").await;
+    let album = f
+        .repository
+        .resolve_or_create_album(&AlbumMetadata::new("Local Album".into()).unwrap())
+        .await
+        .unwrap();
+    f.repository
+        .set_album_track(album.id(), local.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    let user = Uuid::now_v7();
+    f.repository
+        .set_rating(
+            user,
+            whio_core::tracks::StateTarget::Track(local.id()),
+            Some(5),
+        )
+        .await
+        .unwrap();
+    let service = CatalogueService::with_providers(f.repository.clone(), vec![Arc::new(OneResult)]);
+    let result = service
+        .search(
+            &CatalogueSearch::new(
+                SearchQuery::new("Song".into()).unwrap(),
+                SearchLimit::new(25).unwrap(),
+            ),
+            Some(&user),
+            &RequestContext::new(RequestId::new("fresh".into()).unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.tracks.len(), 1);
+    assert_eq!(result.tracks[0].track().id(), local.id());
+    assert_eq!(result.tracks[0].state().rating(), Some(5));
+    assert_eq!(result.tracks[0].album().unwrap().title(), "Local Album");
+    assert_eq!(
+        f.repository
+            .find_album_for_track(local.id())
+            .await
+            .unwrap()
+            .unwrap()
+            .title(),
+        "Local Album"
+    );
+    assert_eq!(
+        f.repository.find_sources(local.id()).await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn generic_demo_version_does_not_bypass_the_demo_veto() {
+    let f = Fixture::new();
+    f.local("Song (Demo Version)", "song.flac").await;
+    let remote = f.remote("Song (Demo Version)").await;
+    assert!(
+        f.search(DedupMode::Suppress)
+            .await
+            .iter()
+            .any(|hit| hit.track().id() == remote.id())
+    );
+}

@@ -7,6 +7,161 @@ use crate::{
 
 const CANDIDATE_LIMIT: u32 = 500;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DedupMode {
+    Off,
+    Shadow,
+    Suppress,
+}
+
+const SUPPRESSION_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
+pub(crate) async fn apply(
+    repository: &Arc<dyn TrackRepository>,
+    mut known: Vec<TrackHit>,
+    mut fresh: Vec<TrackHit>,
+    user: Option<uuid::Uuid>,
+    context: &RequestContext,
+    mode: DedupMode,
+) -> (Vec<TrackHit>, Vec<TrackHit>) {
+    if mode == DedupMode::Off {
+        return (known, fresh);
+    }
+    let started = std::time::Instant::now();
+    let hits = known.iter().chain(&fresh).cloned().collect::<Vec<_>>();
+    if mode == DedupMode::Shadow {
+        let _ = tokio::time::timeout(SUPPRESSION_BUDGET, shadow(repository, &hits, context)).await;
+        return (known, fresh);
+    }
+    match tokio::time::timeout(SUPPRESSION_BUDGET, replacements(repository, &hits, user)).await {
+        Ok(Ok(replacements)) => {
+            tracing::info!(request_id = %context.request_id().as_str(), replaced = replacements.len(), elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, "dedup suppression");
+            for hit in known.iter_mut().chain(&mut fresh) {
+                if let Some(local) = replacements.get(hit.track().id()) {
+                    *hit = local.clone();
+                }
+            }
+        }
+        Ok(Err(error)) => tracing::warn!(%error, "dedup skipped; keeping remote results"),
+        Err(_) => tracing::warn!("dedup budget exceeded; keeping remote results"),
+    }
+    (known, fresh)
+}
+
+async fn replacements(
+    repository: &Arc<dyn TrackRepository>,
+    hits: &[TrackHit],
+    user: Option<uuid::Uuid>,
+) -> Result<
+    std::collections::HashMap<crate::tracks::TrackId, TrackHit>,
+    crate::tracks::TrackRepositoryError,
+> {
+    use crate::tracks::{MatchStatus, normalize_for_matching};
+    let remotes =
+        hits.iter()
+            .filter(|hit| {
+                !hit.sources()
+                    .iter()
+                    .any(|source| source.provider_id().kind() == Some(ProviderKind::Local))
+                    && hit.sources().iter().any(|source| {
+                        source.provider_id().kind() == Some(ProviderKind::YoutubeMusic)
+                    })
+            })
+            .collect::<Vec<_>>();
+    let mut out = std::collections::HashMap::new();
+    if remotes.is_empty() {
+        return Ok(out);
+    }
+    let keys = remotes
+        .iter()
+        .map(|hit| hit.track().title().to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let candidates = repository
+        .dedup_candidates(&keys, CANDIDATE_LIMIT + 1)
+        .await?;
+    if candidates.len() > CANDIDATE_LIMIT as usize {
+        tracing::warn!("dedup candidate limit exceeded; keeping remote results");
+        return Ok(out);
+    }
+    let index = RecordingIndex::new(candidates.iter().map(local_record).collect());
+    let mut checked = std::collections::HashMap::new();
+    for hit in remotes {
+        let remote = record(hit.track().id().to_string(), hit);
+        let decision = index.match_record(&remote, chrono::Utc::now().timestamp());
+        if !matches!(
+            decision.status(),
+            MatchStatus::Verified | MatchStatus::MetadataCandidate
+        ) {
+            continue;
+        }
+        let Some(local) = candidates
+            .iter()
+            .find(|local| Some(local.track().id().to_string().as_str()) == decision.target())
+        else {
+            continue;
+        };
+        if normalize_for_matching(hit.track().title())
+            != normalize_for_matching(local.track().title())
+        {
+            continue;
+        }
+        if !checked.contains_key(local.track().id()) {
+            let ready = if local_available(repository, local).await? {
+                let mut local = local.clone();
+                if let Some(user) = user {
+                    let state = repository
+                        .find_track_state(local.track().id(), user)
+                        .await?;
+                    local = local.with_state(state);
+                }
+                Some(local)
+            } else {
+                None
+            };
+            checked.insert(local.track().id().clone(), ready);
+        }
+        if let Some(Some(local)) = checked.get(local.track().id()) {
+            out.insert(hit.track().id().clone(), local.clone());
+        }
+    }
+    Ok(out)
+}
+
+async fn local_available(
+    repository: &Arc<dyn TrackRepository>,
+    hit: &TrackHit,
+) -> Result<bool, crate::tracks::TrackRepositoryError> {
+    for source in hit.sources() {
+        if source.provider_id().kind() != Some(ProviderKind::Local) {
+            continue;
+        }
+        let crate::tracks::SourceScope::Named(root) = source.source_scope() else {
+            continue;
+        };
+        let Some(facts) = repository.find_source_file_facts(source).await? else {
+            continue;
+        };
+        if facts.missing_at.is_some() {
+            continue;
+        }
+        let Some(relative) = facts.path.as_deref() else {
+            continue;
+        };
+        let Some(path) = crate::source_path::local_path(root, relative) else {
+            continue;
+        };
+        if tokio::fs::metadata(path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) async fn shadow(
     repository: &Arc<dyn TrackRepository>,
     fresh: &[TrackHit],
@@ -170,5 +325,90 @@ mod tests {
         .await;
 
         assert!(decisions.is_empty());
+    }
+    struct UnusableCandidates {
+        hits: Vec<TrackHit>,
+        delay: bool,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tracks::LibraryRead for UnusableCandidates {
+        async fn find_track(
+            &self,
+            _: &crate::tracks::TrackId,
+        ) -> Result<Option<crate::tracks::Track>, crate::tracks::TrackRepositoryError> {
+            Ok(None)
+        }
+        async fn dedup_candidates(
+            &self,
+            _: &[String],
+            _: u32,
+        ) -> Result<Vec<TrackHit>, crate::tracks::TrackRepositoryError> {
+            if self.delay {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+            if self.fail {
+                return Err(crate::tracks::TrackRepositoryError::Unavailable);
+            }
+            Ok(self.hits.clone())
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::tracks::CatalogueWrite for UnusableCandidates {
+        async fn get_or_create(
+            &self,
+            _: crate::tracks::SourceIdentity,
+            _: crate::tracks::TrackMetadata,
+        ) -> Result<crate::tracks::Track, crate::tracks::TrackRepositoryError> {
+            Err(crate::tracks::TrackRepositoryError::Unavailable)
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::tracks::SourceLookup for UnusableCandidates {
+        async fn find_sources(
+            &self,
+            _: &crate::tracks::TrackId,
+        ) -> Result<Vec<crate::tracks::SourceIdentity>, crate::tracks::TrackRepositoryError>
+        {
+            Ok(vec![])
+        }
+    }
+    impl crate::tracks::StateStore for UnusableCandidates {}
+    impl crate::tracks::DuplicateReport for UnusableCandidates {}
+
+    #[tokio::test]
+    async fn suppression_keeps_remote_results_on_overflow_error_or_timeout() {
+        let metadata = crate::tracks::TrackMetadata::from_names(
+            "Song".into(),
+            vec!["Artist".into()],
+            Some(240000),
+        )
+        .unwrap();
+        let remote = TrackHit::new(
+            crate::tracks::Track::new(crate::tracks::TrackId::new(), metadata),
+            None,
+            vec![provider_source()],
+        );
+        for (delay, fail, count) in [(false, false, 501), (false, true, 0), (true, false, 0)] {
+            let repository: Arc<dyn TrackRepository> = Arc::new(UnusableCandidates {
+                hits: vec![remote.clone(); count],
+                delay,
+                fail,
+            });
+            let started = std::time::Instant::now();
+            let (known, fresh) = apply(
+                &repository,
+                vec![remote.clone()],
+                vec![],
+                None,
+                &context(),
+                DedupMode::Suppress,
+            )
+            .await;
+            assert_eq!(known[0].track().id(), remote.track().id());
+            assert!(fresh.is_empty());
+            assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        }
     }
 }

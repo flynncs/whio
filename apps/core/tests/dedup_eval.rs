@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env, fs};
 
 use serde_json::{Value, json};
-use whio_core::tracks::{MatchRecord, ParsedTitle, RecordingIndex, from_ytm};
+use whio_core::tracks::{MatchRecord, RecordingIndex, from_ytm};
 
 fn review_dir() -> String {
     format!(
@@ -96,61 +96,68 @@ fn record_json(record: &MatchRecord) -> Value {
     })
 }
 
-fn same_audio(local: &MatchRecord, label: &Value) -> bool {
-    let Some(title) = label.get("title").and_then(Value::as_str) else {
-        return false;
-    };
-    if local.parsed().core() != ParsedTitle::parse(title, &[]).core() {
-        return false;
+fn classify(target: Option<&MatchRecord>, label: Option<&Value>, present: bool) -> &'static str {
+    match (target, label) {
+        (Some(_), None) => "unlabelled_with_target",
+        (None, None) => "unlabelled_no_target",
+        (Some(local), Some(label)) => {
+            if local.recording_id().is_some()
+                && local.recording_id() == label["recording_id"].as_str()
+            {
+                "identifier_agreement"
+            } else {
+                "identifier_conflict_with_target"
+            }
+        }
+        (None, Some(_)) if present => "labelled_miss",
+        (None, Some(_)) => "labelled_absent_no_target",
     }
-    if let (Some(length), Some(duration)) = (
-        label.get("length").and_then(Value::as_u64),
-        local.duration_ms(),
-    ) && length.abs_diff(duration) > 2000
-    {
-        return false;
-    }
-
-    true
 }
 
 #[derive(Default, Clone)]
 struct Metrics {
-    confirmed_positive: usize,
-    confirmed_false_positive: usize,
-    false_negative: usize,
-    same_audio_other_entity: usize,
-    negative_no_target: usize,
-    resolved_recording_absent: usize,
+    classification: HashMap<String, usize>,
     status: HashMap<String, usize>,
     reason: HashMap<String, usize>,
 }
 
 impl Metrics {
-    fn precision_lower_bound(&self) -> Option<f64> {
-        let decided = self.confirmed_positive + self.confirmed_false_positive;
-        (decided > 0).then(|| self.confirmed_positive as f64 / decided as f64)
-    }
-
-    fn recall_lower_bound(&self) -> Option<f64> {
-        let expected = self.confirmed_positive + self.false_negative;
-        (expected > 0).then(|| self.confirmed_positive as f64 / expected as f64)
-    }
-
     fn to_json(&self) -> Value {
         json!({
-            "confirmed_positive": self.confirmed_positive,
-            "confirmed_false_positive": self.confirmed_false_positive,
-            "false_negative": self.false_negative,
-            "same_audio_other_entity": self.same_audio_other_entity,
-            "negative_no_target": self.negative_no_target,
-            "resolved_recording_absent": self.resolved_recording_absent,
-            "precision_lower_bound": self.precision_lower_bound(),
-            "recall_lower_bound": self.recall_lower_bound(),
+            "classification": self.classification,
             "status": self.status,
             "reason": self.reason,
+            "precision": null,
+            "recall": null,
+            "accuracy_note": "identifier conflicts and unlabelled rows remain unresolved; these counts do not establish precision or recall",
         })
     }
+}
+
+#[test]
+fn a_conflicting_target_is_not_a_miss_or_proven_same_audio() {
+    let local = MatchRecord::new(
+        "local",
+        "Teeth",
+        vec!["Artist".into()],
+        Some(328000),
+        "",
+        Some("3090a947-1be6-48c2-b972-455186eae7db".into()),
+        None,
+        None,
+        true,
+    );
+    let label = json!({"recording_id":"92d54007-370c-4020-a2cc-0e5d55cea3ab", "title":"Hypocrite", "length":248986});
+    assert_eq!(
+        classify(Some(&local), Some(&label), true),
+        "identifier_conflict_with_target"
+    );
+    assert_eq!(classify(None, Some(&label), true), "labelled_miss");
+    let same_metadata = json!({"recording_id":"92d54007-370c-4020-a2cc-0e5d55cea3ab", "title":"Teeth", "length":328000});
+    assert_eq!(
+        classify(Some(&local), Some(&same_metadata), true),
+        "identifier_conflict_with_target"
+    );
 }
 
 fn bucket(id: &str) -> usize {
@@ -219,64 +226,18 @@ fn evaluate() {
 
             let target = decision.target();
             let label = labels.get(video).filter(|label| !label.is_null());
-            let classification = match label {
-                None => {
-                    if target.is_some() {
-                        "unlabelled_with_target"
-                    } else {
-                        "unlabelled_no_target"
-                    }
-                }
-                Some(label) => {
-                    let recording = label["recording_id"].as_str().unwrap_or_default();
-                    match by_recording.get(recording) {
-                        Some(ids) if ids.iter().any(|id| Some(id.as_str()) == target) => {
-                            overall.confirmed_positive += 1;
-                            metrics.confirmed_positive += 1;
-                            "confirmed_positive"
-                        }
-                        Some(_) => {
-                            if target
-                                .and_then(|id| by_id.get(id))
-                                .is_some_and(|local| same_audio(local, label))
-                            {
-                                overall.same_audio_other_entity += 1;
-                                metrics.same_audio_other_entity += 1;
-                                "same_audio_other_entity"
-                            } else {
-                                overall.false_negative += 1;
-                                metrics.false_negative += 1;
-                                "false_negative"
-                            }
-                        }
-                        None => {
-                            overall.resolved_recording_absent += 1;
-                            metrics.resolved_recording_absent += 1;
-                            match target {
-                                None => {
-                                    overall.negative_no_target += 1;
-                                    metrics.negative_no_target += 1;
-                                    "negative_no_target"
-                                }
-                                Some(target) => {
-                                    if by_id
-                                        .get(target)
-                                        .is_some_and(|local| same_audio(local, label))
-                                    {
-                                        overall.same_audio_other_entity += 1;
-                                        metrics.same_audio_other_entity += 1;
-                                        "same_audio_other_entity"
-                                    } else {
-                                        overall.confirmed_false_positive += 1;
-                                        metrics.confirmed_false_positive += 1;
-                                        "confirmed_false_positive"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            };
+            let present = label
+                .and_then(|label| label["recording_id"].as_str())
+                .is_some_and(|id| by_recording.contains_key(id));
+            let classification = classify(target.and_then(|id| by_id.get(id)), label, present);
+            *overall
+                .classification
+                .entry(classification.into())
+                .or_default() += 1;
+            *metrics
+                .classification
+                .entry(classification.into())
+                .or_default() += 1;
 
             rows.push(json!({
                 "query": query,

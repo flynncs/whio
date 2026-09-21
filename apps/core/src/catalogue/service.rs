@@ -32,6 +32,7 @@ pub enum CatalogueError {
 pub struct CatalogueService {
     track_repository: Arc<dyn TrackRepository>,
     providers: Vec<Arc<dyn CatalogueProvider>>,
+    dedup_mode: super::DedupMode,
 }
 
 pub struct SearchOutcome {
@@ -56,6 +57,7 @@ impl CatalogueService {
         Self {
             track_repository,
             providers: Vec::new(),
+            dedup_mode: super::DedupMode::Suppress,
         }
     }
 
@@ -66,7 +68,13 @@ impl CatalogueService {
         Self {
             track_repository,
             providers,
+            dedup_mode: super::DedupMode::Suppress,
         }
+    }
+
+    pub fn with_dedup_mode(mut self, mode: super::DedupMode) -> Self {
+        self.dedup_mode = mode;
+        self
     }
 
     pub async fn track(&self, track_id: &TrackId) -> Result<Option<Track>, CatalogueError> {
@@ -229,7 +237,15 @@ impl CatalogueService {
             .map_err(CatalogueError::Repository)?;
         let (fresh, first_error, any_success) =
             self.fan_out(search, user, context, PROVIDER_BUDGET).await;
-        let _ = super::dedup::shadow(&self.track_repository, &fresh, context).await;
+        let (known, fresh) = super::dedup::apply(
+            &self.track_repository,
+            known,
+            fresh,
+            user.copied(),
+            context,
+            self.dedup_mode,
+        )
+        .await;
         let albums = self
             .track_repository
             .search_albums(&query, window, user.copied())
