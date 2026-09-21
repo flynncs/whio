@@ -47,14 +47,16 @@ pub fn watch(roots: &[PathBuf], service: Arc<ScanService>) -> Result<MediaWatche
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracks::InMemoryTrackRepository;
+    use crate::tracks::{CatalogueWrite, InMemoryTrackRepository, SourceLookup};
 
     #[test]
     fn a_media_root_can_be_watched_and_a_missing_one_is_refused() {
         let root = std::env::temp_dir().join(format!("whio-watch-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
+        let store = Arc::new(InMemoryTrackRepository::default());
         let service = ScanService::new(
-            Arc::new(InMemoryTrackRepository::default()),
+            Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&store) as Arc<dyn SourceLookup>,
             vec![root.clone()],
         );
 

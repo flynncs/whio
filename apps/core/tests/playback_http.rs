@@ -13,11 +13,11 @@ use axum::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
-use support::{NATIVE_AUTH_QUERY, credential_service, router};
+use support::{NATIVE_AUTH_QUERY, StorePorts, credential_service, router};
 use tower::ServiceExt;
 use uuid::Uuid;
 use whio_core::{
-    catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch, CatalogueService},
+    catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch},
     delivery::StreamDelivery,
     media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
     playback::{
@@ -26,10 +26,7 @@ use whio_core::{
     },
     providers::ProviderError,
     request::RequestContext,
-    tracks::{
-        InMemoryTrackRepository, ProviderId, ProviderKind, SourceIdentity, SourceScope, TrackId,
-        TrackMetadata,
-    },
+    tracks::{ProviderId, ProviderKind, SourceIdentity, SourceScope, TrackId, TrackMetadata},
 };
 
 struct StubProvider {
@@ -143,13 +140,10 @@ fn app_with_media_bytes(bytes: Vec<u8>) -> (Router, Arc<StubProvider>) {
         playback: Mutex::new(Some(playable_media())),
         resolved_source: Mutex::new(None),
     });
-    let track_repository = Arc::new(InMemoryTrackRepository::default());
-    let catalogue = Arc::new(CatalogueService::with_providers(
-        track_repository.clone(),
-        vec![provider.clone() as Arc<dyn CatalogueProvider>],
-    ));
+    let ports = StorePorts::new();
+    let catalogue = ports.catalogue_service(vec![provider.clone() as Arc<dyn CatalogueProvider>]);
     let playback = Arc::new(StreamingService::new(
-        track_repository,
+        ports.sources(),
         vec![provider.clone() as Arc<dyn PlaybackProvider>],
         Arc::new(StreamDelivery::new(
             Arc::new(StubMediaFetcher { bytes }),

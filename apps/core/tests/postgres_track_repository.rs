@@ -1653,7 +1653,12 @@ async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_iden
         .await
         .unwrap();
     let user = Uuid::now_v7();
-    let service = CatalogueService::new(repository.clone());
+    let service = CatalogueService::new(
+        Arc::clone(&repository) as Arc<dyn LibraryRead>,
+        Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&repository) as Arc<dyn SourceLookup>,
+        Arc::clone(&repository) as Arc<dyn StateStore>,
+    );
     let search = CatalogueSearch::new(
         SearchQuery::new("Song".into()).unwrap(),
         SearchLimit::new(25).unwrap(),

@@ -9,7 +9,7 @@ use std::{
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use crate::tracks::TrackRepository;
+use crate::tracks::{CatalogueWrite, SourceLookup};
 
 use super::scanner::{ScanError, ScanMode, ScanReport, scan_with};
 
@@ -31,7 +31,8 @@ struct LastScan {
 }
 
 pub struct ScanService {
-    repository: Option<Arc<dyn TrackRepository>>,
+    catalogue: Option<Arc<dyn CatalogueWrite>>,
+    sources: Option<Arc<dyn SourceLookup>>,
     roots: Vec<PathBuf>,
     scanning: AtomicBool,
     count: AtomicU32,
@@ -41,9 +42,14 @@ pub struct ScanService {
 }
 
 impl ScanService {
-    pub fn new(repository: Arc<dyn TrackRepository>, roots: Vec<PathBuf>) -> Arc<Self> {
+    pub fn new(
+        catalogue: Arc<dyn CatalogueWrite>,
+        sources: Arc<dyn SourceLookup>,
+        roots: Vec<PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            repository: Some(repository),
+            catalogue: Some(catalogue),
+            sources: Some(sources),
             roots,
             scanning: AtomicBool::new(false),
             count: AtomicU32::new(0),
@@ -55,7 +61,8 @@ impl ScanService {
 
     pub fn disabled() -> Arc<Self> {
         Arc::new(Self {
-            repository: None,
+            catalogue: None,
+            sources: None,
             roots: Vec::new(),
             scanning: AtomicBool::new(false),
             count: AtomicU32::new(0),
@@ -66,7 +73,7 @@ impl ScanService {
     }
 
     pub fn is_configured(&self) -> bool {
-        self.repository.is_some() && !self.roots.is_empty()
+        self.catalogue.is_some() && !self.roots.is_empty()
     }
 
     pub fn status(&self) -> ScanStatus {
@@ -110,7 +117,7 @@ impl ScanService {
     }
 
     pub async fn run_once(&self, full: bool) -> Result<ScanReport, ScanError> {
-        let Some(repository) = &self.repository else {
+        let (Some(catalogue), Some(sources)) = (&self.catalogue, &self.sources) else {
             return Err(ScanError::Unreadable);
         };
         if self.roots.is_empty() {
@@ -124,7 +131,7 @@ impl ScanService {
         } else {
             ScanMode::Incremental
         };
-        let result = scan_with(repository, &self.roots, mode, &self.count).await;
+        let result = scan_with(catalogue, sources, &self.roots, mode, &self.count).await;
         self.scanning.store(false, Ordering::SeqCst);
 
         if let Ok(report) = &result {
@@ -143,11 +150,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::tracks::InMemoryTrackRepository;
+    use crate::tracks::{CatalogueWrite, InMemoryTrackRepository, SourceLookup};
 
     fn service() -> Arc<ScanService> {
+        let store = Arc::new(InMemoryTrackRepository::default());
         ScanService::new(
-            Arc::new(InMemoryTrackRepository::default()),
+            Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&store) as Arc<dyn SourceLookup>,
             vec![std::env::temp_dir()],
         )
     }

@@ -18,7 +18,10 @@ use whio_core::{
     playback::{PlaybackProvider, PlaybackSource, ResolvedPlayback, StreamingService},
     providers::ProviderError,
     request::RequestContext,
-    tracks::{InMemoryTrackRepository, ProviderKind},
+    tracks::{
+        CatalogueWrite, DuplicateReport, InMemoryTrackRepository, LibraryRead, ProviderKind,
+        SourceLookup, StateStore,
+    },
 };
 
 pub mod credentials;
@@ -90,22 +93,80 @@ impl PlaybackProvider for StubProvider {
     }
 }
 
+// one in-memory store, handed out as the narrow port each service declares
+pub struct StorePorts {
+    pub store: Arc<InMemoryTrackRepository>,
+}
+
+impl StorePorts {
+    pub fn new() -> Self {
+        Self {
+            store: Arc::new(InMemoryTrackRepository::default()),
+        }
+    }
+
+    pub fn library(&self) -> Arc<dyn LibraryRead> {
+        Arc::clone(&self.store) as Arc<dyn LibraryRead>
+    }
+
+    pub fn catalogue(&self) -> Arc<dyn CatalogueWrite> {
+        Arc::clone(&self.store) as Arc<dyn CatalogueWrite>
+    }
+
+    pub fn sources(&self) -> Arc<dyn SourceLookup> {
+        Arc::clone(&self.store) as Arc<dyn SourceLookup>
+    }
+
+    pub fn state(&self) -> Arc<dyn StateStore> {
+        Arc::clone(&self.store) as Arc<dyn StateStore>
+    }
+
+    pub fn reports(&self) -> Arc<dyn DuplicateReport> {
+        Arc::clone(&self.store) as Arc<dyn DuplicateReport>
+    }
+
+    pub fn catalogue_service(
+        &self,
+        providers: Vec<Arc<dyn CatalogueProvider>>,
+    ) -> Arc<CatalogueService> {
+        Arc::new(CatalogueService::with_providers(
+            self.library(),
+            self.catalogue(),
+            self.sources(),
+            self.state(),
+            providers,
+        ))
+    }
+
+    pub fn bare_catalogue(&self) -> Arc<CatalogueService> {
+        Arc::new(CatalogueService::new(
+            self.library(),
+            self.catalogue(),
+            self.sources(),
+            self.state(),
+        ))
+    }
+
+    pub fn streaming(&self, providers: Vec<Arc<dyn PlaybackProvider>>) -> Arc<StreamingService> {
+        Arc::new(StreamingService::new(self.sources(), providers, delivery()))
+    }
+}
+
+impl Default for StorePorts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn services(
     responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>,
 ) -> (Arc<CatalogueService>, Arc<StreamingService>) {
     let provider = Arc::new(StubProvider {
         responses: Mutex::new(responses.into()),
     });
-    let track_repository = Arc::new(InMemoryTrackRepository::default());
-    let catalogue = Arc::new(CatalogueService::with_providers(
-        track_repository.clone(),
-        vec![provider.clone() as Arc<dyn CatalogueProvider>],
-    ));
-    let playback = Arc::new(StreamingService::new(
-        track_repository,
-        vec![provider as Arc<dyn PlaybackProvider>],
-        delivery(),
-    ));
+    let ports = StorePorts::new();
+    let catalogue = ports.catalogue_service(vec![provider.clone() as Arc<dyn CatalogueProvider>]);
+    let playback = ports.streaming(vec![provider as Arc<dyn PlaybackProvider>]);
     (catalogue, playback)
 }
 

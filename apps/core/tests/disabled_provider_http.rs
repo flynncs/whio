@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 mod support;
 
-use support::{NATIVE_AUTH_QUERY, credential_service, delivery, router};
+use support::{NATIVE_AUTH_QUERY, StorePorts, credential_service, router};
 
 use axum::{
     body::{Body, to_bytes},
@@ -11,8 +11,8 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
-    catalogue::{CatalogueProvider, CatalogueService},
-    playback::{PlaybackProvider, StreamingService},
+    catalogue::CatalogueProvider,
+    playback::PlaybackProvider,
     providers::YtmAdapter,
     tracks::{
         CatalogueWrite, InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope,
@@ -43,15 +43,13 @@ async fn app() -> (axum::Router, String) {
         .to_string();
     // a disabled adapter surfaces `ProviderError::Disabled` for both
     // catalogue and playback, which the HTTP layer maps to 503s
-    let catalogue = Arc::new(CatalogueService::with_providers(
-        repository.clone(),
-        vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn CatalogueProvider>],
-    ));
-    let playback = Arc::new(StreamingService::new(
-        repository,
-        vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
-        delivery(),
-    ));
+    let ports = StorePorts { store: repository };
+    let catalogue = ports.catalogue_service(vec![
+        Arc::new(YtmAdapter::disabled()) as Arc<dyn CatalogueProvider>
+    ]);
+    let playback = ports.streaming(vec![
+        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+    ]);
 
     (
         router(credential_service(), catalogue, playback),

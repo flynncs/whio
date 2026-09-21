@@ -7,15 +7,14 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
-use support::{NATIVE_AUTH_QUERY, credential_service, router};
+use support::{NATIVE_AUTH_QUERY, StorePorts, credential_service, router};
 use tower::ServiceExt;
 use whio_core::{
-    catalogue::CatalogueService,
-    playback::{PlaybackProvider, StreamingService},
+    playback::PlaybackProvider,
     providers::LocalPlaybackProvider,
     tracks::{
-        InMemoryTrackRepository, ProviderId, SourceFileFacts, SourceIdentity, SourceScope, TrackId,
-        TrackMetadata, TrackRepository,
+        CatalogueWrite, InMemoryTrackRepository, ProviderId, SourceFileFacts, SourceIdentity,
+        SourceScope, TrackId, TrackMetadata,
     },
 };
 
@@ -30,7 +29,7 @@ fn fixture_root() -> PathBuf {
 
 async fn app() -> (Router, TrackId, PathBuf) {
     let root = fixture_root();
-    let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+    let repository = Arc::new(InMemoryTrackRepository::default());
     let source = SourceIdentity::new(
         ProviderId::new("local".to_owned()).unwrap(),
         SourceScope::Named(root.display().to_string()),
@@ -65,12 +64,11 @@ async fn app() -> (Router, TrackId, PathBuf) {
         .await
         .unwrap();
 
-    let catalogue = Arc::new(CatalogueService::with_providers(repository.clone(), vec![]));
-    let playback = Arc::new(StreamingService::new(
-        repository.clone(),
-        vec![Arc::new(LocalPlaybackProvider::new(repository.clone())) as Arc<dyn PlaybackProvider>],
-        support::delivery(),
-    ));
+    let ports = StorePorts { store: repository };
+    let catalogue = ports.catalogue_service(vec![]);
+    let playback = ports.streaming(vec![
+        Arc::new(LocalPlaybackProvider::new(ports.sources())) as Arc<dyn PlaybackProvider>
+    ]);
 
     (
         router(credential_service(), catalogue, playback),

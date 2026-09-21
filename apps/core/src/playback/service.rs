@@ -8,7 +8,7 @@ use crate::{
     },
     providers::ProviderError,
     request::RequestContext,
-    tracks::{ProviderKind, TrackId, TrackRepository, TrackRepositoryError},
+    tracks::{ProviderKind, SourceLookup, TrackId, TrackRepositoryError},
 };
 
 use super::PlaybackProvider;
@@ -69,13 +69,13 @@ const MAX_MEDIA_ATTEMPTS: usize = 3;
 
 pub struct StreamingService {
     providers: HashMap<ProviderKind, Arc<dyn PlaybackProvider>>,
-    track_repository: Arc<dyn TrackRepository>,
+    sources: Arc<dyn SourceLookup>,
     delivery: Arc<dyn PlaybackDelivery>,
 }
 
 impl StreamingService {
     pub fn new(
-        track_repository: Arc<dyn TrackRepository>,
+        sources: Arc<dyn SourceLookup>,
         providers: Vec<Arc<dyn PlaybackProvider>>,
         delivery: Arc<dyn PlaybackDelivery>,
     ) -> Self {
@@ -84,7 +84,7 @@ impl StreamingService {
                 .into_iter()
                 .map(|provider| (provider.kind(), provider))
                 .collect(),
-            track_repository,
+            sources,
             delivery,
         }
     }
@@ -94,7 +94,7 @@ impl StreamingService {
         track_id: &TrackId,
     ) -> Result<Vec<PlaybackSource>, PlaybackError> {
         let sources = self
-            .track_repository
+            .sources
             .find_sources(track_id)
             .await
             .map_err(PlaybackError::Repository)?;
@@ -407,12 +407,12 @@ mod tests {
     }
 
     fn service(
-        repository: Arc<dyn TrackRepository>,
+        sources: Arc<dyn SourceLookup>,
         values: Vec<Result<PlayableMedia, ProviderError>>,
     ) -> (StreamingService, Arc<QueueProvider>) {
         let provider = responses(values);
         let service = StreamingService::new(
-            repository,
+            sources,
             vec![Arc::clone(&provider) as Arc<dyn PlaybackProvider>],
             Arc::new(FakeDelivery::default()),
         );

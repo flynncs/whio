@@ -3,7 +3,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::tracks::{
-    AlbumId, ArtistId, Starred, StateTarget, TrackId, TrackRepository, TrackRepositoryError,
+    AlbumId, ArtistId, LibraryRead, Starred, StateStore, StateTarget, TrackId, TrackRepositoryError,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -13,22 +13,27 @@ pub enum LibraryStateError {
 }
 
 pub struct LibraryStateService {
-    repository: Option<Arc<dyn TrackRepository>>,
+    state: Option<Arc<dyn StateStore>>,
+    library: Option<Arc<dyn LibraryRead>>,
 }
 
 impl LibraryStateService {
-    pub fn new(repository: Arc<dyn TrackRepository>) -> Self {
+    pub fn new(state: Arc<dyn StateStore>, library: Arc<dyn LibraryRead>) -> Self {
         Self {
-            repository: Some(repository),
+            state: Some(state),
+            library: Some(library),
         }
     }
 
     pub fn disabled() -> Self {
-        Self { repository: None }
+        Self {
+            state: None,
+            library: None,
+        }
     }
 
     pub async fn starred(&self, user: Uuid) -> Result<Starred, LibraryStateError> {
-        let Some(repository) = &self.repository else {
+        let Some(repository) = &self.state else {
             return Ok(Starred::new(Vec::new(), Vec::new(), Vec::new()));
         };
 
@@ -44,22 +49,22 @@ impl LibraryStateService {
         target: StateTarget<'_>,
         starred: bool,
     ) -> Result<(), LibraryStateError> {
-        let Some(repository) = &self.repository else {
+        let (Some(state), Some(library)) = (&self.state, &self.library) else {
             return Ok(());
         };
 
         let exists = match target {
-            StateTarget::Track(track_id) => repository
+            StateTarget::Track(track_id) => library
                 .find_track(track_id)
                 .await
                 .map_err(LibraryStateError::Repository)?
                 .is_some(),
-            StateTarget::Album(album_id) => repository
+            StateTarget::Album(album_id) => library
                 .find_album(album_id)
                 .await
                 .map_err(LibraryStateError::Repository)?
                 .is_some(),
-            StateTarget::Artist(artist_id) => repository
+            StateTarget::Artist(artist_id) => library
                 .find_artist(artist_id, Some(user))
                 .await
                 .map_err(LibraryStateError::Repository)?
@@ -69,7 +74,7 @@ impl LibraryStateService {
             return Ok(());
         }
 
-        repository
+        state
             .set_starred(user, target, starred)
             .await
             .map_err(LibraryStateError::Repository)
@@ -81,7 +86,7 @@ impl LibraryStateService {
         target: StateTarget<'_>,
         rating: Option<u8>,
     ) -> Result<(), LibraryStateError> {
-        let Some(repository) = &self.repository else {
+        let Some(repository) = &self.state else {
             return Ok(());
         };
 
@@ -97,12 +102,12 @@ impl LibraryStateService {
         raw_id: &str,
         rating: Option<u8>,
     ) -> Result<bool, LibraryStateError> {
-        let Some(repository) = &self.repository else {
+        let (Some(_), Some(library)) = (&self.state, &self.library) else {
             return Ok(false);
         };
 
         if let Ok(track_id) = raw_id.parse::<TrackId>()
-            && repository
+            && library
                 .find_track(&track_id)
                 .await
                 .map_err(LibraryStateError::Repository)?
@@ -113,7 +118,7 @@ impl LibraryStateService {
             return Ok(true);
         }
         if let Ok(album_id) = raw_id.parse::<AlbumId>()
-            && repository
+            && library
                 .find_album(&album_id)
                 .await
                 .map_err(LibraryStateError::Repository)?
@@ -124,7 +129,7 @@ impl LibraryStateService {
             return Ok(true);
         }
         if let Ok(artist_id) = raw_id.parse::<ArtistId>()
-            && repository
+            && library
                 .find_artist(&artist_id, Some(user))
                 .await
                 .map_err(LibraryStateError::Repository)?
@@ -144,10 +149,10 @@ impl LibraryStateService {
         track_id: &TrackId,
         played_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), LibraryStateError> {
-        let Some(repository) = &self.repository else {
+        let (Some(state), Some(library)) = (&self.state, &self.library) else {
             return Ok(());
         };
-        if repository
+        if library
             .find_track(track_id)
             .await
             .map_err(LibraryStateError::Repository)?
@@ -156,7 +161,7 @@ impl LibraryStateService {
             return Ok(());
         }
 
-        repository
+        state
             .record_play(user, track_id, played_at)
             .await
             .map_err(LibraryStateError::Repository)
@@ -191,7 +196,10 @@ mod tests {
             .get_or_create(local_source("path-a"), metadata("Song"))
             .await
             .unwrap();
-        let service = LibraryStateService::new(Arc::clone(&repository) as Arc<dyn TrackRepository>);
+        let service = LibraryStateService::new(
+            Arc::clone(&repository) as Arc<dyn StateStore>,
+            Arc::clone(&repository) as Arc<dyn LibraryRead>,
+        );
 
         (service, repository, track.id().clone())
     }

@@ -10,9 +10,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
     AppState,
-    catalogue::CatalogueService,
     library::ScanService,
-    playback::{PlaybackProvider, StreamingService},
+    playback::PlaybackProvider,
     providers::YtmAdapter,
     tracks::{
         AlbumMetadata, AlbumTrack, ArtistCredit, CatalogueWrite, InMemoryTrackRepository,
@@ -20,7 +19,7 @@ use whio_core::{
     },
 };
 
-use support::{credential_service_with_known_app_password, delivery};
+use support::{StorePorts, credential_service_with_known_app_password};
 
 struct Seeded {
     app: axum::Router,
@@ -102,17 +101,17 @@ async fn seeded_app() -> Seeded {
         .await
         .unwrap();
 
-    let scanner = ScanService::new(repository.clone(), vec![root]);
+    let ports = StorePorts { store: repository };
+    let scanner = ScanService::new(ports.catalogue(), ports.sources(), vec![root]);
     scanner.start();
-    let catalogue = Arc::new(CatalogueService::new(repository.clone()));
+    let catalogue = ports.bare_catalogue();
     let library_state = Arc::new(whio_core::library_state::LibraryStateService::new(
-        repository.clone(),
+        ports.state(),
+        ports.library(),
     ));
-    let playback = Arc::new(StreamingService::new(
-        repository,
-        vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
-        delivery(),
-    ));
+    let playback = ports.streaming(vec![
+        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+    ]);
     let app = whio_core::router(
         AppState::new(credential, catalogue, playback)
             .with_library_state(library_state)

@@ -439,7 +439,7 @@ fn index_letter(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracks::CatalogueWrite;
+    use crate::tracks::{CatalogueWrite, LibraryRead, SourceLookup, StateStore};
     use crate::{
         catalogue::{CatalogueCandidate, CatalogueProvider},
         providers::ProviderError,
@@ -482,8 +482,12 @@ mod tests {
         let stub = Arc::new(StubCatalogue {
             responses: Mutex::new(responses.into()),
         });
+        let store = Arc::new(InMemoryTrackRepository::default());
         CatalogueService::with_providers(
-            Arc::new(InMemoryTrackRepository::default()),
+            Arc::clone(&store) as Arc<dyn LibraryRead>,
+            Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&store) as Arc<dyn SourceLookup>,
+            Arc::clone(&store) as Arc<dyn StateStore>,
             vec![stub as Arc<dyn CatalogueProvider>],
         )
     }
@@ -509,8 +513,12 @@ mod tests {
     }
 
     fn paged_catalogue(total: u32) -> CatalogueService {
+        let store = Arc::new(InMemoryTrackRepository::default());
         CatalogueService::with_providers(
-            Arc::new(InMemoryTrackRepository::default()),
+            Arc::clone(&store) as Arc<dyn LibraryRead>,
+            Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&store) as Arc<dyn SourceLookup>,
+            Arc::clone(&store) as Arc<dyn StateStore>,
             vec![Arc::new(PagedCatalogue { total }) as Arc<dyn CatalogueProvider>],
         )
     }
@@ -678,7 +686,13 @@ mod tests {
             repository.resolve_or_create_album(&metadata).await.unwrap();
         }
 
-        CatalogueService::with_providers(repository, Vec::new())
+        CatalogueService::with_providers(
+            Arc::clone(&repository) as Arc<dyn LibraryRead>,
+            Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&repository) as Arc<dyn SourceLookup>,
+            Arc::clone(&repository) as Arc<dyn StateStore>,
+            Vec::new(),
+        )
     }
 
     #[tokio::test]
@@ -803,7 +817,13 @@ mod tests {
             )
             .await
             .unwrap();
-        let catalogue = CatalogueService::with_providers(repository, Vec::new());
+        let catalogue = CatalogueService::with_providers(
+            Arc::clone(&repository) as Arc<dyn LibraryRead>,
+            Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&repository) as Arc<dyn SourceLookup>,
+            Arc::clone(&repository) as Arc<dyn StateStore>,
+            Vec::new(),
+        );
 
         let detail = album_detail(&catalogue, &album.id().to_string(), None, SourceTags::Off)
             .await
@@ -845,7 +865,13 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let catalogue = CatalogueService::with_providers(repository, Vec::new());
+        let catalogue = CatalogueService::with_providers(
+            Arc::clone(&repository) as Arc<dyn LibraryRead>,
+            Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&repository) as Arc<dyn SourceLookup>,
+            Arc::clone(&repository) as Arc<dyn StateStore>,
+            Vec::new(),
+        );
 
         let artists = artists(&catalogue, None).await.expect("the list succeeds");
         let indexes = artist_indexes(artists);

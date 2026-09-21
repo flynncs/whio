@@ -9,22 +9,17 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
-    catalogue::CatalogueService,
-    playback::{PlaybackProvider, StreamingService},
-    providers::YtmAdapter,
-    tracks::InMemoryTrackRepository,
+    playback::PlaybackProvider, providers::YtmAdapter, tracks::InMemoryTrackRepository,
 };
 
-use support::{credential_service_with_known_app_password, delivery, router};
+use support::{StorePorts, credential_service_with_known_app_password, router};
 
 fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
-    let repository = Arc::new(InMemoryTrackRepository::default());
-    let catalogue = Arc::new(CatalogueService::new(repository.clone()));
-    let playback = Arc::new(StreamingService::new(
-        repository,
-        vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
-        delivery(),
-    ));
+    let ports = StorePorts::new();
+    let catalogue = ports.bare_catalogue();
+    let playback = ports.streaming(vec![
+        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+    ]);
 
     router(credential, catalogue, playback)
 }
@@ -117,12 +112,11 @@ async fn browse_app(
         .await
         .unwrap();
 
-    let catalogue = Arc::new(CatalogueService::new(repository.clone()));
-    let playback = Arc::new(StreamingService::new(
-        repository,
-        vec![Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>],
-        delivery(),
-    ));
+    let ports = StorePorts { store: repository };
+    let catalogue = ports.bare_catalogue();
+    let playback = ports.streaming(vec![
+        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+    ]);
 
     router(credential, catalogue, playback)
 }

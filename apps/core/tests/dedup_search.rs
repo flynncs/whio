@@ -4,13 +4,14 @@ use whio_core::{
     catalogue::{CatalogueSearch, CatalogueService, DedupMode, SearchLimit, SearchQuery},
     request::{RequestContext, RequestId},
     tracks::{
-        AlbumMetadata, AlbumTrack, InMemoryTrackRepository, ProviderId, SourceFileFacts,
-        SourceIdentity, SourceScope, Track, TrackMetadata, TrackRepository,
+        AlbumMetadata, AlbumTrack, CatalogueWrite, InMemoryTrackRepository, LibraryRead,
+        ProviderId, SourceFileFacts, SourceIdentity, SourceLookup, SourceScope, StateStore, Track,
+        TrackMetadata,
     },
 };
 
 struct Fixture {
-    repository: Arc<dyn TrackRepository>,
+    repository: Arc<InMemoryTrackRepository>,
     root: PathBuf,
 }
 
@@ -64,7 +65,13 @@ impl Fixture {
     }
 
     async fn search(&self, mode: DedupMode) -> Vec<whio_core::tracks::TrackHit> {
-        let service = CatalogueService::new(self.repository.clone()).with_dedup_mode(mode);
+        let service = CatalogueService::new(
+            Arc::clone(&self.repository) as Arc<dyn LibraryRead>,
+            Arc::clone(&self.repository) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&self.repository) as Arc<dyn SourceLookup>,
+            Arc::clone(&self.repository) as Arc<dyn StateStore>,
+        )
+        .with_dedup_mode(mode);
         service
             .search(
                 &CatalogueSearch::new(
@@ -234,7 +241,13 @@ async fn fresh_provider_result_uses_local_state_without_changing_album_or_source
         )
         .await
         .unwrap();
-    let service = CatalogueService::with_providers(f.repository.clone(), vec![Arc::new(OneResult)]);
+    let service = CatalogueService::with_providers(
+        Arc::clone(&f.repository) as Arc<dyn LibraryRead>,
+        Arc::clone(&f.repository) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&f.repository) as Arc<dyn SourceLookup>,
+        Arc::clone(&f.repository) as Arc<dyn StateStore>,
+        vec![Arc::new(OneResult)],
+    );
     let result = service
         .search(
             &CatalogueSearch::new(

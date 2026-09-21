@@ -17,7 +17,7 @@ use whio_core::{
     media::{self, HttpMediaFetcher},
     playback::{PlaybackProvider, StreamingService},
     providers::{LocalPlaybackProvider, ProviderError, YtmAdapter},
-    tracks::{PostgresTrackRepository, TrackRepository},
+    tracks::{CatalogueWrite, LibraryRead, PostgresTrackRepository, SourceLookup, StateStore},
 };
 
 async fn shutdown_signal() {
@@ -85,8 +85,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, ProviderError> {
-    let track_repository: Arc<dyn TrackRepository> =
-        Arc::new(PostgresTrackRepository::new(database.pool()));
+    let store = Arc::new(PostgresTrackRepository::new(database.pool()));
+    let library: Arc<dyn LibraryRead> = Arc::clone(&store) as Arc<dyn LibraryRead>;
+    let catalogue_write: Arc<dyn CatalogueWrite> = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+    let source_lookup: Arc<dyn SourceLookup> = Arc::clone(&store) as Arc<dyn SourceLookup>;
+    let state: Arc<dyn StateStore> = Arc::clone(&store) as Arc<dyn StateStore>;
     let credential_repository: Arc<dyn CredentialRepository> =
         Arc::new(PostgresCredentialRepository::new(database.pool()));
 
@@ -110,8 +113,14 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         }
     };
     let catalogue = Arc::new(
-        CatalogueService::with_providers(track_repository.clone(), catalogue_providers)
-            .with_dedup_mode(config.dedup_mode),
+        CatalogueService::with_providers(
+            Arc::clone(&library),
+            Arc::clone(&catalogue_write),
+            Arc::clone(&source_lookup),
+            Arc::clone(&state),
+            catalogue_providers,
+        )
+        .with_dedup_mode(config.dedup_mode),
     );
     let youtube_media_suffixes = vec![config.youtube_media_suffix.clone()];
     let fetcher = Arc::new(HttpMediaFetcher::with_allowed_host_suffixes(
@@ -128,18 +137,23 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         )
         .with_spool_limits(config.max_spool_bytes, config.spool_budget_bytes),
     );
-    let local = Arc::new(LocalPlaybackProvider::new(track_repository.clone()));
-    let scanner =
-        whio_core::library::ScanService::new(track_repository.clone(), config.media_roots.clone());
+    let local = Arc::new(LocalPlaybackProvider::new(Arc::clone(&source_lookup)));
+    let scanner = whio_core::library::ScanService::new(
+        Arc::clone(&catalogue_write),
+        Arc::clone(&source_lookup),
+        config.media_roots.clone(),
+    );
     let artwork = Arc::new(whio_core::artwork::ArtworkService::new(
-        track_repository.clone(),
+        Arc::clone(&library),
+        Arc::clone(&source_lookup),
         config.artwork_host_suffixes.clone(),
     ));
     let library_state = Arc::new(whio_core::library_state::LibraryStateService::new(
-        track_repository.clone(),
+        Arc::clone(&state),
+        Arc::clone(&library),
     ));
     let streaming = Arc::new(StreamingService::new(
-        track_repository,
+        source_lookup,
         vec![
             local as Arc<dyn PlaybackProvider>,
             ytm as Arc<dyn PlaybackProvider>,

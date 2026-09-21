@@ -8,16 +8,16 @@ use crate::{
     providers::ProviderError,
     request::RequestContext,
     source_path::local_path,
-    tracks::{ProviderKind, SourceScope, TrackRepository, TrackRepositoryError},
+    tracks::{ProviderKind, SourceLookup, SourceScope, TrackRepositoryError},
 };
 
 pub struct LocalPlaybackProvider {
-    repository: Arc<dyn TrackRepository>,
+    sources: Arc<dyn SourceLookup>,
 }
 
 impl LocalPlaybackProvider {
-    pub fn new(repository: Arc<dyn TrackRepository>) -> Self {
-        Self { repository }
+    pub fn new(sources: Arc<dyn SourceLookup>) -> Self {
+        Self { sources }
     }
 }
 
@@ -41,7 +41,7 @@ impl PlaybackProvider for LocalPlaybackProvider {
         };
 
         let Some(facts) = self
-            .repository
+            .sources
             .find_source_file_facts(source.identity())
             .await
             .map_err(repository_error)?
@@ -117,7 +117,7 @@ mod tests {
     use crate::{
         request::RequestId,
         tracks::{
-            InMemoryTrackRepository, ProviderId, SourceFileFacts, SourceIdentity, TrackRepository,
+            CatalogueWrite, InMemoryTrackRepository, ProviderId, SourceFileFacts, SourceIdentity,
         },
     };
 
@@ -157,13 +157,13 @@ mod tests {
         root: &Path,
         facts: SourceFileFacts,
     ) -> (LocalPlaybackProvider, SourceIdentity) {
-        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+        let store = Arc::new(InMemoryTrackRepository::default());
         let source = local_source(root, "recording-1");
-        repository
-            .set_source_file_facts(&source, &facts)
-            .await
-            .unwrap();
-        (LocalPlaybackProvider::new(repository), source)
+        store.set_source_file_facts(&source, &facts).await.unwrap();
+        (
+            LocalPlaybackProvider::new(Arc::clone(&store) as Arc<dyn SourceLookup>),
+            source,
+        )
     }
 
     #[tokio::test]
@@ -223,8 +223,8 @@ mod tests {
     #[tokio::test]
     async fn a_source_without_file_facts_resolves_to_nothing() {
         let root = root("no-facts");
-        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
-        let provider = LocalPlaybackProvider::new(repository);
+        let store = Arc::new(InMemoryTrackRepository::default());
+        let provider = LocalPlaybackProvider::new(Arc::clone(&store) as Arc<dyn SourceLookup>);
         let source = PlaybackSource::from_identity(local_source(&root, "recording-1")).unwrap();
 
         assert!(

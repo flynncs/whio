@@ -12,19 +12,16 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use support::credentials::{MemoryCredentialStore, TEST_PASSWORD};
-use support::{NATIVE_AUTH_QUERY, delivery, router_with_artwork};
+use support::{NATIVE_AUTH_QUERY, StorePorts, router_with_artwork};
 use whio_core::{
     artwork::ArtworkService,
-    catalogue::CatalogueService,
     identity::{
         domain::{User, UserId},
         secrets::CredentialKey,
         service::CredentialService,
     },
-    playback::StreamingService,
     tracks::{
-        ArtworkRef, InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope,
-        TrackMetadata, TrackRepository,
+        ArtworkRef, InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
     },
 };
 
@@ -89,14 +86,14 @@ async fn public_app(url: &str) -> (axum::Router, String) {
         .await
         .unwrap();
 
-    let catalogue = Arc::new(CatalogueService::new(
-        Arc::clone(&repository) as Arc<dyn TrackRepository>
-    ));
+    let ports = StorePorts { store: repository };
+    let catalogue = ports.bare_catalogue();
     let artwork = Arc::new(ArtworkService::new(
-        Arc::clone(&repository) as Arc<dyn TrackRepository>,
+        ports.library(),
+        ports.sources(),
         whio_core::media::default_artwork_host_suffixes(),
     ));
-    let playback = Arc::new(StreamingService::new(repository, Vec::new(), delivery()));
+    let playback = ports.streaming(Vec::new());
 
     (
         router_with_artwork(credential, catalogue, playback, artwork),
@@ -203,14 +200,14 @@ async fn pictured_app() -> (axum::Router, String, String, String) {
         .await
         .unwrap();
 
-    let catalogue = Arc::new(CatalogueService::new(
-        Arc::clone(&repository) as Arc<dyn TrackRepository>
-    ));
+    let ports = StorePorts { store: repository };
+    let catalogue = ports.bare_catalogue();
     let artwork = Arc::new(ArtworkService::new(
-        Arc::clone(&repository) as Arc<dyn TrackRepository>,
+        ports.library(),
+        ports.sources(),
         whio_core::media::default_artwork_host_suffixes(),
     ));
-    let playback = Arc::new(StreamingService::new(repository, Vec::new(), delivery()));
+    let playback = ports.streaming(Vec::new());
 
     (
         router_with_artwork(credential, catalogue, playback, artwork),

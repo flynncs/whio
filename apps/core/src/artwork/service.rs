@@ -8,8 +8,8 @@ use crate::{
     media::{self, MediaFetchError},
     source_path::local_path,
     tracks::{
-        AlbumEntry, AlbumId, ArtistId, ProviderKind, SourceScope, TrackId, TrackRepository,
-        TrackRepositoryError,
+        AlbumEntry, AlbumId, ArtistId, LibraryRead, ProviderKind, SourceLookup, SourceScope,
+        TrackId, TrackRepositoryError,
     },
 };
 
@@ -62,16 +62,22 @@ enum Resolved {
 }
 
 pub struct ArtworkService {
-    repository: Option<Arc<dyn TrackRepository>>,
+    library: Option<Arc<dyn LibraryRead>>,
+    sources: Option<Arc<dyn SourceLookup>>,
     client: reqwest::Client,
     host_suffixes: Vec<String>,
 }
 
 impl ArtworkService {
-    pub fn new(repository: Arc<dyn TrackRepository>, host_suffixes: Vec<String>) -> Self {
+    pub fn new(
+        library: Arc<dyn LibraryRead>,
+        sources: Arc<dyn SourceLookup>,
+        host_suffixes: Vec<String>,
+    ) -> Self {
         let client = media::client(media::artwork_redirect_policy(host_suffixes.clone()));
         Self {
-            repository: Some(repository),
+            library: Some(library),
+            sources: Some(sources),
             client,
             host_suffixes,
         }
@@ -81,7 +87,8 @@ impl ArtworkService {
         let host_suffixes = media::default_artwork_host_suffixes();
         let client = media::client(media::artwork_redirect_policy(host_suffixes.clone()));
         Self {
-            repository: None,
+            library: None,
+            sources: None,
             client,
             host_suffixes,
         }
@@ -119,29 +126,33 @@ impl ArtworkService {
     }
 
     async fn resolve(&self, target: CoverArtTarget) -> Result<Option<Resolved>, ArtworkError> {
-        let Some(repository) = &self.repository else {
+        let (Some(library), Some(sources)) = (&self.library, &self.sources) else {
             return Ok(None);
         };
 
         match target {
             CoverArtTarget::Track(track_id) => {
-                if let Some(resolved) = self.track_artwork(repository, &track_id).await? {
+                if let Some(resolved) = self.track_artwork(library, sources, &track_id).await? {
                     return Ok(Some(resolved));
                 }
 
                 let uuid = *track_id.as_uuid();
                 if let Some(resolved) = self
-                    .album_artwork(repository, &AlbumId::from_uuid(uuid))
+                    .album_artwork(library, sources, &AlbumId::from_uuid(uuid))
                     .await?
                 {
                     return Ok(Some(resolved));
                 }
 
-                self.artist_artwork(repository, &ArtistId::from_uuid(uuid))
+                self.artist_artwork(library, sources, &ArtistId::from_uuid(uuid))
                     .await
             }
-            CoverArtTarget::Album(album_id) => self.album_artwork(repository, &album_id).await,
-            CoverArtTarget::Artist(artist_id) => self.artist_artwork(repository, &artist_id).await,
+            CoverArtTarget::Album(album_id) => {
+                self.album_artwork(library, sources, &album_id).await
+            }
+            CoverArtTarget::Artist(artist_id) => {
+                self.artist_artwork(library, sources, &artist_id).await
+            }
         }
     }
 
@@ -177,51 +188,60 @@ impl ArtworkService {
 
     async fn track_artwork(
         &self,
-        repository: &Arc<dyn TrackRepository>,
+        library: &Arc<dyn LibraryRead>,
+        sources: &Arc<dyn SourceLookup>,
         track_id: &TrackId,
     ) -> Result<Option<Resolved>, ArtworkError> {
-        if let Some(local) = self.embedded_for_track(repository, track_id).await? {
+        if let Some(local) = self.embedded_for_track(library, sources, track_id).await? {
             return Ok(Some(local));
         }
 
-        self.stored_for_track(repository, track_id).await
+        self.stored_for_track(library, sources, track_id).await
     }
 
     async fn album_artwork(
         &self,
-        repository: &Arc<dyn TrackRepository>,
+        library: &Arc<dyn LibraryRead>,
+        sources: &Arc<dyn SourceLookup>,
         album_id: &AlbumId,
     ) -> Result<Option<Resolved>, ArtworkError> {
-        let entries = self.album_entries(repository, album_id).await?;
+        let entries = self.album_entries(library, sources, album_id).await?;
 
-        if let Some(local) = self.embedded_for_entries(repository, &entries).await? {
+        if let Some(local) = self
+            .embedded_for_entries(library, sources, &entries)
+            .await?
+        {
             return Ok(Some(local));
         }
 
-        self.stored_for_entries(repository, &entries).await
+        self.stored_for_entries(library, sources, &entries).await
     }
 
     async fn artist_artwork(
         &self,
-        repository: &Arc<dyn TrackRepository>,
+        library: &Arc<dyn LibraryRead>,
+        sources: &Arc<dyn SourceLookup>,
         artist_id: &ArtistId,
     ) -> Result<Option<Resolved>, ArtworkError> {
-        let albums = repository
+        let albums = library
             .find_albums_for_artist(artist_id, None)
             .await
             .map_err(ArtworkError::Repository)?;
         let mut albums_entries = Vec::with_capacity(albums.len());
         for summary in &albums {
-            albums_entries.push(self.album_entries(repository, summary.album().id()).await?);
+            albums_entries.push(
+                self.album_entries(library, sources, summary.album().id())
+                    .await?,
+            );
         }
 
         for entries in &albums_entries {
-            if let Some(local) = self.embedded_for_entries(repository, entries).await? {
+            if let Some(local) = self.embedded_for_entries(library, sources, entries).await? {
                 return Ok(Some(local));
             }
         }
         for entries in &albums_entries {
-            if let Some(stored) = self.stored_for_entries(repository, entries).await? {
+            if let Some(stored) = self.stored_for_entries(library, sources, entries).await? {
                 return Ok(Some(stored));
             }
         }
@@ -231,10 +251,11 @@ impl ArtworkService {
 
     async fn album_entries(
         &self,
-        repository: &Arc<dyn TrackRepository>,
+        library: &Arc<dyn LibraryRead>,
+        _sources: &Arc<dyn SourceLookup>,
         album_id: &AlbumId,
     ) -> Result<Vec<AlbumEntry>, ArtworkError> {
-        repository
+        library
             .find_album_entries(album_id, None)
             .await
             .map_err(ArtworkError::Repository)
@@ -242,12 +263,13 @@ impl ArtworkService {
 
     async fn embedded_for_entries(
         &self,
-        repository: &Arc<dyn TrackRepository>,
+        library: &Arc<dyn LibraryRead>,
+        sources: &Arc<dyn SourceLookup>,
         entries: &[AlbumEntry],
     ) -> Result<Option<Resolved>, ArtworkError> {
         for entry in entries {
             if let Some(local) = self
-                .embedded_for_track(repository, entry.track().id())
+                .embedded_for_track(library, sources, entry.track().id())
                 .await?
             {
                 return Ok(Some(local));
@@ -259,12 +281,13 @@ impl ArtworkService {
 
     async fn stored_for_entries(
         &self,
-        repository: &Arc<dyn TrackRepository>,
+        library: &Arc<dyn LibraryRead>,
+        sources: &Arc<dyn SourceLookup>,
         entries: &[AlbumEntry],
     ) -> Result<Option<Resolved>, ArtworkError> {
         for entry in entries {
             if let Some(stored) = self
-                .stored_for_track(repository, entry.track().id())
+                .stored_for_track(library, sources, entry.track().id())
                 .await?
             {
                 return Ok(Some(stored));
@@ -276,22 +299,23 @@ impl ArtworkService {
 
     async fn embedded_for_track(
         &self,
-        repository: &Arc<dyn TrackRepository>,
+        _library: &Arc<dyn LibraryRead>,
+        sources: &Arc<dyn SourceLookup>,
         track_id: &TrackId,
     ) -> Result<Option<Resolved>, ArtworkError> {
-        let sources = repository
+        let track_sources = sources
             .find_sources(track_id)
             .await
             .map_err(ArtworkError::Repository)?;
 
-        for source in sources {
+        for source in track_sources {
             if source.provider_id().kind() != Some(ProviderKind::Local) {
                 continue;
             }
             let SourceScope::Named(root) = source.source_scope() else {
                 continue;
             };
-            let Some(facts) = repository
+            let Some(facts) = sources
                 .find_source_file_facts(&source)
                 .await
                 .map_err(ArtworkError::Repository)?
@@ -330,10 +354,11 @@ impl ArtworkService {
 
     async fn stored_for_track(
         &self,
-        repository: &Arc<dyn TrackRepository>,
+        _library: &Arc<dyn LibraryRead>,
+        sources: &Arc<dyn SourceLookup>,
         track_id: &TrackId,
     ) -> Result<Option<Resolved>, ArtworkError> {
-        let Some((_, artwork)) = repository
+        let Some((_, artwork)) = sources
             .find_artwork(track_id)
             .await
             .map_err(ArtworkError::Repository)?
@@ -531,7 +556,11 @@ mod tests {
     }
 
     fn service(repository: Arc<InMemoryTrackRepository>) -> ArtworkService {
-        ArtworkService::new(repository, media::default_artwork_host_suffixes())
+        ArtworkService::new(
+            Arc::clone(&repository) as Arc<dyn LibraryRead>,
+            Arc::clone(&repository) as Arc<dyn SourceLookup>,
+            media::default_artwork_host_suffixes(),
+        )
     }
 
     #[tokio::test]

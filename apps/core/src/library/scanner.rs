@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use rayon::prelude::*;
 
 use crate::tracks::{
-    AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceFileFacts, SourceIdentity,
-    SourceScope, TrackMetadata, TrackRepository, TrackRepositoryError,
+    AlbumMetadata, AlbumTrack, ArtistCredit, CatalogueWrite, ProviderId, SourceFileFacts,
+    SourceIdentity, SourceLookup, SourceScope, TrackMetadata, TrackRepositoryError,
 };
 
 use super::tags::{TagError, read_tags};
@@ -67,16 +67,18 @@ pub enum ScanMode {
 }
 
 pub async fn scan(
-    repository: &Arc<dyn TrackRepository>,
+    catalogue: &Arc<dyn CatalogueWrite>,
+    sources: &Arc<dyn SourceLookup>,
     roots: &[PathBuf],
 ) -> Result<ScanReport, ScanError> {
     let progress = AtomicU32::new(0);
 
-    scan_with(repository, roots, ScanMode::Incremental, &progress).await
+    scan_with(catalogue, sources, roots, ScanMode::Incremental, &progress).await
 }
 
 pub async fn scan_with(
-    repository: &Arc<dyn TrackRepository>,
+    catalogue: &Arc<dyn CatalogueWrite>,
+    sources: &Arc<dyn SourceLookup>,
     roots: &[PathBuf],
     mode: ScanMode,
     progress: &AtomicU32,
@@ -89,7 +91,7 @@ pub async fn scan_with(
 
     for root in roots {
         let scope = SourceScope::Named(root.display().to_string());
-        let known = known_paths(repository, &provider, &scope).await?;
+        let known = known_paths(sources, &provider, &scope).await?;
         let found = walk(root)?;
         let mut seen = Vec::with_capacity(found.len());
         let lookup = if mode == ScanMode::Full {
@@ -127,8 +129,7 @@ pub async fn scan_with(
                     let source = SourceIdentity::new(provider.clone(), scope.clone(), external_id)
                         .expect("scanned identity is non-empty");
 
-                    match index_track(repository, &source, &facts, metadata, album, membership)
-                        .await
+                    match index_track(catalogue, &source, &facts, metadata, album, membership).await
                     {
                         Ok(()) => {
                             seen.push(relative);
@@ -157,27 +158,27 @@ pub async fn scan_with(
 }
 
 async fn index_track(
-    repository: &Arc<dyn TrackRepository>,
+    catalogue: &Arc<dyn CatalogueWrite>,
     source: &SourceIdentity,
     facts: &SourceFileFacts,
     metadata: TrackMetadata,
     album: Option<AlbumMetadata>,
     membership: Option<AlbumTrack>,
 ) -> Result<(), ScanError> {
-    let stored = repository
+    let stored = catalogue
         .index_source(source.clone(), metadata, facts)
         .await?;
 
     if let Some(album) = &album {
-        let album = repository.resolve_or_create_album(album).await?;
+        let album = catalogue.resolve_or_create_album(album).await?;
         if let Some(membership) = membership {
-            repository
+            catalogue
                 .set_album_track(album.id(), stored.id(), &membership)
                 .await?;
         }
-        repository.set_album_source(album.id(), source).await?;
+        catalogue.set_album_source(album.id(), source).await?;
     } else {
-        repository.clear_album_track(stored.id()).await?;
+        catalogue.clear_album_track(stored.id()).await?;
     }
 
     Ok(())
@@ -295,11 +296,11 @@ fn track_credits(tags: &super::TrackTags) -> Vec<ArtistCredit> {
 }
 
 async fn known_paths(
-    repository: &Arc<dyn TrackRepository>,
+    sources: &Arc<dyn SourceLookup>,
     provider: &ProviderId,
     scope: &SourceScope,
 ) -> Result<HashMap<String, SourceFileFacts>, ScanError> {
-    let recorded = repository.list_scanned_paths(provider, scope).await?;
+    let recorded = sources.list_scanned_paths(provider, scope).await?;
     Ok(recorded
         .into_iter()
         .filter_map(|(_, facts)| facts.path.clone().map(|path| (path, facts)))
@@ -362,7 +363,7 @@ fn is_audio(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracks::InMemoryTrackRepository;
+    use crate::tracks::{InMemoryTrackRepository, LibraryRead};
 
     fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("whio-{label}-{}", uuid::Uuid::now_v7()));
@@ -408,14 +409,16 @@ mod tests {
         let root = temp_root("skip");
         std::fs::copy(fixture(), root.join("a.flac")).unwrap();
 
-        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+        let store = Arc::new(InMemoryTrackRepository::default());
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
 
-        let first = scan(&repository, std::slice::from_ref(&root))
+        let first = scan(&catalogue, &sources, std::slice::from_ref(&root))
             .await
             .unwrap();
         assert_eq!(first.indexed, 1);
 
-        let second = scan(&repository, std::slice::from_ref(&root))
+        let second = scan(&catalogue, &sources, std::slice::from_ref(&root))
             .await
             .unwrap();
         assert_eq!(second.unchanged, 1);
@@ -434,14 +437,16 @@ mod tests {
         let file = root.join("a.flac");
         std::fs::copy(fixture(), &file).unwrap();
 
-        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
-        let first = scan(&repository, std::slice::from_ref(&root))
+        let store = Arc::new(InMemoryTrackRepository::default());
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        let first = scan(&catalogue, &sources, std::slice::from_ref(&root))
             .await
             .unwrap();
         assert_eq!(first.indexed, 1);
 
         std::fs::remove_file(&file).unwrap();
-        let second = scan(&repository, std::slice::from_ref(&root))
+        let second = scan(&catalogue, &sources, std::slice::from_ref(&root))
             .await
             .unwrap();
         assert_eq!(second.missing, 1);
@@ -477,9 +482,11 @@ mod tests {
             root.join("a.flac"),
         )
         .unwrap();
-        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+        let store = Arc::new(InMemoryTrackRepository::default());
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
 
-        let report = scan(&repository, std::slice::from_ref(&root))
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
             .await
             .unwrap();
 
@@ -498,22 +505,24 @@ mod tests {
     async fn a_scanned_file_populates_its_album_and_membership() {
         let root = temp_root("album");
         std::fs::copy(fixture(), root.join("a.flac")).unwrap();
-        let repository: Arc<dyn TrackRepository> = Arc::new(InMemoryTrackRepository::default());
+        let store = Arc::new(InMemoryTrackRepository::default());
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
 
-        let report = scan(&repository, std::slice::from_ref(&root))
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
             .await
             .unwrap();
         assert_eq!(report.indexed, 1);
 
         let tags = read_tags(&fixture()).unwrap();
         let expected = album_metadata(&tags).unwrap().unwrap();
-        let album = repository.resolve_or_create_album(&expected).await.unwrap();
+        let album = catalogue.resolve_or_create_album(&expected).await.unwrap();
 
-        let sources = repository.find_album_sources(album.id()).await.unwrap();
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].provider_id().as_str(), "local");
+        let album_sources = sources.find_album_sources(album.id()).await.unwrap();
+        assert_eq!(album_sources.len(), 1);
+        assert_eq!(album_sources[0].provider_id().as_str(), "local");
 
-        let tracks = repository
+        let tracks = (store.as_ref() as &dyn LibraryRead)
             .find_album_entries(album.id(), None)
             .await
             .unwrap();
