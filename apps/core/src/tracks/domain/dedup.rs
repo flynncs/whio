@@ -668,8 +668,15 @@ fn metadata_gate(
     if !local.available {
         return Some("local_unavailable");
     }
-    if remote.parsed.artists.is_empty() || remote.parsed.artists != local.parsed.artists {
+    if remote.parsed.artists.is_empty() || local.parsed.artists.is_empty() {
         return Some("artist_credits_differ");
+    }
+    if remote.parsed.artists != local.parsed.artists {
+        if !is_strict_subset(&local.parsed.artists, &remote.parsed.artists) {
+            return Some("artist_credits_differ");
+        }
+
+        return feature_superset_gate(remote, local, 1000);
     }
     if remote.parsed.core.is_empty() || remote.parsed.core != local.parsed.core {
         return Some("title_not_exact");
@@ -707,6 +714,35 @@ fn metadata_gate(
         (None, _) | (_, None) => (!shared).then_some("missing_duration"),
         _ => None,
     }
+}
+
+fn feature_superset_gate(
+    remote: &MatchRecord,
+    local: &MatchRecord,
+    tolerance_ms: u64,
+) -> Option<&'static str> {
+    if remote.parsed.core.is_empty() || remote.parsed.core != local.parsed.core {
+        return Some("title_not_exact");
+    }
+    if let Some(issue) = conflicts(remote, local) {
+        return Some(issue);
+    }
+    let shared = remote.recording_id().is_some() && remote.recording_id() == local.recording_id();
+    if (remote.parsed.unparsed_risk || local.parsed.unparsed_risk) && !shared {
+        return Some("unparsed_version_wording");
+    }
+
+    match (remote.duration_ms, local.duration_ms) {
+        (Some(remote), Some(local)) if remote.abs_diff(local) > tolerance_ms => {
+            Some("duration_conflict")
+        }
+        (None, _) | (_, None) => (!shared).then_some("missing_duration"),
+        _ => None,
+    }
+}
+
+fn is_strict_subset(local: &[String], remote: &[String]) -> bool {
+    local.len() < remote.len() && local.iter().all(|artist| remote.contains(artist))
 }
 
 fn increment(reasons: &mut Vec<(&'static str, usize)>, reason: &'static str) {
@@ -1362,6 +1398,90 @@ mod tests {
             index.match_record(&remote, 101).reason(),
             "verified_video_id"
         );
+    }
+
+    #[test]
+    fn a_remote_feature_superset_is_accepted_but_a_dropped_credit_is_not() {
+        let single = MatchRecord::new(
+            "local",
+            "Song",
+            vec!["A".to_owned()],
+            Some(240_000),
+            "Album",
+            None,
+            None,
+            None,
+            true,
+        );
+        let pair = MatchRecord::new(
+            "local",
+            "Song",
+            vec!["A".to_owned(), "B".to_owned()],
+            Some(240_000),
+            "Album",
+            None,
+            None,
+            None,
+            true,
+        );
+        let superset = MatchRecord::new(
+            "remote",
+            "Song",
+            vec!["A".to_owned(), "B".to_owned()],
+            Some(240_000),
+            "Album",
+            None,
+            None,
+            None,
+            true,
+        );
+        let dropped = MatchRecord::new(
+            "remote",
+            "Song",
+            vec!["A".to_owned()],
+            Some(240_000),
+            "Album",
+            None,
+            None,
+            None,
+            true,
+        );
+        let close = MatchRecord::new(
+            "remote",
+            "Song",
+            vec!["A".to_owned(), "B".to_owned()],
+            Some(240_500),
+            "Album",
+            None,
+            None,
+            None,
+            true,
+        );
+        let far = MatchRecord::new(
+            "remote",
+            "Song",
+            vec!["A".to_owned(), "B".to_owned()],
+            Some(242_500),
+            "Album",
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let superset_index = RecordingIndex::new(vec![single.clone()]);
+        assert_eq!(
+            superset_index.match_record(&superset, 0).target(),
+            Some("local")
+        );
+        assert_eq!(
+            superset_index.match_record(&close, 0).target(),
+            Some("local")
+        );
+        assert!(superset_index.match_record(&far, 0).target().is_none());
+
+        let dropped_index = RecordingIndex::new(vec![pair]);
+        assert!(dropped_index.match_record(&dropped, 0).target().is_none());
     }
 
     #[test]
