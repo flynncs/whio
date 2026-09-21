@@ -4,8 +4,8 @@ use uuid::Uuid;
 use crate::{
     artwork::CoverArtTarget,
     catalogue::{
-        CatalogueError, CatalogueSearch, LibraryService, SearchHit, SearchLimit, SearchOffset,
-        SearchQuery, SearchService,
+        CatalogueError, CatalogueSearch, CompletionService, LibraryService, SearchHit, SearchLimit,
+        SearchOffset, SearchQuery, SearchService,
     },
     compat::SourceTags,
     identity::service::{AuthError, CredentialService},
@@ -238,7 +238,7 @@ pub(crate) async fn song_detail(
 const DEFAULT_PAGE_SIZE: u32 = 500;
 
 pub(crate) async fn album_songs(
-    library: &LibraryService,
+    completion: &CompletionService,
     credential: &CredentialService,
     token: &str,
     raw_album_id: &str,
@@ -246,7 +246,7 @@ pub(crate) async fn album_songs(
 ) -> Result<Vec<Song>, SongError> {
     let user = authorize(credential, token).await?;
     let album_id: AlbumId = raw_album_id.parse().map_err(|_| SongError::NotFound)?;
-    let detail = library
+    let detail = completion
         .album_detail(&album_id, Some(&user))
         .await
         .map_err(SongError::Catalogue)?
@@ -308,14 +308,14 @@ pub(crate) async fn album_list(
 }
 
 pub(crate) async fn album_detail(
-    library: &LibraryService,
+    completion: &CompletionService,
     credential: &CredentialService,
     token: &str,
     raw_id: &str,
 ) -> Result<Album, SongError> {
     let user = authorize(credential, token).await?;
     let album_id: AlbumId = raw_id.parse().map_err(|_| SongError::NotFound)?;
-    let detail = library
+    let detail = completion
         .album_detail(&album_id, Some(&user))
         .await
         .map_err(SongError::Catalogue)?

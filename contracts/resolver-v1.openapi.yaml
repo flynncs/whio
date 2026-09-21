@@ -541,6 +541,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CatalogueCandidate"
+        reported_count:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          description: The provider's reported number of tracks for the fetched entity, when it reports one. Completeness compares the materialised member count against this.
 
     PlaybackResolveRequest:
       type: object

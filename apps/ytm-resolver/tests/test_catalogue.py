@@ -58,6 +58,7 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
         response = YouTubeMusicCatalogue(client).fetch_album(source)
 
         client.get_album.assert_called_once_with("MPREb_album")
+        self.assertEqual(response.reported_count, 11)
         album = response.results[0].album
         self.assertEqual(album.title, "SOUR")
         self.assertEqual(album.source.external_id, "MPREb_album")

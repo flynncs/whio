@@ -163,6 +163,11 @@ class CatalogueCandidatesResponse(BaseModel):
         extra='forbid',
     )
     results: list[CatalogueCandidate]
+    reported_count: int | None = Field(
+        None,
+        description="The provider's reported number of tracks for the fetched entity, when it reports one. Completeness compares the materialised member count against this.",
+        ge=0,
+    )
 
 
 class PlaybackResolveResponse(BaseModel):

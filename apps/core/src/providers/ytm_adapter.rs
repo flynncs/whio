@@ -15,12 +15,12 @@ use whio_resolver_api::{
 };
 
 use crate::{
-    catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch},
+    catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch, FetchedAlbum},
     playback::PlayableMedia,
     playback::{PlaybackProvider, PlaybackSource, ResolvedPlayback},
     providers::ProviderError,
     request::RequestContext,
-    tracks::{ProviderKind, SourceIdentity},
+    tracks::{ProviderKind, SourceIdentity, YOUTUBE_MUSIC_PROVIDER_ID},
 };
 
 pub struct YtmAdapter {
@@ -90,7 +90,10 @@ impl CatalogueProvider for YtmAdapter {
         &self,
         source: &SourceIdentity,
         context: &RequestContext,
-    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+    ) -> Result<FetchedAlbum, ProviderError> {
+        if source.provider_id().as_str() != YOUTUBE_MUSIC_PROVIDER_ID {
+            return Err(ProviderError::UnsupportedProvider);
+        }
         let Some(transport) = self.transport.as_ref() else {
             return Err(ProviderError::Disabled);
         };
@@ -105,7 +108,7 @@ impl CatalogueProvider for YtmAdapter {
         )
         .await
         .map_err(map_album_error)?;
-        response
+        let candidates = response
             .results
             .into_iter()
             .map(|candidate| {
@@ -113,7 +116,13 @@ impl CatalogueProvider for YtmAdapter {
                     .try_into()
                     .map_err(ProviderError::InvalidCatalogueData)
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        let reported_count = response
+            .reported_count
+            .flatten()
+            .and_then(|count| u32::try_from(count).ok());
+
+        Ok(FetchedAlbum::new(candidates, reported_count))
     }
 }
 

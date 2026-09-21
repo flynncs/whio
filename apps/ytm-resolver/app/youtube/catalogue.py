@@ -57,7 +57,8 @@ class YouTubeMusicCatalogue:
             results=[
                 normalize_album_track(track, album_identity, album_artists, artwork_url)
                 for track in album.get("tracks", [])
-            ]
+            ],
+            reported_count=parse_count(album.get("trackCount")),
         )
 
 
@@ -133,6 +134,12 @@ def parse_release_type(value: Any) -> str | None:
 def parse_duration_seconds(value: Any) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value * 1000
+    return None
+
+
+def parse_count(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
     return None
 
 

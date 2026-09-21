@@ -13,7 +13,8 @@ use whio_core::{
     AppState,
     artwork::ArtworkService,
     catalogue::{
-        CatalogueCandidate, CatalogueProvider, CatalogueSearch, LibraryService, SearchService,
+        CatalogueCandidate, CatalogueProvider, CatalogueSearch, CompletionService, LibraryService,
+        SearchService,
     },
     compat::SourceTags,
     identity::service::CredentialService,
@@ -64,6 +65,18 @@ pub fn router_with_artwork(
     artwork: Arc<ArtworkService>,
 ) -> Router {
     whio_core::router(AppState::new(credential, search, library, playback).with_artwork(artwork))
+}
+
+pub fn router_with_completion(
+    credential: Arc<CredentialService>,
+    search: Arc<SearchService>,
+    library: Arc<LibraryService>,
+    completion: Arc<CompletionService>,
+    playback: Arc<StreamingService>,
+) -> Router {
+    whio_core::router(
+        AppState::new(credential, search, library, playback).with_completion(completion),
+    )
 }
 
 struct StubProvider {

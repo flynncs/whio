@@ -12,7 +12,9 @@ use whio_core::{
     playback::PlaybackProvider, providers::YtmAdapter, tracks::InMemoryTrackRepository,
 };
 
-use support::{StorePorts, credential_service_with_known_app_password, router};
+use support::{
+    StorePorts, credential_service_with_known_app_password, router, router_with_completion,
+};
 
 fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
     let ports = StorePorts::new();
@@ -560,6 +562,154 @@ async fn source_tags_reach_an_album_track_listing() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body[0]["artist"], json!("[YTM] artist"));
+}
+
+#[tokio::test]
+async fn opening_a_partial_provider_album_completes_it_over_the_facade() {
+    use async_trait::async_trait;
+    use whio_core::{
+        catalogue::{
+            CatalogueCandidate, CatalogueProvider, CatalogueSearch, CompletionService,
+            FetchedAlbum, LibraryService, SearchService,
+        },
+        providers::ProviderError,
+        request::RequestContext,
+        tracks::{
+            AlbumMetadata, AlbumTrack, ArtistCredit, CatalogueWrite, ProviderId, ProviderRegistry,
+            SourceIdentity, SourceScope, TrackMetadata,
+        },
+    };
+
+    fn provider_source(external_id: &str) -> SourceIdentity {
+        SourceIdentity::new(
+            ProviderId::new("youtube_music".to_owned()).unwrap(),
+            SourceScope::Global,
+            external_id.to_owned(),
+        )
+        .unwrap()
+    }
+
+    fn album_metadata() -> AlbumMetadata {
+        AlbumMetadata::new("SOUR".to_owned())
+            .unwrap()
+            .with_album_artist(ArtistCredit::new("Olivia Rodrigo".to_owned(), None).unwrap())
+            .with_provider(Some(provider_source("MPREb_album")))
+    }
+
+    fn candidate(external_id: &str, title: &str) -> CatalogueCandidate {
+        let metadata = TrackMetadata::from_names(
+            title.to_owned(),
+            vec!["Olivia Rodrigo".to_owned()],
+            Some(1_000),
+        )
+        .unwrap();
+
+        CatalogueCandidate::new(provider_source(external_id), metadata)
+            .with_album(Some(album_metadata()))
+    }
+
+    struct AlbumProvider {
+        candidates: Vec<CatalogueCandidate>,
+    }
+
+    #[async_trait]
+    impl CatalogueProvider for AlbumProvider {
+        async fn search(
+            &self,
+            _search: &CatalogueSearch,
+            _user: Option<&uuid::Uuid>,
+            _context: &RequestContext,
+        ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_album(
+            &self,
+            _source: &SourceIdentity,
+            _context: &RequestContext,
+        ) -> Result<FetchedAlbum, ProviderError> {
+            Ok(FetchedAlbum::new(self.candidates.clone(), Some(3)))
+        }
+    }
+
+    let (service, secret) = credential_service_with_known_app_password();
+    let ports = StorePorts::new();
+    let album = ports
+        .store
+        .resolve_or_create_album(&album_metadata())
+        .await
+        .unwrap();
+    let partial = ports
+        .store
+        .get_or_create(
+            provider_source("vid-1"),
+            TrackMetadata::from_names(
+                "brutal".to_owned(),
+                vec!["Olivia Rodrigo".to_owned()],
+                Some(1_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_album_source(album.id(), &provider_source("MPREb_album"))
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_album_track(album.id(), partial.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let provider = Arc::new(AlbumProvider {
+        candidates: vec![
+            candidate("vid-2", "traitor"),
+            candidate("vid-3", "drivers license"),
+        ],
+    });
+    let library = Arc::new(LibraryService::new(
+        ports.library(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let search = Arc::new(SearchService::new(
+        ports.library(),
+        ports.catalogue(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let completion = Arc::new(
+        CompletionService::new(
+            Arc::clone(&library),
+            ports.catalogue(),
+            ports.sources(),
+            vec![provider],
+        )
+        .with_registry(ProviderRegistry::with_enabled(["youtube_music"])),
+    );
+    let playback = ports.streaming(vec![]);
+    let app = router_with_completion(service, search, library, completion, playback);
+
+    let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
+    let body = get(
+        app,
+        &format!(
+            "/compat/subsonic/rest/getAlbum.view?{auth}&id={}",
+            album.id()
+        ),
+    )
+    .await;
+
+    let songs = body["subsonic-response"]["album"]["song"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        songs.len(),
+        3,
+        "opening a partial provider album fetches its full tracklist"
+    );
 }
 
 #[tokio::test]

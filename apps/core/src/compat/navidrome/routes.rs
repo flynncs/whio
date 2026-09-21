@@ -34,7 +34,7 @@ pub(crate) async fn song_list(
 
     if let Some(album_id) = query.album_id.as_deref() {
         return match service::album_songs(
-            state.library(),
+            state.completion(),
             state.credential(),
             &token.0,
             album_id,
@@ -125,7 +125,7 @@ pub(crate) async fn album_detail(
     token: NdToken,
     Path(id): Path<String>,
 ) -> Response {
-    match service::album_detail(state.library(), state.credential(), &token.0, &id).await {
+    match service::album_detail(state.completion(), state.credential(), &token.0, &id).await {
         Ok(album) => Json(album).into_response(),
         Err(error) => song_error(error, &context),
     }

@@ -15,10 +15,21 @@ use serde::{Deserialize, Serialize};
 pub struct CatalogueCandidatesResponse {
     #[serde(rename = "results")]
     pub results: Vec<models::CatalogueCandidate>,
+    /// The provider's reported number of tracks for the fetched entity, when it reports one. Completeness compares the materialised member count against this.
+    #[serde(
+        rename = "reported_count",
+        default,
+        with = "::serde_with::rust::double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reported_count: Option<Option<i32>>,
 }
 
 impl CatalogueCandidatesResponse {
     pub fn new(results: Vec<models::CatalogueCandidate>) -> CatalogueCandidatesResponse {
-        CatalogueCandidatesResponse { results }
+        CatalogueCandidatesResponse {
+            results,
+            reported_count: None,
+        }
     }
 }

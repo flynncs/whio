@@ -7,7 +7,7 @@ mod config;
 use config::{Config, YoutubeResolverConfig};
 use whio_core::{
     AppState,
-    catalogue::{CatalogueProvider, LibraryService, SearchService},
+    catalogue::{CatalogueProvider, CompletionService, LibraryService, SearchService},
     database::Database,
     delivery::StreamDelivery,
     identity::{
@@ -125,7 +125,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             Arc::clone(&catalogue_write),
             Arc::clone(&source_lookup),
             Arc::clone(&state),
-            catalogue_providers,
+            catalogue_providers.clone(),
         )
         .with_dedup_mode(config.dedup_mode),
     );
@@ -134,6 +134,15 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             Arc::clone(&library),
             Arc::clone(&source_lookup),
             Arc::clone(&state),
+        )
+        .with_registry(ProviderRegistry::with_enabled(enabled_providers.clone())),
+    );
+    let completion = Arc::new(
+        CompletionService::new(
+            Arc::clone(&library_service),
+            Arc::clone(&catalogue_write),
+            Arc::clone(&source_lookup),
+            catalogue_providers,
         )
         .with_registry(ProviderRegistry::with_enabled(enabled_providers)),
     );
@@ -178,6 +187,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
 
     Ok(
         AppState::with_database(credential, search, library_service, streaming, database)
+            .with_completion(completion)
             .with_artwork(artwork)
             .with_library_state(library_state)
             .with_scanner(scanner)

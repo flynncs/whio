@@ -4,15 +4,12 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use uuid::Uuid;
 
 use crate::{
-    catalogue::{
-        CatalogueCandidate, CatalogueProvider, CatalogueSearch, SearchLimit, SearchOffset,
-        SearchQuery,
-    },
+    catalogue::{CatalogueProvider, CatalogueSearch, SearchLimit, SearchOffset, SearchQuery},
     providers::ProviderError,
     request::RequestContext,
     tracks::{
-        AlbumSummary, AlbumTrack, ArtistSummary, CatalogueWrite, LibraryRead, SearchConfidence,
-        SearchTerms, SourceLookup, StateStore, TrackId, best_field_quality,
+        AlbumSummary, ArtistSummary, CatalogueWrite, LibraryRead, SearchConfidence, SearchTerms,
+        SourceLookup, StateStore, TrackId, best_field_quality,
     },
 };
 
@@ -317,82 +314,11 @@ impl SearchService {
                 .await
                 .map_err(CatalogueError::Provider)?;
             let page_len = candidates.len() as u32;
-            hits.extend(Self::materialize(&catalogue, &sources, candidates).await?);
+            hits.extend(super::materialize::materialize(&catalogue, &sources, candidates).await?);
             fetched = fetched.saturating_add(page_len);
             if page_len < page_size {
                 break;
             }
-        }
-        Ok(hits)
-    }
-
-    async fn materialize(
-        catalogue: &Arc<dyn CatalogueWrite>,
-        sources: &Arc<dyn SourceLookup>,
-        candidates: Vec<CatalogueCandidate>,
-    ) -> Result<Vec<SearchHit>, CatalogueError> {
-        let mut hits = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            let source = candidate.source().clone();
-            let artwork = candidate.artwork().cloned();
-            let album_metadata = candidate.album().cloned();
-            let metadata = candidate.metadata().clone();
-            let credits = metadata.artists().to_vec();
-
-            let track = catalogue
-                .get_or_create(source.clone(), metadata)
-                .await
-                .map_err(CatalogueError::Repository)?;
-
-            let album = match &album_metadata {
-                Some(album_metadata) => {
-                    let album = catalogue
-                        .resolve_or_create_album(album_metadata)
-                        .await
-                        .map_err(CatalogueError::Repository)?;
-                    if let Some(provider) = album_metadata.provider() {
-                        catalogue
-                            .set_album_source(album.id(), provider)
-                            .await
-                            .map_err(CatalogueError::Repository)?;
-                    }
-                    catalogue
-                        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
-                        .await
-                        .map_err(CatalogueError::Repository)?;
-
-                    Some(album)
-                }
-                None => {
-                    catalogue
-                        .clear_album_track(track.id())
-                        .await
-                        .map_err(CatalogueError::Repository)?;
-
-                    None
-                }
-            };
-
-            for credit in &credits {
-                if let Some(provider) = credit.provider() {
-                    let artist = catalogue
-                        .resolve_or_create_artist(credit)
-                        .await
-                        .map_err(CatalogueError::Repository)?;
-                    catalogue
-                        .set_artist_source(artist.id(), provider)
-                        .await
-                        .map_err(CatalogueError::Repository)?;
-                }
-            }
-
-            if let Some(artwork) = artwork
-                && let Err(error) = sources.set_source_artwork(&source, &artwork).await
-            {
-                tracing::warn!(%error, "artwork could not be stored");
-            }
-
-            hits.push(SearchHit::new(track, album, vec![source]));
         }
         Ok(hits)
     }

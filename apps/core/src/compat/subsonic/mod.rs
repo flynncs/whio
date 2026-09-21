@@ -211,7 +211,7 @@ pub(crate) async fn get_album(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::album_detail(state.library(), id, Some(&user), state.source_tags()).await {
+    match service::album_detail(state.completion(), id, Some(&user), state.source_tags()).await {
         Ok(album) => Json(album_envelope(album)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }

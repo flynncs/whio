@@ -19,7 +19,7 @@ pub mod tracks;
 
 use crate::{
     artwork::ArtworkService,
-    catalogue::{LibraryService, SearchService},
+    catalogue::{CompletionService, LibraryService, SearchService},
     compat::SourceTags,
     identity::service::CredentialService,
     library::ScanService,
@@ -32,6 +32,7 @@ pub struct AppState {
     artwork: Arc<ArtworkService>,
     search: Arc<SearchService>,
     library: Arc<LibraryService>,
+    completion: Arc<CompletionService>,
     credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
     library_state: Arc<LibraryStateService>,
@@ -70,6 +71,11 @@ impl AppState {
         self
     }
 
+    pub fn with_completion(mut self, completion: Arc<CompletionService>) -> Self {
+        self.completion = completion;
+        self
+    }
+
     pub fn with_source_tags(mut self, tags: SourceTags) -> Self {
         self.source_tags = tags;
         self
@@ -91,11 +97,14 @@ impl AppState {
         streaming: Arc<StreamingService>,
         database: Option<Arc<database::Database>>,
     ) -> Self {
+        let completion = Arc::new(CompletionService::disabled(Arc::clone(&library)));
+
         Self {
             artwork: Arc::new(ArtworkService::disabled()),
             credential,
             search,
             library,
+            completion,
             database,
             library_state: Arc::new(LibraryStateService::disabled()),
             streaming,
@@ -114,6 +123,10 @@ impl AppState {
 
     pub(crate) fn library(&self) -> &LibraryService {
         &self.library
+    }
+
+    pub(crate) fn completion(&self) -> &CompletionService {
+        &self.completion
     }
 
     pub(crate) fn credential(&self) -> &CredentialService {

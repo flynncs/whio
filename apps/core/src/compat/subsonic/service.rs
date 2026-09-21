@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use crate::{
     catalogue::{
-        CatalogueError, CatalogueSearch, LibraryService, SearchLimit, SearchOffset, SearchQuery,
-        SearchService,
+        CatalogueError, CatalogueSearch, CompletionService, LibraryService, SearchLimit,
+        SearchOffset, SearchQuery, SearchService,
     },
     compat::SourceTags,
     library_state::{LibraryStateError, LibraryStateService},
@@ -370,13 +370,13 @@ pub(crate) async fn scrobble(
 }
 
 pub(crate) async fn album_detail(
-    library: &LibraryService,
+    completion: &CompletionService,
     raw_id: &str,
     user: Option<&Uuid>,
     tags: SourceTags,
 ) -> Result<models::AlbumId3WithSongs, BrowseError> {
     let album_id: AlbumId = raw_id.parse().map_err(|_| BrowseError::AlbumNotFound)?;
-    let detail = library
+    let detail = completion
         .album_detail(&album_id, user)
         .await
         .map_err(BrowseError::Catalogue)?
@@ -812,11 +812,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let catalogue = LibraryService::new(
+        let catalogue = CompletionService::disabled(Arc::new(LibraryService::new(
             Arc::clone(&repository) as Arc<dyn LibraryRead>,
             Arc::clone(&repository) as Arc<dyn SourceLookup>,
             Arc::clone(&repository) as Arc<dyn StateStore>,
-        );
+        )));
 
         let detail = album_detail(&catalogue, &album.id().to_string(), None, SourceTags::Off)
             .await

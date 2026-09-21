@@ -1,15 +1,18 @@
+mod completion;
 mod dedup;
 mod domain;
 mod error;
 mod library;
+mod materialize;
 mod ports;
 mod search;
 
 pub use dedup::DedupMode;
 
+pub use completion::CompletionService;
 pub use domain::{
-    CatalogueCandidate, CatalogueSearch, MAX_SEARCH_OFFSET, SearchLimit, SearchOffset, SearchQuery,
-    ValidationError,
+    CatalogueCandidate, CatalogueSearch, FetchedAlbum, MAX_SEARCH_OFFSET, SearchLimit,
+    SearchOffset, SearchQuery, ValidationError,
 };
 pub use error::CatalogueError;
 pub use library::{AlbumDetail, ArtistDetail, LibraryService};

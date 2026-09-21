@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use super::domain::{CatalogueCandidate, CatalogueSearch};
+use super::domain::{CatalogueCandidate, CatalogueSearch, FetchedAlbum};
 use crate::{providers::ProviderError, request::RequestContext, tracks::SourceIdentity};
 
 #[async_trait]
@@ -17,7 +17,7 @@ pub trait CatalogueProvider: Send + Sync {
         &self,
         _source: &SourceIdentity,
         _context: &RequestContext,
-    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+    ) -> Result<FetchedAlbum, ProviderError> {
         Err(ProviderError::UnsupportedProvider)
     }
 }
