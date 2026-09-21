@@ -1576,3 +1576,40 @@ async fn per_user_state_and_genres_round_trip(pool: PgPool) {
         None
     );
 }
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn dedup_candidates_return_local_matches_and_strip_qualifiers(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let plain = repository
+        .get_or_create(local_source("a"), metadata("Song", &["A"], Some(240_000)))
+        .await
+        .unwrap();
+    let live = repository
+        .get_or_create(
+            local_source("b"),
+            metadata("Song (Live)", &["A"], Some(240_000)),
+        )
+        .await
+        .unwrap();
+    repository
+        .get_or_create(source("remote"), metadata("Song", &["A"], Some(240_000)))
+        .await
+        .unwrap();
+
+    let hits = repository
+        .dedup_candidates(&["song".to_owned()], 25)
+        .await
+        .unwrap();
+    let ids = hits
+        .iter()
+        .map(|hit| hit.track().id().clone())
+        .collect::<Vec<_>>();
+
+    assert!(ids.contains(plain.id()));
+    assert!(
+        ids.contains(live.id()),
+        "the trigram branch reaches a qualifier"
+    );
+    assert_eq!(ids.len(), 2, "the provider track is not a dedup candidate");
+}

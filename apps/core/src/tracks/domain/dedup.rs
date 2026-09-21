@@ -206,6 +206,10 @@ impl MatchRecord {
         &self.fingerprint
     }
 
+    pub fn retrieval_key(&self) -> String {
+        loose(&self.parsed.core)
+    }
+
     fn compute_fingerprint(&self) -> String {
         let mut hasher = Sha256::new();
         for part in [

@@ -1,3 +1,4 @@
+mod dedup;
 mod domain;
 mod ports;
 mod service;

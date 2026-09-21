@@ -719,6 +719,60 @@ impl TrackRepository for InMemoryTrackRepository {
         Ok(hits)
     }
 
+    async fn dedup_candidates(
+        &self,
+        keys: &[String],
+        limit: u32,
+    ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+        let keys = keys
+            .iter()
+            .map(|key| normalize_for_matching(key))
+            .filter(|key| !key.is_empty())
+            .collect::<HashSet<_>>();
+
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut hits = indexes
+            .by_track_id
+            .values()
+            .filter(|entry| owned(&entry.sources))
+            .filter(|entry| {
+                let title = normalize_for_matching(entry.track.title());
+                keys.iter().any(|key| {
+                    title == *key
+                        || title.starts_with(key.as_str())
+                        || key.starts_with(title.as_str())
+                })
+            })
+            .map(|entry| {
+                TrackHit::new(
+                    entry.track.clone(),
+                    album_for_track(&indexes, entry.track.id()),
+                    entry.sources.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            normalize_for_matching(left.track().title())
+                .cmp(&normalize_for_matching(right.track().title()))
+                .then_with(|| {
+                    left.track()
+                        .id()
+                        .to_string()
+                        .cmp(&right.track().id().to_string())
+                })
+        });
+        hits.truncate(limit as usize);
+
+        Ok(hits)
+    }
+
     async fn list_genres(&self) -> Result<Vec<GenreSummary>, TrackRepositoryError> {
         let indexes = self
             .indexes

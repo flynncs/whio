@@ -33,7 +33,8 @@ fn the_port_reproduces_the_python_matcher() {
     let index = RecordingIndex::new(tracks);
 
     let decisions: Vec<Value> =
-        serde_json::from_str(&fs::read_to_string(format!("{dir}/decisions.json")).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(format!("{dir}/decisions.json")).unwrap())
+            .unwrap();
     let expected = decisions
         .iter()
         .map(|entry| {
@@ -77,7 +78,10 @@ fn the_port_reproduces_the_python_matcher() {
         }
     }
 
-    println!("compared {compared} observations, {} mismatches", mismatches.len());
+    println!(
+        "compared {compared} observations, {} mismatches",
+        mismatches.len()
+    );
     for mismatch in mismatches.iter().take(10) {
         println!("{}", serde_json::to_string(mismatch).unwrap());
     }

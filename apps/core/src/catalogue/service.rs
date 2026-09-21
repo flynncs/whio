@@ -229,6 +229,7 @@ impl CatalogueService {
             .map_err(CatalogueError::Repository)?;
         let (fresh, first_error, any_success) =
             self.fan_out(search, user, context, PROVIDER_BUDGET).await;
+        let _ = super::dedup::shadow(&self.track_repository, &fresh, context).await;
         let albums = self
             .track_repository
             .search_albums(&query, window, user.copied())

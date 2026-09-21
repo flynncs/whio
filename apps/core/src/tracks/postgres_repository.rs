@@ -1114,6 +1114,53 @@ impl TrackRepository for PostgresTrackRepository {
         hits_from_rows(&self.pool, rows, None).await
     }
 
+    async fn dedup_candidates(
+        &self,
+        keys: &[String],
+        limit: u32,
+    ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
+        let keys = keys
+            .iter()
+            .map(|key| normalize_for_matching(key))
+            .filter(|key| !key.is_empty())
+            .collect::<Vec<_>>();
+
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
+            r#"
+            SELECT t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, t.isrc, t.genre,
+                   {ALBUM_SEARCH_COLUMNS}
+            FROM tracks AS t
+            LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
+            LEFT JOIN albums AS a ON a.id = mt.album_id
+            WHERE t.id IN (
+                SELECT DISTINCT matched.id
+                FROM tracks AS matched
+                JOIN unnest($1::text[]) AS k(value)
+                  ON matched.title_normalized = k.value
+                  OR matched.title_normalized % k.value
+                WHERE EXISTS (
+                    SELECT 1 FROM track_sources AS sources
+                    WHERE sources.track_id = matched.id AND sources.provider_id = $2
+                )
+            )
+            ORDER BY t.title_normalized, t.id
+            LIMIT $3
+            "#
+        ))
+        .bind(keys.as_slice())
+        .bind(LOCAL_PROVIDER_ID)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        hits_from_rows(&self.pool, rows, None).await
+    }
+
     async fn list_genres(&self) -> Result<Vec<GenreSummary>, TrackRepositoryError> {
         let rows = sqlx::query_as::<_, (String, i64, i64)>(
             r#"

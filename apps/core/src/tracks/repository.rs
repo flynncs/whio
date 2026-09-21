@@ -280,6 +280,14 @@ pub trait TrackRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    async fn dedup_candidates(
+        &self,
+        _keys: &[String],
+        _limit: u32,
+    ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
     async fn list_genres(&self) -> Result<Vec<GenreSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }
