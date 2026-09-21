@@ -4,9 +4,10 @@ use crate::{
     artwork::CoverArtTarget,
     catalogue::{AlbumDetail, ArtistDetail, SearchHit},
     compat::SourceTags,
+    playlists::PlaylistDetail,
     tracks::{
         Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary, GenreSummary,
-        LibraryState, SourceIdentity, Track,
+        LibraryState, Playlist, SourceIdentity, Track,
     },
 };
 
@@ -126,6 +127,54 @@ pub(crate) fn album_detail_with_songs(
 
 pub(crate) fn album_artist(artist: &Artist) -> models::ArtistId3 {
     artist_id3(artist, None, LibraryState::default())
+}
+
+pub(crate) fn playlist_from_domain(playlist: &Playlist) -> models::Playlist {
+    models::Playlist {
+        id: playlist.id().to_string(),
+        name: playlist.name().to_owned(),
+        comment: playlist.comment().map(str::to_owned),
+        owner: None,
+        public: Some(playlist.is_public()),
+        song_count: i32::try_from(playlist.track_count()).unwrap_or(i32::MAX),
+        duration: (playlist.duration_ms() / 1000) as i32,
+        created: playlist.created_at().fixed_offset(),
+        changed: playlist.updated_at().fixed_offset(),
+        cover_art: None,
+        allowed_user: None,
+        readonly: None,
+        valid_until: None,
+    }
+}
+
+pub(crate) fn playlist_with_songs(
+    detail: &PlaylistDetail,
+    tags: SourceTags,
+) -> models::PlaylistWithSongs {
+    let playlist = playlist_from_domain(&detail.playlist);
+
+    models::PlaylistWithSongs {
+        id: playlist.id,
+        name: playlist.name,
+        comment: playlist.comment,
+        owner: playlist.owner,
+        public: playlist.public,
+        song_count: playlist.song_count,
+        duration: playlist.duration,
+        created: playlist.created,
+        changed: playlist.changed,
+        cover_art: playlist.cover_art,
+        allowed_user: playlist.allowed_user,
+        readonly: playlist.readonly,
+        valid_until: playlist.valid_until,
+        entry: Some(
+            detail
+                .entries
+                .iter()
+                .map(|hit| child_from_hit(hit, tags))
+                .collect(),
+        ),
+    }
 }
 
 fn artist_id3(artist: &Artist, album_count: Option<u32>, state: LibraryState) -> models::ArtistId3 {

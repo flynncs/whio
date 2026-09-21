@@ -19,6 +19,7 @@ use whio_core::{
     compat::SourceTags,
     identity::service::CredentialService,
     playback::{PlaybackProvider, PlaybackSource, ResolvedPlayback, StreamingService},
+    playlists::PlaylistService,
     providers::ProviderError,
     request::RequestContext,
     tracks::{
@@ -76,6 +77,18 @@ pub fn router_with_completion(
 ) -> Router {
     whio_core::router(
         AppState::new(credential, search, library, playback).with_completion(completion),
+    )
+}
+
+pub fn router_with_playlists(
+    credential: Arc<CredentialService>,
+    search: Arc<SearchService>,
+    library: Arc<LibraryService>,
+    playlists: Arc<PlaylistService>,
+    playback: Arc<StreamingService>,
+) -> Router {
+    whio_core::router(
+        AppState::new(credential, search, library, playback).with_playlists(playlists),
     )
 }
 

@@ -258,6 +258,63 @@ pub(crate) fn starred2_envelope(
     }
 }
 
+pub(crate) fn playlists_envelope(playlists: Vec<models::Playlist>) -> models::GetPlaylistsResponse {
+    models::GetPlaylistsResponse {
+        subsonic_response: Some(Box::new(
+            models::GetPlaylistsResponseSubsonicResponse::GetPlaylistsSuccessResponse(Box::new(
+                models::GetPlaylistsSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_playlists_success_response::Status::Ok,
+                    playlists: Box::new(models::Playlists {
+                        playlist: (!playlists.is_empty()).then_some(playlists),
+                    }),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn playlist_envelope(
+    playlist: models::PlaylistWithSongs,
+) -> models::GetPlaylistResponse {
+    models::GetPlaylistResponse {
+        subsonic_response: Some(Box::new(
+            models::GetPlaylistResponseSubsonicResponse::GetPlaylistSuccessResponse(Box::new(
+                models::GetPlaylistSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_playlist_success_response::Status::Ok,
+                    playlist: Box::new(playlist),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn create_playlist_envelope(
+    playlist: models::PlaylistWithSongs,
+) -> models::CreatePlaylistResponse {
+    models::CreatePlaylistResponse {
+        subsonic_response: Some(Box::new(
+            models::CreatePlaylistResponseSubsonicResponse::CreatePlaylistSuccessResponse(
+                Box::new(models::CreatePlaylistSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::create_playlist_success_response::Status::Ok,
+                    playlist: Box::new(playlist),
+                }),
+            ),
+        )),
+    }
+}
+
 pub(crate) fn genres_envelope(genres: Vec<models::Genre>) -> models::GetGenresResponse {
     models::GetGenresResponse {
         subsonic_response: Some(Box::new(

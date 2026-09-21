@@ -16,10 +16,11 @@ use whio_core::{
     },
     media::{self, HttpMediaFetcher},
     playback::{PlaybackProvider, StreamingService},
+    playlists::PlaylistService,
     providers::{LocalPlaybackProvider, ProviderError, YtmAdapter},
     tracks::{
-        CatalogueWrite, LibraryRead, PostgresTrackRepository, ProviderRegistry, SourceLookup,
-        StateStore, YOUTUBE_MUSIC_PROVIDER_ID,
+        CatalogueWrite, LibraryRead, PlaylistStore, PostgresTrackRepository, ProviderRegistry,
+        SourceLookup, StateStore, YOUTUBE_MUSIC_PROVIDER_ID,
     },
 };
 
@@ -146,6 +147,10 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         )
         .with_registry(ProviderRegistry::with_enabled(enabled_providers)),
     );
+    let playlists = Arc::new(PlaylistService::new(
+        Arc::clone(&store) as Arc<dyn PlaylistStore>,
+        Arc::clone(&library_service),
+    ));
     let youtube_media_suffixes = vec![config.youtube_media_suffix.clone()];
     let fetcher = Arc::new(HttpMediaFetcher::with_allowed_host_suffixes(
         media::client(media::host_suffix_redirect_policy(
@@ -188,6 +193,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
     Ok(
         AppState::with_database(credential, search, library_service, streaming, database)
             .with_completion(completion)
+            .with_playlists(playlists)
             .with_artwork(artwork)
             .with_library_state(library_state)
             .with_scanner(scanner)

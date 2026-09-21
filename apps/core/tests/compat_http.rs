@@ -14,6 +14,7 @@ use whio_core::{
 
 use support::{
     StorePorts, credential_service_with_known_app_password, router, router_with_completion,
+    router_with_playlists,
 };
 
 fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
@@ -709,6 +710,137 @@ async fn opening_a_partial_provider_album_completes_it_over_the_facade() {
         songs.len(),
         3,
         "opening a partial provider album fetches its full tracklist"
+    );
+}
+
+#[tokio::test]
+async fn subsonic_playlist_verbs_round_trip() {
+    use whio_core::{
+        catalogue::{LibraryService, SearchService},
+        playlists::PlaylistService,
+        tracks::{
+            CatalogueWrite, PlaylistStore, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+        },
+    };
+
+    fn source(provider: &str, scope: SourceScope, external_id: &str) -> SourceIdentity {
+        SourceIdentity::new(
+            ProviderId::new(provider.to_owned()).unwrap(),
+            scope,
+            external_id.to_owned(),
+        )
+        .unwrap()
+    }
+
+    let (service, secret) = credential_service_with_known_app_password();
+    let ports = StorePorts::new();
+    let owned = ports
+        .store
+        .get_or_create(
+            source("local", SourceScope::Named("/music".to_owned()), "path-a"),
+            TrackMetadata::from_names("Owned".to_owned(), vec!["Artist".to_owned()], Some(1_000))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let discovered = ports
+        .store
+        .get_or_create(
+            source("youtube_music", SourceScope::Global, "vid-1"),
+            TrackMetadata::from_names(
+                "Discovered".to_owned(),
+                vec!["Artist".to_owned()],
+                Some(1_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let library = Arc::new(LibraryService::new(
+        ports.library(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let search = Arc::new(SearchService::new(
+        ports.library(),
+        ports.catalogue(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let playlists = Arc::new(PlaylistService::new(
+        Arc::clone(&ports.store) as Arc<dyn PlaylistStore>,
+        Arc::clone(&library),
+    ));
+    let playback = ports.streaming(vec![]);
+    let app = router_with_playlists(service, search, library, playlists, playback);
+
+    let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
+
+    let body = get(
+        app.clone(),
+        &format!(
+            "/compat/subsonic/rest/createPlaylist.view?{auth}&name=Trip&songId={}&songId={}",
+            owned.id(),
+            discovered.id()
+        ),
+    )
+    .await;
+    let playlist = &body["subsonic-response"]["playlist"];
+    assert_eq!(playlist["name"], json!("Trip"));
+    assert_eq!(playlist["songCount"], json!(2));
+    let playlist_id = playlist["id"].as_str().unwrap();
+    assert_eq!(playlist["entry"].as_array().unwrap().len(), 2);
+
+    let body = get(
+        app.clone(),
+        &format!("/compat/subsonic/rest/getPlaylists.view?{auth}"),
+    )
+    .await;
+    let listed = body["subsonic-response"]["playlists"]["playlist"]
+        .as_array()
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["songCount"], json!(2));
+
+    let body = get(
+        app.clone(),
+        &format!("/compat/subsonic/rest/updatePlaylist.view?{auth}&playlistId={playlist_id}&songIndexToRemove=0"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let body = get(
+        app.clone(),
+        &format!("/compat/subsonic/rest/getPlaylist.view?{auth}&id={playlist_id}"),
+    )
+    .await;
+    let entries = body["subsonic-response"]["playlist"]["entry"]
+        .as_array()
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0]["title"],
+        json!("Discovered"),
+        "a provider track is a legal playlist entry"
+    );
+
+    let body = get(
+        app.clone(),
+        &format!("/compat/subsonic/rest/deletePlaylist.view?{auth}&id={playlist_id}"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let body = get(
+        app,
+        &format!("/compat/subsonic/rest/getPlaylists.view?{auth}"),
+    )
+    .await;
+    assert!(
+        body["subsonic-response"]["playlists"]
+            .get("playlist")
+            .is_none()
     );
 }
 

@@ -43,7 +43,7 @@ struct StoredPlaylist {
 }
 
 impl StoredPlaylist {
-    fn playlist(&self, id: &PlaylistId, track_count: u32) -> Playlist {
+    fn playlist(&self, id: &PlaylistId, track_count: u32, duration_ms: u64) -> Playlist {
         Playlist::new(
             id.clone(),
             self.name.clone(),
@@ -52,6 +52,7 @@ impl StoredPlaylist {
             self.created_at,
             self.updated_at,
             track_count,
+            duration_ms,
         )
         .expect("a stored playlist stays valid")
     }

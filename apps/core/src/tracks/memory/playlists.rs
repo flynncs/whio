@@ -22,6 +22,19 @@ fn track_count(indexes: &TrackIndexes, playlist_id: &PlaylistId) -> u32 {
         .map_or(0, |tracks| tracks.len() as u32)
 }
 
+fn duration_ms(indexes: &TrackIndexes, playlist_id: &PlaylistId) -> u64 {
+    indexes
+        .playlist_tracks
+        .get(playlist_id)
+        .map_or(0, |tracks| {
+            tracks
+                .iter()
+                .filter_map(|track_id| indexes.by_track_id.get(track_id))
+                .filter_map(|entry| entry.track.duration_ms())
+                .fold(0u64, u64::saturating_add)
+        })
+}
+
 #[async_trait]
 impl PlaylistStore for InMemoryTrackRepository {
     async fn create_playlist(
@@ -40,6 +53,7 @@ impl PlaylistStore for InMemoryTrackRepository {
             false,
             now,
             now,
+            0,
             0,
         )
         .map_err(|_| TrackRepositoryError::InvalidData)?;
@@ -70,6 +84,7 @@ impl PlaylistStore for InMemoryTrackRepository {
     ) -> Result<Option<Playlist>, TrackRepositoryError> {
         let mut indexes = locked(self)?;
         let count = track_count(&indexes, playlist_id);
+        let duration = duration_ms(&indexes, playlist_id);
 
         let Some(stored) = indexes.playlists.get_mut(playlist_id) else {
             return Ok(None);
@@ -86,6 +101,7 @@ impl PlaylistStore for InMemoryTrackRepository {
             stored.created_at,
             chrono::Utc::now(),
             count,
+            duration,
         )
         .map_err(|_| TrackRepositoryError::InvalidData)?;
 
@@ -131,9 +147,11 @@ impl PlaylistStore for InMemoryTrackRepository {
             return Ok(None);
         }
 
-        Ok(Some(
-            stored.playlist(playlist_id, track_count(&indexes, playlist_id)),
-        ))
+        Ok(Some(stored.playlist(
+            playlist_id,
+            track_count(&indexes, playlist_id),
+            duration_ms(&indexes, playlist_id),
+        )))
     }
 
     async fn list_playlists(&self, user: Uuid) -> Result<Vec<Playlist>, TrackRepositoryError> {
@@ -143,7 +161,9 @@ impl PlaylistStore for InMemoryTrackRepository {
             .playlists
             .iter()
             .filter(|(_, stored)| stored.user == user)
-            .map(|(id, stored)| stored.playlist(id, track_count(&indexes, id)))
+            .map(|(id, stored)| {
+                stored.playlist(id, track_count(&indexes, id), duration_ms(&indexes, id))
+            })
             .collect::<Vec<_>>();
         playlists.sort_by(|left, right| {
             left.name()

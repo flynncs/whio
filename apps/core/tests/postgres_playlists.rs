@@ -3,9 +3,19 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 use whio_core::tracks::{
-    CatalogueWrite, PlaylistId, PlaylistStore, PostgresTrackRepository, ProviderId, SourceIdentity,
-    SourceScope, TrackMetadata,
+    AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, CatalogueWrite, LibraryRead,
+    PlaylistId, PlaylistStore, PostgresTrackRepository, ProviderId, SourceIdentity, SourceScope,
+    TrackMetadata,
 };
+
+fn source(external_id: &str) -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        external_id.to_owned(),
+    )
+    .unwrap()
+}
 
 fn local_source(external_id: &str) -> SourceIdentity {
     SourceIdentity::new(
@@ -153,5 +163,115 @@ async fn playlists_round_trip_and_stay_owned(pool: PgPool) {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[sqlx::test]
+#[ignore = "requires PostgreSQL"]
+async fn a_playlisted_provider_track_becomes_browsable_for_its_owner(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let owner = Uuid::now_v7();
+    let stranger = Uuid::now_v7();
+    insert_user(&pool, owner, "owner").await;
+    insert_user(&pool, stranger, "stranger").await;
+
+    let track = repository
+        .get_or_create(source("vid-1"), metadata("Song"))
+        .await
+        .unwrap();
+    let album = repository
+        .resolve_or_create_album(&AlbumMetadata::new("Lost".to_owned()).unwrap())
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &source("MPREb_lost"))
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    assert!(
+        repository
+            .list_albums(
+                0,
+                50,
+                AlbumOrder::Title,
+                AlbumListFilter::new(),
+                Some(owner)
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+        "an unengaged provider album is not in browse"
+    );
+    assert_eq!(
+        repository
+            .count_albums(Some(owner), AlbumListFilter::new())
+            .await
+            .unwrap(),
+        0
+    );
+
+    let playlist = repository
+        .create_playlist(owner, "mix", None)
+        .await
+        .unwrap();
+    repository
+        .add_playlist_track(owner, playlist.id(), track.id())
+        .await
+        .unwrap();
+
+    let albums = repository
+        .list_albums(
+            0,
+            50,
+            AlbumOrder::Title,
+            AlbumListFilter::new(),
+            Some(owner),
+        )
+        .await
+        .unwrap();
+    assert_eq!(albums.len(), 1, "the playlist entry engages the album");
+    assert_eq!(albums[0].album().id(), album.id());
+    assert_eq!(
+        repository
+            .count_albums(Some(owner), AlbumListFilter::new())
+            .await
+            .unwrap(),
+        1,
+        "the count agrees with the list"
+    );
+
+    let artists = repository.list_artists(0, 50, Some(owner)).await.unwrap();
+    assert_eq!(artists.len(), 1);
+    assert_eq!(artists[0].artist().name(), "Artist");
+    assert_eq!(
+        repository.count_artists(Some(owner)).await.unwrap(),
+        1,
+        "the credited artist is browsable too"
+    );
+
+    assert!(
+        repository
+            .list_albums(
+                0,
+                50,
+                AlbumOrder::Title,
+                AlbumListFilter::new(),
+                Some(stranger)
+            )
+            .await
+            .unwrap()
+            .is_empty(),
+        "another user's browse is unaffected"
+    );
+    assert_eq!(
+        repository
+            .count_albums(Some(stranger), AlbumListFilter::new())
+            .await
+            .unwrap(),
+        0
     );
 }

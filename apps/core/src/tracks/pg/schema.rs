@@ -89,6 +89,11 @@ pub(crate) const ALBUM_ENGAGED: &str = "(EXISTS (
               OR EXISTS (
                   SELECT 1 FROM track_play_stats AS play
                   WHERE play.track_id = t.id AND play.user_id = $9 AND play.play_count > 0
+              )
+              OR EXISTS (
+                  SELECT 1 FROM playlist_entries AS entry
+                  JOIN playlists AS list ON list.id = entry.playlist_id
+                  WHERE entry.track_id = t.id AND list.user_id = $9
               ))
     )
     OR EXISTS (
@@ -130,6 +135,11 @@ pub(crate) const ARTIST_ENGAGED: &str = "(EXISTS (
               OR EXISTS (
                   SELECT 1 FROM track_play_stats AS play
                   WHERE play.track_id = t.id AND play.user_id = $4 AND play.play_count > 0
+              )
+              OR EXISTS (
+                  SELECT 1 FROM playlist_entries AS entry
+                  JOIN playlists AS list ON list.id = entry.playlist_id
+                  WHERE entry.track_id = t.id AND list.user_id = $4
               ))
     )
     OR EXISTS (
@@ -161,6 +171,11 @@ pub(crate) const COUNT_ALBUM_ENGAGED: &str = "(EXISTS (
               OR EXISTS (
                   SELECT 1 FROM track_play_stats AS play
                   WHERE play.track_id = t.id AND play.user_id = $2 AND play.play_count > 0
+              )
+              OR EXISTS (
+                  SELECT 1 FROM playlist_entries AS entry
+                  JOIN playlists AS list ON list.id = entry.playlist_id
+                  WHERE entry.track_id = t.id AND list.user_id = $2
               ))
     )
     OR EXISTS (
@@ -192,6 +207,11 @@ pub(crate) const COUNT_ARTIST_ENGAGED: &str = "(EXISTS (
               OR EXISTS (
                   SELECT 1 FROM track_play_stats AS play
                   WHERE play.track_id = t.id AND play.user_id = $2 AND play.play_count > 0
+              )
+              OR EXISTS (
+                  SELECT 1 FROM playlist_entries AS entry
+                  JOIN playlists AS list ON list.id = entry.playlist_id
+                  WHERE entry.track_id = t.id AND list.user_id = $2
               ))
     )
     OR EXISTS (

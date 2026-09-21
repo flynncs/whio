@@ -7,7 +7,9 @@ use super::PgStore;
 use super::decode::repository_error;
 
 const PLAYLIST_COLUMNS: &str = "p.id, p.name, p.comment, p.public, p.created_at, p.updated_at, \
-     (SELECT count(*) FROM playlist_entries AS e WHERE e.playlist_id = p.id)::BIGINT";
+     (SELECT count(*) FROM playlist_entries AS e WHERE e.playlist_id = p.id)::BIGINT, \
+     (SELECT COALESCE(SUM(t.duration_ms), 0)::BIGINT FROM playlist_entries AS e \
+      JOIN tracks AS t ON t.id = e.track_id WHERE e.playlist_id = p.id)";
 
 type PlaylistRow = (
     Uuid,
@@ -17,10 +19,12 @@ type PlaylistRow = (
     chrono::DateTime<chrono::Utc>,
     chrono::DateTime<chrono::Utc>,
     i64,
+    i64,
 );
 
 fn decode_playlist(row: PlaylistRow) -> Result<Playlist, TrackRepositoryError> {
     let track_count = u32::try_from(row.6.max(0)).map_err(|_| TrackRepositoryError::InvalidData)?;
+    let duration_ms = u64::try_from(row.7.max(0)).map_err(|_| TrackRepositoryError::InvalidData)?;
 
     Playlist::new(
         PlaylistId::from_uuid(row.0),
@@ -30,6 +34,7 @@ fn decode_playlist(row: PlaylistRow) -> Result<Playlist, TrackRepositoryError> {
         row.4,
         row.5,
         track_count,
+        duration_ms,
     )
     .map_err(|_| TrackRepositoryError::InvalidData)
 }
@@ -44,6 +49,7 @@ fn validated(name: &str, comment: Option<&str>) -> Result<Playlist, TrackReposit
         false,
         now,
         now,
+        0,
         0,
     )
     .map_err(|_| TrackRepositoryError::InvalidData)
@@ -69,7 +75,8 @@ impl PlaylistStore for PgStore {
             SELECT inserted.id, inserted.name, inserted.comment, inserted.public,
                    inserted.created_at, inserted.updated_at,
                    (SELECT count(*) FROM playlist_entries AS e
-                    WHERE e.playlist_id = inserted.id)::BIGINT
+                    WHERE e.playlist_id = inserted.id)::BIGINT,
+                   0::BIGINT
             FROM inserted
             "#,
         )
@@ -105,7 +112,11 @@ impl PlaylistStore for PgStore {
             SELECT updated.id, updated.name, updated.comment, updated.public,
                    updated.created_at, updated.updated_at,
                    (SELECT count(*) FROM playlist_entries AS e
-                    WHERE e.playlist_id = updated.id)::BIGINT
+                    WHERE e.playlist_id = updated.id)::BIGINT,
+                   (SELECT COALESCE(SUM(t.duration_ms), 0)::BIGINT
+                    FROM playlist_entries AS e
+                    JOIN tracks AS t ON t.id = e.track_id
+                    WHERE e.playlist_id = updated.id)
             FROM updated
             "#,
         )

@@ -56,6 +56,7 @@ pub struct Playlist {
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     track_count: u32,
+    duration_ms: u64,
 }
 
 impl Playlist {
@@ -68,6 +69,7 @@ impl Playlist {
         created_at: chrono::DateTime<chrono::Utc>,
         updated_at: chrono::DateTime<chrono::Utc>,
         track_count: u32,
+        duration_ms: u64,
     ) -> Result<Self, ValidationError> {
         let name = name.trim().to_owned();
         if name.is_empty() {
@@ -85,6 +87,7 @@ impl Playlist {
             created_at,
             updated_at,
             track_count,
+            duration_ms,
         })
     }
 
@@ -114,5 +117,9 @@ impl Playlist {
 
     pub fn track_count(&self) -> u32 {
         self.track_count
+    }
+
+    pub fn duration_ms(&self) -> u64 {
+        self.duration_ms
     }
 }

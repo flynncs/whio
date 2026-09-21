@@ -12,6 +12,7 @@ pub mod library;
 pub mod library_state;
 pub mod media;
 pub mod playback;
+pub mod playlists;
 pub mod providers;
 pub mod request;
 mod source_path;
@@ -25,6 +26,7 @@ use crate::{
     library::ScanService,
     library_state::LibraryStateService,
     playback::StreamingService,
+    playlists::PlaylistService,
 };
 
 #[derive(Clone)]
@@ -33,6 +35,7 @@ pub struct AppState {
     search: Arc<SearchService>,
     library: Arc<LibraryService>,
     completion: Arc<CompletionService>,
+    playlists: Arc<PlaylistService>,
     credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
     library_state: Arc<LibraryStateService>,
@@ -76,6 +79,11 @@ impl AppState {
         self
     }
 
+    pub fn with_playlists(mut self, playlists: Arc<PlaylistService>) -> Self {
+        self.playlists = playlists;
+        self
+    }
+
     pub fn with_source_tags(mut self, tags: SourceTags) -> Self {
         self.source_tags = tags;
         self
@@ -98,6 +106,7 @@ impl AppState {
         database: Option<Arc<database::Database>>,
     ) -> Self {
         let completion = Arc::new(CompletionService::disabled(Arc::clone(&library)));
+        let playlists = Arc::new(PlaylistService::disabled(Arc::clone(&library)));
 
         Self {
             artwork: Arc::new(ArtworkService::disabled()),
@@ -105,6 +114,7 @@ impl AppState {
             search,
             library,
             completion,
+            playlists,
             database,
             library_state: Arc::new(LibraryStateService::disabled()),
             streaming,
@@ -127,6 +137,10 @@ impl AppState {
 
     pub(crate) fn completion(&self) -> &CompletionService {
         &self.completion
+    }
+
+    pub(crate) fn playlists(&self) -> &PlaylistService {
+        &self.playlists
     }
 
     pub(crate) fn credential(&self) -> &CredentialService {
