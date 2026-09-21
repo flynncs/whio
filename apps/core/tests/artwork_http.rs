@@ -87,7 +87,7 @@ async fn public_app(url: &str) -> (axum::Router, String) {
         .unwrap();
 
     let ports = StorePorts { store: repository };
-    let catalogue = ports.bare_catalogue();
+    let (search, library) = ports.bare_catalogue();
     let artwork = Arc::new(ArtworkService::new(
         ports.library(),
         ports.sources(),
@@ -96,7 +96,7 @@ async fn public_app(url: &str) -> (axum::Router, String) {
     let playback = ports.streaming(Vec::new());
 
     (
-        router_with_artwork(credential, catalogue, playback, artwork),
+        router_with_artwork(credential, search, library, playback, artwork),
         track.id().to_string(),
     )
 }
@@ -201,7 +201,7 @@ async fn pictured_app() -> (axum::Router, String, String, String) {
         .unwrap();
 
     let ports = StorePorts { store: repository };
-    let catalogue = ports.bare_catalogue();
+    let (search, library) = ports.bare_catalogue();
     let artwork = Arc::new(ArtworkService::new(
         ports.library(),
         ports.sources(),
@@ -210,7 +210,7 @@ async fn pictured_app() -> (axum::Router, String, String, String) {
     let playback = ports.streaming(Vec::new());
 
     (
-        router_with_artwork(credential, catalogue, playback, artwork),
+        router_with_artwork(credential, search, library, playback, artwork),
         format!("al-{}", album.id()),
         format!("ar-{}", artist.id()),
         track.id().to_string(),

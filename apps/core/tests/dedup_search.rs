@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;
 use whio_core::{
-    catalogue::{CatalogueSearch, CatalogueService, DedupMode, SearchLimit, SearchQuery},
+    catalogue::{CatalogueSearch, DedupMode, SearchLimit, SearchQuery, SearchService},
     request::{RequestContext, RequestId},
     tracks::{
         AlbumMetadata, AlbumTrack, CatalogueWrite, InMemoryTrackRepository, LibraryRead,
@@ -65,7 +65,7 @@ impl Fixture {
     }
 
     async fn search(&self, mode: DedupMode) -> Vec<whio_core::tracks::TrackHit> {
-        let service = CatalogueService::new(
+        let service = SearchService::new(
             Arc::clone(&self.repository) as Arc<dyn LibraryRead>,
             Arc::clone(&self.repository) as Arc<dyn CatalogueWrite>,
             Arc::clone(&self.repository) as Arc<dyn SourceLookup>,
@@ -241,7 +241,7 @@ async fn fresh_provider_result_uses_local_state_without_changing_album_or_source
         )
         .await
         .unwrap();
-    let service = CatalogueService::with_providers(
+    let service = SearchService::with_providers(
         Arc::clone(&f.repository) as Arc<dyn LibraryRead>,
         Arc::clone(&f.repository) as Arc<dyn CatalogueWrite>,
         Arc::clone(&f.repository) as Arc<dyn SourceLookup>,

@@ -20,12 +20,12 @@ use whio_core::{
 
 fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
     let ports = StorePorts::new();
-    let catalogue = ports.bare_catalogue();
+    let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
         Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
     ]);
 
-    router(credential, catalogue, playback)
+    router(credential, search, library, playback)
 }
 
 async fn get(app: axum::Router, uri: &str) -> Value {

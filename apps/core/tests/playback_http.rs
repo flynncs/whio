@@ -141,7 +141,8 @@ fn app_with_media_bytes(bytes: Vec<u8>) -> (Router, Arc<StubProvider>) {
         resolved_source: Mutex::new(None),
     });
     let ports = StorePorts::new();
-    let catalogue = ports.catalogue_service(vec![provider.clone() as Arc<dyn CatalogueProvider>]);
+    let (search, library) =
+        ports.catalogue_service(vec![provider.clone() as Arc<dyn CatalogueProvider>]);
     let playback = Arc::new(StreamingService::new(
         ports.sources(),
         vec![provider.clone() as Arc<dyn PlaybackProvider>],
@@ -152,7 +153,10 @@ fn app_with_media_bytes(bytes: Vec<u8>) -> (Router, Arc<StubProvider>) {
         )),
     ));
 
-    (router(credential_service(), catalogue, playback), provider)
+    (
+        router(credential_service(), search, library, playback),
+        provider,
+    )
 }
 
 fn request(uri: &str, body: String) -> Request<Body> {

@@ -65,13 +65,13 @@ async fn app() -> (Router, TrackId, PathBuf) {
         .unwrap();
 
     let ports = StorePorts { store: repository };
-    let catalogue = ports.catalogue_service(vec![]);
+    let (search, library) = ports.catalogue_service(vec![]);
     let playback = ports.streaming(vec![
         Arc::new(LocalPlaybackProvider::new(ports.sources())) as Arc<dyn PlaybackProvider>
     ]);
 
     (
-        router(credential_service(), catalogue, playback),
+        router(credential_service(), search, library, playback),
         track.id().clone(),
         root,
     )

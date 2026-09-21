@@ -34,7 +34,7 @@ pub(crate) async fn song_list(
 
     if let Some(album_id) = query.album_id.as_deref() {
         return match service::album_songs(
-            state.catalogue(),
+            state.library(),
             state.credential(),
             &token.0,
             album_id,
@@ -48,7 +48,7 @@ pub(crate) async fn song_list(
     }
 
     match service::search_songs(
-        state.catalogue(),
+        state.search(),
         state.credential(),
         &context,
         &token.0,
@@ -69,7 +69,7 @@ pub(crate) async fn song_detail(
     Path(id): Path<String>,
 ) -> Response {
     match service::song_detail(
-        state.catalogue(),
+        state.library(),
         state.credential(),
         &id,
         &token.0,
@@ -103,7 +103,7 @@ pub(crate) async fn album_list(
     }
 
     match service::album_list(
-        state.catalogue(),
+        state.library(),
         state.credential(),
         &token.0,
         order,
@@ -125,7 +125,7 @@ pub(crate) async fn album_detail(
     token: NdToken,
     Path(id): Path<String>,
 ) -> Response {
-    match service::album_detail(state.catalogue(), state.credential(), &token.0, &id).await {
+    match service::album_detail(state.library(), state.credential(), &token.0, &id).await {
         Ok(album) => Json(album).into_response(),
         Err(error) => song_error(error, &context),
     }
@@ -138,7 +138,7 @@ pub(crate) async fn artist_list(
     query: RawQuery,
 ) -> Response {
     match service::artist_list(
-        state.catalogue(),
+        state.library(),
         state.credential(),
         &token.0,
         page_start(&query),
@@ -157,7 +157,7 @@ pub(crate) async fn artist_detail(
     token: NdToken,
     Path(id): Path<String>,
 ) -> Response {
-    match service::artist_detail(state.catalogue(), state.credential(), &token.0, &id).await {
+    match service::artist_detail(state.library(), state.credential(), &token.0, &id).await {
         Ok(artist) => Json(artist).into_response(),
         Err(error) => song_error(error, &context),
     }
@@ -168,7 +168,7 @@ pub(crate) async fn genre_list(
     Extension(context): Extension<RequestContext>,
     token: NdToken,
 ) -> Response {
-    match service::genre_list(state.catalogue(), state.credential(), &token.0).await {
+    match service::genre_list(state.library(), state.credential(), &token.0).await {
         Ok(genres) => Json(genres).into_response(),
         Err(error) => song_error(error, &context),
     }

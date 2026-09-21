@@ -4,8 +4,8 @@ use uuid::Uuid;
 use crate::{
     artwork::CoverArtTarget,
     catalogue::{
-        CatalogueError, CatalogueSearch, CatalogueService, SearchHit, SearchLimit, SearchOffset,
-        SearchQuery,
+        CatalogueError, CatalogueSearch, LibraryService, SearchHit, SearchLimit, SearchOffset,
+        SearchQuery, SearchService,
     },
     compat::SourceTags,
     identity::service::{AuthError, CredentialService},
@@ -165,7 +165,7 @@ fn genre_from_summary(summary: &GenreSummary) -> Genre {
 }
 
 pub(crate) async fn search_songs(
-    catalogue: &CatalogueService,
+    search_service: &SearchService,
     credential: &CredentialService,
     context: &RequestContext,
     token: &str,
@@ -204,7 +204,7 @@ pub(crate) async fn search_songs(
         _ => return Err(SongError::InvalidSearch),
     };
 
-    let outcome = catalogue
+    let outcome = search_service
         .search(&search, Some(&user_uuid), context)
         .await
         .map_err(SongError::Catalogue)?;
@@ -217,7 +217,7 @@ pub(crate) async fn search_songs(
 }
 
 pub(crate) async fn song_detail(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     credential: &CredentialService,
     raw_id: &str,
     token: &str,
@@ -226,7 +226,7 @@ pub(crate) async fn song_detail(
     let user = authorize(credential, token).await?;
 
     let track_id: TrackId = raw_id.parse().map_err(|_| SongError::NotFound)?;
-    let hit = catalogue
+    let hit = library
         .track_detail(&track_id, Some(&user))
         .await
         .map_err(SongError::Catalogue)?
@@ -238,7 +238,7 @@ pub(crate) async fn song_detail(
 const DEFAULT_PAGE_SIZE: u32 = 500;
 
 pub(crate) async fn album_songs(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     credential: &CredentialService,
     token: &str,
     raw_album_id: &str,
@@ -246,7 +246,7 @@ pub(crate) async fn album_songs(
 ) -> Result<Vec<Song>, SongError> {
     let user = authorize(credential, token).await?;
     let album_id: AlbumId = raw_album_id.parse().map_err(|_| SongError::NotFound)?;
-    let detail = catalogue
+    let detail = library
         .album_detail(&album_id, Some(&user))
         .await
         .map_err(SongError::Catalogue)?
@@ -261,7 +261,7 @@ pub(crate) async fn album_songs(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn album_list(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     credential: &CredentialService,
     token: &str,
     order: AlbumOrder,
@@ -276,7 +276,7 @@ pub(crate) async fn album_list(
     match artist_id {
         Some(raw) => {
             let artist_id: ArtistId = raw.parse().map_err(|_| SongError::InvalidSearch)?;
-            let detail = catalogue
+            let detail = library
                 .artist_detail(&artist_id, Some(&user))
                 .await
                 .map_err(SongError::Catalogue)?
@@ -293,11 +293,11 @@ pub(crate) async fn album_list(
             Ok((albums, total))
         }
         None => {
-            let total = catalogue
+            let total = library
                 .album_count(Some(&user), filter.clone())
                 .await
                 .map_err(SongError::Catalogue)?;
-            let albums = catalogue
+            let albums = library
                 .album_list(offset, limit, order, filter, Some(&user))
                 .await
                 .map_err(SongError::Catalogue)?;
@@ -308,14 +308,14 @@ pub(crate) async fn album_list(
 }
 
 pub(crate) async fn album_detail(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     credential: &CredentialService,
     token: &str,
     raw_id: &str,
 ) -> Result<Album, SongError> {
     let user = authorize(credential, token).await?;
     let album_id: AlbumId = raw_id.parse().map_err(|_| SongError::NotFound)?;
-    let detail = catalogue
+    let detail = library
         .album_detail(&album_id, Some(&user))
         .await
         .map_err(SongError::Catalogue)?
@@ -325,7 +325,7 @@ pub(crate) async fn album_detail(
 }
 
 pub(crate) async fn artist_list(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     credential: &CredentialService,
     token: &str,
     start: u32,
@@ -333,11 +333,11 @@ pub(crate) async fn artist_list(
 ) -> Result<(Vec<Artist>, u32), SongError> {
     let user = authorize(credential, token).await?;
     let (offset, limit) = page(start, end);
-    let total = catalogue
+    let total = library
         .artist_count(Some(&user))
         .await
         .map_err(SongError::Catalogue)?;
-    let artists = catalogue
+    let artists = library
         .artist_list(offset, limit, Some(&user))
         .await
         .map_err(SongError::Catalogue)?;
@@ -346,14 +346,14 @@ pub(crate) async fn artist_list(
 }
 
 pub(crate) async fn artist_detail(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     credential: &CredentialService,
     token: &str,
     raw_id: &str,
 ) -> Result<Artist, SongError> {
     let user = authorize(credential, token).await?;
     let artist_id: ArtistId = raw_id.parse().map_err(|_| SongError::NotFound)?;
-    let detail = catalogue
+    let detail = library
         .artist_detail(&artist_id, Some(&user))
         .await
         .map_err(SongError::Catalogue)?
@@ -379,13 +379,13 @@ pub(crate) fn album_order(sort: Option<&str>) -> AlbumOrder {
 }
 
 pub(crate) async fn genre_list(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     credential: &CredentialService,
     token: &str,
 ) -> Result<Vec<Genre>, SongError> {
     authorize(credential, token).await?;
 
-    catalogue
+    library
         .genres()
         .await
         .map(|genres| genres.iter().map(genre_from_summary).collect())
@@ -529,20 +529,30 @@ mod tests {
         RequestContext::new(RequestId::generate())
     }
 
-    fn catalogue(
+    fn services(
         responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>,
-    ) -> CatalogueService {
+    ) -> (SearchService, LibraryService) {
         let stub = Arc::new(StubCatalogue {
             responses: Mutex::new(responses.into()),
         });
         let store = Arc::new(InMemoryTrackRepository::default());
-        CatalogueService::with_providers(
+        let search = SearchService::with_providers(
             Arc::clone(&store) as Arc<dyn LibraryRead>,
             Arc::clone(&store) as Arc<dyn CatalogueWrite>,
             Arc::clone(&store) as Arc<dyn SourceLookup>,
             Arc::clone(&store) as Arc<dyn StateStore>,
             vec![stub as Arc<dyn CatalogueProvider>],
-        )
+        );
+        let library = LibraryService::new(
+            Arc::clone(&store) as Arc<dyn LibraryRead>,
+            Arc::clone(&store) as Arc<dyn SourceLookup>,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+        );
+        (search, library)
+    }
+
+    fn catalogue(responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>) -> SearchService {
+        services(responses).0
     }
 
     struct PagedCatalogue {
@@ -565,9 +575,9 @@ mod tests {
         }
     }
 
-    fn paged_catalogue(total: u32) -> CatalogueService {
+    fn paged_catalogue(total: u32) -> SearchService {
         let store = Arc::new(InMemoryTrackRepository::default());
-        CatalogueService::with_providers(
+        SearchService::with_providers(
             Arc::clone(&store) as Arc<dyn LibraryRead>,
             Arc::clone(&store) as Arc<dyn CatalogueWrite>,
             Arc::clone(&store) as Arc<dyn SourceLookup>,
@@ -621,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn auth_gates_search_and_detail() {
-        let catalogue = catalogue(vec![]);
+        let (catalogue, library) = services(vec![]);
         let auth = auth();
         let result = search_songs(
             &catalogue,
@@ -635,7 +645,7 @@ mod tests {
         assert!(matches!(result, Err(SongError::Unauthorized)));
 
         let result = song_detail(
-            &catalogue,
+            &library,
             &auth.service,
             &TrackId::new().to_string(),
             "forged",
@@ -732,7 +742,7 @@ mod tests {
 
         let catalogue = paged_catalogue(25);
         async fn songs(
-            catalogue: &CatalogueService,
+            catalogue: &SearchService,
             auth: &TestAuth,
             context: &RequestContext,
             start: u32,
@@ -771,7 +781,7 @@ mod tests {
 
     #[tokio::test]
     async fn detail_returns_songs_and_rejects_unknown_ids() {
-        let catalogue = catalogue(vec![Ok(vec![candidate()])]);
+        let (catalogue, library) = services(vec![Ok(vec![candidate()])]);
         let auth = auth();
         let songs = search_songs(
             &catalogue,
@@ -784,7 +794,7 @@ mod tests {
         .await
         .expect("search succeeds");
         let song = song_detail(
-            &catalogue,
+            &library,
             &auth.service,
             &songs[0].id,
             &auth.token,
@@ -798,7 +808,7 @@ mod tests {
         assert_eq!(song.duration, 180.0);
 
         let result = song_detail(
-            &catalogue,
+            &library,
             &auth.service,
             &TrackId::new().to_string(),
             &auth.token,
@@ -808,7 +818,7 @@ mod tests {
         assert!(matches!(result, Err(SongError::NotFound)));
 
         let result = song_detail(
-            &catalogue,
+            &library,
             &auth.service,
             "not-a-uuid",
             &auth.token,

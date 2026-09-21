@@ -18,15 +18,20 @@ mod source_path;
 pub mod tracks;
 
 use crate::{
-    artwork::ArtworkService, catalogue::CatalogueService, compat::SourceTags,
-    identity::service::CredentialService, library::ScanService, library_state::LibraryStateService,
+    artwork::ArtworkService,
+    catalogue::{LibraryService, SearchService},
+    compat::SourceTags,
+    identity::service::CredentialService,
+    library::ScanService,
+    library_state::LibraryStateService,
     playback::StreamingService,
 };
 
 #[derive(Clone)]
 pub struct AppState {
     artwork: Arc<ArtworkService>,
-    catalogue: Arc<CatalogueService>,
+    search: Arc<SearchService>,
+    library: Arc<LibraryService>,
     credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
     library_state: Arc<LibraryStateService>,
@@ -38,19 +43,21 @@ pub struct AppState {
 impl AppState {
     pub fn new(
         credential: Arc<CredentialService>,
-        catalogue: Arc<CatalogueService>,
+        search: Arc<SearchService>,
+        library: Arc<LibraryService>,
         streaming: Arc<StreamingService>,
     ) -> Self {
-        Self::build(credential, catalogue, streaming, None)
+        Self::build(credential, search, library, streaming, None)
     }
 
     pub fn with_database(
         credential: Arc<CredentialService>,
-        catalogue: Arc<CatalogueService>,
+        search: Arc<SearchService>,
+        library: Arc<LibraryService>,
         streaming: Arc<StreamingService>,
         database: Arc<database::Database>,
     ) -> Self {
-        Self::build(credential, catalogue, streaming, Some(database))
+        Self::build(credential, search, library, streaming, Some(database))
     }
 
     pub fn with_artwork(mut self, artwork: Arc<ArtworkService>) -> Self {
@@ -79,14 +86,16 @@ impl AppState {
 
     fn build(
         credential: Arc<CredentialService>,
-        catalogue: Arc<CatalogueService>,
+        search: Arc<SearchService>,
+        library: Arc<LibraryService>,
         streaming: Arc<StreamingService>,
         database: Option<Arc<database::Database>>,
     ) -> Self {
         Self {
             artwork: Arc::new(ArtworkService::disabled()),
             credential,
-            catalogue,
+            search,
+            library,
             database,
             library_state: Arc::new(LibraryStateService::disabled()),
             streaming,
@@ -99,8 +108,12 @@ impl AppState {
         self.database.as_deref()
     }
 
-    pub(crate) fn catalogue(&self) -> &CatalogueService {
-        &self.catalogue
+    pub(crate) fn search(&self) -> &SearchService {
+        &self.search
+    }
+
+    pub(crate) fn library(&self) -> &LibraryService {
+        &self.library
     }
 
     pub(crate) fn credential(&self) -> &CredentialService {

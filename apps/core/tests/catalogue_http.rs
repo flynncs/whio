@@ -66,10 +66,11 @@ async fn search_requires_authentication() {
 
 #[tokio::test]
 async fn credential_storage_failure_is_a_server_error() {
-    let (catalogue, playback) = services(vec![]);
+    let (search, library, playback) = services(vec![]);
     let response = router(
         credential_service_with_storage_failure(),
-        catalogue,
+        search,
+        library,
         playback,
     )
     .oneshot(
@@ -145,7 +146,7 @@ async fn unavailable_resolver_returns_service_unavailable() {
 async fn a_disabled_provider_track_is_reported_unavailable() {
     use std::sync::Arc;
     use whio_core::{
-        catalogue::CatalogueService,
+        catalogue::{LibraryService, SearchService},
         tracks::{CatalogueWrite, InMemoryTrackRepository, ProviderRegistry},
     };
 
@@ -177,18 +178,18 @@ async fn a_disabled_provider_track_is_reported_unavailable() {
         .unwrap();
 
     let ports = StorePorts { store: repository };
-    let catalogue = Arc::new(
-        CatalogueService::with_providers(
-            ports.library(),
-            ports.catalogue(),
-            ports.sources(),
-            ports.state(),
-            Vec::new(),
-        )
-        .with_registry(ProviderRegistry::with_enabled(Vec::new())),
+    let search = Arc::new(SearchService::new(
+        ports.library(),
+        ports.catalogue(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let library = Arc::new(
+        LibraryService::new(ports.library(), ports.sources(), ports.state())
+            .with_registry(ProviderRegistry::with_enabled(Vec::new())),
     );
     let playback = ports.streaming(Vec::new());
-    let response = router(credential_service(), catalogue, playback)
+    let response = router(credential_service(), search, library, playback)
         .oneshot(request(r#"{"query":"Song","limit":5}"#))
         .await
         .unwrap();

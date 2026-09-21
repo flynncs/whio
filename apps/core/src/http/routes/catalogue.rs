@@ -101,7 +101,7 @@ pub(crate) async fn search(
     let user_uuid = principal.user_id.as_uuid();
 
     let outcome = state
-        .catalogue()
+        .search()
         .search(&search, Some(&user_uuid), &context)
         .await
         .map_err(|error| ApiError::Catalogue {
@@ -109,12 +109,12 @@ pub(crate) async fn search(
             error,
         })?;
 
-    let catalogue = state.catalogue();
+    let library = state.library();
     let results = outcome
         .tracks
         .into_iter()
         .map(|hit| {
-            let availability = catalogue.availability(hit.sources());
+            let availability = library.availability(hit.sources());
 
             TrackResponse::from_hit(hit, availability)
         })

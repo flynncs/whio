@@ -7,7 +7,7 @@ mod config;
 use config::{Config, YoutubeResolverConfig};
 use whio_core::{
     AppState,
-    catalogue::{CatalogueProvider, CatalogueService},
+    catalogue::{CatalogueProvider, LibraryService, SearchService},
     database::Database,
     delivery::StreamDelivery,
     identity::{
@@ -119,16 +119,23 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             vec![YOUTUBE_MUSIC_PROVIDER_ID],
         ),
     };
-    let catalogue = Arc::new(
-        CatalogueService::with_providers(
+    let search = Arc::new(
+        SearchService::with_providers(
             Arc::clone(&library),
             Arc::clone(&catalogue_write),
             Arc::clone(&source_lookup),
             Arc::clone(&state),
             catalogue_providers,
         )
-        .with_registry(ProviderRegistry::with_enabled(enabled_providers))
         .with_dedup_mode(config.dedup_mode),
+    );
+    let library_service = Arc::new(
+        LibraryService::new(
+            Arc::clone(&library),
+            Arc::clone(&source_lookup),
+            Arc::clone(&state),
+        )
+        .with_registry(ProviderRegistry::with_enabled(enabled_providers)),
     );
     let youtube_media_suffixes = vec![config.youtube_media_suffix.clone()];
     let fetcher = Arc::new(HttpMediaFetcher::with_allowed_host_suffixes(
@@ -170,7 +177,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
     ));
 
     Ok(
-        AppState::with_database(credential, catalogue, streaming, database)
+        AppState::with_database(credential, search, library_service, streaming, database)
             .with_artwork(artwork)
             .with_library_state(library_state)
             .with_scanner(scanner)

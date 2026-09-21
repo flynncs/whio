@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::{
     catalogue::{
-        CatalogueError, CatalogueSearch, CatalogueService, SearchLimit, SearchOffset, SearchQuery,
+        CatalogueError, CatalogueSearch, LibraryService, SearchLimit, SearchOffset, SearchQuery,
+        SearchService,
     },
     compat::SourceTags,
     library_state::{LibraryStateError, LibraryStateService},
@@ -31,7 +32,7 @@ pub(crate) struct SearchResult {
 }
 
 pub(crate) async fn search(
-    catalogue: &CatalogueService,
+    search_service: &SearchService,
     context: &RequestContext,
     user: Option<&uuid::Uuid>,
     query: &str,
@@ -75,7 +76,7 @@ pub(crate) async fn search(
         _ => return Err(SearchError::InvalidSearch),
     };
 
-    catalogue
+    search_service
         .search(&search, user, context)
         .await
         .map(|outcome| SearchResult {
@@ -153,7 +154,7 @@ pub(crate) struct StarredResult {
 }
 
 pub(crate) async fn album_list(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     request: &AlbumListRequest<'_>,
     user: Option<&Uuid>,
 ) -> Result<Vec<models::AlbumId3>, BrowseError> {
@@ -174,7 +175,7 @@ pub(crate) async fn album_list(
     };
     let (order, filter) = album_list_order(request)?;
 
-    catalogue
+    library
         .album_list(offset, size, order, filter, user)
         .await
         .map(|albums| albums.iter().map(mapping::album_from_summary).collect())
@@ -231,10 +232,8 @@ fn album_list_order(
     }
 }
 
-pub(crate) async fn genres(
-    catalogue: &CatalogueService,
-) -> Result<Vec<models::Genre>, BrowseError> {
-    catalogue
+pub(crate) async fn genres(library: &LibraryService) -> Result<Vec<models::Genre>, BrowseError> {
+    library
         .genres()
         .await
         .map(|genres| genres.iter().map(mapping::genre_from_summary).collect())
@@ -371,13 +370,13 @@ pub(crate) async fn scrobble(
 }
 
 pub(crate) async fn album_detail(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     raw_id: &str,
     user: Option<&Uuid>,
     tags: SourceTags,
 ) -> Result<models::AlbumId3WithSongs, BrowseError> {
     let album_id: AlbumId = raw_id.parse().map_err(|_| BrowseError::AlbumNotFound)?;
-    let detail = catalogue
+    let detail = library
         .album_detail(&album_id, user)
         .await
         .map_err(BrowseError::Catalogue)?
@@ -387,10 +386,10 @@ pub(crate) async fn album_detail(
 }
 
 pub(crate) async fn artists(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     user: Option<&Uuid>,
 ) -> Result<Vec<models::ArtistId3>, BrowseError> {
-    catalogue
+    library
         .artist_list(0, u32::MAX, user)
         .await
         .map(|artists| artists.iter().map(mapping::artist_from_summary).collect())
@@ -398,12 +397,12 @@ pub(crate) async fn artists(
 }
 
 pub(crate) async fn artist_detail(
-    catalogue: &CatalogueService,
+    library: &LibraryService,
     raw_id: &str,
     user: Option<&Uuid>,
 ) -> Result<models::ArtistWithAlbumsId3, BrowseError> {
     let artist_id: ArtistId = raw_id.parse().map_err(|_| BrowseError::ArtistNotFound)?;
-    let detail = catalogue
+    let detail = library
         .artist_detail(&artist_id, user)
         .await
         .map_err(BrowseError::Catalogue)?
@@ -476,14 +475,12 @@ mod tests {
         }
     }
 
-    fn catalogue(
-        responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>,
-    ) -> CatalogueService {
+    fn catalogue(responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>) -> SearchService {
         let stub = Arc::new(StubCatalogue {
             responses: Mutex::new(responses.into()),
         });
         let store = Arc::new(InMemoryTrackRepository::default());
-        CatalogueService::with_providers(
+        SearchService::with_providers(
             Arc::clone(&store) as Arc<dyn LibraryRead>,
             Arc::clone(&store) as Arc<dyn CatalogueWrite>,
             Arc::clone(&store) as Arc<dyn SourceLookup>,
@@ -512,9 +509,9 @@ mod tests {
         }
     }
 
-    fn paged_catalogue(total: u32) -> CatalogueService {
+    fn paged_catalogue(total: u32) -> SearchService {
         let store = Arc::new(InMemoryTrackRepository::default());
-        CatalogueService::with_providers(
+        SearchService::with_providers(
             Arc::clone(&store) as Arc<dyn LibraryRead>,
             Arc::clone(&store) as Arc<dyn CatalogueWrite>,
             Arc::clone(&store) as Arc<dyn SourceLookup>,
@@ -631,7 +628,7 @@ mod tests {
 
         let service = paged_catalogue(25);
         async fn songs(
-            catalogue: &CatalogueService,
+            catalogue: &SearchService,
             context: &RequestContext,
             count: &str,
             offset: &str,
@@ -676,7 +673,7 @@ mod tests {
         assert_eq!(songs.len(), 25);
     }
 
-    async fn album_catalogue(albums: &[&str]) -> CatalogueService {
+    async fn album_catalogue(albums: &[&str]) -> LibraryService {
         let repository = Arc::new(InMemoryTrackRepository::default());
 
         for title in albums {
@@ -686,12 +683,10 @@ mod tests {
             repository.resolve_or_create_album(&metadata).await.unwrap();
         }
 
-        CatalogueService::with_providers(
+        LibraryService::new(
             Arc::clone(&repository) as Arc<dyn LibraryRead>,
-            Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
             Arc::clone(&repository) as Arc<dyn SourceLookup>,
             Arc::clone(&repository) as Arc<dyn StateStore>,
-            Vec::new(),
         )
     }
 
@@ -817,12 +812,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let catalogue = CatalogueService::with_providers(
+        let catalogue = LibraryService::new(
             Arc::clone(&repository) as Arc<dyn LibraryRead>,
-            Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
             Arc::clone(&repository) as Arc<dyn SourceLookup>,
             Arc::clone(&repository) as Arc<dyn StateStore>,
-            Vec::new(),
         );
 
         let detail = album_detail(&catalogue, &album.id().to_string(), None, SourceTags::Off)
@@ -865,12 +858,10 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let catalogue = CatalogueService::with_providers(
+        let catalogue = LibraryService::new(
             Arc::clone(&repository) as Arc<dyn LibraryRead>,
-            Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
             Arc::clone(&repository) as Arc<dyn SourceLookup>,
             Arc::clone(&repository) as Arc<dyn StateStore>,
-            Vec::new(),
         );
 
         let artists = artists(&catalogue, None).await.expect("the list succeeds");

@@ -44,7 +44,7 @@ async fn app() -> (axum::Router, String) {
     // a disabled adapter surfaces `ProviderError::Disabled` for both
     // catalogue and playback, which the HTTP layer maps to 503s
     let ports = StorePorts { store: repository };
-    let catalogue = ports.catalogue_service(vec![
+    let (search, library) = ports.catalogue_service(vec![
         Arc::new(YtmAdapter::disabled()) as Arc<dyn CatalogueProvider>
     ]);
     let playback = ports.streaming(vec![
@@ -52,7 +52,7 @@ async fn app() -> (axum::Router, String) {
     ]);
 
     (
-        router(credential_service(), catalogue, playback),
+        router(credential_service(), search, library, playback),
         track_id.to_string(),
     )
 }

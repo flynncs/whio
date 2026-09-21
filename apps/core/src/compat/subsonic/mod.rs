@@ -129,7 +129,7 @@ pub(crate) async fn search3(
     };
     let user_uuid = principal.user_id.as_uuid();
     match service::search(
-        state.catalogue(),
+        state.search(),
         &context,
         Some(&user_uuid),
         q,
@@ -190,7 +190,7 @@ pub(crate) async fn get_album_list2(
         genre: query.get("genre"),
     };
 
-    match service::album_list(state.catalogue(), &request, Some(&user)).await {
+    match service::album_list(state.library(), &request, Some(&user)).await {
         Ok(albums) => Json(album_list2_envelope(albums)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
@@ -211,7 +211,7 @@ pub(crate) async fn get_album(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::album_detail(state.catalogue(), id, Some(&user), state.source_tags()).await {
+    match service::album_detail(state.library(), id, Some(&user), state.source_tags()).await {
         Ok(album) => Json(album_envelope(album)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
@@ -228,7 +228,7 @@ pub(crate) async fn get_artists(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::artists(state.catalogue(), Some(&user)).await {
+    match service::artists(state.library(), Some(&user)).await {
         Ok(artists) => Json(artists_envelope(service::artist_indexes(artists))).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
@@ -249,7 +249,7 @@ pub(crate) async fn get_artist(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::artist_detail(state.catalogue(), id, Some(&user)).await {
+    match service::artist_detail(state.library(), id, Some(&user)).await {
         Ok(artist) => Json(artist_envelope(artist)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
@@ -532,7 +532,7 @@ pub(crate) async fn get_genres(
         return response;
     }
 
-    match service::genres(state.catalogue()).await {
+    match service::genres(state.library()).await {
         Ok(genres) => Json(genres_envelope(genres)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }

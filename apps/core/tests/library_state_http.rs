@@ -104,7 +104,7 @@ async fn seeded_app() -> Seeded {
     let ports = StorePorts { store: repository };
     let scanner = ScanService::new(ports.catalogue(), ports.sources(), vec![root]);
     scanner.start();
-    let catalogue = ports.bare_catalogue();
+    let (search, library) = ports.bare_catalogue();
     let library_state = Arc::new(whio_core::library_state::LibraryStateService::new(
         ports.state(),
         ports.library(),
@@ -113,7 +113,7 @@ async fn seeded_app() -> Seeded {
         Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
     ]);
     let app = whio_core::router(
-        AppState::new(credential, catalogue, playback)
+        AppState::new(credential, search, library, playback)
             .with_library_state(library_state)
             .with_scanner(scanner),
     );

@@ -12,7 +12,9 @@ use uuid::Uuid;
 use whio_core::{
     AppState,
     artwork::ArtworkService,
-    catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch, CatalogueService},
+    catalogue::{
+        CatalogueCandidate, CatalogueProvider, CatalogueSearch, LibraryService, SearchService,
+    },
     compat::SourceTags,
     identity::service::CredentialService,
     playback::{PlaybackProvider, PlaybackSource, ResolvedPlayback, StreamingService},
@@ -37,28 +39,31 @@ pub use media::{delivery, pictured_flac};
 // here once instead of in every suite
 pub fn router(
     credential: Arc<CredentialService>,
-    catalogue: Arc<CatalogueService>,
+    search: Arc<SearchService>,
+    library: Arc<LibraryService>,
     playback: Arc<StreamingService>,
 ) -> Router {
-    router_with_source_tags(credential, catalogue, playback, SourceTags::Off)
+    router_with_source_tags(credential, search, library, playback, SourceTags::Off)
 }
 
 pub fn router_with_source_tags(
     credential: Arc<CredentialService>,
-    catalogue: Arc<CatalogueService>,
+    search: Arc<SearchService>,
+    library: Arc<LibraryService>,
     playback: Arc<StreamingService>,
     tags: SourceTags,
 ) -> Router {
-    whio_core::router(AppState::new(credential, catalogue, playback).with_source_tags(tags))
+    whio_core::router(AppState::new(credential, search, library, playback).with_source_tags(tags))
 }
 
 pub fn router_with_artwork(
     credential: Arc<CredentialService>,
-    catalogue: Arc<CatalogueService>,
+    search: Arc<SearchService>,
+    library: Arc<LibraryService>,
     playback: Arc<StreamingService>,
     artwork: Arc<ArtworkService>,
 ) -> Router {
-    whio_core::router(AppState::new(credential, catalogue, playback).with_artwork(artwork))
+    whio_core::router(AppState::new(credential, search, library, playback).with_artwork(artwork))
 }
 
 struct StubProvider {
@@ -128,23 +133,37 @@ impl StorePorts {
     pub fn catalogue_service(
         &self,
         providers: Vec<Arc<dyn CatalogueProvider>>,
-    ) -> Arc<CatalogueService> {
-        Arc::new(CatalogueService::with_providers(
+    ) -> (Arc<SearchService>, Arc<LibraryService>) {
+        let search = Arc::new(SearchService::with_providers(
             self.library(),
             self.catalogue(),
             self.sources(),
             self.state(),
             providers,
-        ))
+        ));
+        let library = Arc::new(LibraryService::new(
+            self.library(),
+            self.sources(),
+            self.state(),
+        ));
+
+        (search, library)
     }
 
-    pub fn bare_catalogue(&self) -> Arc<CatalogueService> {
-        Arc::new(CatalogueService::new(
+    pub fn bare_catalogue(&self) -> (Arc<SearchService>, Arc<LibraryService>) {
+        let search = Arc::new(SearchService::new(
             self.library(),
             self.catalogue(),
             self.sources(),
             self.state(),
-        ))
+        ));
+        let library = Arc::new(LibraryService::new(
+            self.library(),
+            self.sources(),
+            self.state(),
+        ));
+
+        (search, library)
     }
 
     pub fn streaming(&self, providers: Vec<Arc<dyn PlaybackProvider>>) -> Arc<StreamingService> {
@@ -160,18 +179,23 @@ impl Default for StorePorts {
 
 pub fn services(
     responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>,
-) -> (Arc<CatalogueService>, Arc<StreamingService>) {
+) -> (
+    Arc<SearchService>,
+    Arc<LibraryService>,
+    Arc<StreamingService>,
+) {
     let provider = Arc::new(StubProvider {
         responses: Mutex::new(responses.into()),
     });
     let ports = StorePorts::new();
-    let catalogue = ports.catalogue_service(vec![provider.clone() as Arc<dyn CatalogueProvider>]);
+    let (search, library) =
+        ports.catalogue_service(vec![provider.clone() as Arc<dyn CatalogueProvider>]);
     let playback = ports.streaming(vec![provider as Arc<dyn PlaybackProvider>]);
-    (catalogue, playback)
+    (search, library, playback)
 }
 
 pub fn app(responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>) -> Router {
-    let (catalogue, playback) = services(responses);
+    let (search, library, playback) = services(responses);
 
-    router(credential_service(), catalogue, playback)
+    router(credential_service(), search, library, playback)
 }

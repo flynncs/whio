@@ -1,8 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use uuid::Uuid;
 
-use thiserror::Error;
 use tokio::{sync::Semaphore, task::JoinSet};
+use uuid::Uuid;
 
 use crate::{
     catalogue::{
@@ -12,32 +11,22 @@ use crate::{
     providers::ProviderError,
     request::RequestContext,
     tracks::{
-        AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, AlbumTrack, ArtistId,
-        ArtistSummary, Availability, CatalogueWrite, GenreSummary, LibraryRead, LibraryState,
-        ProviderRegistry, SearchConfidence, SearchTerms, SourceIdentity, SourceLookup, StateStore,
-        Track, TrackId, TrackRepositoryError, best_field_quality,
+        AlbumSummary, AlbumTrack, ArtistSummary, CatalogueWrite, LibraryRead, SearchConfidence,
+        SearchTerms, SourceLookup, StateStore, TrackId, best_field_quality,
     },
 };
 
+use super::{CatalogueError, DedupMode};
+
 pub use crate::tracks::TrackHit as SearchHit;
 
-#[derive(Debug, Error)]
-pub enum CatalogueError {
-    #[error("catalogue provider failed")]
-    Provider(#[source] ProviderError),
-
-    #[error("track repository failed")]
-    Repository(#[source] TrackRepositoryError),
-}
-
-pub struct CatalogueService {
+pub struct SearchService {
     library: Arc<dyn LibraryRead>,
     catalogue: Arc<dyn CatalogueWrite>,
     source_lookup: Arc<dyn SourceLookup>,
     state: Arc<dyn StateStore>,
     providers: Vec<Arc<dyn CatalogueProvider>>,
-    registry: ProviderRegistry,
-    dedup_mode: super::DedupMode,
+    dedup_mode: DedupMode,
 }
 
 pub struct SearchOutcome {
@@ -47,17 +36,7 @@ pub struct SearchOutcome {
     pub confidence: SearchConfidence,
 }
 
-pub struct AlbumDetail {
-    pub album: AlbumSummary,
-    pub entries: Vec<AlbumEntry>,
-}
-
-pub struct ArtistDetail {
-    pub artist: ArtistSummary,
-    pub albums: Vec<AlbumSummary>,
-}
-
-impl CatalogueService {
+impl SearchService {
     pub fn new(
         library: Arc<dyn LibraryRead>,
         catalogue: Arc<dyn CatalogueWrite>,
@@ -70,8 +49,7 @@ impl CatalogueService {
             source_lookup: sources,
             state,
             providers: Vec::new(),
-            registry: ProviderRegistry::builtin(),
-            dedup_mode: super::DedupMode::Suppress,
+            dedup_mode: DedupMode::Suppress,
         }
     }
 
@@ -88,171 +66,13 @@ impl CatalogueService {
             source_lookup: sources,
             state,
             providers,
-            registry: ProviderRegistry::builtin(),
-            dedup_mode: super::DedupMode::Suppress,
+            dedup_mode: DedupMode::Suppress,
         }
     }
 
-    pub fn with_registry(mut self, registry: ProviderRegistry) -> Self {
-        self.registry = registry;
-        self
-    }
-
-    pub fn availability(&self, sources: &[SourceIdentity]) -> Availability {
-        self.registry.availability(sources)
-    }
-
-    pub fn with_dedup_mode(mut self, mode: super::DedupMode) -> Self {
+    pub fn with_dedup_mode(mut self, mode: DedupMode) -> Self {
         self.dedup_mode = mode;
         self
-    }
-
-    pub async fn track(&self, track_id: &TrackId) -> Result<Option<Track>, CatalogueError> {
-        self.library
-            .find_track(track_id)
-            .await
-            .map_err(CatalogueError::Repository)
-    }
-
-    pub async fn track_detail(
-        &self,
-        track_id: &TrackId,
-        user: Option<&Uuid>,
-    ) -> Result<Option<SearchHit>, CatalogueError> {
-        let Some(track) = self.track(track_id).await? else {
-            return Ok(None);
-        };
-        let album = self
-            .library
-            .find_album_for_track(track_id)
-            .await
-            .map_err(CatalogueError::Repository)?;
-        let sources = self.sources(track_id).await?;
-        let state = match user {
-            Some(user) => self
-                .state
-                .find_track_state(track_id, *user)
-                .await
-                .map_err(CatalogueError::Repository)?,
-            None => LibraryState::default(),
-        };
-
-        Ok(Some(
-            SearchHit::new(track, album, sources).with_state(state),
-        ))
-    }
-
-    pub async fn album_list(
-        &self,
-        offset: u32,
-        limit: u32,
-        order: AlbumOrder,
-        filter: AlbumListFilter,
-        user: Option<&Uuid>,
-    ) -> Result<Vec<AlbumSummary>, CatalogueError> {
-        self.library
-            .list_albums(offset, limit, order, filter, user.copied())
-            .await
-            .map_err(CatalogueError::Repository)
-    }
-
-    pub async fn genres(&self) -> Result<Vec<GenreSummary>, CatalogueError> {
-        self.library
-            .list_genres()
-            .await
-            .map_err(CatalogueError::Repository)
-    }
-
-    pub async fn album_count(
-        &self,
-        user: Option<&Uuid>,
-        filter: AlbumListFilter,
-    ) -> Result<u32, CatalogueError> {
-        self.library
-            .count_albums(user.copied(), filter)
-            .await
-            .map_err(CatalogueError::Repository)
-    }
-
-    pub async fn artist_count(&self, user: Option<&Uuid>) -> Result<u32, CatalogueError> {
-        self.library
-            .count_artists(user.copied())
-            .await
-            .map_err(CatalogueError::Repository)
-    }
-
-    pub async fn album_detail(
-        &self,
-        album_id: &AlbumId,
-        user: Option<&Uuid>,
-    ) -> Result<Option<AlbumDetail>, CatalogueError> {
-        let Some(album) = self
-            .library
-            .find_album_summary(album_id, user.copied())
-            .await
-            .map_err(CatalogueError::Repository)?
-        else {
-            return Ok(None);
-        };
-
-        let entries = self
-            .library
-            .find_album_entries(album_id, user.copied())
-            .await
-            .map_err(CatalogueError::Repository)?;
-
-        Ok(Some(AlbumDetail { album, entries }))
-    }
-
-    pub async fn artist_list(
-        &self,
-        offset: u32,
-        limit: u32,
-        user: Option<&Uuid>,
-    ) -> Result<Vec<ArtistSummary>, CatalogueError> {
-        self.library
-            .list_artists(offset, limit, user.copied())
-            .await
-            .map_err(CatalogueError::Repository)
-    }
-
-    pub async fn artist_detail(
-        &self,
-        artist_id: &ArtistId,
-        user: Option<&Uuid>,
-    ) -> Result<Option<ArtistDetail>, CatalogueError> {
-        let Some(artist) = self
-            .library
-            .find_artist(artist_id, user.copied())
-            .await
-            .map_err(CatalogueError::Repository)?
-        else {
-            return Ok(None);
-        };
-
-        let albums = self
-            .library
-            .find_albums_for_artist(artist_id, user.copied())
-            .await
-            .map_err(CatalogueError::Repository)?;
-        let state = match user {
-            Some(user) => self
-                .state
-                .find_artist_state(artist_id, *user)
-                .await
-                .map_err(CatalogueError::Repository)?,
-            None => LibraryState::default(),
-        };
-        let artist = ArtistSummary::new(artist, albums.len() as u32).with_state(state);
-
-        Ok(Some(ArtistDetail { artist, albums }))
-    }
-
-    pub async fn sources(&self, track_id: &TrackId) -> Result<Vec<SourceIdentity>, CatalogueError> {
-        self.source_lookup
-            .find_sources(track_id)
-            .await
-            .map_err(CatalogueError::Repository)
     }
 
     pub async fn search(
@@ -261,7 +81,7 @@ impl CatalogueService {
         user: Option<&Uuid>,
         context: &RequestContext,
     ) -> Result<SearchOutcome, CatalogueError> {
-        let window = provider_target(search);
+        let window = Self::provider_target(search);
         let query = search.query().as_str().to_owned();
 
         let known = self
@@ -313,15 +133,13 @@ impl CatalogueService {
         context: &RequestContext,
         budget: Duration,
     ) -> (Vec<SearchHit>, Option<CatalogueError>, bool) {
-        // Dropping the set aborts remaining tasks, so a disconnected
-        // request stops its providers instead of orphaning them.
         let mut tasks = JoinSet::new();
         let concurrency = Arc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY));
         let query = search.query().clone();
-        let target = provider_target(search);
+        let target = Self::provider_target(search);
         for (index, provider) in self.providers.iter().enumerate() {
             let permit = Arc::clone(&concurrency);
-            let pending = search_source(
+            let pending = Self::search_source(
                 Arc::clone(provider),
                 Arc::clone(&self.catalogue),
                 Arc::clone(&self.source_lookup),
@@ -331,7 +149,6 @@ impl CatalogueService {
                 context.clone(),
             );
             tasks.spawn(async move {
-                // Provider timeout starts after the concurrency permit is acquired.
                 let _permit = permit
                     .acquire_owned()
                     .await
@@ -360,7 +177,6 @@ impl CatalogueService {
         let mut hits = Vec::new();
         let mut first_error = None;
         let mut any_success = false;
-        // Preserve source priority regardless of completion order.
         for result in results.into_iter().flatten() {
             match result {
                 Ok(page) => {
@@ -368,8 +184,6 @@ impl CatalogueService {
                     hits.extend(page);
                 }
                 Err(CatalogueError::Provider(ProviderError::CredentialsRejected)) => {
-                    // the adapter has already marked the link stale; the remaining
-                    // sources still answer, so this only degrades the result.
                     tracing::warn!("catalogue source credentials were rejected");
                 }
                 Err(error) => {
@@ -397,7 +211,7 @@ impl CatalogueService {
         let limit = search.limit().get() as usize;
         let offset = search.offset().get() as usize;
         let terms = SearchTerms::new(search.query().as_str());
-        let confidence = library_confidence(&terms, &known);
+        let confidence = Self::library_confidence(&terms, &known);
 
         let mut positions: HashMap<TrackId, usize> = HashMap::new();
         let mut unique: Vec<SearchHit> = Vec::new();
@@ -425,7 +239,7 @@ impl CatalogueService {
             .into_iter()
             .partition(|hit| hit.match_quality().is_some());
         if !provider_hits.is_empty() {
-            library_hits.truncate(library_window(provider_target(search)) as usize);
+            library_hits.truncate(Self::library_window(Self::provider_target(search)) as usize);
         }
         let ordered = match confidence {
             SearchConfidence::Strong => library_hits
@@ -445,159 +259,149 @@ impl CatalogueService {
             confidence,
         })
     }
-}
 
-fn library_confidence(terms: &SearchTerms, hits: &[SearchHit]) -> SearchConfidence {
-    if hits.is_empty() {
-        return SearchConfidence::None;
+    fn library_confidence(terms: &SearchTerms, hits: &[SearchHit]) -> SearchConfidence {
+        if hits.is_empty() {
+            return SearchConfidence::None;
+        }
+        if terms.low_signal() {
+            return SearchConfidence::Weak;
+        }
+
+        let best = best_field_quality(
+            terms,
+            hits.iter().flat_map(|hit| {
+                std::iter::once(hit.track().title())
+                    .chain(hit.track().artists().iter().map(|artist| artist.name()))
+            }),
+        );
+
+        match best {
+            Some(quality) if quality.is_confident() => SearchConfidence::Strong,
+            _ => SearchConfidence::Weak,
+        }
     }
-    if terms.low_signal() {
-        return SearchConfidence::Weak;
+
+    fn library_window(window: u32) -> u32 {
+        if window <= 1 {
+            return window;
+        }
+
+        window - window.div_ceil(PROVIDER_WINDOW_DIVISOR)
     }
 
-    let best = best_field_quality(
-        terms,
-        hits.iter().flat_map(|hit| {
-            std::iter::once(hit.track().title())
-                .chain(hit.track().artists().iter().map(|artist| artist.name()))
-        }),
-    );
-
-    match best {
-        Some(quality) if quality.is_confident() => SearchConfidence::Strong,
-        _ => SearchConfidence::Weak,
+    fn provider_target(search: &CatalogueSearch) -> u32 {
+        u32::from(search.limit().get()).saturating_add(search.offset().get())
     }
-}
 
-#[cfg(test)]
-fn is_owned(sources: &[SourceIdentity]) -> bool {
-    sources
-        .iter()
-        .any(|source| source.provider_id().kind() == Some(crate::tracks::ProviderKind::Local))
+    async fn search_source(
+        provider: Arc<dyn CatalogueProvider>,
+        catalogue: Arc<dyn CatalogueWrite>,
+        sources: Arc<dyn SourceLookup>,
+        query: SearchQuery,
+        target: u32,
+        user: Option<Uuid>,
+        context: RequestContext,
+    ) -> Result<Vec<SearchHit>, CatalogueError> {
+        let mut hits = Vec::new();
+        let mut fetched = 0u32;
+        while fetched < target {
+            let page_size = (target - fetched).min(PROVIDER_PAGE_LIMIT);
+            let search = CatalogueSearch::new_with_offset(
+                query.clone(),
+                SearchLimit::new(page_size).expect("bounded provider limit is valid"),
+                SearchOffset::new(fetched).expect("bounded provider offset is valid"),
+            );
+            let candidates = provider
+                .search(&search, user.as_ref(), &context)
+                .await
+                .map_err(CatalogueError::Provider)?;
+            let page_len = candidates.len() as u32;
+            hits.extend(Self::materialize(&catalogue, &sources, candidates).await?);
+            fetched = fetched.saturating_add(page_len);
+            if page_len < page_size {
+                break;
+            }
+        }
+        Ok(hits)
+    }
+
+    async fn materialize(
+        catalogue: &Arc<dyn CatalogueWrite>,
+        sources: &Arc<dyn SourceLookup>,
+        candidates: Vec<CatalogueCandidate>,
+    ) -> Result<Vec<SearchHit>, CatalogueError> {
+        let mut hits = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let source = candidate.source().clone();
+            let artwork = candidate.artwork().cloned();
+            let album_metadata = candidate.album().cloned();
+            let metadata = candidate.metadata().clone();
+            let credits = metadata.artists().to_vec();
+
+            let track = catalogue
+                .get_or_create(source.clone(), metadata)
+                .await
+                .map_err(CatalogueError::Repository)?;
+
+            let album = match &album_metadata {
+                Some(album_metadata) => {
+                    let album = catalogue
+                        .resolve_or_create_album(album_metadata)
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+                    if let Some(provider) = album_metadata.provider() {
+                        catalogue
+                            .set_album_source(album.id(), provider)
+                            .await
+                            .map_err(CatalogueError::Repository)?;
+                    }
+                    catalogue
+                        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+
+                    Some(album)
+                }
+                None => {
+                    catalogue
+                        .clear_album_track(track.id())
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+
+                    None
+                }
+            };
+
+            for credit in &credits {
+                if let Some(provider) = credit.provider() {
+                    let artist = catalogue
+                        .resolve_or_create_artist(credit)
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+                    catalogue
+                        .set_artist_source(artist.id(), provider)
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+                }
+            }
+
+            if let Some(artwork) = artwork
+                && let Err(error) = sources.set_source_artwork(&source, &artwork).await
+            {
+                tracing::warn!(%error, "artwork could not be stored");
+            }
+
+            hits.push(SearchHit::new(track, album, vec![source]));
+        }
+        Ok(hits)
+    }
 }
 
 const PROVIDER_BUDGET: Duration = Duration::from_secs(45);
 const MAX_SOURCE_CONCURRENCY: usize = 4;
 const PROVIDER_PAGE_LIMIT: u32 = 25;
 const PROVIDER_WINDOW_DIVISOR: u32 = 4;
-
-fn library_window(window: u32) -> u32 {
-    if window <= 1 {
-        return window;
-    }
-
-    window - window.div_ceil(PROVIDER_WINDOW_DIVISOR)
-}
-
-/// Providers page independently, so the aggregate window is built by walking
-/// each provider from its first page until it has produced enough candidates.
-fn provider_target(search: &CatalogueSearch) -> u32 {
-    u32::from(search.limit().get()).saturating_add(search.offset().get())
-}
-
-async fn search_source(
-    provider: Arc<dyn CatalogueProvider>,
-    catalogue: Arc<dyn CatalogueWrite>,
-    sources: Arc<dyn SourceLookup>,
-    query: SearchQuery,
-    target: u32,
-    user: Option<Uuid>,
-    context: RequestContext,
-) -> Result<Vec<SearchHit>, CatalogueError> {
-    let mut hits = Vec::new();
-    let mut fetched = 0u32;
-    while fetched < target {
-        let page_size = (target - fetched).min(PROVIDER_PAGE_LIMIT);
-        let search = CatalogueSearch::new_with_offset(
-            query.clone(),
-            SearchLimit::new(page_size).expect("bounded provider limit is valid"),
-            SearchOffset::new(fetched).expect("bounded provider offset is valid"),
-        );
-        let candidates = provider
-            .search(&search, user.as_ref(), &context)
-            .await
-            .map_err(CatalogueError::Provider)?;
-        let page_len = candidates.len() as u32;
-        hits.extend(materialize(&catalogue, &sources, candidates).await?);
-        fetched = fetched.saturating_add(page_len);
-        // a short page means the provider has no more results for this query.
-        if page_len < page_size {
-            break;
-        }
-    }
-    Ok(hits)
-}
-
-async fn materialize(
-    catalogue: &Arc<dyn CatalogueWrite>,
-    sources: &Arc<dyn SourceLookup>,
-    candidates: Vec<CatalogueCandidate>,
-) -> Result<Vec<SearchHit>, CatalogueError> {
-    let mut hits = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let source = candidate.source().clone();
-        let artwork = candidate.artwork().cloned();
-        let album_metadata = candidate.album().cloned();
-        let metadata = candidate.metadata().clone();
-        let credits = metadata.artists().to_vec();
-
-        let track = catalogue
-            .get_or_create(source.clone(), metadata)
-            .await
-            .map_err(CatalogueError::Repository)?;
-
-        let album = match &album_metadata {
-            Some(album_metadata) => {
-                let album = catalogue
-                    .resolve_or_create_album(album_metadata)
-                    .await
-                    .map_err(CatalogueError::Repository)?;
-                if let Some(provider) = album_metadata.provider() {
-                    catalogue
-                        .set_album_source(album.id(), provider)
-                        .await
-                        .map_err(CatalogueError::Repository)?;
-                }
-                catalogue
-                    .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
-                    .await
-                    .map_err(CatalogueError::Repository)?;
-
-                Some(album)
-            }
-            None => {
-                catalogue
-                    .clear_album_track(track.id())
-                    .await
-                    .map_err(CatalogueError::Repository)?;
-
-                None
-            }
-        };
-
-        for credit in &credits {
-            if let Some(provider) = credit.provider() {
-                let artist = catalogue
-                    .resolve_or_create_artist(credit)
-                    .await
-                    .map_err(CatalogueError::Repository)?;
-                catalogue
-                    .set_artist_source(artist.id(), provider)
-                    .await
-                    .map_err(CatalogueError::Repository)?;
-            }
-        }
-
-        if let Some(artwork) = artwork
-            && let Err(error) = sources.set_source_artwork(&source, &artwork).await
-        {
-            tracing::warn!(%error, "artwork could not be stored");
-        }
-
-        hits.push(SearchHit::new(track, album, vec![source]));
-    }
-    Ok(hits)
-}
 
 #[cfg(test)]
 mod tests {
@@ -620,10 +424,16 @@ mod tests {
         request::RequestId,
         tracks::{
             AlbumMetadata, ArtistCredit, InMemoryTrackRepository, ProviderId, SourceIdentity,
-            SourceScope, TrackMetadata,
+            SourceScope, Track, TrackMetadata, TrackRepositoryError,
         },
     };
     use uuid::Uuid;
+
+    fn is_owned(sources: &[SourceIdentity]) -> bool {
+        sources
+            .iter()
+            .any(|source| source.provider_id().kind() == Some(crate::tracks::ProviderKind::Local))
+    }
 
     struct StubProvider {
         responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ProviderError>>>,
@@ -763,8 +573,8 @@ mod tests {
             Arc::clone(&self.store) as Arc<dyn StateStore>
         }
 
-        fn service(&self, providers: Vec<Arc<dyn CatalogueProvider>>) -> CatalogueService {
-            CatalogueService::with_providers(
+        fn service(&self, providers: Vec<Arc<dyn CatalogueProvider>>) -> SearchService {
+            SearchService::with_providers(
                 self.library(),
                 self.catalogue(),
                 self.sources(),
@@ -773,8 +583,8 @@ mod tests {
             )
         }
 
-        fn bare(&self) -> CatalogueService {
-            CatalogueService::new(
+        fn bare(&self) -> SearchService {
+            SearchService::new(
                 self.library(),
                 self.catalogue(),
                 self.sources(),
@@ -783,7 +593,7 @@ mod tests {
         }
     }
 
-    fn service(providers: Vec<Arc<dyn CatalogueProvider>>) -> CatalogueService {
+    fn service(providers: Vec<Arc<dyn CatalogueProvider>>) -> SearchService {
         Fixture::new().service(providers)
     }
 
@@ -1082,7 +892,7 @@ mod tests {
     #[tokio::test]
     async fn search_preserves_repository_errors() {
         let resolver = StubProvider::new(vec![Ok(vec![candidate("source-a", "Title")])]);
-        let service = CatalogueService::with_providers(
+        let service = SearchService::with_providers(
             Arc::new(FailingTrackRepository) as Arc<dyn LibraryRead>,
             Arc::new(FailingTrackRepository) as Arc<dyn CatalogueWrite>,
             Arc::new(FailingTrackRepository) as Arc<dyn SourceLookup>,

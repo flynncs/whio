@@ -16,12 +16,12 @@ use support::{StorePorts, credential_service_with_known_app_password, router};
 
 fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
     let ports = StorePorts::new();
-    let catalogue = ports.bare_catalogue();
+    let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
         Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
     ]);
 
-    router(credential, catalogue, playback)
+    router(credential, search, library, playback)
 }
 
 async fn get(app: axum::Router, uri: &str) -> Value {
@@ -113,12 +113,12 @@ async fn browse_app(
         .unwrap();
 
     let ports = StorePorts { store: repository };
-    let catalogue = ports.bare_catalogue();
+    let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
         Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
     ]);
 
-    router(credential, catalogue, playback)
+    router(credential, search, library, playback)
 }
 
 #[tokio::test]
@@ -417,8 +417,8 @@ async fn song_list_returns_mapped_tracks_for_a_login_token() {
         TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
-    let (catalogue, playback) = services(vec![Ok(vec![candidate])]);
-    let app = router(service.clone(), catalogue, playback);
+    let (search, library, playback) = services(vec![Ok(vec![candidate])]);
+    let app = router(service.clone(), search, library, playback);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
 
@@ -461,8 +461,9 @@ async fn source_tags_label_the_artist_in_both_song_surfaces() {
         TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
-    let (catalogue, playback) = services(vec![Ok(vec![candidate.clone()]), Ok(vec![candidate])]);
-    let app = router_with_source_tags(service, catalogue, playback, SourceTags::ArtistPrefix);
+    let (search, library, playback) =
+        services(vec![Ok(vec![candidate.clone()]), Ok(vec![candidate])]);
+    let app = router_with_source_tags(service, search, library, playback, SourceTags::ArtistPrefix);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
 
@@ -528,9 +529,9 @@ async fn source_tags_reach_an_album_track_listing() {
         .unwrap();
 
     let ports = StorePorts { store: repository };
-    let catalogue = ports.bare_catalogue();
+    let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![]);
-    let app = router_with_source_tags(service, catalogue, playback, SourceTags::ArtistPrefix);
+    let app = router_with_source_tags(service, search, library, playback, SourceTags::ArtistPrefix);
 
     let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
     let body = get(
@@ -580,8 +581,8 @@ async fn song_detail_returns_the_searched_song() {
         TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
-    let (catalogue, playback) = services(vec![Ok(vec![candidate])]);
-    let app = router(service.clone(), catalogue, playback);
+    let (search, library, playback) = services(vec![Ok(vec![candidate])]);
+    let app = router(service.clone(), search, library, playback);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
 

@@ -1821,7 +1821,7 @@ async fn dedup_candidates_return_local_matches_and_strip_qualifiers(pool: PgPool
 #[ignore = "requires PostgreSQL"]
 async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_identity(pool: PgPool) {
     use whio_core::{
-        catalogue::{CatalogueSearch, CatalogueService, SearchLimit, SearchQuery},
+        catalogue::{CatalogueSearch, SearchLimit, SearchQuery, SearchService},
         request::{RequestContext, RequestId},
     };
     let root = std::env::temp_dir().join(format!("whio-pg-dedup-{}", Uuid::now_v7()));
@@ -1855,7 +1855,7 @@ async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_iden
         .await
         .unwrap();
     let user = Uuid::now_v7();
-    let service = CatalogueService::new(
+    let service = SearchService::new(
         Arc::clone(&repository) as Arc<dyn LibraryRead>,
         Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
         Arc::clone(&repository) as Arc<dyn SourceLookup>,
