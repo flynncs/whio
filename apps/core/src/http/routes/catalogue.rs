@@ -12,7 +12,7 @@ use crate::{
     http::auth::AuthenticatedPrincipal,
     http::errors::ApiError,
     request::RequestContext,
-    tracks::Track,
+    tracks::Availability,
 };
 
 #[derive(Deserialize)]
@@ -49,11 +49,16 @@ pub(crate) struct TrackResponse {
     duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     match_quality: Option<String>,
+    ownership: String,
+    availability: String,
 }
 
-impl From<Track> for TrackResponse {
-    fn from(value: Track) -> Self {
-        let (id, metadata) = value.into_parts();
+impl TrackResponse {
+    fn from_hit(hit: SearchHit, availability: Availability) -> Self {
+        let match_quality = hit
+            .match_quality()
+            .map(|quality| quality.as_str().to_owned());
+        let (id, metadata) = hit.into_track().into_parts();
         let (title, artists, duration_ms) = metadata.into_parts();
         let artists = artists
             .iter()
@@ -65,19 +70,15 @@ impl From<Track> for TrackResponse {
             title,
             artists,
             duration_ms,
-            match_quality: None,
+            match_quality,
+            ownership: if availability.is_owned() {
+                "owned"
+            } else {
+                "provider"
+            }
+            .to_owned(),
+            availability: availability.as_str().to_owned(),
         }
-    }
-}
-
-impl From<SearchHit> for TrackResponse {
-    fn from(hit: SearchHit) -> Self {
-        let match_quality = hit
-            .match_quality()
-            .map(|quality| quality.as_str().to_owned());
-        let mut response = Self::from(hit.into_track());
-        response.match_quality = match_quality;
-        response
     }
 }
 
@@ -108,8 +109,19 @@ pub(crate) async fn search(
             error,
         })?;
 
+    let catalogue = state.catalogue();
+    let results = outcome
+        .tracks
+        .into_iter()
+        .map(|hit| {
+            let availability = catalogue.availability(hit.sources());
+
+            TrackResponse::from_hit(hit, availability)
+        })
+        .collect();
+
     Ok(Json(SearchResponse {
-        results: outcome.tracks.into_iter().map(Into::into).collect(),
+        results,
         confidence: outcome.confidence.as_str().to_owned(),
     }))
 }

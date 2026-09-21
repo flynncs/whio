@@ -17,7 +17,10 @@ use whio_core::{
     media::{self, HttpMediaFetcher},
     playback::{PlaybackProvider, StreamingService},
     providers::{LocalPlaybackProvider, ProviderError, YtmAdapter},
-    tracks::{CatalogueWrite, LibraryRead, PostgresTrackRepository, SourceLookup, StateStore},
+    tracks::{
+        CatalogueWrite, LibraryRead, PostgresTrackRepository, ProviderRegistry, SourceLookup,
+        StateStore, YOUTUBE_MUSIC_PROVIDER_ID,
+    },
 };
 
 async fn shutdown_signal() {
@@ -106,11 +109,15 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         credential_repository,
         config.credential_key.clone(),
     ));
-    let catalogue_providers: Vec<Arc<dyn CatalogueProvider>> = match &config.youtube_resolver {
-        YoutubeResolverConfig::Disabled => Vec::new(),
-        YoutubeResolverConfig::Enabled { .. } => {
-            vec![Arc::clone(&ytm) as Arc<dyn CatalogueProvider>]
-        }
+    let (catalogue_providers, enabled_providers): (
+        Vec<Arc<dyn CatalogueProvider>>,
+        Vec<&'static str>,
+    ) = match &config.youtube_resolver {
+        YoutubeResolverConfig::Disabled => (Vec::new(), Vec::new()),
+        YoutubeResolverConfig::Enabled { .. } => (
+            vec![Arc::clone(&ytm) as Arc<dyn CatalogueProvider>],
+            vec![YOUTUBE_MUSIC_PROVIDER_ID],
+        ),
     };
     let catalogue = Arc::new(
         CatalogueService::with_providers(
@@ -120,6 +127,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             Arc::clone(&state),
             catalogue_providers,
         )
+        .with_registry(ProviderRegistry::with_enabled(enabled_providers))
         .with_dedup_mode(config.dedup_mode),
     );
     let youtube_media_suffixes = vec![config.youtube_media_suffix.clone()];

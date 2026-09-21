@@ -13,7 +13,10 @@ use whio_core::{
 
 mod support;
 
-use support::{NATIVE_AUTH_QUERY, app, credential_service_with_storage_failure, router, services};
+use support::{
+    NATIVE_AUTH_QUERY, StorePorts, app, credential_service,
+    credential_service_with_storage_failure, router, services,
+};
 
 fn candidate() -> CatalogueCandidate {
     let provider_id = ProviderId::new("youtube_music".to_owned()).unwrap();
@@ -136,4 +139,77 @@ async fn unavailable_resolver_returns_service_unavailable() {
         body.as_ref(),
         br#"{"code":"catalogue_unavailable","message":"The catalogue is temporarily unavailable","request_id":"request-123"}"#
     );
+}
+
+#[tokio::test]
+async fn a_disabled_provider_track_is_reported_unavailable() {
+    use std::sync::Arc;
+    use whio_core::{
+        catalogue::CatalogueService,
+        tracks::{CatalogueWrite, InMemoryTrackRepository, ProviderRegistry},
+    };
+
+    fn source(provider: &str, scope: SourceScope, external_id: &str) -> SourceIdentity {
+        SourceIdentity::new(
+            ProviderId::new(provider.to_owned()).unwrap(),
+            scope,
+            external_id.to_owned(),
+        )
+        .unwrap()
+    }
+
+    let repository = Arc::new(InMemoryTrackRepository::default());
+    repository
+        .get_or_create(
+            source("local", SourceScope::Named("/music".to_owned()), "path-a"),
+            TrackMetadata::from_names("Owned Song".to_owned(), vec!["Artist".to_owned()], None)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .get_or_create(
+            source("youtube_music", SourceScope::Global, "vid-1"),
+            TrackMetadata::from_names("Provider Song".to_owned(), vec!["Artist".to_owned()], None)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let ports = StorePorts { store: repository };
+    let catalogue = Arc::new(
+        CatalogueService::with_providers(
+            ports.library(),
+            ports.catalogue(),
+            ports.sources(),
+            ports.state(),
+            Vec::new(),
+        )
+        .with_registry(ProviderRegistry::with_enabled(Vec::new())),
+    );
+    let playback = ports.streaming(Vec::new());
+    let response = router(credential_service(), catalogue, playback)
+        .oneshot(request(r#"{"query":"Song","limit":5}"#))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 8192).await.unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    let track = |title: &str| {
+        body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["title"] == json!(title))
+            .unwrap()
+    };
+
+    let owned = track("Owned Song");
+    assert_eq!(owned["ownership"], json!("owned"));
+    assert_eq!(owned["availability"], json!("owned"));
+
+    let provider = track("Provider Song");
+    assert_eq!(provider["ownership"], json!("provider"));
+    assert_eq!(provider["availability"], json!("unavailable"));
 }

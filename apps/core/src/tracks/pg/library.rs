@@ -16,7 +16,7 @@ use super::decode::{
     album_states, album_summaries_by_ids, attach_album_state, attach_album_states,
     attach_artist_states, credits_for_tracks, decode_album, decode_album_summary, decode_artist,
     decode_artist_summary, decode_membership, decode_track, hits_from_rows, repository_error,
-    track_states,
+    sources_for_tracks, track_states,
 };
 use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_ENGAGED, ALBUM_OWNED,
@@ -175,6 +175,7 @@ impl LibraryRead for PgStore {
 
         let track_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
         let mut credits = credits_for_tracks(&self.pool, &track_ids).await?;
+        let mut sources = sources_for_tracks(&self.pool, &track_ids).await?;
         let states = track_states(&self.pool, user, &track_ids).await?;
         let mut entries = Vec::with_capacity(rows.len());
 
@@ -201,8 +202,13 @@ impl LibraryRead for PgStore {
             )?;
             let membership = decode_membership(disc_number, track_number, position)?;
             let state = states.get(&id).copied().unwrap_or_default();
+            let sources = sources.remove(&id).unwrap_or_default();
 
-            entries.push(AlbumEntry::new(track, membership).with_state(state));
+            entries.push(
+                AlbumEntry::new(track, membership)
+                    .with_state(state)
+                    .with_sources(sources),
+            );
         }
 
         Ok(entries)

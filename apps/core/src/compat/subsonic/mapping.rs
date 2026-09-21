@@ -32,7 +32,7 @@ pub(crate) fn child_from_entry(
         entry.track(),
         Some(album_id),
         Some(album_title),
-        &[],
+        entry.sources(),
         tags,
         Some(entry.membership()),
         entry.state(),

@@ -489,6 +489,79 @@ async fn source_tags_label_the_artist_in_both_song_surfaces() {
 }
 
 #[tokio::test]
+async fn source_tags_reach_an_album_track_listing() {
+    use support::router_with_source_tags;
+    use whio_core::{
+        compat::SourceTags,
+        tracks::{
+            AlbumMetadata, AlbumTrack, ArtistCredit, CatalogueWrite, ProviderId, SourceIdentity,
+            SourceScope, TrackMetadata,
+        },
+    };
+
+    let (service, secret) = credential_service_with_known_app_password();
+    let repository = Arc::new(InMemoryTrackRepository::default());
+    let album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Discovery".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(
+            SourceIdentity::new(
+                ProviderId::new("youtube_music".to_owned()).unwrap(),
+                SourceScope::Global,
+                "vid-1".to_owned(),
+            )
+            .unwrap(),
+            TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let ports = StorePorts { store: repository };
+    let catalogue = ports.bare_catalogue();
+    let playback = ports.streaming(vec![]);
+    let app = router_with_source_tags(service, catalogue, playback, SourceTags::ArtistPrefix);
+
+    let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
+    let body = get(
+        app.clone(),
+        &format!(
+            "/compat/subsonic/rest/getAlbum.view?{auth}&id={}",
+            album.id()
+        ),
+    )
+    .await;
+    assert_eq!(
+        body["subsonic-response"]["album"]["song"][0]["artist"],
+        json!("[YTM] artist")
+    );
+
+    let (_, login) = post_login(app.clone(), "flynn", &secret).await;
+    let token = login["token"].as_str().unwrap();
+    let (status, _, body) = get_authed(
+        app,
+        &format!(
+            "/compat/navidrome/api/song?album_id={}&_start=0&_end=9",
+            album.id()
+        ),
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["artist"], json!("[YTM] artist"));
+}
+
+#[tokio::test]
 async fn song_detail_returns_the_searched_song() {
     use support::services;
     use whio_core::{

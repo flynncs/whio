@@ -5,10 +5,10 @@ mod ports;
 
 pub use domain::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
-    AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, DuplicateCandidate,
-    DuplicateSource, GenreSummary, KeepReason, LOCAL_PROVIDER_ID, LibraryState, MATCHER_VERSION,
-    MAX_RATING, MIN_RATING, MatchDecision, MatchQuality, MatchRecord, MatchStatus, ParsedTitle,
-    ProviderDescriptor, ProviderId, ProviderKind, ProviderRegistry, RecordingIndex,
+    AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, Availability,
+    DuplicateCandidate, DuplicateSource, GenreSummary, KeepReason, LOCAL_PROVIDER_ID, LibraryState,
+    MATCHER_VERSION, MAX_RATING, MIN_RATING, MatchDecision, MatchQuality, MatchRecord, MatchStatus,
+    ParsedTitle, ProviderDescriptor, ProviderId, ProviderKind, ProviderRegistry, RecordingIndex,
     SearchConfidence, SearchTerms, SourceIdentity, SourceKind, SourceScope, SplitArtist,
     SplitArtistRow, Starred, StateTarget, Track, TrackHit, TrackId, TrackMetadata, ValidationError,
     YOUTUBE_MUSIC_PROVIDER_ID, checked_rating, from_ytm,

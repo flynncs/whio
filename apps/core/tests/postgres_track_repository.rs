@@ -571,8 +571,9 @@ async fn album_sources_and_membership_round_trip(pool: PgPool) {
         .resolve_or_create_album(&album("Discovery"))
         .await
         .unwrap();
+    let track_source = source("local-track");
     let track = repository
-        .get_or_create(source("local-track"), metadata("Song", &["Artist"], None))
+        .get_or_create(track_source.clone(), metadata("Song", &["Artist"], None))
         .await
         .unwrap();
     let album_source = source("youtube_music");
@@ -602,6 +603,11 @@ async fn album_sources_and_membership_round_trip(pool: PgPool) {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].track().id(), track.id());
     assert_eq!(entries[0].membership(), &membership);
+    assert_eq!(
+        entries[0].sources(),
+        std::slice::from_ref(&track_source),
+        "an album entry carries the track's sources so a facade can label it"
+    );
     assert_eq!(
         repository
             .find_album_for_track(track.id())

@@ -74,7 +74,7 @@ fn song_from_entry(entry: &AlbumEntry, album: &AlbumSummary, tags: SourceTags) -
     Song {
         id: track.id().to_string(),
         title: track.title().to_owned(),
-        artist: tags.artist(track.artists(), &[]),
+        artist: tags.artist(track.artists(), entry.sources()),
         album: Some(album.album().title().to_owned()),
         album_id: Some(album.album().id().to_string()),
         album_artist: album.album_artist().map(|artist| artist.name().to_owned()),

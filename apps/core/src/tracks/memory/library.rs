@@ -73,6 +73,7 @@ impl LibraryRead for InMemoryTrackRepository {
                 indexes.by_track_id.get(&track_id).map(|entry| {
                     AlbumEntry::new(entry.track.clone(), membership)
                         .with_state(track_state(&indexes, &track_id, user))
+                        .with_sources(entry.sources.clone())
                 })
             })
             .collect();

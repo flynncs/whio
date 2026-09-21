@@ -6,7 +6,8 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    Artist, ArtistCredit, ArtistId, LibraryState, MatchQuality, Track, ValidationError,
+    Artist, ArtistCredit, ArtistId, LibraryState, MatchQuality, SourceIdentity, Track,
+    ValidationError,
     text::{optional, required},
 };
 
@@ -415,6 +416,7 @@ pub struct AlbumEntry {
     track: Track,
     membership: AlbumTrack,
     state: LibraryState,
+    sources: Vec<SourceIdentity>,
 }
 
 impl AlbumEntry {
@@ -423,6 +425,7 @@ impl AlbumEntry {
             track,
             membership,
             state: LibraryState::default(),
+            sources: Vec::new(),
         }
     }
 
@@ -431,8 +434,17 @@ impl AlbumEntry {
         self
     }
 
+    pub fn with_sources(mut self, sources: Vec<SourceIdentity>) -> Self {
+        self.sources = sources;
+        self
+    }
+
     pub fn state(&self) -> LibraryState {
         self.state
+    }
+
+    pub fn sources(&self) -> &[SourceIdentity] {
+        &self.sources
     }
 
     pub fn track(&self) -> &Track {

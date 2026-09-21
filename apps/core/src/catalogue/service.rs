@@ -13,9 +13,9 @@ use crate::{
     request::RequestContext,
     tracks::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, AlbumTrack, ArtistId,
-        ArtistSummary, CatalogueWrite, GenreSummary, LibraryRead, LibraryState, SearchConfidence,
-        SearchTerms, SourceIdentity, SourceLookup, StateStore, Track, TrackId,
-        TrackRepositoryError, best_field_quality,
+        ArtistSummary, Availability, CatalogueWrite, GenreSummary, LibraryRead, LibraryState,
+        ProviderRegistry, SearchConfidence, SearchTerms, SourceIdentity, SourceLookup, StateStore,
+        Track, TrackId, TrackRepositoryError, best_field_quality,
     },
 };
 
@@ -36,6 +36,7 @@ pub struct CatalogueService {
     source_lookup: Arc<dyn SourceLookup>,
     state: Arc<dyn StateStore>,
     providers: Vec<Arc<dyn CatalogueProvider>>,
+    registry: ProviderRegistry,
     dedup_mode: super::DedupMode,
 }
 
@@ -69,6 +70,7 @@ impl CatalogueService {
             source_lookup: sources,
             state,
             providers: Vec::new(),
+            registry: ProviderRegistry::builtin(),
             dedup_mode: super::DedupMode::Suppress,
         }
     }
@@ -86,8 +88,18 @@ impl CatalogueService {
             source_lookup: sources,
             state,
             providers,
+            registry: ProviderRegistry::builtin(),
             dedup_mode: super::DedupMode::Suppress,
         }
+    }
+
+    pub fn with_registry(mut self, registry: ProviderRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    pub fn availability(&self, sources: &[SourceIdentity]) -> Availability {
+        self.registry.availability(sources)
     }
 
     pub fn with_dedup_mode(mut self, mode: super::DedupMode) -> Self {

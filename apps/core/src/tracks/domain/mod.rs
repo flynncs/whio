@@ -32,7 +32,7 @@ pub use source::{
     LOCAL_PROVIDER_ID, ProviderId, ProviderKind, SourceIdentity, SourceScope,
     YOUTUBE_MUSIC_PROVIDER_ID,
 };
-pub use source_kind::{ProviderDescriptor, ProviderRegistry, SourceKind};
+pub use source_kind::{Availability, ProviderDescriptor, ProviderRegistry, SourceKind};
 pub use state::{
     GenreSummary, LibraryState, MAX_RATING, MIN_RATING, Starred, StateTarget, checked_rating,
 };
