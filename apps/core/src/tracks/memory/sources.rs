@@ -55,6 +55,18 @@ impl SourceLookup for InMemoryTrackRepository {
             .unwrap_or_default())
     }
 
+    async fn find_provider_entity_state(
+        &self,
+        source: &SourceIdentity,
+    ) -> Result<Option<ProviderEntityState>, TrackRepositoryError> {
+        let indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        Ok(indexes.provider_entity_state.get(source).cloned())
+    }
+
     async fn set_source_artwork(
         &self,
         source: &SourceIdentity,

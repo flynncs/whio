@@ -3,8 +3,8 @@ use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::tracks::{
-    Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, SourceFileFacts,
-    SourceIdentity, Track, TrackId, TrackMetadata, TrackRepositoryError,
+    Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, ProviderEntityState,
+    SourceFileFacts, SourceIdentity, Track, TrackId, TrackMetadata, TrackRepositoryError,
 };
 
 use crate::tracks::CatalogueWrite;
@@ -102,6 +102,40 @@ impl CatalogueWrite for PgStore {
         .bind(source.provider_id().as_str())
         .bind(encode_source_scope(source.source_scope()))
         .bind(source.external_id())
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(repository_error)
+    }
+
+    async fn set_provider_entity_state(
+        &self,
+        source: &SourceIdentity,
+        state: &ProviderEntityState,
+    ) -> Result<(), TrackRepositoryError> {
+        let reported_count = state
+            .reported_count()
+            .map(i32::try_from)
+            .transpose()
+            .map_err(|_| TrackRepositoryError::InvalidData)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO provider_entity_state
+                (provider_id, source_scope, external_id, fetched_at, reported_count, last_error)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (provider_id, source_scope, external_id) DO UPDATE
+            SET fetched_at = EXCLUDED.fetched_at,
+                reported_count = EXCLUDED.reported_count,
+                last_error = EXCLUDED.last_error
+            "#,
+        )
+        .bind(source.provider_id().as_str())
+        .bind(encode_source_scope(source.source_scope()))
+        .bind(source.external_id())
+        .bind(state.fetched_at())
+        .bind(reported_count)
+        .bind(state.last_error())
         .execute(&self.pool)
         .await
         .map(|_| ())

@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::tracks::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, Artist, ArtistId,
-    ArtistSummary, GenreSummary, SourceIdentity, Track, TrackHit, TrackId,
+    ArtistSummary, GenreSummary, ProviderEntityState, SourceIdentity, Track, TrackHit, TrackId,
 };
 
 use super::TrackRepositoryError;
@@ -154,6 +154,13 @@ pub trait SourceLookup: Send + Sync {
         _artist_id: &ArtistId,
     ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
         Ok(Vec::new())
+    }
+
+    async fn find_provider_entity_state(
+        &self,
+        _source: &SourceIdentity,
+    ) -> Result<Option<ProviderEntityState>, TrackRepositoryError> {
+        Ok(None)
     }
 
     async fn set_source_artwork(

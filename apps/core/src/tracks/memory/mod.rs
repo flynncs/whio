@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::tracks::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
     AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary, ArtworkRef, GenreSummary,
-    LibraryState, MatchQuality, ProviderId, ProviderKind, SearchTerms, SourceFileFacts, Starred,
-    StateTarget, Track, TrackHit, TrackMetadata, checked_rating,
+    LibraryState, MatchQuality, ProviderEntityState, ProviderId, ProviderKind, SearchTerms,
+    SourceFileFacts, Starred, StateTarget, Track, TrackHit, TrackMetadata, checked_rating,
     domain::{album_quality, normalize_for_matching, track_quality},
 };
 
@@ -46,6 +46,7 @@ struct TrackIndexes {
     pub(super) album_by_text: HashMap<(Option<ArtistId>, String), AlbumId>,
     pub(super) album_sources: HashMap<AlbumId, Vec<SourceIdentity>>,
     pub(super) artist_sources: HashMap<ArtistId, Vec<SourceIdentity>>,
+    pub(super) provider_entity_state: HashMap<SourceIdentity, ProviderEntityState>,
     pub(super) album_tracks: HashMap<AlbumId, Vec<(TrackId, AlbumTrack)>>,
     pub(super) album_created_at: HashMap<AlbumId, chrono::DateTime<chrono::Utc>>,
     pub(super) track_favorites: HashMap<(Uuid, TrackId), StarredAt>,

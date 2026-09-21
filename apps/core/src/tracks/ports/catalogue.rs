@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 
 use crate::tracks::{
-    Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, SourceIdentity,
-    Track, TrackId, TrackMetadata,
+    Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, ProviderEntityState,
+    SourceIdentity, Track, TrackId, TrackMetadata,
 };
 
 use super::{SourceFileFacts, TrackRepositoryError};
@@ -61,6 +61,14 @@ pub trait CatalogueWrite: Send + Sync {
         &self,
         _artist_id: &ArtistId,
         _source: &SourceIdentity,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn set_provider_entity_state(
+        &self,
+        _source: &SourceIdentity,
+        _state: &ProviderEntityState,
     ) -> Result<(), TrackRepositoryError> {
         Ok(())
     }

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 
 use crate::tracks::{
-    AlbumId, ArtistId, ArtworkRef, ProviderId, SourceFileFacts, SourceIdentity, SourceScope,
-    TrackId, TrackRepositoryError,
+    AlbumId, ArtistId, ArtworkRef, ProviderEntityState, ProviderId, SourceFileFacts,
+    SourceIdentity, SourceScope, TrackId, TrackRepositoryError,
 };
 
 use crate::tracks::SourceLookup;
@@ -81,6 +81,37 @@ impl SourceLookup for PgStore {
                 decode_source(provider_id, source_scope, external_id)
             })
             .collect()
+    }
+
+    async fn find_provider_entity_state(
+        &self,
+        source: &SourceIdentity,
+    ) -> Result<Option<ProviderEntityState>, TrackRepositoryError> {
+        let row =
+            sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>, Option<i32>, Option<String>)>(
+                r#"
+            SELECT fetched_at, reported_count, last_error
+            FROM provider_entity_state
+            WHERE provider_id = $1 AND source_scope = $2 AND external_id = $3
+            "#,
+            )
+            .bind(source.provider_id().as_str())
+            .bind(encode_source_scope(source.source_scope()))
+            .bind(source.external_id())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(repository_error)?;
+
+        row.map(|(fetched_at, reported_count, last_error)| {
+            let reported_count = reported_count
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| TrackRepositoryError::InvalidData)?;
+
+            ProviderEntityState::new(fetched_at, reported_count, last_error)
+                .map_err(|_| TrackRepositoryError::InvalidData)
+        })
+        .transpose()
     }
 
     async fn set_source_artwork(

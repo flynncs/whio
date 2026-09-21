@@ -132,6 +132,22 @@ impl CatalogueWrite for InMemoryTrackRepository {
         Ok(())
     }
 
+    async fn set_provider_entity_state(
+        &self,
+        source: &SourceIdentity,
+        state: &ProviderEntityState,
+    ) -> Result<(), TrackRepositoryError> {
+        let mut indexes = self
+            .indexes
+            .lock()
+            .map_err(|_| TrackRepositoryError::Unavailable)?;
+
+        indexes
+            .provider_entity_state
+            .insert(source.clone(), state.clone());
+        Ok(())
+    }
+
     async fn set_album_track(
         &self,
         album_id: &AlbumId,
