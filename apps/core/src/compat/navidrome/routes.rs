@@ -197,6 +197,44 @@ fn list_response<T: serde::Serialize>(items: &[T], total: u32) -> Response {
     response
 }
 
+pub(crate) async fn playlist_list(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+) -> Response {
+    match service::playlist_list(
+        state.playlists(),
+        state.credential(),
+        &token.0,
+        state.source_tags(),
+    )
+    .await
+    {
+        Ok(playlists) => Json(playlists).into_response(),
+        Err(error) => song_error(error, &context),
+    }
+}
+
+pub(crate) async fn playlist_detail(
+    State(state): State<AppState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+    Path(id): Path<String>,
+) -> Response {
+    match service::playlist_detail(
+        state.playlists(),
+        state.credential(),
+        &token.0,
+        &id,
+        state.source_tags(),
+    )
+    .await
+    {
+        Ok(playlist) => Json(playlist).into_response(),
+        Err(error) => song_error(error, &context),
+    }
+}
+
 fn song_error(error: SongError, context: &RequestContext) -> Response {
     match error {
         SongError::Unauthorized => errors::error(StatusCode::UNAUTHORIZED, "Not authenticated"),
@@ -211,6 +249,10 @@ fn song_error(error: SongError, context: &RequestContext) -> Response {
         }
         SongError::Catalogue(error) => {
             tracing::error!(error = %error, request_id = context.request_id().as_str(), "catalogue read failed");
+            errors::error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error.")
+        }
+        SongError::Playlist(error) => {
+            tracing::error!(error = %error, request_id = context.request_id().as_str(), "playlist read failed");
             errors::error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error.")
         }
     }

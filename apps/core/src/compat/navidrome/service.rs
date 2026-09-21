@@ -9,15 +9,16 @@ use crate::{
     },
     compat::SourceTags,
     identity::service::{AuthError, CredentialService},
+    playlists::{PlaylistDetail, PlaylistError, PlaylistService},
     request::RequestContext,
     tracks::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistSummary,
-        GenreSummary, TrackId,
+        GenreSummary, PlaylistId, TrackId,
     },
 };
 
 use super::{
-    dto::{Album, Artist, Genre, Song, SongListQuery},
+    dto::{Album, Artist, Genre, Playlist, Song, SongListQuery},
     session,
 };
 
@@ -37,6 +38,9 @@ pub(crate) enum SongError {
 
     #[error("catalogue search failed")]
     Catalogue(#[source] CatalogueError),
+
+    #[error("playlist request failed")]
+    Playlist(#[source] PlaylistError),
 }
 
 fn song_from(hit: &SearchHit, tags: SourceTags) -> Song {
@@ -322,6 +326,68 @@ pub(crate) async fn album_detail(
         .ok_or(SongError::NotFound)?;
 
     Ok(album_from_summary(&detail.album))
+}
+
+fn playlist_from(detail: &PlaylistDetail, owner: Uuid, tags: SourceTags) -> Playlist {
+    let playlist = &detail.playlist;
+
+    Playlist {
+        id: playlist.id().to_string(),
+        name: playlist.name().to_owned(),
+        comment: playlist.comment().map(str::to_owned),
+        owner: owner.to_string(),
+        public: playlist.is_public(),
+        song_count: playlist.track_count(),
+        duration: playlist.duration_ms() as f32 / 1000.0,
+        created_at: playlist.created_at().to_rfc3339(),
+        updated_at: playlist.updated_at().to_rfc3339(),
+        songs: detail
+            .entries
+            .iter()
+            .map(|hit| song_from(hit, tags))
+            .collect(),
+    }
+}
+
+pub(crate) async fn playlist_list(
+    playlists: &PlaylistService,
+    credential: &CredentialService,
+    token: &str,
+    tags: SourceTags,
+) -> Result<Vec<Playlist>, SongError> {
+    let user = authorize(credential, token).await?;
+    let summaries = playlists.list(user).await.map_err(SongError::Playlist)?;
+    let mut result = Vec::with_capacity(summaries.len());
+
+    for summary in summaries {
+        if let Some(detail) = playlists
+            .detail(user, summary.id())
+            .await
+            .map_err(SongError::Playlist)?
+        {
+            result.push(playlist_from(&detail, user, tags));
+        }
+    }
+
+    Ok(result)
+}
+
+pub(crate) async fn playlist_detail(
+    playlists: &PlaylistService,
+    credential: &CredentialService,
+    token: &str,
+    raw_id: &str,
+    tags: SourceTags,
+) -> Result<Playlist, SongError> {
+    let user = authorize(credential, token).await?;
+    let playlist_id: PlaylistId = raw_id.parse().map_err(|_| SongError::NotFound)?;
+    let detail = playlists
+        .detail(user, &playlist_id)
+        .await
+        .map_err(SongError::Playlist)?
+        .ok_or(SongError::NotFound)?;
+
+    Ok(playlist_from(&detail, user, tags))
 }
 
 pub(crate) async fn artist_list(

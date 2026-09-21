@@ -22,5 +22,7 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/api/artist", get(routes::artist_list))
         .route("/api/artist/{id}", get(routes::artist_detail))
         .route("/api/genre", get(routes::genre_list))
+        .route("/api/playlist", get(routes::playlist_list))
+        .route("/api/playlist/{id}", get(routes::playlist_detail))
         .fallback(errors::not_found)
 }

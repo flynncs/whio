@@ -845,6 +845,86 @@ async fn subsonic_playlist_verbs_round_trip() {
 }
 
 #[tokio::test]
+async fn navidrome_playlist_surface_lists_its_songs() {
+    use whio_core::{
+        catalogue::{LibraryService, SearchService},
+        playlists::PlaylistService,
+        tracks::{
+            CatalogueWrite, PlaylistStore, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+        },
+    };
+
+    let (service, secret) = credential_service_with_known_app_password();
+    let ports = StorePorts::new();
+    let track = ports
+        .store
+        .get_or_create(
+            SourceIdentity::new(
+                ProviderId::new("local".to_owned()).unwrap(),
+                SourceScope::Named("/music".to_owned()),
+                "path-a".to_owned(),
+            )
+            .unwrap(),
+            TrackMetadata::from_names("Owned".to_owned(), vec!["Artist".to_owned()], Some(1_000))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let library = Arc::new(LibraryService::new(
+        ports.library(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let search = Arc::new(SearchService::new(
+        ports.library(),
+        ports.catalogue(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let playlists = Arc::new(PlaylistService::new(
+        Arc::clone(&ports.store) as Arc<dyn PlaylistStore>,
+        Arc::clone(&library),
+    ));
+    let playback = ports.streaming(vec![]);
+    let app = router_with_playlists(service, search, library, playlists, playback);
+
+    let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
+    let body = get(
+        app.clone(),
+        &format!(
+            "/compat/subsonic/rest/createPlaylist.view?{auth}&name=Trip&songId={}",
+            track.id()
+        ),
+    )
+    .await;
+    let playlist_id = body["subsonic-response"]["playlist"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (_, login) = post_login(app.clone(), "flynn", &secret).await;
+    let token = login["token"].as_str().unwrap();
+
+    let (status, _, body) = get_authed(app.clone(), "/compat/navidrome/api/playlist", token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["name"], json!("Trip"));
+    assert_eq!(body[0]["songCount"], json!(1));
+    assert_eq!(body[0]["songs"][0]["title"], json!("Owned"));
+
+    let (status, _, body) = get_authed(
+        app,
+        &format!("/compat/navidrome/api/playlist/{playlist_id}"),
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["songs"].as_array().unwrap().len(), 1);
+    assert_eq!(body["songs"][0]["artist"], json!("Artist"));
+}
+
+#[tokio::test]
 async fn song_detail_returns_the_searched_song() {
     use support::services;
     use whio_core::{

@@ -139,6 +139,21 @@ pub(crate) struct Artist {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Playlist {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) comment: Option<String>,
+    pub(crate) owner: String,
+    pub(crate) public: bool,
+    pub(crate) song_count: u32,
+    pub(crate) duration: f32,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+    pub(crate) songs: Vec<Song>,
+}
+
+#[derive(Serialize)]
 pub(crate) struct NdError {
     pub(crate) error: String,
 }
