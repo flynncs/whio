@@ -84,6 +84,18 @@ fn load_library(path: &str) -> Vec<MatchRecord> {
     }
 }
 
+fn record_json(record: &MatchRecord) -> Value {
+    json!({
+        "id": record.id(),
+        "title": record.title(),
+        "artists": record.artists(),
+        "duration_ms": record.duration_ms(),
+        "album": record.album(),
+        "musicbrainz_recording_id": record.recording_id(),
+        "isrc": record.isrc(),
+    })
+}
+
 fn same_audio(local: &MatchRecord, label: &Value) -> bool {
     let Some(title) = label.get("title").and_then(Value::as_str) else {
         return false;
@@ -177,9 +189,16 @@ fn evaluate() {
 
     let mut overall = Metrics::default();
     let mut splits = [Metrics::default(), Metrics::default()];
+    let mut rows = Vec::new();
     for (query, entry) in cache.as_object().unwrap() {
         let metrics = &mut splits[bucket(query)];
-        for result in entry["results"].as_array().into_iter().flatten() {
+        for (position, result) in entry["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let video = result["videoId"].as_str().unwrap_or_default();
             let decision = index.match_record(&from_ytm(result), 0);
             *overall
                 .status
@@ -197,52 +216,84 @@ fn evaluate() {
                 .reason
                 .entry(decision.reason().to_owned())
                 .or_default() += 1;
-            let Some(label) = labels
-                .get(result["videoId"].as_str().unwrap_or_default())
-                .filter(|label| !label.is_null())
-            else {
-                continue;
-            };
-            let recording = label["recording_id"].as_str().unwrap_or_default();
-            let expected = by_recording.get(recording);
+
             let target = decision.target();
-            match expected {
-                Some(ids) if ids.iter().any(|id| Some(id.as_str()) == target) => {
-                    overall.confirmed_positive += 1;
-                    metrics.confirmed_positive += 1;
-                }
-                Some(_) => {
-                    let same = target
-                        .and_then(|id| by_id.get(id))
-                        .is_some_and(|local| same_audio(local, label));
-                    if same {
-                        overall.same_audio_other_entity += 1;
-                        metrics.same_audio_other_entity += 1;
-                    } else {
-                        overall.false_negative += 1;
-                        metrics.false_negative += 1;
-                    }
-                }
+            let label = labels.get(video).filter(|label| !label.is_null());
+            let classification = match label {
                 None => {
-                    overall.resolved_recording_absent += 1;
-                    metrics.resolved_recording_absent += 1;
-                    let Some(target) = target else {
-                        overall.negative_no_target += 1;
-                        metrics.negative_no_target += 1;
-                        continue;
-                    };
-                    let same = by_id
-                        .get(target)
-                        .is_some_and(|local| same_audio(local, label));
-                    if same {
-                        overall.same_audio_other_entity += 1;
-                        metrics.same_audio_other_entity += 1;
+                    if target.is_some() {
+                        "unlabelled_with_target"
                     } else {
-                        overall.confirmed_false_positive += 1;
-                        metrics.confirmed_false_positive += 1;
+                        "unlabelled_no_target"
                     }
                 }
-            }
+                Some(label) => {
+                    let recording = label["recording_id"].as_str().unwrap_or_default();
+                    match by_recording.get(recording) {
+                        Some(ids) if ids.iter().any(|id| Some(id.as_str()) == target) => {
+                            overall.confirmed_positive += 1;
+                            metrics.confirmed_positive += 1;
+                            "confirmed_positive"
+                        }
+                        Some(_) => {
+                            if target
+                                .and_then(|id| by_id.get(id))
+                                .is_some_and(|local| same_audio(local, label))
+                            {
+                                overall.same_audio_other_entity += 1;
+                                metrics.same_audio_other_entity += 1;
+                                "same_audio_other_entity"
+                            } else {
+                                overall.false_negative += 1;
+                                metrics.false_negative += 1;
+                                "false_negative"
+                            }
+                        }
+                        None => {
+                            overall.resolved_recording_absent += 1;
+                            metrics.resolved_recording_absent += 1;
+                            match target {
+                                None => {
+                                    overall.negative_no_target += 1;
+                                    metrics.negative_no_target += 1;
+                                    "negative_no_target"
+                                }
+                                Some(target) => {
+                                    if by_id
+                                        .get(target)
+                                        .is_some_and(|local| same_audio(local, label))
+                                    {
+                                        overall.same_audio_other_entity += 1;
+                                        metrics.same_audio_other_entity += 1;
+                                        "same_audio_other_entity"
+                                    } else {
+                                        overall.confirmed_false_positive += 1;
+                                        metrics.confirmed_false_positive += 1;
+                                        "confirmed_false_positive"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            rows.push(json!({
+                "query": query,
+                "position": position,
+                "video_id": video,
+                "remote": result,
+                "decision": {
+                    "status": decision.status().as_str(),
+                    "reason": decision.reason(),
+                    "target": decision.target(),
+                    "candidates": decision.candidates(),
+                    "examined": decision.examined(),
+                },
+                "target_local": target.and_then(|id| by_id.get(id)).map(record_json),
+                "oracle": label,
+                "classification": classification,
+            }));
         }
     }
 
@@ -255,6 +306,14 @@ fn evaluate() {
     });
     let out = format!("{}/dedup-eval-{mode}.json", review_dir());
     fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+    if let Ok(dump) = env::var("WHIO_DEDUP_DUMP") {
+        let body = rows
+            .iter()
+            .map(|row| serde_json::to_string(row).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&dump, format!("{body}\n")).unwrap();
+    }
     println!("{out}");
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
 }
