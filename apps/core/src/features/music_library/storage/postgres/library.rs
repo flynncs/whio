@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use sqlx::PgPool;
 
 use async_trait::async_trait;
@@ -6,15 +8,18 @@ use uuid::Uuid;
 use crate::features::music_library::{
     domain::{
         Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, Artist, ArtistId,
-        ArtistSummary, GenreSummary, LOCAL_PROVIDER_ID, SearchTerms, Track, TrackHit, TrackId,
-        TrackListFilter, TrackListScope, TrackOrder, TrackPage, TrackView,
+        ArtistSummary, GenreSummary, LOCAL_PROVIDER_ID, RandomSeed, Range, Resource, RoleSelector,
+        SearchTerms, SortDirection, Track, TrackHit, TrackId, TrackListFilter, TrackListScope,
+        TrackOrder, TrackPage, TrackView, YOUTUBE_MUSIC_PROVIDER_ID,
     },
+    library::LibraryRegistry,
     storage::contracts::TrackRepositoryError,
 };
 
 use crate::features::music_library::storage::contracts::LibraryRead;
 
 use super::PgStore;
+use super::PostgresLibraryStore;
 use super::decode::{
     album_states, album_summaries_by_ids, albums_for_tracks, attach_album_state,
     attach_album_states, attach_artist_states, credits_for_tracks, decode_album,
@@ -392,7 +397,25 @@ impl LibraryRead for PgStore {
             TrackListScope::Engaged => TRACK_ENGAGED,
             TrackListScope::Owned => TRACK_OWNED,
         };
-        let rows = sqlx::query_as::<_, TrackPageRow>(&format!(
+        let direction = filter.resolved_direction(order);
+        let seed = match filter.resolved_seed(order) {
+            Ok(seed) => seed,
+            Err(_) => return Err(TrackRepositoryError::InvalidData),
+        };
+        let seed = match (order, seed) {
+            (TrackOrder::Random, Some(seed)) => Some(seed),
+            (TrackOrder::Random, None) => Some(RandomSeed::for_request(
+                user,
+                Resource::Track,
+                chrono::Utc::now().date_naive(),
+            )),
+            _ => None,
+        };
+        let mut predicates = TrackPredicates::new(5);
+        track_selector_clauses(&self.pool, filter, &mut predicates).await?;
+        let order_clause = track_order_clause(order, direction, seed, &mut predicates);
+        let selectors = predicates.where_clause();
+        let statement = format!(
             r#"
             SELECT page.id, page.title, page.duration_ms, page.musicbrainz_recording_id,
                    page.isrc, page.recording_date, page.recording_date_precision,
@@ -401,31 +424,32 @@ impl LibraryRead for PgStore {
                 SELECT COUNT(*)::BIGINT AS n
                 FROM tracks AS t
                 WHERE {scope}
-                  AND ($5::TEXT IS NULL OR t.title_normalized LIKE $5)
+                  {selectors}
             ) AS totals
             LEFT JOIN LATERAL (
                 SELECT {TRACK_COLUMNS}
                 FROM tracks AS t
                 WHERE {scope}
-                  AND ($5::TEXT IS NULL OR t.title_normalized LIKE $5)
-                ORDER BY {}
+                  {selectors}
+                ORDER BY {order_clause}
                 LIMIT $3 OFFSET $4
             ) AS page ON TRUE
-            "#,
-            track_order_clause(order)
-        ))
-        .bind(user)
-        .bind(&library_ids)
-        .bind(i64::from(limit))
-        .bind(i64::from(offset))
-        .bind(
-            filter
-                .title()
-                .map(|title| format!("%{}%", escape_like(title))),
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(repository_error)?;
+            "#
+        );
+        let mut query = sqlx::query_as::<_, TrackPageRow>(&statement)
+            .bind(user)
+            .bind(&library_ids)
+            .bind(i64::from(limit))
+            .bind(i64::from(offset));
+
+        for value in predicates.values() {
+            query = value.bind(query);
+        }
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(repository_error)?;
 
         let Some(first) = rows.first() else {
             return Err(TrackRepositoryError::InvalidData);
@@ -857,10 +881,635 @@ fn rank_artists(summaries: &mut [ArtistSummary]) {
     });
 }
 
-fn track_order_clause(order: TrackOrder) -> &'static str {
+fn source_precedence(alias: &str) -> String {
+    format!(
+        "(CASE {alias}.provider_id WHEN '{LOCAL_PROVIDER_ID}' THEN 0 \
+         WHEN '{YOUTUBE_MUSIC_PROVIDER_ID}' THEN 1 ELSE 255 END)"
+    )
+}
+
+fn folded(column: &str) -> String {
+    format!(
+        "translate(lower(regexp_replace(normalize({column}, NFC), '\\s+', ' ', 'g')), \
+         U&'\\2019\\2018\\02BC\\2013\\2014\\2011', U&'\\0027\\0027\\0027\\002D\\002D\\002D')"
+    )
+}
+
+fn primary_membership(fact: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM album_tracks AS member \
+         JOIN albums AS member_album ON member_album.id = member.album_id \
+         WHERE member.track_id = t.id AND ({fact}) \
+           AND NOT EXISTS (SELECT 1 FROM album_tracks AS nearer \
+                           JOIN albums AS nearer_album ON nearer_album.id = nearer.album_id \
+                           WHERE nearer.track_id = t.id \
+                             AND (nearer_album.title_normalized, nearer_album.id) \
+                                 < (member_album.title_normalized, member_album.id)))"
+    )
+}
+
+fn primary_membership_row(column: &str) -> String {
+    format!(
+        "(SELECT {column} FROM album_tracks AS member \
+         JOIN albums AS member_album ON member_album.id = member.album_id \
+         WHERE member.track_id = t.id \
+         ORDER BY member_album.title_normalized, member_album.id, member.position \
+         LIMIT 1)"
+    )
+}
+
+fn selected_representation(alias: &str) -> String {
+    let closer = source_precedence("nearer");
+    let selected = source_precedence(alias);
+
+    format!(
+        "{alias}.track_id = t.id AND {alias}.provider_id = ANY($2::TEXT[]) \
+         AND NOT EXISTS (SELECT 1 FROM track_sources AS nearer \
+                         WHERE nearer.track_id = t.id \
+                           AND nearer.provider_id = ANY($2::TEXT[]) \
+                           AND ({closer}, nearer.external_id) < ({selected}, {alias}.external_id))"
+    )
+}
+
+fn selected_representation_scalar(column: &str) -> String {
+    format!(
+        "(SELECT {column} FROM track_sources AS rep WHERE {} LIMIT 1)",
+        selected_representation("rep")
+    )
+}
+
+fn role_clause(
+    role: RoleSelector,
+    artists: Option<&str>,
+    predicates: &mut TrackPredicates,
+) -> String {
+    let artist_term = artists.map_or_else(String::new, |placeholder| {
+        format!(" AND sel_role.artist_id = ANY({placeholder})")
+    });
+
+    match role.stored_role() {
+        Some(stored) => {
+            let placeholder = predicates.text(stored.as_str().to_owned());
+
+            format!(
+                "EXISTS (SELECT 1 FROM track_artist_credits AS sel_role \
+                 WHERE sel_role.track_id = t.id AND sel_role.role = {placeholder}{artist_term})"
+            )
+        }
+        None if role == RoleSelector::Artist => format!(
+            "EXISTS (SELECT 1 FROM track_artist_credits AS sel_role \
+             WHERE sel_role.track_id = t.id AND sel_role.role IS NULL{artist_term})"
+        ),
+        None => {
+            let album_artist_term = artists.map_or_else(
+                || " AND sel_album_artist_album.album_artist_id IS NOT NULL".to_owned(),
+                |placeholder| {
+                    format!(" AND sel_album_artist_album.album_artist_id = ANY({placeholder})")
+                },
+            );
+
+            format!(
+                "EXISTS (SELECT 1 FROM album_tracks AS sel_album_artist_member \
+                 JOIN albums AS sel_album_artist_album \
+                   ON sel_album_artist_album.id = sel_album_artist_member.album_id \
+                 WHERE sel_album_artist_member.track_id = t.id{album_artist_term})"
+            )
+        }
+    }
+}
+
+async fn track_selector_clauses(
+    pool: &PgPool,
+    filter: &TrackListFilter,
+    predicates: &mut TrackPredicates,
+) -> Result<(), TrackRepositoryError> {
+    if let Some(title) = filter.title() {
+        let pattern = predicates.text(format!("%{}%", escape_like(title.as_str())));
+
+        predicates.push(format!("t.title_normalized LIKE {pattern}"));
+    }
+
+    if let Some(album_id) = filter.album_id() {
+        let ids = album_id.iter().map(|id| *id.as_uuid()).collect::<Vec<_>>();
+        let placeholder = predicates.uuids(ids);
+
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM album_tracks AS sel_album \
+             WHERE sel_album.track_id = t.id AND sel_album.album_id = ANY({placeholder}))"
+        ));
+    }
+
+    let artists = filter.artists_id().map(|artists_id| {
+        let ids = artists_id
+            .iter()
+            .map(|id| *id.as_uuid())
+            .collect::<Vec<_>>();
+
+        predicates.uuids(ids)
+    });
+
+    if let Some(album_artist_id) = filter.album_artist_id() {
+        let ids = album_artist_id
+            .iter()
+            .map(|id| *id.as_uuid())
+            .collect::<Vec<_>>();
+        let placeholder = predicates.uuids(ids);
+
+        predicates.push(primary_membership(&format!(
+            "member_album.album_artist_id = ANY({placeholder})"
+        )));
+    }
+
+    if let Some(roles) = filter.role() {
+        let mut terms = Vec::new();
+
+        for role in roles.iter() {
+            terms.push(role_clause(*role, artists.as_deref(), predicates));
+        }
+
+        predicates.push(format!("({})", terms.join(" OR ")));
+    } else if let Some(placeholder) = artists.as_deref() {
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM track_artist_credits AS sel_credit \
+             WHERE sel_credit.track_id = t.id AND sel_credit.artist_id = ANY({placeholder}))"
+        ));
+    }
+
+    if let Some(genre) = filter.genre() {
+        let names = genre
+            .iter()
+            .map(|name| name.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let placeholder = predicates.texts(names);
+
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM track_genres AS sel_genre \
+             WHERE sel_genre.track_id = t.id AND sel_genre.name_normalized = ANY({placeholder}))"
+        ));
+    }
+
+    if let Some(year) = filter.year() {
+        let range = predicates.i32_range("member_album.year", year);
+
+        predicates.push(primary_membership(&range));
+    }
+
+    if let Some(compilation) = filter.compilation() {
+        let placeholder = predicates.boolean(compilation);
+
+        predicates.push(primary_membership(&format!(
+            "member_album.compilation = {placeholder}"
+        )));
+    }
+
+    if let Some(starred) = filter.starred() {
+        let clause = "EXISTS (SELECT 1 FROM track_favorites AS sel_favorite \
+                      WHERE sel_favorite.track_id = t.id AND sel_favorite.user_id = $1)";
+
+        predicates.push(if starred {
+            clause.to_owned()
+        } else {
+            format!("NOT {clause}")
+        });
+    }
+
+    if let Some(has_rating) = filter.has_rating() {
+        let clause = "EXISTS (SELECT 1 FROM track_ratings AS sel_rating \
+                      WHERE sel_rating.track_id = t.id AND sel_rating.user_id = $1)";
+
+        predicates.push(if has_rating {
+            clause.to_owned()
+        } else {
+            format!("NOT {clause}")
+        });
+    }
+
+    if let Some(rating) = filter.rating() {
+        let range = predicates.u8_range("sel_rating.rating", rating);
+
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM track_ratings AS sel_rating \
+             WHERE sel_rating.track_id = t.id AND sel_rating.user_id = $1 AND {range})"
+        ));
+    }
+
+    if let Some(play_count) = filter.play_count() {
+        let clause = predicates.u32_range(
+            "COALESCE((SELECT sel_plays.play_count FROM track_play_stats AS sel_plays \
+              WHERE sel_plays.track_id = t.id AND sel_plays.user_id = $1), 0)",
+            play_count,
+        );
+
+        predicates.push(clause);
+    }
+
+    if let Some(recently_played) = filter.recently_played() {
+        let clause = "EXISTS (SELECT 1 FROM track_play_stats AS sel_played \
+                      WHERE sel_played.track_id = t.id AND sel_played.user_id = $1 \
+                        AND sel_played.last_played_at IS NOT NULL)";
+
+        predicates.push(if recently_played {
+            clause.to_owned()
+        } else {
+            format!("NOT {clause}")
+        });
+    }
+
+    if let Some(date_added) = filter.date_added() {
+        let clause = predicates.time_range(
+            "(SELECT MIN(sel_added.created_at) FROM track_sources AS sel_added \
+              WHERE sel_added.track_id = t.id AND sel_added.provider_id = ANY($2::TEXT[]))",
+            date_added,
+        );
+
+        predicates.push(clause);
+    }
+
+    if let Some(missing) = filter.missing() {
+        let clause = "EXISTS (SELECT 1 FROM track_sources AS sel_missing \
+                      WHERE sel_missing.track_id = t.id \
+                        AND sel_missing.provider_id = ANY($2::TEXT[]) \
+                        AND sel_missing.missing_at IS NOT NULL)";
+
+        predicates.push(if missing {
+            clause.to_owned()
+        } else {
+            format!("NOT {clause}")
+        });
+    }
+
+    if let Some(path) = filter.path() {
+        let pattern = predicates.text(format!("%{}%", escape_like(path.as_str())));
+
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM track_sources AS sel_path \
+             WHERE sel_path.track_id = t.id AND sel_path.provider_id = ANY($2::TEXT[]) \
+               AND sel_path.path IS NOT NULL AND {} LIKE {pattern})",
+            folded("sel_path.path")
+        ));
+    }
+
+    if let Some(duration) = filter.duration() {
+        let clause = predicates.u64_range("t.duration_ms", duration);
+
+        predicates.push(clause);
+    }
+
+    for (selector, column) in [
+        (filter.track_number(), "member.track_number"),
+        (filter.disc_number(), "member.disc_number"),
+        (filter.disc_total(), "member.disc_total"),
+        (filter.track_total(), "member.track_total"),
+    ] {
+        if let Some(range) = selector {
+            let range = predicates.u16_range(column, range);
+
+            predicates.push(primary_membership(&range));
+        }
+    }
+
+    for (selector, column) in [
+        (filter.bitrate(), "rep.bitrate_kbps"),
+        (filter.bitdepth(), "rep.bit_depth"),
+        (filter.samplerate(), "rep.sample_rate_hz"),
+        (filter.size(), "rep.size_bytes"),
+    ] {
+        if let Some(range) = selector {
+            let range = predicates.i64_range(column, range);
+
+            predicates.push(format!(
+                "EXISTS (SELECT 1 FROM track_sources AS rep WHERE {} AND {range})",
+                selected_representation("rep")
+            ));
+        }
+    }
+
+    if let Some(channels) = filter.channels() {
+        let range = predicates.u16_range("rep.channels", channels);
+
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM track_sources AS rep WHERE {} AND {range})",
+            selected_representation("rep")
+        ));
+    }
+
+    if let Some(codec) = filter.codec() {
+        let placeholder = predicates.text(codec.as_str().to_owned());
+
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM track_sources AS rep WHERE {} AND {} = {placeholder})",
+            selected_representation("rep"),
+            folded("rep.codec")
+        ));
+    }
+
+    if let Some(filetype) = filter.filetype() {
+        let placeholder = predicates.text(filetype.as_str().to_owned());
+
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM track_sources AS rep WHERE {} AND {} = {placeholder})",
+            selected_representation("rep"),
+            folded("rep.container")
+        ));
+    }
+
+    if let Some(library_id) = filter.library_id() {
+        let ids = library_id.iter().cloned().collect::<Vec<_>>();
+        let registry = LibraryRegistry::new(Arc::new(PostgresLibraryStore::new(pool.clone())));
+        let scopes = registry
+            .scopes_for_ids(&ids)
+            .await
+            .map_err(|_| TrackRepositoryError::InvalidData)?;
+        let placeholder = predicates.texts(scopes);
+
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM track_sources AS sel_library \
+             WHERE sel_library.track_id = t.id \
+               AND sel_library.source_scope = ANY({placeholder}))"
+        ));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+enum TrackBind {
+    Text(String),
+    Texts(Vec<String>),
+    Uuids(Vec<Uuid>),
+    Boolean(bool),
+    Integer(i64),
+    Small(i32),
+    Timestamp(chrono::DateTime<chrono::Utc>),
+}
+
+impl TrackBind {
+    fn bind<'q>(
+        self,
+        query: sqlx::query::QueryAs<'q, sqlx::Postgres, TrackPageRow, sqlx::postgres::PgArguments>,
+    ) -> sqlx::query::QueryAs<'q, sqlx::Postgres, TrackPageRow, sqlx::postgres::PgArguments> {
+        match self {
+            Self::Text(value) => query.bind(value),
+            Self::Texts(value) => query.bind(value),
+            Self::Uuids(value) => query.bind(value),
+            Self::Boolean(value) => query.bind(value),
+            Self::Integer(value) => query.bind(value),
+            Self::Small(value) => query.bind(value),
+            Self::Timestamp(value) => query.bind(value),
+        }
+    }
+}
+
+struct TrackPredicates {
+    clauses: Vec<String>,
+    binds: Vec<TrackBind>,
+    next: u8,
+}
+
+impl TrackPredicates {
+    fn new(first: u8) -> Self {
+        Self {
+            clauses: Vec::new(),
+            binds: Vec::new(),
+            next: first,
+        }
+    }
+
+    fn push(&mut self, clause: String) {
+        self.clauses.push(clause);
+    }
+
+    fn where_clause(&self) -> String {
+        if self.clauses.is_empty() {
+            String::new()
+        } else {
+            format!("AND {}", self.clauses.join("\n                  AND "))
+        }
+    }
+
+    fn values(self) -> Vec<TrackBind> {
+        self.binds
+    }
+
+    fn add(&mut self, value: TrackBind, cast: &str) -> String {
+        let placeholder = format!("${}::{cast}", self.next);
+
+        self.binds.push(value);
+        self.next = self.next.saturating_add(1);
+
+        placeholder
+    }
+
+    fn text(&mut self, value: String) -> String {
+        self.add(TrackBind::Text(value), "TEXT")
+    }
+
+    fn texts(&mut self, value: Vec<String>) -> String {
+        self.add(TrackBind::Texts(value), "TEXT[]")
+    }
+
+    fn uuids(&mut self, value: Vec<Uuid>) -> String {
+        self.add(TrackBind::Uuids(value), "UUID[]")
+    }
+
+    fn boolean(&mut self, value: bool) -> String {
+        self.add(TrackBind::Boolean(value), "BOOLEAN")
+    }
+
+    fn integer(&mut self, value: i64) -> String {
+        self.add(TrackBind::Integer(value), "BIGINT")
+    }
+
+    fn small(&mut self, value: i32) -> String {
+        self.add(TrackBind::Small(value), "INTEGER")
+    }
+
+    fn timestamp(&mut self, value: chrono::DateTime<chrono::Utc>) -> String {
+        self.add(TrackBind::Timestamp(value), "TIMESTAMPTZ")
+    }
+
+    fn i64_range(&mut self, fact: &str, range: Range<i64>) -> String {
+        let mut terms = Vec::new();
+
+        if let Some(from) = range.from() {
+            terms.push(format!("{fact} >= {}", self.integer(from)));
+        }
+        if let Some(to) = range.to() {
+            terms.push(format!("{fact} <= {}", self.integer(to)));
+        }
+
+        terms.join(" AND ")
+    }
+
+    fn i32_range(&mut self, fact: &str, range: Range<i32>) -> String {
+        let mut terms = Vec::new();
+
+        if let Some(from) = range.from() {
+            terms.push(format!("{fact} >= {}", self.small(from)));
+        }
+        if let Some(to) = range.to() {
+            terms.push(format!("{fact} <= {}", self.small(to)));
+        }
+
+        terms.join(" AND ")
+    }
+
+    fn u8_range(&mut self, fact: &str, range: Range<u8>) -> String {
+        let mut terms = Vec::new();
+
+        if let Some(from) = range.from() {
+            terms.push(format!("{fact} >= {}", self.small(i32::from(from))));
+        }
+        if let Some(to) = range.to() {
+            terms.push(format!("{fact} <= {}", self.small(i32::from(to))));
+        }
+
+        terms.join(" AND ")
+    }
+
+    fn u16_range(&mut self, fact: &str, range: Range<u16>) -> String {
+        let mut terms = Vec::new();
+
+        if let Some(from) = range.from() {
+            terms.push(format!("{fact} >= {}", self.small(i32::from(from))));
+        }
+        if let Some(to) = range.to() {
+            terms.push(format!("{fact} <= {}", self.small(i32::from(to))));
+        }
+
+        terms.join(" AND ")
+    }
+
+    fn u32_range(&mut self, fact: &str, range: Range<u32>) -> String {
+        let mut terms = Vec::new();
+
+        if let Some(from) = range.from() {
+            terms.push(format!("{fact} >= {}", self.integer(i64::from(from))));
+        }
+        if let Some(to) = range.to() {
+            terms.push(format!("{fact} <= {}", self.integer(i64::from(to))));
+        }
+
+        terms.join(" AND ")
+    }
+
+    fn u64_range(&mut self, fact: &str, range: Range<u64>) -> String {
+        let mut terms = Vec::new();
+
+        if let Some(from) = range.from() {
+            terms.push(format!(
+                "{fact} >= {}",
+                self.integer(i64::try_from(from).unwrap_or(i64::MAX))
+            ));
+        }
+        if let Some(to) = range.to() {
+            terms.push(format!(
+                "{fact} <= {}",
+                self.integer(i64::try_from(to).unwrap_or(i64::MAX))
+            ));
+        }
+
+        terms.join(" AND ")
+    }
+
+    fn time_range(&mut self, fact: &str, range: Range<chrono::DateTime<chrono::Utc>>) -> String {
+        let mut terms = Vec::new();
+
+        if let Some(from) = range.from() {
+            terms.push(format!("{fact} >= {}", self.timestamp(from)));
+        }
+        if let Some(to) = range.to() {
+            terms.push(format!("{fact} <= {}", self.timestamp(to)));
+        }
+
+        terms.join(" AND ")
+    }
+}
+
+fn track_order_clause(
+    order: TrackOrder,
+    direction: SortDirection,
+    seed: Option<RandomSeed>,
+    predicates: &mut TrackPredicates,
+) -> String {
+    let dir = direction.sql();
+
     match order {
-        TrackOrder::Title => "t.title_normalized ASC, t.id",
-        TrackOrder::RecentlyAdded => "t.created_at DESC, t.id",
+        TrackOrder::Title => format!("t.title_normalized {dir}, t.id"),
+        TrackOrder::Id => format!("t.id {dir}"),
+        TrackOrder::Album => format!(
+            "{} {dir} NULLS LAST, {} {dir} NULLS LAST, {} {dir} NULLS LAST, \
+             {} {dir} NULLS LAST, t.id",
+            primary_membership_row("member_album.title_normalized"),
+            primary_membership_row("member.disc_number"),
+            primary_membership_row("member.track_number"),
+            primary_membership_row("member.position"),
+        ),
+        TrackOrder::Track => format!(
+            "{} {dir} NULLS LAST, {} {dir} NULLS LAST, {} {dir} NULLS LAST, t.id",
+            primary_membership_row("member.disc_number"),
+            primary_membership_row("member.track_number"),
+            primary_membership_row("member.position"),
+        ),
+        TrackOrder::Artist => format!(
+            "(SELECT artist.name_normalized FROM track_artist_credits AS credited \
+              LEFT JOIN artists AS artist ON artist.id = credited.artist_id \
+              WHERE credited.track_id = t.id ORDER BY credited.position LIMIT 1) \
+             {dir} NULLS LAST, t.id"
+        ),
+        TrackOrder::AlbumArtist => format!(
+            "(SELECT album_artist.name_normalized FROM album_tracks AS member \
+              JOIN albums AS member_album ON member_album.id = member.album_id \
+              JOIN artists AS album_artist ON album_artist.id = member_album.album_artist_id \
+              WHERE member.track_id = t.id \
+              ORDER BY member_album.title_normalized, member_album.id, member.position \
+              LIMIT 1) {dir} NULLS LAST, t.id"
+        ),
+        TrackOrder::Duration => format!("t.duration_ms {dir} NULLS LAST, t.id"),
+        TrackOrder::Genre => format!(
+            "(SELECT genre.name_normalized FROM track_genres AS genre \
+              WHERE genre.track_id = t.id ORDER BY genre.position LIMIT 1) \
+             {dir} NULLS LAST, t.id"
+        ),
+        TrackOrder::Year | TrackOrder::ReleaseYear => format!(
+            "{} {dir} NULLS LAST, t.id",
+            primary_membership_row("member_album.year")
+        ),
+        TrackOrder::DateAdded => format!(
+            "(SELECT MIN(added.created_at) FROM track_sources AS added \
+              WHERE added.track_id = t.id AND added.provider_id = ANY($2::TEXT[])) \
+             {dir} NULLS LAST, t.id"
+        ),
+        TrackOrder::StarredAt => format!(
+            "(SELECT favorite.starred_at FROM track_favorites AS favorite \
+              WHERE favorite.track_id = t.id AND favorite.user_id = $1) \
+             {dir} NULLS LAST, t.id"
+        ),
+        TrackOrder::Rating => format!(
+            "(SELECT rating.rating FROM track_ratings AS rating \
+              WHERE rating.track_id = t.id AND rating.user_id = $1) \
+             {dir} NULLS LAST, t.id"
+        ),
+        TrackOrder::PlayCount => format!(
+            "COALESCE((SELECT plays.play_count FROM track_play_stats AS plays \
+              WHERE plays.track_id = t.id AND plays.user_id = $1), 0) {dir}, t.id"
+        ),
+        TrackOrder::PlayDate => format!(
+            "(SELECT plays.last_played_at FROM track_play_stats AS plays \
+              WHERE plays.track_id = t.id AND plays.user_id = $1) \
+             {dir} NULLS LAST, t.id"
+        ),
+        TrackOrder::Channels => format!(
+            "{} {dir} NULLS LAST, t.id",
+            selected_representation_scalar("rep.channels")
+        ),
+        TrackOrder::Random => {
+            let seed = seed.map_or(0, |seed| seed.get() as i64);
+            let placeholder = predicates.integer(seed);
+
+            format!("hashtextextended(t.id::text, {placeholder}) {dir}, t.id")
+        }
+        TrackOrder::RecentlyAdded => format!("t.created_at {dir}, t.id"),
     }
 }
 

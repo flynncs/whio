@@ -1,0 +1,1773 @@
+use std::collections::BTreeSet;
+
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use super::PostgresTrackRepository;
+use crate::features::identity::provision;
+use crate::features::music_library::{
+    domain::{
+        AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ArtistId, CreditRole, IdSet, ProviderId,
+        RandomSeed, Range, RoleSelector, RoleSet, SelectorText, SortDirection, SourceIdentity,
+        SourceScope, StateTarget, TrackId, TrackListFilter, TrackListScope, TrackMetadata,
+        TrackOrder, ValidationError,
+    },
+    library::LibraryId,
+    storage::contracts::{CatalogueWrite, LibraryRead, SourceFileFacts, StateStore},
+};
+
+const LOCAL_ROOT: &str = "/music";
+const OTHER_ROOT: &str = "/elsewhere";
+
+fn source(provider: &str, external_id: &str) -> SourceIdentity {
+    source_in(provider, LOCAL_ROOT, external_id)
+}
+
+fn source_in(provider: &str, root: &str, external_id: &str) -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new(provider.to_owned()).unwrap(),
+        if provider == "local" {
+            SourceScope::Named(root.to_owned())
+        } else {
+            SourceScope::Global
+        },
+        external_id.to_owned(),
+    )
+    .unwrap()
+}
+
+fn metadata(title: &str) -> TrackMetadata {
+    metadata_by(title, "Narrator")
+}
+
+fn metadata_by(title: &str, primary: &str) -> TrackMetadata {
+    TrackMetadata::from_names(title.to_owned(), vec![primary.to_owned()], Some(1_000)).unwrap()
+}
+
+fn credit(name: &str, role: Option<CreditRole>) -> ArtistCredit {
+    let credit = ArtistCredit::new(name.to_owned(), None).unwrap();
+
+    match role {
+        Some(role) => credit.with_role(role),
+        None => credit,
+    }
+}
+
+fn album(title: &str) -> AlbumMetadata {
+    AlbumMetadata::new(title.to_owned()).unwrap()
+}
+
+fn album_id_set(ids: &[&AlbumId]) -> IdSet<AlbumId> {
+    IdSet::new(ids.iter().map(|id| (*id).clone())).unwrap()
+}
+
+fn artist_id_set(ids: &[&ArtistId]) -> IdSet<ArtistId> {
+    IdSet::new(ids.iter().map(|id| (*id).clone())).unwrap()
+}
+
+fn selector(value: &str) -> Option<SelectorText> {
+    SelectorText::new(value).unwrap()
+}
+
+fn text_set(values: &[&str]) -> IdSet<SelectorText> {
+    IdSet::new(values.iter().map(|value| selector(value).unwrap())).unwrap()
+}
+
+fn role_set(values: &[RoleSelector]) -> RoleSet {
+    RoleSet::new(values.to_vec()).unwrap()
+}
+
+fn range<T: Ord + Copy>(from: Option<T>, to: Option<T>) -> Range<T> {
+    Range::new(from, to).unwrap()
+}
+
+fn page_ids(page: &crate::features::music_library::domain::TrackPage) -> Vec<TrackId> {
+    page.items()
+        .iter()
+        .map(|item| item.track().id().clone())
+        .collect()
+}
+
+fn sorted(ids: &[&TrackId]) -> Vec<TrackId> {
+    let mut ids = ids.iter().map(|id| (*id).clone()).collect::<Vec<_>>();
+    ids.sort_by(|left, right| left.as_uuid().cmp(right.as_uuid()));
+    ids
+}
+
+async fn page_at(
+    repository: &PostgresTrackRepository,
+    offset: u32,
+    limit: u32,
+    order: TrackOrder,
+    filter: &TrackListFilter,
+    user: Option<&Uuid>,
+) -> Vec<TrackId> {
+    repository
+        .page_tracks(offset, limit, order, filter, user.copied())
+        .await
+        .unwrap()
+        .into_parts()
+        .0
+        .iter()
+        .map(|item| item.track().id().clone())
+        .collect()
+}
+
+async fn total(
+    repository: &PostgresTrackRepository,
+    filter: &TrackListFilter,
+    user: Option<&Uuid>,
+) -> u32 {
+    total_of(repository, TrackOrder::Id, filter, user).await
+}
+
+async fn total_of(
+    repository: &PostgresTrackRepository,
+    order: TrackOrder,
+    filter: &TrackListFilter,
+    user: Option<&Uuid>,
+) -> u32 {
+    repository
+        .page_tracks(0, 500, order, filter, user.copied())
+        .await
+        .unwrap()
+        .total()
+}
+
+async fn list(
+    repository: &PostgresTrackRepository,
+    filter: &TrackListFilter,
+    user: Option<&Uuid>,
+) -> Vec<TrackId> {
+    page_at(repository, 0, 500, TrackOrder::Id, filter, user).await
+}
+
+async fn credit_artist(pool: &PgPool, track: &TrackId, name: &str) -> ArtistId {
+    let id: Uuid = sqlx::query_scalar(
+        "SELECT artist_id FROM track_artist_credits \
+         WHERE track_id = $1 AND name = $2 ORDER BY position LIMIT 1",
+    )
+    .bind(track.as_uuid())
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    ArtistId::from_uuid(id)
+}
+
+async fn album_artist_of(pool: &PgPool, album: &AlbumId) -> ArtistId {
+    let id: Uuid = sqlx::query_scalar("SELECT album_artist_id FROM albums WHERE id = $1")
+        .bind(album.as_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+    ArtistId::from_uuid(id)
+}
+
+fn local_facts(channels: Option<u8>, bitrate_kbps: Option<u32>) -> SourceFileFacts {
+    SourceFileFacts {
+        path: Some("Library/song.flac".to_owned()),
+        size_bytes: 4_000,
+        modified_at: None,
+        missing_at: None,
+        content_type: Some("audio/flac".to_owned()),
+        suffix: Some("flac".to_owned()),
+        container: Some("flac".to_owned()),
+        codec: Some("flac".to_owned()),
+        bitrate_kbps,
+        sample_rate_hz: Some(44_100),
+        bit_depth: Some(16),
+        channels,
+        facts_version: 1,
+        acoustid_fingerprint: None,
+    }
+}
+
+fn encoded(source: &SourceIdentity) -> String {
+    match source.source_scope() {
+        SourceScope::Global => "global".to_owned(),
+        SourceScope::Named(root) => format!("named:{root}"),
+    }
+}
+
+async fn set_missing(pool: &PgPool, source: &SourceIdentity, missing: bool) {
+    sqlx::query(
+        "UPDATE track_sources SET missing_at = CASE WHEN $4 THEN CURRENT_TIMESTAMP ELSE NULL END \
+         WHERE provider_id = $1 AND source_scope = $2 AND external_id = $3",
+    )
+    .bind(source.provider_id().as_str())
+    .bind(encoded(source))
+    .bind(source.external_id())
+    .bind(missing)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn age_track(pool: &PgPool, track: &TrackId, days: i64) {
+    sqlx::query("UPDATE tracks SET created_at = $1 WHERE id = $2")
+        .bind(chrono::Utc::now() + chrono::Duration::days(days))
+        .bind(track.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn age_source(pool: &PgPool, source: &SourceIdentity, days: i64) {
+    sqlx::query(
+        "UPDATE track_sources SET created_at = $4 \
+         WHERE provider_id = $1 AND source_scope = $2 AND external_id = $3",
+    )
+    .bind(source.provider_id().as_str())
+    .bind(encoded(source))
+    .bind(source.external_id())
+    .bind(chrono::Utc::now() + chrono::Duration::days(days))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn register_library(pool: &PgPool, label: &str, root: &str) -> LibraryId {
+    let id = Uuid::now_v7();
+
+    sqlx::query("INSERT INTO libraries (id, label) VALUES ($1, $2)")
+        .bind(id)
+        .bind(label)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO library_roots (library_id, root) VALUES ($1, $2)")
+        .bind(id)
+        .bind(root)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    LibraryId::from_uuid(id)
+}
+
+async fn table_scans(pool: &PgPool, table: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COALESCE(seq_scan, 0) + COALESCE(idx_scan, 0) FROM pg_stat_user_tables \
+         WHERE relname = $1",
+    )
+    .bind(table)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn settled_table_scans(pool: &PgPool, table: &str) -> i64 {
+    let mut previous = -1;
+
+    for _ in 0..4 {
+        sqlx::query("SELECT pg_stat_force_next_flush()")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("SELECT 1").execute(pool).await.unwrap();
+        let current = table_scans(pool, table).await;
+
+        if current == previous {
+            return current;
+        }
+        previous = current;
+    }
+
+    previous
+}
+
+#[sqlx::test]
+async fn or_within_and_across_selectors(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let first_album = repository
+        .resolve_or_create_album(&album("Shared").with_album_artist(credit("Narrator", None)))
+        .await
+        .unwrap();
+    let second_album = repository
+        .resolve_or_create_album(&album("Other").with_album_artist(credit("Narrator", None)))
+        .await
+        .unwrap();
+    let doubled = repository
+        .get_or_create(
+            source("local", "doubled.flac"),
+            metadata_by("doubled", "Doubled")
+                .with_genres(vec!["Rock".to_owned()])
+                .with_credits(vec![
+                    credit("Doubled", Some(CreditRole::Composer)),
+                    credit("Doubled", Some(CreditRole::Performer)),
+                ]),
+        )
+        .await
+        .unwrap();
+    let pop = repository
+        .get_or_create(
+            source("local", "pop.flac"),
+            metadata("pop").with_genres(vec!["Pop".to_owned()]),
+        )
+        .await
+        .unwrap();
+    let third = repository
+        .get_or_create(
+            source("local", "third.flac"),
+            metadata("third").with_genres(vec!["Rock".to_owned()]),
+        )
+        .await
+        .unwrap();
+
+    let doubled_id = doubled.id().clone();
+    let pop_id = pop.id().clone();
+    let third_id = third.id().clone();
+
+    repository
+        .set_album_track(first_album.id(), &doubled_id, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    repository
+        .set_album_track(first_album.id(), &pop_id, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    repository
+        .set_album_track(second_album.id(), &third_id, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let doubled_artist = credit_artist(&pool, &doubled_id, "Doubled").await;
+    let both_albums = TrackListFilter::new()
+        .with_album_id(Some(album_id_set(&[first_album.id(), second_album.id()])));
+
+    assert_eq!(
+        list(&repository, &both_albums, None).await,
+        sorted(&[&doubled_id, &pop_id, &third_id]),
+        "repeated album_id values are an OR"
+    );
+    assert_eq!(total(&repository, &both_albums, None).await, 3);
+
+    let one_album = TrackListFilter::new().with_album_id(Some(album_id_set(&[first_album.id()])));
+    assert_eq!(
+        list(&repository, &one_album, None).await,
+        sorted(&[&doubled_id, &pop_id])
+    );
+
+    let album_and_genre = one_album.clone().with_genre(Some(text_set(&["rock"])));
+    assert_eq!(
+        list(&repository, &album_and_genre, None).await,
+        sorted(&[&doubled_id]),
+        "two selectors are ANDed"
+    );
+    assert_eq!(total(&repository, &album_and_genre, None).await, 1);
+
+    let credited = TrackListFilter::new().with_artists_id(Some(artist_id_set(&[&doubled_artist])));
+    assert_eq!(
+        list(&repository, &credited, None).await,
+        sorted(&[&doubled_id]),
+        "a track crediting the artist three times appears once"
+    );
+    assert_eq!(
+        total(&repository, &credited, None).await,
+        1,
+        "and the total counts it once"
+    );
+}
+
+#[sqlx::test]
+async fn total_agrees_with_the_list_for_every_selector(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("selector-user", "Selector User")
+        .await
+        .unwrap();
+    let kept_album = repository
+        .resolve_or_create_album(
+            &album("Kept")
+                .with_album_artist(credit("Album Artist", None))
+                .with_year(Some(1999))
+                .unwrap()
+                .with_compilation(Some(false)),
+        )
+        .await
+        .unwrap();
+    let other_album = repository
+        .resolve_or_create_album(&album("Other").with_year(Some(2020)).unwrap())
+        .await
+        .unwrap();
+    let alpha = repository
+        .get_or_create(
+            source("local", "alpha.flac"),
+            metadata_by("alpha", "Composer One")
+                .with_genres(vec!["Rock".to_owned(), "Pop".to_owned()])
+                .with_credits(vec![credit("Composer One", Some(CreditRole::Composer))]),
+        )
+        .await
+        .unwrap();
+    let beta = repository
+        .get_or_create(
+            source_in("local", OTHER_ROOT, "beta.flac"),
+            metadata_by("beta", "Narrator")
+                .with_genres(vec!["Jazz".to_owned()])
+                .with_credits(vec![credit("Narrator", Some(CreditRole::Composer))]),
+        )
+        .await
+        .unwrap();
+    let delta = repository
+        .get_or_create(source("local", "delta.flac"), metadata("delta"))
+        .await
+        .unwrap();
+
+    let alpha_id = alpha.id().clone();
+    let beta_id = beta.id().clone();
+    let delta_id = delta.id().clone();
+
+    repository
+        .set_album_track(kept_album.id(), &alpha_id, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    repository
+        .set_album_track(other_album.id(), &beta_id, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    repository
+        .set_source_file_facts(
+            &source("local", "alpha.flac"),
+            &local_facts(Some(2), Some(320)),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_source_file_facts(
+            &source_in("local", OTHER_ROOT, "beta.flac"),
+            &local_facts(Some(6), Some(1411)),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_starred(user, StateTarget::Track(&alpha_id), true)
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Track(&alpha_id), Some(4))
+        .await
+        .unwrap();
+    repository
+        .record_play(user, &beta_id, chrono::Utc::now())
+        .await
+        .unwrap();
+    set_missing(&pool, &source_in("local", OTHER_ROOT, "beta.flac"), true).await;
+
+    let alpha_artist = credit_artist(&pool, &alpha_id, "Composer One").await;
+    let album_artist = album_artist_of(&pool, kept_album.id()).await;
+    let music = register_library(&pool, "main", LOCAL_ROOT).await;
+    let elsewhere = register_library(&pool, "elsewhere", OTHER_ROOT).await;
+
+    let fixtures: Vec<(&str, TrackListFilter, Vec<&TrackId>)> = vec![
+        (
+            "title",
+            TrackListFilter::new().with_title(selector("alpha")),
+            vec![&alpha_id],
+        ),
+        (
+            "album_id",
+            TrackListFilter::new().with_album_id(Some(album_id_set(&[kept_album.id()]))),
+            vec![&alpha_id],
+        ),
+        (
+            "album_artist_id",
+            TrackListFilter::new().with_album_artist_id(Some(artist_id_set(&[&album_artist]))),
+            vec![&alpha_id],
+        ),
+        (
+            "artists_id",
+            TrackListFilter::new().with_artists_id(Some(artist_id_set(&[&alpha_artist]))),
+            vec![&alpha_id],
+        ),
+        (
+            "role",
+            TrackListFilter::new().with_role(Some(role_set(&[RoleSelector::Composer]))),
+            vec![&alpha_id, &beta_id],
+        ),
+        (
+            "genre",
+            TrackListFilter::new().with_genre(Some(text_set(&["rock"]))),
+            vec![&alpha_id],
+        ),
+        (
+            "year",
+            TrackListFilter::new().with_year(Some(range(Some(1990), Some(2010)))),
+            vec![&alpha_id],
+        ),
+        (
+            "compilation",
+            TrackListFilter::new().with_compilation(Some(false)),
+            vec![&alpha_id],
+        ),
+        (
+            "starred",
+            TrackListFilter::new().with_starred(Some(true)),
+            vec![&alpha_id],
+        ),
+        (
+            "has_rating",
+            TrackListFilter::new().with_has_rating(Some(true)),
+            vec![&alpha_id],
+        ),
+        (
+            "rating",
+            TrackListFilter::new().with_rating(Some(range(Some(4), Some(5)))),
+            vec![&alpha_id],
+        ),
+        (
+            "play_count",
+            TrackListFilter::new().with_play_count(Some(range(Some(1), None))),
+            vec![&beta_id],
+        ),
+        (
+            "recently_played",
+            TrackListFilter::new().with_recently_played(Some(true)),
+            vec![&beta_id],
+        ),
+        (
+            "missing",
+            TrackListFilter::new().with_missing(Some(true)),
+            vec![&beta_id],
+        ),
+        (
+            "path",
+            TrackListFilter::new().with_path(selector("song.flac")),
+            vec![&alpha_id, &beta_id],
+        ),
+        (
+            "duration",
+            TrackListFilter::new().with_duration(Some(range(Some(500), Some(2_000)))),
+            vec![&alpha_id, &beta_id, &delta_id],
+        ),
+        (
+            "bitrate",
+            TrackListFilter::new().with_bitrate(Some(range(Some(300), Some(400)))),
+            vec![&alpha_id],
+        ),
+        (
+            "bitdepth",
+            TrackListFilter::new().with_bitdepth(Some(range(Some(16), Some(16)))),
+            vec![&alpha_id, &beta_id],
+        ),
+        (
+            "samplerate",
+            TrackListFilter::new().with_samplerate(Some(range(Some(44_100), None))),
+            vec![&alpha_id, &beta_id],
+        ),
+        (
+            "size",
+            TrackListFilter::new().with_size(Some(range(Some(1_000), None))),
+            vec![&alpha_id, &beta_id],
+        ),
+        (
+            "channels",
+            TrackListFilter::new().with_channels(Some(range(Some(2), Some(2)))),
+            vec![&alpha_id],
+        ),
+        (
+            "codec",
+            TrackListFilter::new().with_codec(selector("flac")),
+            vec![&alpha_id, &beta_id],
+        ),
+        (
+            "filetype",
+            TrackListFilter::new().with_filetype(selector("flac")),
+            vec![&alpha_id, &beta_id],
+        ),
+        (
+            "library_id",
+            TrackListFilter::new().with_library_id(Some(IdSet::new([music.clone()]).unwrap())),
+            vec![&alpha_id, &delta_id],
+        ),
+        (
+            "library_id elsewhere",
+            TrackListFilter::new().with_library_id(Some(IdSet::new([elsewhere]).unwrap())),
+            vec![&beta_id],
+        ),
+    ];
+
+    for (name, filter, expected) in fixtures {
+        let expected = sorted(&expected);
+        let observed = list(&repository, &filter, Some(&user)).await;
+        let observed_total = total(&repository, &filter, Some(&user)).await;
+
+        assert_eq!(observed, expected, "the {name} selector's list");
+        assert_eq!(
+            observed_total,
+            u32::try_from(expected.len()).unwrap(),
+            "the {name} selector's total"
+        );
+
+        let past_end = repository
+            .page_tracks(
+                u32::try_from(expected.len()).unwrap() + 5,
+                500,
+                TrackOrder::Id,
+                &filter,
+                Some(user),
+            )
+            .await
+            .unwrap();
+
+        assert!(past_end.items().is_empty(), "the {name} page past the end");
+        assert_eq!(
+            past_end.total(),
+            observed_total,
+            "the {name} total past the end is unchanged"
+        );
+    }
+
+    let all = TrackListFilter::new()
+        .with_album_id(Some(album_id_set(&[kept_album.id()])))
+        .with_genre(Some(text_set(&["rock"])))
+        .with_compilation(Some(false))
+        .with_starred(Some(true))
+        .with_has_rating(Some(true));
+
+    assert_eq!(
+        list(&repository, &all, Some(&user)).await,
+        sorted(&[&alpha_id]),
+        "every selector at once"
+    );
+    assert_eq!(total(&repository, &all, Some(&user)).await, 1);
+
+    let unknown = TrackListFilter::new().with_library_id(Some(
+        IdSet::new([LibraryId::from_uuid(Uuid::now_v7())]).unwrap(),
+    ));
+    assert!(
+        repository
+            .page_tracks(0, 500, TrackOrder::Id, &unknown, Some(user))
+            .await
+            .is_err(),
+        "an unregistered library id is rejected, not ignored"
+    );
+}
+
+#[sqlx::test]
+async fn role_scoped_membership_matches_the_list(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album = repository
+        .resolve_or_create_album(&album("Roles").with_album_artist(credit("X", None)))
+        .await
+        .unwrap();
+    let primary_x = repository
+        .get_or_create(
+            source("local", "primary-x.flac"),
+            metadata_by("primary x", "X")
+                .with_credits(vec![credit("Y", Some(CreditRole::Performer))]),
+        )
+        .await
+        .unwrap();
+    let composer_x = repository
+        .get_or_create(
+            source("local", "composer-x.flac"),
+            metadata_by("composer x", "Y")
+                .with_credits(vec![credit("X", Some(CreditRole::Composer))]),
+        )
+        .await
+        .unwrap();
+    let featured = repository
+        .get_or_create(
+            source("local", "featured.flac"),
+            metadata_by("featured", "Y"),
+        )
+        .await
+        .unwrap();
+
+    let primary_id = primary_x.id().clone();
+    let composer_id = composer_x.id().clone();
+    let featured_id = featured.id().clone();
+
+    repository
+        .set_album_track(album.id(), &featured_id, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let x = album_artist_of(&pool, album.id()).await;
+    let role = |role: RoleSelector, artists: bool| {
+        let filter = TrackListFilter::new().with_role(Some(role_set(&[role])));
+
+        if artists {
+            filter.with_artists_id(Some(artist_id_set(&[&x])))
+        } else {
+            filter
+        }
+    };
+
+    let composer = role(RoleSelector::Composer, true);
+    assert_eq!(
+        list(&repository, &composer, None).await,
+        sorted(&[&composer_id]),
+        "artists_id with role=composer is the composer credit"
+    );
+    assert_eq!(total(&repository, &composer, None).await, 1);
+
+    assert_eq!(
+        list(&repository, &role(RoleSelector::Artist, true), None).await,
+        sorted(&[&primary_id]),
+        "artists_id with role=artist is the primary credit"
+    );
+    assert_eq!(
+        list(&repository, &role(RoleSelector::AlbumArtist, true), None).await,
+        sorted(&[&featured_id]),
+        "artists_id with role=albumartist is album-artist membership"
+    );
+    assert_eq!(
+        list(&repository, &role(RoleSelector::Composer, false), None).await,
+        sorted(&[&composer_id]),
+        "role=composer alone is any composer credit"
+    );
+    assert_eq!(
+        list(&repository, &role(RoleSelector::Artist, false), None).await,
+        sorted(&[&primary_id, &composer_id, &featured_id]),
+        "role=artist alone is any primary credit"
+    );
+    assert_eq!(
+        list(&repository, &role(RoleSelector::AlbumArtist, false), None).await,
+        sorted(&[&featured_id]),
+        "role=albumartist alone is album-artist presence"
+    );
+}
+
+#[sqlx::test]
+async fn track_selectors_are_not_aliases(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let first_album = repository
+        .resolve_or_create_album(&album("First").with_album_artist(credit("C2", None)))
+        .await
+        .unwrap();
+    let second_album = repository
+        .resolve_or_create_album(&album("Second").with_album_artist(credit("C4", None)))
+        .await
+        .unwrap();
+    let credited = repository
+        .get_or_create(
+            source("local", "credited.flac"),
+            metadata_by("credited", "C1")
+                .with_credits(vec![credit("C3", Some(CreditRole::Producer))]),
+        )
+        .await
+        .unwrap();
+    let unrelated = repository
+        .get_or_create(
+            source("local", "unrelated.flac"),
+            metadata_by("unrelated", "C5"),
+        )
+        .await
+        .unwrap();
+    let unresolved = repository
+        .get_or_create(
+            source("local", "unresolved.flac"),
+            metadata_by("unresolved", "C6"),
+        )
+        .await
+        .unwrap();
+
+    let credited_id = credited.id().clone();
+    let unrelated_id = unrelated.id().clone();
+
+    repository
+        .set_album_track(first_album.id(), &credited_id, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    repository
+        .set_album_track(second_album.id(), &unrelated_id, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE track_artist_credits SET artist_id = NULL WHERE track_id = $1")
+        .bind(unresolved.id().as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let c1 = credit_artist(&pool, &credited_id, "C1").await;
+    let c2 = album_artist_of(&pool, first_album.id()).await;
+    let c3 = credit_artist(&pool, &credited_id, "C3").await;
+    let c5 = credit_artist(&pool, &unrelated_id, "C5").await;
+
+    assert_eq!(
+        list(
+            &repository,
+            &TrackListFilter::new().with_artists_id(Some(artist_id_set(&[&c1]))),
+            None
+        )
+        .await,
+        sorted(&[&credited_id]),
+        "artists_id selects a credited track artist"
+    );
+    assert_eq!(
+        list(
+            &repository,
+            &TrackListFilter::new().with_album_artist_id(Some(artist_id_set(&[&c2]))),
+            None
+        )
+        .await,
+        sorted(&[&credited_id]),
+        "album_artist_id selects album membership"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_artists_id(Some(artist_id_set(&[&c2]))),
+            None
+        )
+        .await,
+        0,
+        "the album artist is not a track credit"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_album_artist_id(Some(artist_id_set(&[&c1]))),
+            None
+        )
+        .await,
+        0,
+        "the track artist is not an album artist"
+    );
+    assert_eq!(
+        list(
+            &repository,
+            &TrackListFilter::new().with_artists_id(Some(artist_id_set(&[&c3]))),
+            None
+        )
+        .await,
+        sorted(&[&credited_id]),
+        "a role credit is still a track credit"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_artists_id(Some(artist_id_set(&[&c1, &c2, &c3, &c5]))),
+            None
+        )
+        .await,
+        2,
+        "an unresolved credit (artist_id IS NULL) matches no id"
+    );
+}
+
+#[sqlx::test]
+async fn absent_values_sort_last_in_both_directions(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("rating-user", "Rating User")
+        .await
+        .unwrap();
+    let mut rated = Vec::new();
+
+    for index in 0..4u8 {
+        let track = repository
+            .get_or_create(
+                source("local", &format!("rated-{index}.flac")),
+                metadata(&format!("rated {index}")),
+            )
+            .await
+            .unwrap();
+        let id = track.id().clone();
+
+        if index > 0 {
+            repository
+                .set_rating(user, StateTarget::Track(&id), Some(index))
+                .await
+                .unwrap();
+        }
+
+        rated.push(id);
+    }
+
+    let unrated = rated[0].clone();
+    let ascending = page_at(
+        &repository,
+        0,
+        500,
+        TrackOrder::Rating,
+        &TrackListFilter::new().with_sort_direction(Some(SortDirection::Ascending)),
+        Some(&user),
+    )
+    .await;
+    assert_eq!(
+        ascending,
+        vec![
+            rated[1].clone(),
+            rated[2].clone(),
+            rated[3].clone(),
+            unrated.clone()
+        ],
+        "the unrated track sorts last in ascending order"
+    );
+
+    let descending = page_at(
+        &repository,
+        0,
+        500,
+        TrackOrder::Rating,
+        &TrackListFilter::new(),
+        Some(&user),
+    )
+    .await;
+    assert_eq!(
+        descending,
+        vec![
+            rated[3].clone(),
+            rated[2].clone(),
+            rated[1].clone(),
+            unrated.clone()
+        ],
+        "the unrated track sorts last in the natural descending order too"
+    );
+
+    let explicit = page_at(
+        &repository,
+        0,
+        500,
+        TrackOrder::Rating,
+        &TrackListFilter::new().with_sort_direction(Some(SortDirection::Descending)),
+        Some(&user),
+    )
+    .await;
+    assert_eq!(explicit, descending);
+}
+
+#[sqlx::test]
+async fn canonical_id_tie_break_is_load_bearing(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let mut fixture = Vec::new();
+
+    for index in 0..1_001u32 {
+        let track = repository
+            .get_or_create(
+                source("local", &format!("tie-{index:04}.flac")),
+                metadata(&format!("item{:02}", index % 10)).with_genres(vec!["Rock".to_owned()]),
+            )
+            .await
+            .unwrap();
+
+        fixture.push((format!("item{:02}", index % 10), track.id().clone()));
+    }
+
+    let mut by_title = fixture.clone();
+    by_title.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.as_uuid().cmp(right.1.as_uuid()))
+    });
+    let by_title = by_title.into_iter().map(|(_, id)| id).collect::<Vec<_>>();
+    let mut by_id = fixture.iter().map(|(_, id)| id.clone()).collect::<Vec<_>>();
+    by_id.sort_by(|left, right| left.as_uuid().cmp(right.as_uuid()));
+
+    for (order, expected) in [
+        (TrackOrder::Title, by_title),
+        (TrackOrder::Artist, by_id.clone()),
+        (TrackOrder::Genre, by_id.clone()),
+    ] {
+        let mut totals = BTreeSet::new();
+
+        for offset in [0u32, 500, 1_000] {
+            let observed = repository
+                .page_tracks(offset, 500, order, &TrackListFilter::new(), None)
+                .await
+                .unwrap();
+            let expected_page = expected
+                .iter()
+                .skip(offset as usize)
+                .take(500)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            assert_eq!(page_ids(&observed), expected_page, "{order:?} at {offset}");
+            totals.insert(observed.total());
+        }
+
+        assert_eq!(
+            totals,
+            BTreeSet::from([1_001]),
+            "the {order:?} total is the same at every offset"
+        );
+    }
+}
+
+#[sqlx::test]
+async fn random_is_repeatable_per_seed_and_not_persistent(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+
+    for index in 0..40u32 {
+        repository
+            .get_or_create(
+                source("local", &format!("random-{index:03}.flac")),
+                metadata(&format!("random {index:03}")),
+            )
+            .await
+            .unwrap();
+    }
+
+    let before = sqlx::query_as::<_, (Uuid, String, chrono::DateTime<chrono::Utc>)>(
+        "SELECT id, title, updated_at FROM tracks ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    let first = TrackListFilter::new().with_random_seed(Some(RandomSeed::new(4_242)));
+    let second = TrackListFilter::new().with_random_seed(Some(RandomSeed::new(9_999)));
+    let whole = page_at(&repository, 0, 500, TrackOrder::Random, &first, None).await;
+    let other_seed = page_at(&repository, 0, 500, TrackOrder::Random, &second, None).await;
+
+    assert_eq!(
+        page_at(&repository, 0, 10, TrackOrder::Random, &first, None).await,
+        page_at(&repository, 0, 10, TrackOrder::Random, &first, None).await,
+        "the same seed repeats the same page"
+    );
+    assert_eq!(
+        page_at(&repository, 10, 10, TrackOrder::Random, &first, None).await,
+        page_at(&repository, 10, 10, TrackOrder::Random, &first, None).await,
+        "and repeats a later page"
+    );
+    assert_eq!(
+        total_of(&repository, TrackOrder::Random, &first, None).await,
+        40,
+        "random does not change membership"
+    );
+    assert_eq!(
+        total_of(&repository, TrackOrder::Random, &second, None).await,
+        40
+    );
+    assert_ne!(whole, other_seed, "a different seed is a different order");
+    assert_eq!(
+        whole
+            .iter()
+            .map(|id| *id.as_uuid())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        40,
+        "the random order is a permutation of the membership"
+    );
+    assert_eq!(
+        whole.iter().take(10).cloned().collect::<Vec<_>>(),
+        page_at(&repository, 0, 10, TrackOrder::Random, &first, None).await,
+        "the first page is the head of the same permutation"
+    );
+    assert_eq!(
+        whole.iter().skip(10).take(10).cloned().collect::<Vec<_>>(),
+        page_at(&repository, 10, 10, TrackOrder::Random, &first, None).await,
+        "the second page continues the same permutation"
+    );
+
+    let after = sqlx::query_as::<_, (Uuid, String, chrono::DateTime<chrono::Utc>)>(
+        "SELECT id, title, updated_at FROM tracks ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(before, after, "a random page writes no tracks row");
+}
+
+#[sqlx::test]
+async fn date_added_is_the_owned_source_timestamp(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("added-user", "Added User")
+        .await
+        .unwrap();
+    let owned = repository
+        .get_or_create(source("local", "owned.flac"), metadata("owned"))
+        .await
+        .unwrap();
+    let provider_only = repository
+        .get_or_create(
+            source("youtube_music", "vid-added"),
+            metadata("provider only"),
+        )
+        .await
+        .unwrap();
+
+    let owned_id = owned.id().clone();
+    let provider_only_id = provider_only.id().clone();
+
+    repository
+        .set_starred(user, StateTarget::Track(&provider_only_id), true)
+        .await
+        .unwrap();
+    age_track(&pool, &owned_id, -100).await;
+    age_track(&pool, &provider_only_id, -1).await;
+    age_source(&pool, &source("local", "owned.flac"), -200).await;
+
+    assert_eq!(
+        page_at(
+            &repository,
+            0,
+            500,
+            TrackOrder::DateAdded,
+            &TrackListFilter::new(),
+            Some(&user)
+        )
+        .await,
+        vec![owned_id.clone(), provider_only_id.clone()],
+        "date_added orders by the owned source timestamp and puts the provider-only track last"
+    );
+    assert_eq!(
+        page_at(
+            &repository,
+            0,
+            500,
+            TrackOrder::RecentlyAdded,
+            &TrackListFilter::new(),
+            Some(&user)
+        )
+        .await,
+        vec![provider_only_id, owned_id],
+        "recently_added is the different materialisation fact"
+    );
+}
+
+#[sqlx::test]
+async fn selected_representation_is_absent_for_provider_only(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("representation-user", "Representation User")
+        .await
+        .unwrap();
+    let provider_only = repository
+        .get_or_create(
+            source("youtube_music", "vid-representation"),
+            metadata("provider only"),
+        )
+        .await
+        .unwrap();
+    let local = repository
+        .get_or_create(
+            source("local", "a-lowest.flac"),
+            metadata("two local sources"),
+        )
+        .await
+        .unwrap();
+
+    let provider_only_id = provider_only.id().clone();
+    let local_id = local.id().clone();
+
+    repository
+        .set_starred(user, StateTarget::Track(&provider_only_id), true)
+        .await
+        .unwrap();
+    repository
+        .set_source_file_facts(
+            &source("local", "a-lowest.flac"),
+            &local_facts(Some(6), Some(900)),
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO track_sources (id, track_id, provider_id, source_scope, external_id, created_at) \
+         VALUES ($1, $2, 'local', $3, 'b-higher.flac', CURRENT_TIMESTAMP)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(local_id.as_uuid())
+    .bind(encoded(&source("local", "b-higher.flac")))
+    .execute(&pool)
+    .await
+    .unwrap();
+    repository
+        .set_source_file_facts(
+            &SourceIdentity::new(
+                ProviderId::new("local".to_owned()).unwrap(),
+                SourceScope::Named(LOCAL_ROOT.to_owned()),
+                "b-higher.flac".to_owned(),
+            )
+            .unwrap(),
+            &local_facts(Some(2), Some(100)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        list(
+            &repository,
+            &TrackListFilter::new().with_channels(Some(range(Some(6), Some(6)))),
+            Some(&user)
+        )
+        .await,
+        vec![local_id.clone()],
+        "the tie is broken by the lowest external_id, a-lowest.flac"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_channels(Some(range(Some(2), Some(2)))),
+            Some(&user)
+        )
+        .await,
+        0,
+        "b-higher.flac's channels are not the selected representation's"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_channels(Some(range(Some(1), Some(8)))),
+            Some(&user)
+        )
+        .await,
+        1,
+        "a provider-only track matches no channels range"
+    );
+    assert_eq!(
+        page_at(
+            &repository,
+            0,
+            500,
+            TrackOrder::Channels,
+            &TrackListFilter::new(),
+            Some(&user)
+        )
+        .await,
+        vec![local_id.clone(), provider_only_id],
+        "channels sorts the absent provider-only track last"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_bitrate(Some(range(Some(800), None))),
+            Some(&user)
+        )
+        .await,
+        1,
+        "the selected representation's bitrate is 900"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_codec(selector("flac")),
+            Some(&user)
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_size(Some(range(Some(1), None))),
+            Some(&user)
+        )
+        .await,
+        1
+    );
+}
+
+#[sqlx::test]
+async fn missing_is_scoped_to_present_local_sources(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("missing-user", "Missing User")
+        .await
+        .unwrap();
+    let provider_only = repository
+        .get_or_create(
+            source("youtube_music", "vid-missing"),
+            metadata("provider only"),
+        )
+        .await
+        .unwrap();
+    let walked = repository
+        .get_or_create(source("local", "walked.flac"), metadata("walked"))
+        .await
+        .unwrap();
+    let gone = repository
+        .get_or_create(source("local", "gone.flac"), metadata("gone"))
+        .await
+        .unwrap();
+
+    let provider_only_id = provider_only.id().clone();
+    let walked_id = walked.id().clone();
+    let gone_id = gone.id().clone();
+
+    repository
+        .set_starred(user, StateTarget::Track(&provider_only_id), true)
+        .await
+        .unwrap();
+    repository
+        .set_source_file_facts(&source("local", "walked.flac"), &local_facts(Some(2), None))
+        .await
+        .unwrap();
+    repository
+        .set_source_file_facts(&source("local", "gone.flac"), &local_facts(Some(2), None))
+        .await
+        .unwrap();
+    set_missing(&pool, &source("local", "gone.flac"), true).await;
+
+    assert_eq!(
+        list(
+            &repository,
+            &TrackListFilter::new().with_missing(Some(true)),
+            Some(&user)
+        )
+        .await,
+        vec![gone_id.clone()],
+        "missing=true is a local source with missing_at set"
+    );
+    assert_eq!(
+        list(
+            &repository,
+            &TrackListFilter::new().with_missing(Some(false)),
+            Some(&user)
+        )
+        .await,
+        sorted(&[&walked_id, &provider_only_id]),
+        "missing=false is the provider-only and present-local tracks"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_missing(Some(false)),
+            Some(&user)
+        )
+        .await,
+        2
+    );
+}
+
+#[sqlx::test]
+async fn boolean_selector_defaults_follow_the_stored_fact(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("boolean-user", "Boolean User")
+        .await
+        .unwrap();
+    let starred = repository
+        .get_or_create(source("local", "starred.flac"), metadata("starred"))
+        .await
+        .unwrap();
+    let plain = repository
+        .get_or_create(source("local", "plain.flac"), metadata("plain"))
+        .await
+        .unwrap();
+    let rated = repository
+        .get_or_create(source("local", "rated.flac"), metadata("rated"))
+        .await
+        .unwrap();
+
+    let starred_id = starred.id().clone();
+    let plain_id = plain.id().clone();
+    let rated_id = rated.id().clone();
+
+    repository
+        .set_starred(user, StateTarget::Track(&starred_id), true)
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Track(&rated_id), Some(1))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        list(
+            &repository,
+            &TrackListFilter::new().with_starred(Some(true)),
+            Some(&user)
+        )
+        .await,
+        vec![starred_id.clone()],
+        "starred=true is the favourited track"
+    );
+    assert_eq!(
+        list(
+            &repository,
+            &TrackListFilter::new().with_starred(Some(false)),
+            Some(&user)
+        )
+        .await,
+        sorted(&[&plain_id, &rated_id]),
+        "starred=false includes a track with no track_favorites row"
+    );
+    assert_eq!(
+        total(&repository, &TrackListFilter::new(), Some(&user)).await,
+        3,
+        "an omitted boolean returns both"
+    );
+    assert_eq!(
+        list(
+            &repository,
+            &TrackListFilter::new().with_has_rating(Some(true)),
+            Some(&user)
+        )
+        .await,
+        vec![rated_id.clone()],
+        "a rating of 1 is present"
+    );
+    assert_eq!(
+        list(
+            &repository,
+            &TrackListFilter::new().with_has_rating(Some(false)),
+            Some(&user)
+        )
+        .await,
+        sorted(&[&starred_id, &plain_id])
+    );
+}
+
+#[sqlx::test]
+async fn anonymous_state_selectors_are_not_all_users(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("anonymous-user", "Anonymous User")
+        .await
+        .unwrap();
+    let owned = repository
+        .get_or_create(source("local", "owned.flac"), metadata("owned"))
+        .await
+        .unwrap();
+    let also_owned = repository
+        .get_or_create(source("local", "also-owned.flac"), metadata("also owned"))
+        .await
+        .unwrap();
+
+    let owned_id = owned.id().clone();
+    let also_owned_id = also_owned.id().clone();
+
+    repository
+        .set_starred(user, StateTarget::Track(&owned_id), true)
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Track(&owned_id), Some(5))
+        .await
+        .unwrap();
+
+    let scoped = TrackListFilter::new().with_scope(TrackListScope::Owned);
+    let scope_total = total(&repository, &scoped, None).await;
+
+    assert_eq!(scope_total, 2);
+    assert_eq!(
+        total(&repository, &scoped.clone().with_starred(Some(true)), None).await,
+        0,
+        "starred=true with no principal returns nothing"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &scoped.clone().with_rating(Some(range(Some(1), Some(5)))),
+            None
+        )
+        .await,
+        0,
+        "a rating selector with no principal returns nothing"
+    );
+    assert_eq!(
+        list(&repository, &scoped.clone().with_starred(Some(false)), None).await,
+        sorted(&[&owned_id, &also_owned_id]),
+        "starred=false is the scope's own list, not an empty one"
+    );
+    assert_eq!(
+        total(&repository, &scoped.clone().with_starred(Some(false)), None).await,
+        scope_total,
+        "the total is the scope's own count"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_starred(Some(true)),
+            None
+        )
+        .await,
+        0
+    );
+}
+
+#[sqlx::test]
+async fn selectors_do_not_broaden_scope(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("scope-user", "Scope User")
+        .await
+        .unwrap();
+    let owned = repository
+        .get_or_create(source("local", "owned.flac"), metadata("owned song"))
+        .await
+        .unwrap();
+    let provider_only = repository
+        .get_or_create(
+            source("youtube_music", "vid-scope"),
+            metadata("remote only"),
+        )
+        .await
+        .unwrap();
+
+    let owned_id = owned.id().clone();
+    let provider_only_id = provider_only.id().clone();
+
+    repository
+        .set_starred(user, StateTarget::Track(&provider_only_id), true)
+        .await
+        .unwrap();
+
+    let star = TrackListFilter::new().with_starred(Some(true));
+    assert_eq!(
+        list(&repository, &star, Some(&user)).await,
+        vec![provider_only_id],
+        "a favourited provider-only track is engaged"
+    );
+
+    let owned_star = star.clone().with_scope(TrackListScope::Owned);
+    assert!(
+        list(&repository, &owned_star, Some(&user)).await.is_empty(),
+        "and is absent under owned for the same selector"
+    );
+    assert_eq!(total(&repository, &owned_star, Some(&user)).await, 0);
+    assert_eq!(total(&repository, &star, Some(&user)).await, 1);
+
+    let title = TrackListFilter::new().with_title(selector("song"));
+    assert_eq!(
+        list(&repository, &title, Some(&user)).await,
+        vec![owned_id],
+        "a title selector does not broaden the scope to the provider-only track"
+    );
+    assert_eq!(total(&repository, &title, Some(&user)).await, 1);
+
+    let owned_title = title.with_scope(TrackListScope::Owned);
+    assert_eq!(total(&repository, &owned_title, Some(&user)).await, 1);
+}
+
+#[sqlx::test]
+async fn page_projection_carries_membership_state_and_sources_on_a_deep_page(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("deep-user", "Deep User")
+        .await
+        .unwrap();
+    let deep_album = repository
+        .resolve_or_create_album(&album("Deep").with_album_artist(credit("Deep Artist", None)))
+        .await
+        .unwrap();
+
+    for index in 0..1_000u32 {
+        repository
+            .get_or_create(
+                source("local", &format!("deep-{index:04}.flac")),
+                metadata(&format!("item{index:04}")),
+            )
+            .await
+            .unwrap();
+    }
+
+    let placed = repository
+        .get_or_create(source("local", "deep-placed.flac"), metadata("zzz placed"))
+        .await
+        .unwrap();
+    let placed_id = placed.id().clone();
+
+    repository
+        .set_album_track(
+            deep_album.id(),
+            &placed_id,
+            &AlbumTrack::new(Some(2), Some(3), 2)
+                .unwrap()
+                .with_totals(Some(2), Some(3)),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Track(&placed_id), Some(5))
+        .await
+        .unwrap();
+    repository
+        .set_starred(user, StateTarget::Track(&placed_id), true)
+        .await
+        .unwrap();
+    repository
+        .record_play(user, &placed_id, chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let observed = repository
+        .page_tracks(
+            1_000,
+            1,
+            TrackOrder::Title,
+            &TrackListFilter::new(),
+            Some(user),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(observed.total(), 1_001);
+    assert_eq!(observed.items().len(), 1);
+
+    let item = &observed.items()[0];
+
+    assert_eq!(item.track().id(), &placed_id);
+    assert_eq!(item.album().map(|album| album.id()), Some(deep_album.id()));
+    assert_eq!(
+        item.album_artist().map(str::to_owned),
+        Some("Deep Artist".to_owned())
+    );
+
+    let membership = item.membership().expect("the deep item carries membership");
+
+    assert_eq!(membership.disc_number(), Some(2));
+    assert_eq!(membership.track_number(), Some(3));
+    assert_eq!(membership.disc_total(), Some(2));
+    assert_eq!(membership.track_total(), Some(3));
+    assert_eq!(item.state().rating(), Some(5));
+    assert!(item.state().is_starred());
+    assert_eq!(item.state().play_count(), 1);
+    assert_eq!(item.sources().len(), 1);
+    assert_eq!(item.sources()[0].provider_id().as_str(), "local");
+}
+
+#[sqlx::test]
+async fn page_reads_do_not_follow_the_page_size(pool: PgPool) {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let repository = PostgresTrackRepository::new(pool.clone());
+
+    let mut first_id = None;
+
+    for index in 0..20 {
+        let track = repository
+            .get_or_create(
+                source("local", &format!("batched-{index:02}.flac")),
+                metadata(&format!("batched {index:02}"))
+                    .with_genres(vec!["Rock".to_owned()])
+                    .with_credits(vec![credit("Player", Some(CreditRole::Performer))]),
+            )
+            .await
+            .unwrap();
+
+        if first_id.is_none() {
+            first_id = Some(track.id().clone());
+        }
+
+        repository
+            .set_source_file_facts(
+                &source("local", &format!("batched-{index:02}.flac")),
+                &local_facts(Some(2), Some(320)),
+            )
+            .await
+            .unwrap();
+    }
+
+    let strip = TrackListFilter::new().with_title(selector("batched"));
+    let narrow = strip
+        .clone()
+        .with_genre(Some(text_set(&["rock"])))
+        .with_role(Some(role_set(&[RoleSelector::Performer])))
+        .with_channels(Some(range(Some(1), Some(8))));
+    let user = provision(pool.clone())
+        .create_user("read-user", "Read User")
+        .await
+        .unwrap();
+    let first = repository
+        .find_track(first_id.as_ref().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    repository
+        .record_play(user, first.id(), chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let mut measured = Vec::new();
+
+    for limit in [2u32, 20] {
+        let genres = settled_table_scans(&pool, "track_genres").await;
+        let credits = settled_table_scans(&pool, "track_artist_credits").await;
+        let sources = settled_table_scans(&pool, "track_sources").await;
+        let plays = settled_table_scans(&pool, "track_play_stats").await;
+        let observed = repository
+            .page_tracks(0, limit, TrackOrder::Title, &strip, Some(user))
+            .await
+            .unwrap();
+
+        measured.push((
+            limit,
+            observed.items().len(),
+            observed.total(),
+            settled_table_scans(&pool, "track_genres").await - genres,
+            settled_table_scans(&pool, "track_artist_credits").await - credits,
+            settled_table_scans(&pool, "track_sources").await - sources,
+            settled_table_scans(&pool, "track_play_stats").await - plays,
+        ));
+    }
+
+    assert_eq!(measured[0].1, 2);
+    assert_eq!(measured[0].2, 20);
+    assert_eq!(measured[1].1, 20);
+    assert_eq!(measured[1].2, 20);
+    assert_eq!(
+        (measured[1].3, measured[1].4, measured[1].5, measured[1].6),
+        (measured[0].3, measured[0].4, measured[0].5, measured[0].6),
+        "a page of 20 must not read the batch sets more often than a page of 2"
+    );
+    assert_eq!(
+        measured[0].3, 1,
+        "the genre set is read by exactly one statement"
+    );
+    assert_eq!(
+        measured[0].4, 1,
+        "the credits are read by exactly one statement"
+    );
+    assert_eq!(
+        measured[0].6, 1,
+        "the principal state is read by exactly one statement"
+    );
+
+    let mut filtered = Vec::new();
+
+    for limit in [2u32, 20] {
+        let plays = settled_table_scans(&pool, "track_play_stats").await;
+        let observed = repository
+            .page_tracks(0, limit, TrackOrder::Title, &narrow, Some(user))
+            .await
+            .unwrap();
+
+        filtered.push((
+            observed.items().len(),
+            observed.total(),
+            settled_table_scans(&pool, "track_play_stats").await - plays,
+        ));
+    }
+
+    assert_eq!(filtered[0].0, 2);
+    assert_eq!(filtered[0].1, 20);
+    assert_eq!(filtered[1].0, 20);
+    assert_eq!(filtered[1].1, 20);
+    assert_eq!(
+        filtered[1].2, filtered[0].2,
+        "a selector-heavy page of 20 reads the principal state once, like a page of 2"
+    );
+}
+
+#[test]
+fn unknown_values_and_bad_ranges_are_explicit_errors() {
+    assert_eq!(TrackOrder::parse("bpm"), None);
+    assert_eq!(TrackOrder::parse("comment"), None);
+    assert_eq!(TrackOrder::parse("explicitStatus"), None);
+    assert_eq!(RoleSelector::parse("other"), None);
+    assert_eq!(SortDirection::parse("sideways"), None);
+    assert!(matches!(
+        Range::new(Some(5), Some(1)),
+        Err(ValidationError::Invalid { field: "range" })
+    ));
+    assert!(matches!(
+        IdSet::new((0..=100u8).collect::<Vec<_>>()),
+        Err(ValidationError::TooLong { field: "ids" })
+    ));
+    assert!(matches!(
+        SelectorText::new(&"a".repeat(501)),
+        Err(ValidationError::TooLong { field: "selector" })
+    ));
+    assert_eq!(SelectorText::new("   ").unwrap(), None);
+    assert_eq!(
+        TrackListFilter::new()
+            .with_random_seed(Some(RandomSeed::new(1)))
+            .resolved_seed(TrackOrder::Title),
+        Err(ValidationError::Invalid {
+            field: "random_seed"
+        })
+    );
+}

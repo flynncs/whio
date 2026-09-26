@@ -10,8 +10,8 @@ use crate::{
     },
     features::music_library::domain::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistSummary,
-        GenreSummary, MAX_PAGE_LIMIT, PageLimit, PlaylistId, TrackId, TrackListFilter, TrackOrder,
-        TrackView,
+        GenreSummary, MAX_PAGE_LIMIT, PageLimit, PlaylistId, SelectorText, TrackId,
+        TrackListFilter, TrackOrder, TrackView,
     },
     features::music_library::playlists::{PlaylistDetail, PlaylistError, PlaylistService},
 };
@@ -208,7 +208,9 @@ pub(crate) async fn song_list(
 ) -> Result<(Vec<Song>, u32), SongError> {
     let user = authorize(credential, token).await?;
     let (offset, limit) = song_window(query)?;
-    let filter = TrackListFilter::new().with_title(query.title.clone());
+    let title = SelectorText::new(query.title.as_deref().unwrap_or_default())
+        .map_err(|_| SongError::InvalidSearch)?;
+    let filter = TrackListFilter::new().with_title(title);
     let page = library
         .track_page(offset, limit, TrackOrder::Title, &filter, Some(&user))
         .await

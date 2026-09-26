@@ -243,7 +243,7 @@ mod native_library {
             "limit=abc",
             "offset=abc",
             "offset=-1",
-            "order=album",
+            "order=bpm",
             "scope=all",
         ] {
             let response = app(pool.clone(), vec![])

@@ -15,6 +15,9 @@ pub enum ValidationError {
         max: i64,
     },
 
+    #[error("{field} is invalid")]
+    Invalid { field: &'static str },
+
     #[error("provider id has an invalid format")]
     InvalidProviderId,
 
