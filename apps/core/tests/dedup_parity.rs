@@ -1,7 +1,26 @@
 use std::{collections::HashMap, env, fs};
 
 use serde_json::Value;
-use whio_core::tracks::{MatchRecord, RecordingIndex, from_ytm};
+use whio_core::features::music_library::domain::{MatchRecord, RecordingIndex};
+#[path = "support/dedup.rs"]
+mod dedup_fixture;
+use dedup_fixture::from_ytm;
+
+#[test]
+fn fixture_parser_preserves_clock_duration_and_provider_evidence() {
+    let raw = serde_json::json!({
+        "videoId": "abc",
+        "title": "Song",
+        "artists": [{"name": "A", "id": "artist-id"}],
+        "album": {"name": "Album", "id": "album-id"},
+        "isExplicit": true,
+        "duration": "4:00"
+    });
+    let track = from_ytm(&raw);
+    assert_eq!(track.duration_ms(), Some(240_000));
+    assert!(track.evidence().contains("artist-id"));
+    assert!(track.evidence().contains("album-id"));
+}
 
 fn review_dir() -> String {
     format!(

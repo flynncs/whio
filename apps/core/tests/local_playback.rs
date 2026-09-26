@@ -1,3 +1,7 @@
+#![cfg(feature = "postgres-integration")]
+
+use sqlx::PgPool;
+use whio_core::features::music_library::test_support::PostgresTrackRepository;
 mod support;
 
 use std::{path::PathBuf, sync::Arc};
@@ -10,12 +14,12 @@ use axum::{
 use support::{NATIVE_AUTH_QUERY, StorePorts, credential_service, router};
 use tower::ServiceExt;
 use whio_core::{
-    playback::PlaybackProvider,
-    providers::LocalPlaybackProvider,
-    tracks::{
-        CatalogueWrite, InMemoryTrackRepository, ProviderId, SourceFileFacts, SourceIdentity,
-        SourceScope, TrackId, TrackMetadata,
+    features::music_library::domain::{
+        ProviderId, SourceIdentity, SourceScope, TrackId, TrackMetadata,
     },
+    features::music_library::test_support::{CatalogueWrite, SourceFileFacts},
+    features::playback::PlaybackProvider,
+    features::playback::providers::LocalPlaybackProvider,
 };
 
 const AUDIO_BYTES: &[u8] = b"local playback fixture bytes";
@@ -27,9 +31,9 @@ fn fixture_root() -> PathBuf {
     root
 }
 
-async fn app() -> (Router, TrackId, PathBuf) {
+async fn app(pool: PgPool) -> (Router, TrackId, PathBuf) {
     let root = fixture_root();
-    let repository = Arc::new(InMemoryTrackRepository::default());
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let source = SourceIdentity::new(
         ProviderId::new("local".to_owned()).unwrap(),
         SourceScope::Named(root.display().to_string()),
@@ -67,7 +71,7 @@ async fn app() -> (Router, TrackId, PathBuf) {
     let ports = StorePorts { store: repository };
     let (search, library) = ports.catalogue_service(vec![]);
     let playback = ports.streaming(vec![
-        Arc::new(LocalPlaybackProvider::new(ports.sources())) as Arc<dyn PlaybackProvider>
+        Arc::new(LocalPlaybackProvider::new(ports.source_queries())) as Arc<dyn PlaybackProvider>,
     ]);
 
     (
@@ -92,9 +96,9 @@ fn stream_request(track_id: &TrackId, range: Option<&str>) -> Request<Body> {
     request.body(Body::empty()).unwrap()
 }
 
-#[tokio::test]
-async fn a_local_track_streams_its_exact_bytes() {
-    let (app, track_id, root) = app().await;
+#[sqlx::test]
+async fn a_local_track_streams_its_exact_bytes(pool: PgPool) {
+    let (app, track_id, root) = app(pool.clone()).await;
 
     let response = app.oneshot(stream_request(&track_id, None)).await.unwrap();
 
@@ -113,9 +117,9 @@ async fn a_local_track_streams_its_exact_bytes() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
-async fn a_local_track_serves_a_client_range() {
-    let (app, track_id, root) = app().await;
+#[sqlx::test]
+async fn a_local_track_serves_a_client_range(pool: PgPool) {
+    let (app, track_id, root) = app(pool.clone()).await;
 
     let response = app
         .oneshot(stream_request(&track_id, Some("bytes=6-14")))
@@ -135,9 +139,9 @@ async fn a_local_track_serves_a_client_range() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
-async fn a_local_track_rejects_an_unsatisfiable_range() {
-    let (app, track_id, root) = app().await;
+#[sqlx::test]
+async fn a_local_track_rejects_an_unsatisfiable_range(pool: PgPool) {
+    let (app, track_id, root) = app(pool.clone()).await;
 
     let response = app
         .oneshot(stream_request(&track_id, Some("bytes=999-")))
@@ -153,9 +157,9 @@ async fn a_local_track_rejects_an_unsatisfiable_range() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-#[tokio::test]
-async fn a_vanished_local_file_does_not_stream() {
-    let (app, track_id, root) = app().await;
+#[sqlx::test]
+async fn a_vanished_local_file_does_not_stream(pool: PgPool) {
+    let (app, track_id, root) = app(pool.clone()).await;
     std::fs::remove_dir_all(&root).unwrap();
 
     let response = app.oneshot(stream_request(&track_id, None)).await.unwrap();

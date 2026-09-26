@@ -83,7 +83,7 @@ jobs:
           DATABASE_URL: postgres://whio:whio-test@localhost:5432/whio
         run: >-
           cargo test --locked --manifest-path apps/core/Cargo.toml
-          --features postgres-integration --tests -- --ignored
+          --features postgres-integration
 
   python:
     runs-on: ubuntu-latest

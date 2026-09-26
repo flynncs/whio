@@ -6,9 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use whio_core::{
-    delivery::StreamDelivery,
-    media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
-    playback::PlayableMedia,
+    features::playback::PlayableMedia,
+    features::playback::delivery::StreamDelivery,
+    features::playback::media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
 };
 
 struct StubMediaFetcher;
@@ -70,6 +70,6 @@ pub fn delivery() -> Arc<StreamDelivery> {
     Arc::new(StreamDelivery::new(
         Arc::new(StubMediaFetcher),
         std::env::temp_dir(),
-        whio_core::delivery::DEFAULT_MAX_SESSIONS,
+        whio_core::features::playback::delivery::DEFAULT_MAX_SESSIONS,
     ))
 }

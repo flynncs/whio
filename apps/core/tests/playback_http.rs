@@ -1,3 +1,6 @@
+#![cfg(feature = "postgres-integration")]
+
+use sqlx::PgPool;
 use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::Mutex;
@@ -17,16 +20,21 @@ use support::{NATIVE_AUTH_QUERY, StorePorts, credential_service, router};
 use tower::ServiceExt;
 use uuid::Uuid;
 use whio_core::{
-    catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch},
-    delivery::StreamDelivery,
-    media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
-    playback::{
+    features::music_library::catalogue::{
+        CatalogueCandidate, CatalogueProvider, CatalogueSearch,
+        ProviderError as CatalogueProviderError,
+    },
+    features::music_library::domain::{
+        ProviderId, ProviderKind, SourceIdentity, SourceScope, TrackId, TrackMetadata,
+    },
+    features::playback::delivery::StreamDelivery,
+    features::playback::media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
+    features::playback::providers::ProviderError,
+    features::playback::{
         MediaMetadata, PlayableMedia, PlaybackProvider, PlaybackSource, PlaybackUrl,
         ResolvedPlayback, StreamingService,
     },
-    providers::ProviderError,
-    request::RequestContext,
-    tracks::{ProviderId, ProviderKind, SourceIdentity, SourceScope, TrackId, TrackMetadata},
+    platform::request::RequestContext,
 };
 
 struct StubProvider {
@@ -42,7 +50,7 @@ impl CatalogueProvider for StubProvider {
         _search: &CatalogueSearch,
         _user: Option<&Uuid>,
         _context: &RequestContext,
-    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+    ) -> Result<Vec<CatalogueCandidate>, CatalogueProviderError> {
         Ok(vec![self.candidate.clone()])
     }
 }
@@ -129,27 +137,27 @@ fn playable_media() -> PlayableMedia {
     )
 }
 
-fn app() -> (Router, Arc<StubProvider>) {
-    app_with_media_bytes(b"0123456789".to_vec())
+fn app(pool: PgPool) -> (Router, Arc<StubProvider>) {
+    app_with_media_bytes(pool, b"0123456789".to_vec())
 }
 
-fn app_with_media_bytes(bytes: Vec<u8>) -> (Router, Arc<StubProvider>) {
+fn app_with_media_bytes(pool: PgPool, bytes: Vec<u8>) -> (Router, Arc<StubProvider>) {
     let source = source();
     let provider = Arc::new(StubProvider {
         candidate: candidate(source),
         playback: Mutex::new(Some(playable_media())),
         resolved_source: Mutex::new(None),
     });
-    let ports = StorePorts::new();
+    let ports = StorePorts::new(pool.clone());
     let (search, library) =
         ports.catalogue_service(vec![provider.clone() as Arc<dyn CatalogueProvider>]);
     let playback = Arc::new(StreamingService::new(
-        ports.sources(),
+        ports.source_queries(),
         vec![provider.clone() as Arc<dyn PlaybackProvider>],
         Arc::new(StreamDelivery::new(
             Arc::new(StubMediaFetcher { bytes }),
             std::env::temp_dir(),
-            whio_core::delivery::DEFAULT_MAX_SESSIONS,
+            whio_core::features::playback::delivery::DEFAULT_MAX_SESSIONS,
         )),
     ));
 
@@ -196,9 +204,9 @@ async fn response_body(response: axum::response::Response) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
-#[tokio::test]
-async fn unknown_track_id_returns_not_found() {
-    let (app, resolver) = app();
+#[sqlx::test]
+async fn unknown_track_id_returns_not_found(pool: PgPool) {
+    let (app, resolver) = app(pool.clone());
     let response = app
         .oneshot(stream_request(
             &format!("/playback/tracks/{}/stream", TrackId::new()),
@@ -219,9 +227,9 @@ async fn unknown_track_id_returns_not_found() {
     assert!(resolver.resolved_source.lock().is_none());
 }
 
-#[tokio::test]
-async fn stream_requires_authentication() {
-    let (app, _) = app();
+#[sqlx::test]
+async fn stream_requires_authentication(pool: PgPool) {
+    let (app, _) = app(pool.clone());
     let response = app
         .oneshot(unauthenticated_stream_request(
             "/playback/tracks/not-a-track-id/stream",
@@ -232,9 +240,9 @@ async fn stream_requires_authentication() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
-async fn invalid_track_id_returns_bad_request() {
-    let (app, resolver) = app();
+#[sqlx::test]
+async fn invalid_track_id_returns_bad_request(pool: PgPool) {
+    let (app, resolver) = app(pool.clone());
     let response = app
         .oneshot(stream_request(
             "/playback/tracks/not-a-track-id/stream",
@@ -271,9 +279,9 @@ async fn searched_track_id(app: &Router) -> String {
         .to_owned()
 }
 
-#[tokio::test]
-async fn stream_returns_full_media_without_a_range() {
-    let (app, _) = app();
+#[sqlx::test]
+async fn stream_returns_full_media_without_a_range(pool: PgPool) {
+    let (app, _) = app(pool.clone());
     let track_id = searched_track_id(&app).await;
 
     let response = app
@@ -293,9 +301,9 @@ async fn stream_returns_full_media_without_a_range() {
     );
 }
 
-#[tokio::test]
-async fn stream_returns_requested_partial_media() {
-    let (app, _) = app();
+#[sqlx::test]
+async fn stream_returns_requested_partial_media(pool: PgPool) {
+    let (app, _) = app(pool.clone());
     let track_id = searched_track_id(&app).await;
 
     let response = app
@@ -312,15 +320,15 @@ async fn stream_returns_requested_partial_media() {
     assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), "2345");
 }
 
-#[tokio::test]
-async fn stream_returns_exact_bytes_for_large_media() {
+#[sqlx::test]
+async fn stream_returns_exact_bytes_for_large_media(pool: PgPool) {
     const TEST_CHUNK_SIZE: usize = 1024 * 1024;
 
     let bytes = (0..TEST_CHUNK_SIZE + 17)
         .map(|index| (index % 251) as u8)
         .collect::<Vec<_>>();
     let expected = bytes.clone();
-    let (app, _) = app_with_media_bytes(bytes);
+    let (app, _) = app_with_media_bytes(pool.clone(), bytes);
     let track_id = searched_track_id(&app).await;
 
     let response = app
@@ -344,8 +352,8 @@ async fn stream_returns_exact_bytes_for_large_media() {
     );
 }
 
-#[tokio::test]
-async fn stream_returns_partial_bytes_for_large_media() {
+#[sqlx::test]
+async fn stream_returns_partial_bytes_for_large_media(pool: PgPool) {
     const TEST_CHUNK_SIZE: u64 = 1024 * 1024;
 
     let bytes = (0..TEST_CHUNK_SIZE * 2 + 17)
@@ -354,7 +362,7 @@ async fn stream_returns_partial_bytes_for_large_media() {
     let start = TEST_CHUNK_SIZE - 5;
     let end = TEST_CHUNK_SIZE + 10;
     let expected = bytes[start as usize..=end as usize].to_vec();
-    let (app, _) = app_with_media_bytes(bytes.clone());
+    let (app, _) = app_with_media_bytes(pool.clone(), bytes.clone());
     let track_id = searched_track_id(&app).await;
 
     let response = app
@@ -382,9 +390,9 @@ async fn stream_returns_partial_bytes_for_large_media() {
     );
 }
 
-#[tokio::test]
-async fn stream_rejects_unsatisfiable_ranges() {
-    let (app, _) = app();
+#[sqlx::test]
+async fn stream_rejects_unsatisfiable_ranges(pool: PgPool) {
+    let (app, _) = app(pool.clone());
     let track_id = searched_track_id(&app).await;
 
     let response = app

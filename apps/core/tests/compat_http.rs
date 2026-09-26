@@ -1,3 +1,7 @@
+#![cfg(feature = "postgres-integration")]
+
+use sqlx::PgPool;
+use whio_core::features::music_library::test_support::PostgresTrackRepository;
 mod support;
 
 use std::sync::Arc;
@@ -8,17 +12,18 @@ use axum::{
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use whio_core::{
-    playback::PlaybackProvider, providers::YtmAdapter, tracks::InMemoryTrackRepository,
-};
+use whio_core::{features::playback::PlaybackProvider, features::playback::providers::YtmAdapter};
 
 use support::{
     StorePorts, credential_service_with_known_app_password, router, router_with_completion,
     router_with_playlists,
 };
 
-fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
-    let ports = StorePorts::new();
+fn app(
+    pool: PgPool,
+    credential: Arc<whio_core::features::identity::service::CredentialService>,
+) -> axum::Router {
+    let ports = StorePorts::new(pool.clone());
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
         Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
@@ -49,12 +54,14 @@ async fn get_status(app: axum::Router, uri: &str) -> (StatusCode, Value) {
 }
 
 async fn browse_app(
-    credential: Arc<whio_core::identity::service::CredentialService>,
+    pool: PgPool,
+    credential: Arc<whio_core::features::identity::service::CredentialService>,
 ) -> axum::Router {
-    use whio_core::tracks::{
-        AlbumMetadata, AlbumTrack, ArtistCredit, CatalogueWrite, ProviderId, SourceIdentity,
-        SourceScope, TrackMetadata,
+    use whio_core::features::music_library::domain::{
+        AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
+        TrackMetadata,
     };
+    use whio_core::features::music_library::test_support::CatalogueWrite;
 
     let local_source = |external_id: &str| {
         SourceIdentity::new(
@@ -65,7 +72,7 @@ async fn browse_app(
         .unwrap()
     };
 
-    let repository = Arc::new(InMemoryTrackRepository::default());
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let album = repository
         .resolve_or_create_album(
             &AlbumMetadata::new("Discovery".to_owned())
@@ -124,10 +131,10 @@ async fn browse_app(
     router(credential, search, library, playback)
 }
 
-#[tokio::test]
-async fn subsonic_browse_lists_albums_artists_and_songs() {
+#[sqlx::test]
+async fn subsonic_browse_lists_albums_artists_and_songs(pool: PgPool) {
     let (service, secret) = credential_service_with_known_app_password();
-    let app = browse_app(service).await;
+    let app = browse_app(pool.clone(), service).await;
     let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
 
     let body = get(
@@ -198,10 +205,10 @@ async fn subsonic_browse_lists_albums_artists_and_songs() {
     assert_eq!(body["subsonic-response"]["status"], json!("failed"));
 }
 
-#[tokio::test]
-async fn navidrome_browse_lists_albums_artists_and_songs() {
+#[sqlx::test]
+async fn navidrome_browse_lists_albums_artists_and_songs(pool: PgPool) {
     let (service, secret) = credential_service_with_known_app_password();
-    let app = browse_app(service).await;
+    let app = browse_app(pool.clone(), service).await;
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
 
@@ -279,13 +286,13 @@ async fn navidrome_browse_lists_albums_artists_and_songs() {
     assert_eq!(body, json!({"error": "Not found."}));
 }
 
-#[tokio::test]
-async fn ping_answers_under_both_compat_roots() {
+#[sqlx::test]
+async fn ping_answers_under_both_compat_roots(pool: PgPool) {
     let (service, secret) = credential_service_with_known_app_password();
 
     for root in ["/compat/navidrome/rest", "/compat/subsonic/rest"] {
         let body = get(
-            app(service.clone()),
+            app(pool.clone(), service.clone()),
             &format!("{root}/ping.view?u=flynn&v=1.16.1&c=test-client&p={secret}"),
         )
         .await;
@@ -314,10 +321,10 @@ async fn post_login(app: axum::Router, username: &str, password: &str) -> (Statu
     (status, serde_json::from_slice(&body).unwrap())
 }
 
-#[tokio::test]
-async fn login_with_known_app_password_returns_nd_payload() {
+#[sqlx::test]
+async fn login_with_known_app_password_returns_nd_payload(pool: PgPool) {
     let (service, secret) = credential_service_with_known_app_password();
-    let app = app(service);
+    let app = app(pool.clone(), service);
 
     let (status, body) = post_login(app.clone(), "flynn", &secret).await;
     assert_eq!(status, StatusCode::OK);
@@ -343,8 +350,8 @@ async fn login_with_known_app_password_returns_nd_payload() {
     assert_eq!(ping["subsonic-response"]["status"], json!("ok"));
 }
 
-#[tokio::test]
-async fn login_with_wrong_password_is_indistinguishable_from_unknown_user() {
+#[sqlx::test]
+async fn login_with_wrong_password_is_indistinguishable_from_unknown_user(pool: PgPool) {
     let (service, secret) = credential_service_with_known_app_password();
 
     for username in ["flynn", "nobody"] {
@@ -353,7 +360,8 @@ async fn login_with_wrong_password_is_indistinguishable_from_unknown_user() {
         } else {
             &secret
         };
-        let (status, body) = post_login(app(service.clone()), username, password).await;
+        let (status, body) =
+            post_login(app(pool.clone(), service.clone()), username, password).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "user: {username}");
         assert_eq!(
             body,
@@ -383,8 +391,8 @@ async fn get_authed(
     (status, headers, serde_json::from_slice(&body).unwrap())
 }
 
-#[tokio::test]
-async fn song_list_rejects_missing_and_forged_tokens() {
+#[sqlx::test]
+async fn song_list_rejects_missing_and_forged_tokens(pool: PgPool) {
     let (service, _) = credential_service_with_known_app_password();
 
     let request = Request::builder()
@@ -393,20 +401,28 @@ async fn song_list_rejects_missing_and_forged_tokens() {
         .header("x-request-id", "request-123")
         .body(Body::empty())
         .unwrap();
-    let response = app(service.clone()).oneshot(request).await.unwrap();
+    let response = app(pool.clone(), service.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    let (status, _, body) = get_authed(app(service), "/compat/navidrome/api/song", "forged").await;
+    let (status, _, body) = get_authed(
+        app(pool.clone(), service),
+        "/compat/navidrome/api/song",
+        "forged",
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, json!({"error": "Not authenticated"}));
 }
 
-#[tokio::test]
-async fn song_list_returns_mapped_tracks_for_a_login_token() {
+#[sqlx::test]
+async fn song_list_returns_mapped_tracks_for_a_login_token(pool: PgPool) {
     use support::services;
     use whio_core::{
-        catalogue::CatalogueCandidate,
-        tracks::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+        features::music_library::catalogue::CatalogueCandidate,
+        features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
     };
 
     let (service, secret) = credential_service_with_known_app_password();
@@ -420,7 +436,7 @@ async fn song_list_returns_mapped_tracks_for_a_login_token() {
         TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
-    let (search, library, playback) = services(vec![Ok(vec![candidate])]);
+    let (search, library, playback) = services(pool.clone(), vec![Ok(vec![candidate])]);
     let app = router(service.clone(), search, library, playback);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
@@ -444,13 +460,13 @@ async fn song_list_returns_mapped_tracks_for_a_login_token() {
     assert_eq!(body, json!([]));
 }
 
-#[tokio::test]
-async fn source_tags_label_the_artist_in_both_song_surfaces() {
+#[sqlx::test]
+async fn source_tags_label_the_artist_in_both_song_surfaces(pool: PgPool) {
     use support::{router_with_source_tags, services};
     use whio_core::{
-        catalogue::CatalogueCandidate,
-        compat::SourceTags,
-        tracks::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+        facades::SourceTags,
+        features::music_library::catalogue::CatalogueCandidate,
+        features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
     };
 
     let (service, secret) = credential_service_with_known_app_password();
@@ -464,8 +480,10 @@ async fn source_tags_label_the_artist_in_both_song_surfaces() {
         TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
-    let (search, library, playback) =
-        services(vec![Ok(vec![candidate.clone()]), Ok(vec![candidate])]);
+    let (search, library, playback) = services(
+        pool.clone(),
+        vec![Ok(vec![candidate.clone()]), Ok(vec![candidate])],
+    );
     let app = router_with_source_tags(service, search, library, playback, SourceTags::ArtistPrefix);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
@@ -492,19 +510,20 @@ async fn source_tags_label_the_artist_in_both_song_surfaces() {
     );
 }
 
-#[tokio::test]
-async fn source_tags_reach_an_album_track_listing() {
+#[sqlx::test]
+async fn source_tags_reach_an_album_track_listing(pool: PgPool) {
     use support::router_with_source_tags;
     use whio_core::{
-        compat::SourceTags,
-        tracks::{
-            AlbumMetadata, AlbumTrack, ArtistCredit, CatalogueWrite, ProviderId, SourceIdentity,
-            SourceScope, TrackMetadata,
+        facades::SourceTags,
+        features::music_library::domain::{
+            AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
+            TrackMetadata,
         },
+        features::music_library::test_support::CatalogueWrite,
     };
 
     let (service, secret) = credential_service_with_known_app_password();
-    let repository = Arc::new(InMemoryTrackRepository::default());
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let album = repository
         .resolve_or_create_album(
             &AlbumMetadata::new("Discovery".to_owned())
@@ -565,20 +584,22 @@ async fn source_tags_reach_an_album_track_listing() {
     assert_eq!(body[0]["artist"], json!("[YTM] artist"));
 }
 
-#[tokio::test]
-async fn opening_a_partial_provider_album_completes_it_over_the_facade() {
+#[sqlx::test]
+async fn opening_a_partial_provider_album_completes_it_over_the_facade(pool: PgPool) {
     use async_trait::async_trait;
     use whio_core::{
-        catalogue::{
+        features::music_library::availability::ProviderRegistry,
+        features::music_library::catalogue::ProviderError,
+        features::music_library::catalogue::{
             CatalogueCandidate, CatalogueProvider, CatalogueSearch, CompletionService,
             FetchedAlbum, LibraryService, SearchService,
         },
-        providers::ProviderError,
-        request::RequestContext,
-        tracks::{
-            AlbumMetadata, AlbumTrack, ArtistCredit, CatalogueWrite, ProviderId, ProviderRegistry,
-            SourceIdentity, SourceScope, TrackMetadata,
+        features::music_library::domain::{
+            AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
+            TrackMetadata,
         },
+        features::music_library::test_support::CatalogueWrite,
+        platform::request::RequestContext,
     };
 
     fn provider_source(external_id: &str) -> SourceIdentity {
@@ -634,7 +655,7 @@ async fn opening_a_partial_provider_album_completes_it_over_the_facade() {
     }
 
     let (service, secret) = credential_service_with_known_app_password();
-    let ports = StorePorts::new();
+    let ports = StorePorts::new(pool.clone());
     let album = ports
         .store
         .resolve_or_create_album(&album_metadata())
@@ -713,14 +734,13 @@ async fn opening_a_partial_provider_album_completes_it_over_the_facade() {
     );
 }
 
-#[tokio::test]
-async fn subsonic_playlist_verbs_round_trip() {
+#[sqlx::test]
+async fn subsonic_playlist_verbs_round_trip(pool: PgPool) {
     use whio_core::{
-        catalogue::{LibraryService, SearchService},
-        playlists::PlaylistService,
-        tracks::{
-            CatalogueWrite, PlaylistStore, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
-        },
+        features::music_library::catalogue::{LibraryService, SearchService},
+        features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+        features::music_library::playlists::PlaylistService,
+        features::music_library::test_support::{CatalogueWrite, PlaylistStore},
     };
 
     fn source(provider: &str, scope: SourceScope, external_id: &str) -> SourceIdentity {
@@ -732,8 +752,8 @@ async fn subsonic_playlist_verbs_round_trip() {
         .unwrap()
     }
 
-    let (service, secret) = credential_service_with_known_app_password();
-    let ports = StorePorts::new();
+    let (service, secret) = support::credentials::database_credential_service(pool.clone()).await;
+    let ports = StorePorts::new(pool.clone());
     let owned = ports
         .store
         .get_or_create(
@@ -844,18 +864,17 @@ async fn subsonic_playlist_verbs_round_trip() {
     );
 }
 
-#[tokio::test]
-async fn navidrome_playlist_surface_lists_its_songs() {
+#[sqlx::test]
+async fn navidrome_playlist_surface_lists_its_songs(pool: PgPool) {
     use whio_core::{
-        catalogue::{LibraryService, SearchService},
-        playlists::PlaylistService,
-        tracks::{
-            CatalogueWrite, PlaylistStore, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
-        },
+        features::music_library::catalogue::{LibraryService, SearchService},
+        features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+        features::music_library::playlists::PlaylistService,
+        features::music_library::test_support::{CatalogueWrite, PlaylistStore},
     };
 
-    let (service, secret) = credential_service_with_known_app_password();
-    let ports = StorePorts::new();
+    let (service, secret) = support::credentials::database_credential_service(pool.clone()).await;
+    let ports = StorePorts::new(pool.clone());
     let track = ports
         .store
         .get_or_create(
@@ -924,12 +943,12 @@ async fn navidrome_playlist_surface_lists_its_songs() {
     assert_eq!(body["songs"][0]["artist"], json!("Artist"));
 }
 
-#[tokio::test]
-async fn song_detail_returns_the_searched_song() {
+#[sqlx::test]
+async fn song_detail_returns_the_searched_song(pool: PgPool) {
     use support::services;
     use whio_core::{
-        catalogue::CatalogueCandidate,
-        tracks::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+        features::music_library::catalogue::CatalogueCandidate,
+        features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
     };
 
     let (service, secret) = credential_service_with_known_app_password();
@@ -943,7 +962,7 @@ async fn song_detail_returns_the_searched_song() {
         TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
-    let (search, library, playback) = services(vec![Ok(vec![candidate])]);
+    let (search, library, playback) = services(pool.clone(), vec![Ok(vec![candidate])]);
     let app = router(service.clone(), search, library, playback);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
@@ -989,8 +1008,8 @@ async fn song_detail_returns_the_searched_song() {
     assert_eq!(body, json!({"error": "Not authenticated"}));
 }
 
-#[tokio::test]
-async fn compat_answers_cors_preflight() {
+#[sqlx::test]
+async fn compat_answers_cors_preflight(pool: PgPool) {
     let (service, _) = credential_service_with_known_app_password();
 
     for uri in [
@@ -1005,7 +1024,10 @@ async fn compat_answers_cors_preflight() {
             .header("access-control-request-method", "POST")
             .body(Body::empty())
             .unwrap();
-        let response = app(service.clone()).oneshot(request).await.unwrap();
+        let response = app(pool.clone(), service.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT, "uri: {uri}");
         assert_eq!(
             response.headers()["access-control-allow-origin"],
@@ -1015,10 +1037,10 @@ async fn compat_answers_cors_preflight() {
     }
 }
 
-#[tokio::test]
-async fn real_client_view_suffix_reaches_handlers() {
+#[sqlx::test]
+async fn real_client_view_suffix_reaches_handlers(pool: PgPool) {
     let (service, secret) = credential_service_with_known_app_password();
-    let app = app(service);
+    let app = app(pool.clone(), service);
 
     let ping = get(
         app.clone(),

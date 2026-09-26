@@ -1,14 +1,18 @@
+#![cfg(feature = "postgres-integration")]
+
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
 use serde_json::{Value, json};
+use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
+use whio_core::features::music_library::test_support::PostgresTrackRepository;
 use whio_core::{
-    catalogue::CatalogueCandidate,
-    providers::ProviderError,
-    tracks::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+    features::music_library::catalogue::CatalogueCandidate,
+    features::music_library::catalogue::ProviderError,
+    features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
 };
 
 mod support;
@@ -52,9 +56,9 @@ fn unauthenticated_request(body: &str) -> Request<Body> {
         .unwrap()
 }
 
-#[tokio::test]
-async fn search_requires_authentication() {
-    let response = app(vec![])
+#[sqlx::test]
+async fn search_requires_authentication(pool: PgPool) {
+    let response = app(pool.clone(), vec![])
         .oneshot(unauthenticated_request(
             r#"{"query":"Daft Punk","limit":5}"#,
         ))
@@ -64,9 +68,9 @@ async fn search_requires_authentication() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[tokio::test]
-async fn credential_storage_failure_is_a_server_error() {
-    let (search, library, playback) = services(vec![]);
+#[sqlx::test]
+async fn credential_storage_failure_is_a_server_error(pool: PgPool) {
+    let (search, library, playback) = services(pool.clone(), vec![]);
     let response = router(
         credential_service_with_storage_failure(),
         search,
@@ -88,9 +92,9 @@ async fn credential_storage_failure_is_a_server_error() {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
-#[tokio::test]
-async fn search_returns_whio_tracks() {
-    let response = app(vec![Ok(vec![candidate()])])
+#[sqlx::test]
+async fn search_returns_whio_tracks(pool: PgPool) {
+    let response = app(pool.clone(), vec![Ok(vec![candidate()])])
         .oneshot(request(r#"{"query":"Daft Punk","limit":5}"#))
         .await
         .unwrap();
@@ -110,13 +114,16 @@ async fn search_returns_whio_tracks() {
     assert!(track.get("match_quality").is_none());
 }
 
-#[tokio::test]
-async fn malformed_and_invalid_requests_share_the_public_error_shape() {
+#[sqlx::test]
+async fn malformed_and_invalid_requests_share_the_public_error_shape(pool: PgPool) {
     for body in [
         r#"{"query":"","limit":5}"#,
         r#"{"query":"Daft Punk","limit":"five"}"#,
     ] {
-        let response = app(vec![]).oneshot(request(body)).await.unwrap();
+        let response = app(pool.clone(), vec![])
+            .oneshot(request(body))
+            .await
+            .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
@@ -127,9 +134,9 @@ async fn malformed_and_invalid_requests_share_the_public_error_shape() {
     }
 }
 
-#[tokio::test]
-async fn unavailable_resolver_returns_service_unavailable() {
-    let response = app(vec![Err(ProviderError::ProviderUnavailable)])
+#[sqlx::test]
+async fn unavailable_resolver_returns_service_unavailable(pool: PgPool) {
+    let response = app(pool.clone(), vec![Err(ProviderError::ProviderUnavailable)])
         .oneshot(request(r#"{"query":"Daft Punk","limit":5}"#))
         .await
         .unwrap();
@@ -142,12 +149,13 @@ async fn unavailable_resolver_returns_service_unavailable() {
     );
 }
 
-#[tokio::test]
-async fn a_disabled_provider_track_is_reported_unavailable() {
+#[sqlx::test]
+async fn a_disabled_provider_track_is_reported_unavailable(pool: PgPool) {
     use std::sync::Arc;
     use whio_core::{
-        catalogue::{LibraryService, SearchService},
-        tracks::{CatalogueWrite, InMemoryTrackRepository, ProviderRegistry},
+        features::music_library::availability::ProviderRegistry,
+        features::music_library::catalogue::{LibraryService, SearchService},
+        features::music_library::test_support::CatalogueWrite,
     };
 
     fn source(provider: &str, scope: SourceScope, external_id: &str) -> SourceIdentity {
@@ -159,7 +167,7 @@ async fn a_disabled_provider_track_is_reported_unavailable() {
         .unwrap()
     }
 
-    let repository = Arc::new(InMemoryTrackRepository::default());
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     repository
         .get_or_create(
             source("local", SourceScope::Named("/music".to_owned()), "path-a"),

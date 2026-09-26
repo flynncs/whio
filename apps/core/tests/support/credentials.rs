@@ -10,11 +10,11 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use uuid::Uuid;
-use whio_core::identity::{
+use whio_core::features::identity::{
     domain::{ApiKeyCredential, AppPasswordCredential, User, UserId},
-    repository::{CredentialRepository, CredentialStoreError},
     secrets::{CredentialKey, encrypt_secret, generate_app_secret, lookup_digest},
     service::CredentialService,
+    test_support::{CredentialRepository, CredentialStoreError},
 };
 
 pub const TEST_USERNAME: &str = "test-user";
@@ -225,4 +225,19 @@ pub fn credential_service_with_known_app_password() -> (Arc<CredentialService>, 
     store.insert_app_password(&key, &secret, user_id);
 
     (Arc::new(CredentialService::new(store, key)), secret)
+}
+
+#[cfg(feature = "postgres-integration")]
+pub async fn database_credential_service(pool: sqlx::PgPool) -> (Arc<CredentialService>, String) {
+    let key = test_credential_key();
+    let provisioning = whio_core::features::identity::provision(pool.clone());
+    provisioning.create_user("flynn", "Flynn").await.unwrap();
+    let (_, secret) = provisioning
+        .mint_app_password(&key, "flynn", "integration")
+        .await
+        .unwrap();
+    (
+        Arc::new(whio_core::features::identity::credentials(pool, key)),
+        secret,
+    )
 }

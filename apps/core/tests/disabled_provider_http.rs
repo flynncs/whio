@@ -1,4 +1,8 @@
+#![cfg(feature = "postgres-integration")]
+
+use sqlx::PgPool;
 use std::sync::Arc;
+use whio_core::features::music_library::test_support::PostgresTrackRepository;
 
 mod support;
 
@@ -11,13 +15,12 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
-    catalogue::CatalogueProvider,
-    playback::PlaybackProvider,
-    providers::YtmAdapter,
-    tracks::{
-        CatalogueWrite, InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope,
-        TrackMetadata,
-    },
+    features::music_library::catalogue::CatalogueProvider,
+    features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+    features::music_library::providers::YoutubeCatalogueProvider,
+    features::music_library::test_support::CatalogueWrite,
+    features::playback::PlaybackProvider,
+    features::playback::providers::YtmAdapter,
 };
 
 fn source() -> SourceIdentity {
@@ -33,20 +36,20 @@ fn metadata() -> TrackMetadata {
     TrackMetadata::from_names("Title".to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
 }
 
-async fn app() -> (axum::Router, String) {
-    let repository = Arc::new(InMemoryTrackRepository::default());
+async fn app(pool: PgPool) -> (axum::Router, String) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let track_id = repository
         .get_or_create(source(), metadata())
         .await
         .unwrap()
         .id()
         .to_string();
-    // a disabled adapter surfaces `ProviderError::Disabled` for both
-    // catalogue and playback, which the HTTP layer maps to 503s
+    // Disabled catalogue and playback adapters both map to 503 responses.
     let ports = StorePorts { store: repository };
-    let (search, library) = ports.catalogue_service(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn CatalogueProvider>
-    ]);
+    let (search, library) =
+        ports.catalogue_service(vec![
+            Arc::new(YoutubeCatalogueProvider::disabled()) as Arc<dyn CatalogueProvider>
+        ]);
     let playback = ports.streaming(vec![
         Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
     ]);
@@ -72,9 +75,9 @@ async fn response_body(response: axum::response::Response) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
-#[tokio::test]
-async fn disabled_youtube_returns_a_safe_catalogue_error() {
-    let (app, _) = app().await;
+#[sqlx::test]
+async fn disabled_youtube_returns_a_safe_catalogue_error(pool: PgPool) {
+    let (app, _) = app(pool.clone()).await;
     let response = app
         .oneshot(request(
             "POST",
@@ -95,9 +98,9 @@ async fn disabled_youtube_returns_a_safe_catalogue_error() {
     );
 }
 
-#[tokio::test]
-async fn disabled_youtube_returns_a_safe_playback_error() {
-    let (app, track_id) = app().await;
+#[sqlx::test]
+async fn disabled_youtube_returns_a_safe_playback_error(pool: PgPool) {
+    let (app, track_id) = app(pool.clone()).await;
     let response = app
         .oneshot(request(
             "GET",

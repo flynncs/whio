@@ -1,4 +1,8 @@
+#![cfg(feature = "postgres-integration")]
+
+use sqlx::PgPool;
 use std::sync::Arc;
+use whio_core::features::music_library::test_support::PostgresTrackRepository;
 
 mod support;
 
@@ -14,14 +18,14 @@ use uuid::Uuid;
 use support::credentials::{MemoryCredentialStore, TEST_PASSWORD};
 use support::{NATIVE_AUTH_QUERY, StorePorts, router_with_artwork};
 use whio_core::{
-    artwork::ArtworkService,
-    identity::{
+    features::identity::{
         domain::{User, UserId},
         secrets::CredentialKey,
         service::CredentialService,
     },
-    tracks::{
-        ArtworkRef, InMemoryTrackRepository, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+    features::music_library::artwork::ArtworkService,
+    features::music_library::domain::{
+        ArtworkRef, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
     },
 };
 
@@ -65,11 +69,11 @@ async fn image_server(bytes: &'static [u8]) -> String {
     format!("http://{address}")
 }
 
-async fn public_app(url: &str) -> (axum::Router, String) {
-    use whio_core::tracks::{CatalogueWrite, SourceLookup};
+async fn public_app(pool: PgPool, url: &str) -> (axum::Router, String) {
+    use whio_core::features::music_library::test_support::{CatalogueWrite, SourceLookup};
 
     let (credential, _user, _key) = credentials();
-    let repository = Arc::new(InMemoryTrackRepository::default());
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
 
     let source = SourceIdentity::new(
         ProviderId::new("youtube_music".to_owned()).unwrap(),
@@ -91,7 +95,7 @@ async fn public_app(url: &str) -> (axum::Router, String) {
     let artwork = Arc::new(ArtworkService::new(
         ports.library(),
         ports.sources(),
-        whio_core::media::default_artwork_host_suffixes(),
+        whio_core::features::music_library::artwork::default_host_suffixes(),
     ));
     let playback = ports.streaming(Vec::new());
 
@@ -112,10 +116,10 @@ fn artwork_request(track_id: &str) -> Request<Body> {
         .unwrap()
 }
 
-#[tokio::test]
-async fn unknown_and_malformed_track_ids_do_not_serve_artwork() {
+#[sqlx::test]
+async fn unknown_and_malformed_track_ids_do_not_serve_artwork(pool: PgPool) {
     let base = image_server(b"cover-bytes").await;
-    let (app, _track_id) = public_app(&format!("{base}/cover.jpg")).await;
+    let (app, _track_id) = public_app(pool.clone(), &format!("{base}/cover.jpg")).await;
 
     let response = app
         .clone()
@@ -131,10 +135,10 @@ async fn unknown_and_malformed_track_ids_do_not_serve_artwork() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test]
-async fn public_artwork_outside_the_allowed_hosts_is_not_fetched() {
+#[sqlx::test]
+async fn public_artwork_outside_the_allowed_hosts_is_not_fetched(pool: PgPool) {
     let base = image_server(b"cover-bytes").await;
-    let (app, track_id) = public_app(&format!("{base}/cover.jpg")).await;
+    let (app, track_id) = public_app(pool.clone(), &format!("{base}/cover.jpg")).await;
 
     let response = app.oneshot(artwork_request(&track_id)).await.unwrap();
 
@@ -143,17 +147,16 @@ async fn public_artwork_outside_the_allowed_hosts_is_not_fetched() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-async fn pictured_app() -> (axum::Router, String, String, String) {
-    use whio_core::tracks::{
-        AlbumMetadata, AlbumTrack, ArtistCredit, CatalogueWrite, SourceFileFacts,
-    };
+async fn pictured_app(pool: PgPool) -> (axum::Router, String, String, String) {
+    use whio_core::features::music_library::domain::{AlbumMetadata, AlbumTrack, ArtistCredit};
+    use whio_core::features::music_library::test_support::{CatalogueWrite, SourceFileFacts};
 
     let (credential, _user, _key) = credentials();
     let root = std::env::temp_dir().join(format!("whio-http-art-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&root).unwrap();
     let file = support::pictured_flac(&root);
 
-    let repository = Arc::new(InMemoryTrackRepository::default());
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let source = SourceIdentity::new(
         ProviderId::new("local".to_owned()).unwrap(),
         SourceScope::Named(root.display().to_string()),
@@ -205,7 +208,7 @@ async fn pictured_app() -> (axum::Router, String, String, String) {
     let artwork = Arc::new(ArtworkService::new(
         ports.library(),
         ports.sources(),
-        whio_core::media::default_artwork_host_suffixes(),
+        whio_core::features::music_library::artwork::default_host_suffixes(),
     ));
     let playback = ports.streaming(Vec::new());
 
@@ -228,9 +231,9 @@ fn subsonic_cover_art_request(id: &str) -> Request<Body> {
         .unwrap()
 }
 
-#[tokio::test]
-async fn album_and_artist_ids_serve_embedded_art_with_validators() {
-    let (app, album_id, artist_id, track_id) = pictured_app().await;
+#[sqlx::test]
+async fn album_and_artist_ids_serve_embedded_art_with_validators(pool: PgPool) {
+    let (app, album_id, artist_id, track_id) = pictured_app(pool.clone()).await;
 
     for id in [&album_id, &artist_id, &track_id] {
         let response = app
@@ -274,9 +277,9 @@ async fn album_and_artist_ids_serve_embedded_art_with_validators() {
     }
 }
 
-#[tokio::test]
-async fn unknown_albums_and_malformed_ids_do_not_serve_artwork() {
-    let (app, _, _, _) = pictured_app().await;
+#[sqlx::test]
+async fn unknown_albums_and_malformed_ids_do_not_serve_artwork(pool: PgPool) {
+    let (app, _, _, _) = pictured_app(pool.clone()).await;
 
     let response = app
         .clone()

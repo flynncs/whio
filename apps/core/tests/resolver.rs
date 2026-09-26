@@ -3,14 +3,20 @@
 use std::collections::HashMap;
 
 use whio_core::{
-    catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch, SearchLimit, SearchQuery},
-    playback::{
+    features::music_library::catalogue::{
+        CatalogueCandidate, CatalogueProvider, CatalogueSearch,
+        ProviderError as CatalogueProviderError, SearchLimit, SearchQuery,
+    },
+    features::music_library::domain::{
+        ProviderId, SourceIdentity, SourceScope, ValidationError as TrackValidationError,
+    },
+    features::music_library::providers::YoutubeCatalogueProvider,
+    features::playback::providers::ProviderError,
+    features::playback::providers::YtmAdapter,
+    features::playback::{
         PlayableMedia, PlaybackProvider, PlaybackSource, ValidationError as PlaybackValidationError,
     },
-    providers::ProviderError,
-    providers::YtmAdapter,
-    request::{RequestContext, RequestId},
-    tracks::{ProviderId, SourceIdentity, SourceScope, ValidationError as TrackValidationError},
+    platform::request::{RequestContext, RequestId},
 };
 use whio_resolver_api::models::{
     CatalogueAlbum as CatalogueAlbumDto, CatalogueArtist as CatalogueArtistDto,
@@ -155,11 +161,11 @@ fn invalid_playback_dto_is_rejected() {
 
 #[tokio::test]
 async fn disabled_adapter_search_reports_disabled() {
-    let adapter = YtmAdapter::disabled();
+    let adapter = YoutubeCatalogueProvider::disabled();
 
     assert!(matches!(
         adapter.search(&search(), None, &context()).await,
-        Err(ProviderError::Disabled)
+        Err(CatalogueProviderError::Disabled)
     ));
 }
 
@@ -175,7 +181,7 @@ async fn disabled_adapter_resolve_reports_disabled() {
 
 #[tokio::test]
 async fn disabled_adapter_fetch_album_reports_disabled() {
-    let adapter = YtmAdapter::disabled();
+    let adapter = YoutubeCatalogueProvider::disabled();
     let source = SourceIdentity::new(
         ProviderId::new("youtube_music".to_owned()).unwrap(),
         SourceScope::Global,
@@ -185,6 +191,6 @@ async fn disabled_adapter_fetch_album_reports_disabled() {
 
     assert!(matches!(
         adapter.fetch_album(&source, &context()).await,
-        Err(ProviderError::Disabled)
+        Err(CatalogueProviderError::Disabled)
     ));
 }

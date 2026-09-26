@@ -1,0 +1,652 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use rayon::prelude::*;
+
+use crate::features::music_library::{
+    domain::{
+        AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
+        TrackMetadata,
+    },
+    storage::contracts::{CatalogueWrite, SourceFileFacts, SourceLookup, TrackRepositoryError},
+};
+
+use super::tags::{TagError, read_tags};
+
+const AUDIO_EXTENSIONS: &[&str] = &[
+    "flac", "mp3", "m4a", "mp4", "ogg", "oga", "opus", "wav", "aiff", "aif", "ape", "wv", "mpc",
+];
+
+pub const LOCAL_PROVIDER: &str = "local";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScanReport {
+    pub indexed: usize,
+    pub unchanged: usize,
+    pub untagged: usize,
+    pub failed: usize,
+    pub missing: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScanError {
+    #[error("media root could not be read")]
+    Unreadable,
+
+    #[error("track repository failed: {0}")]
+    Repository(#[from] TrackRepositoryError),
+}
+
+struct FoundFile {
+    absolute: PathBuf,
+    relative: String,
+    size_bytes: u64,
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+    suffix: Option<String>,
+}
+
+enum Prepared {
+    Unchanged { relative: String },
+    Untagged,
+    Failed,
+    Ready(Box<PreparedTrack>),
+}
+
+struct PreparedTrack {
+    relative: String,
+    facts: SourceFileFacts,
+    external_id: String,
+    metadata: TrackMetadata,
+    album: Option<AlbumMetadata>,
+    membership: Option<AlbumTrack>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanMode {
+    Incremental,
+    Full,
+}
+
+pub async fn scan(
+    catalogue: &Arc<dyn CatalogueWrite>,
+    sources: &Arc<dyn SourceLookup>,
+    roots: &[PathBuf],
+) -> Result<ScanReport, ScanError> {
+    let progress = AtomicU32::new(0);
+
+    scan_with(catalogue, sources, roots, ScanMode::Incremental, &progress).await
+}
+
+pub async fn scan_with(
+    catalogue: &Arc<dyn CatalogueWrite>,
+    sources: &Arc<dyn SourceLookup>,
+    roots: &[PathBuf],
+    mode: ScanMode,
+    progress: &AtomicU32,
+) -> Result<ScanReport, ScanError> {
+    let provider = ProviderId::new(LOCAL_PROVIDER.to_owned())
+        .expect("the local provider id is a valid identifier");
+    let mut report = ScanReport::default();
+    let mut processed = 0u32;
+    let empty = HashMap::new();
+
+    for root in roots {
+        let scope = SourceScope::Named(root.display().to_string());
+        let known = known_paths(sources, &provider, &scope).await?;
+        let found = walk(root)?;
+        let mut seen = Vec::with_capacity(found.len());
+        let lookup = if mode == ScanMode::Full {
+            &empty
+        } else {
+            &known
+        };
+
+        let prepared: Vec<Prepared> = found
+            .into_par_iter()
+            .map(|file| prepare(lookup, file))
+            .collect();
+
+        for item in prepared {
+            processed = processed.saturating_add(1);
+            progress.store(processed, Ordering::SeqCst);
+
+            match item {
+                Prepared::Unchanged { relative } => {
+                    seen.push(relative);
+                    report.unchanged += 1;
+                }
+                Prepared::Untagged => report.untagged += 1,
+                Prepared::Failed => report.failed += 1,
+                Prepared::Ready(track) => {
+                    let PreparedTrack {
+                        relative,
+                        facts,
+                        external_id,
+                        metadata,
+                        album,
+                        membership,
+                    } = *track;
+
+                    let source = SourceIdentity::new(provider.clone(), scope.clone(), external_id)
+                        .expect("scanned identity is non-empty");
+
+                    match index_track(catalogue, &source, &facts, metadata, album, membership).await
+                    {
+                        Ok(()) => {
+                            seen.push(relative);
+                            report.indexed += 1;
+                        }
+                        Err(error) => {
+                            tracing::warn!(path = %relative, error = ?error, "library scan could not index a file");
+                            seen.push(relative);
+                            if matches!(
+                                error,
+                                ScanError::Repository(TrackRepositoryError::Unavailable)
+                            ) {
+                                return Err(error);
+                            }
+                            report.failed += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        report.missing += mark_missing(&known, &seen);
+    }
+
+    Ok(report)
+}
+
+async fn index_track(
+    catalogue: &Arc<dyn CatalogueWrite>,
+    source: &SourceIdentity,
+    facts: &SourceFileFacts,
+    metadata: TrackMetadata,
+    album: Option<AlbumMetadata>,
+    membership: Option<AlbumTrack>,
+) -> Result<(), ScanError> {
+    let stored = catalogue
+        .index_source(source.clone(), metadata, facts)
+        .await?;
+
+    if let Some(album) = &album {
+        let album = catalogue.resolve_or_create_album(album).await?;
+        if let Some(membership) = membership {
+            catalogue
+                .set_album_track(album.id(), stored.id(), &membership)
+                .await?;
+        }
+        catalogue.set_album_source(album.id(), source).await?;
+    } else {
+        catalogue.clear_album_track(stored.id()).await?;
+    }
+
+    Ok(())
+}
+
+fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepared {
+    let mut facts = SourceFileFacts {
+        path: Some(file.relative.clone()),
+        size_bytes: file.size_bytes,
+        modified_at: file.modified_at,
+        missing_at: None,
+        content_type: None,
+        suffix: file.suffix,
+        acoustid_fingerprint: None,
+    };
+
+    if let Some(previous) = known.get(&file.relative)
+        && previous.size_bytes == file.size_bytes
+        && previous.modified_at.map(|time| time.timestamp_micros())
+            == file.modified_at.map(|time| time.timestamp_micros())
+    {
+        return Prepared::Unchanged {
+            relative: file.relative,
+        };
+    }
+
+    match read_tags(&file.absolute) {
+        Ok(tags) => {
+            let external_id = file.relative.clone();
+            let album = match album_metadata(&tags) {
+                Ok(album) => album,
+                Err(()) => return Prepared::Untagged,
+            };
+            let membership = album_track(&tags);
+            let acoustid_fingerprint = tags.acoustid_fingerprint.clone();
+            let credits = track_credits(&tags);
+
+            let Ok(metadata) = TrackMetadata::new(tags.title, credits, tags.duration_ms)
+                .and_then(|metadata| metadata.with_recording_id(tags.recording_id))
+                .and_then(|metadata| metadata.with_isrc(tags.isrc))
+                .and_then(|metadata| metadata.with_genre(tags.genre))
+            else {
+                return Prepared::Untagged;
+            };
+
+            facts.acoustid_fingerprint = acoustid_fingerprint;
+
+            Prepared::Ready(Box::new(PreparedTrack {
+                relative: file.relative,
+                facts,
+                external_id,
+                metadata,
+                album,
+                membership,
+            }))
+        }
+        Err(TagError::Untagged) => Prepared::Untagged,
+        Err(TagError::Unreadable) => Prepared::Failed,
+    }
+}
+
+fn album_metadata(tags: &super::TrackTags) -> Result<Option<AlbumMetadata>, ()> {
+    let Some(title) = &tags.album else {
+        return Ok(None);
+    };
+
+    let mut album = AlbumMetadata::new(title.clone()).map_err(|_| ())?;
+
+    if let Some(album_artist) = &tags.album_artist {
+        let credit = ArtistCredit::new(album_artist.clone(), tags.album_artist_id.clone())
+            .map_err(|_| ())?;
+        album = album.with_album_artist(credit);
+    }
+
+    album
+        .with_year(tags.year)
+        .and_then(|album| album.with_release_type(tags.release_type.clone()))
+        .and_then(|album| album.with_label(tags.label.clone()))
+        .and_then(|album| album.with_release_group_id(tags.release_group_id.clone()))
+        .and_then(|album| album.with_release_id(tags.release_id.clone()))
+        .map(Some)
+        .map_err(|_| ())
+}
+
+fn album_track(tags: &super::TrackTags) -> Option<AlbumTrack> {
+    let track_number = tags
+        .track_number
+        .and_then(|number| u16::try_from(number).ok())
+        .filter(|number| *number >= 1);
+    let disc_number = tags
+        .disc_number
+        .and_then(|number| u16::try_from(number).ok())
+        .filter(|number| *number >= 1);
+    let position = track_number.map_or(0, |number| u32::from(number) - 1);
+
+    AlbumTrack::new(disc_number, track_number, position).ok()
+}
+
+fn track_credits(tags: &super::TrackTags) -> Vec<ArtistCredit> {
+    if !tags.artists.is_empty() {
+        return tags
+            .artists
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                ArtistCredit::new(name.clone(), tags.artist_ids.get(index).cloned()).ok()
+            })
+            .collect();
+    }
+
+    tags.album_artist
+        .as_ref()
+        .and_then(|name| ArtistCredit::new(name.clone(), tags.album_artist_id.clone()).ok())
+        .into_iter()
+        .collect()
+}
+
+async fn known_paths(
+    sources: &Arc<dyn SourceLookup>,
+    provider: &ProviderId,
+    scope: &SourceScope,
+) -> Result<HashMap<String, SourceFileFacts>, ScanError> {
+    let recorded = sources.list_scanned_paths(provider, scope).await?;
+    Ok(recorded
+        .into_iter()
+        .filter_map(|(_, facts)| facts.path.clone().map(|path| (path, facts)))
+        .collect())
+}
+
+fn mark_missing(known: &HashMap<String, SourceFileFacts>, seen: &[String]) -> usize {
+    let present: std::collections::HashSet<&str> = seen.iter().map(String::as_str).collect();
+    known
+        .iter()
+        .filter(|(path, facts)| !present.contains(path.as_str()) && facts.missing_at.is_none())
+        .count()
+}
+
+fn walk(root: &Path) -> Result<Vec<FoundFile>, ScanError> {
+    let mut found = Vec::new();
+
+    for entry in jwalk::WalkDir::new(root) {
+        let entry = entry.map_err(|_| ScanError::Unreadable)?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let absolute = entry.path();
+        if !is_audio(&absolute) {
+            continue;
+        }
+
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let relative = absolute
+            .strip_prefix(root)
+            .unwrap_or(&absolute)
+            .to_string_lossy()
+            .into_owned();
+
+        found.push(FoundFile {
+            relative,
+            size_bytes: metadata.len(),
+            modified_at: metadata.modified().ok().map(chrono::DateTime::from),
+            suffix: absolute
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.to_ascii_lowercase()),
+            absolute,
+        });
+    }
+
+    found.sort_by(|left, right| left.relative.cmp(&right.relative));
+    Ok(found)
+}
+
+fn is_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| AUDIO_EXTENSIONS.contains(&extension.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(feature = "postgres-integration")]
+    use crate::features::music_library::{
+        storage::contracts::LibraryRead, storage::postgres::PostgresTrackRepository,
+    };
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("whio-{label}-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn audio_extensions_are_matched_case_insensitively() {
+        assert!(is_audio(Path::new("/m/a.flac")));
+        assert!(is_audio(Path::new("/m/a.FLAC")));
+        assert!(is_audio(Path::new("/m/a.Mp3")));
+        assert!(!is_audio(Path::new("/m/a.lrc")));
+        assert!(!is_audio(Path::new("/m/a.jpg")));
+        assert!(!is_audio(Path::new("/m/no-extension")));
+    }
+
+    #[test]
+    fn walk_finds_audio_recursively_and_skips_sidecars() {
+        let root = temp_root("walk");
+        std::fs::create_dir_all(root.join("Artist/Album")).unwrap();
+        std::fs::write(root.join("Artist/Album/01.flac"), b"x").unwrap();
+        std::fs::write(root.join("Artist/Album/01.lrc"), b"x").unwrap();
+        std::fs::write(root.join("Artist/Album/cover.jpg"), b"x").unwrap();
+        std::fs::write(root.join("Artist/loose.mp3"), b"x").unwrap();
+
+        let names = walk(&root)
+            .unwrap()
+            .iter()
+            .map(|file| file.relative.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["Artist/Album/01.flac", "Artist/loose.mp3"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn fixture() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac")
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_second_scan_skips_unchanged_files_and_does_not_report_them_missing(
+        pool: sqlx::PgPool,
+    ) {
+        let root = temp_root("skip");
+        std::fs::copy(fixture(), root.join("a.flac")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+
+        let first = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(first.indexed, 1);
+
+        let second = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(second.unchanged, 1);
+        assert_eq!(second.indexed, 0);
+        assert_eq!(
+            second.missing, 0,
+            "an unchanged file is still present on disk"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_vanished_file_is_counted_missing_without_touching_the_track(pool: sqlx::PgPool) {
+        let root = temp_root("missing");
+        let file = root.join("a.flac");
+        std::fs::copy(fixture(), &file).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        let first = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(first.indexed, 1);
+
+        std::fs::remove_file(&file).unwrap();
+        let second = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(second.missing, 1);
+        assert_eq!(second.indexed, 0);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_fixture_reads_back_every_field_the_scanner_needs() {
+        let tags = read_tags(&fixture()).unwrap();
+
+        assert_eq!(tags.title, "Fixture Song");
+        assert_eq!(tags.artists, vec!["Fixture Artist".to_owned()]);
+        assert_eq!(tags.album.as_deref(), Some("Fixture Album"));
+        assert_eq!(tags.album_artist.as_deref(), Some("Fixture Artist"));
+        assert_eq!(tags.track_number, Some(3));
+        assert_eq!(tags.disc_number, Some(1));
+        assert_eq!(tags.year, Some(2024));
+        assert_eq!(tags.genre.as_deref(), Some("Test"));
+        assert_eq!(
+            tags.recording_id.as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        assert!(tags.duration_ms.is_some_and(|ms| ms > 0));
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn an_untagged_file_is_counted_rather_than_indexed(pool: sqlx::PgPool) {
+        let root = temp_root("untagged");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/silence.flac"),
+            root.join("a.flac"),
+        )
+        .unwrap();
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        assert_eq!(report.untagged, 1);
+        assert_eq!(report.indexed, 0);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_missing_root_is_an_error() {
+        let missing = std::env::temp_dir().join(format!("whio-x-{}", uuid::Uuid::now_v7()));
+        assert!(matches!(walk(&missing), Err(ScanError::Unreadable)));
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_scanned_file_populates_its_album_and_membership(pool: sqlx::PgPool) {
+        let root = temp_root("album");
+        std::fs::copy(fixture(), root.join("a.flac")).unwrap();
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(report.indexed, 1);
+
+        let tags = read_tags(&fixture()).unwrap();
+        let expected = album_metadata(&tags).unwrap().unwrap();
+        let album = catalogue.resolve_or_create_album(&expected).await.unwrap();
+
+        let album_sources = sources.find_album_sources(album.id()).await.unwrap();
+        assert_eq!(album_sources.len(), 1);
+        assert_eq!(album_sources[0].provider_id().as_str(), "local");
+
+        let tracks = (store.as_ref() as &dyn LibraryRead)
+            .find_album_entries(album.id(), None)
+            .await
+            .unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].membership().disc_number(), Some(1));
+        assert_eq!(tracks[0].membership().track_number(), Some(3));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_track_without_an_artist_tag_falls_back_to_the_album_artist() {
+        use lofty::{
+            config::WriteOptions,
+            file::{AudioFile, TaggedFileExt},
+            tag::ItemKey,
+        };
+
+        let root = temp_root("no-artist");
+        let path = root.join("a.flac");
+        std::fs::copy(fixture(), &path).unwrap();
+
+        let mut tagged = lofty::probe::Probe::open(&path).unwrap().read().unwrap();
+        {
+            let has_primary = tagged.primary_tag_mut().is_some();
+            let tag = if has_primary {
+                tagged.primary_tag_mut().expect("checked above")
+            } else {
+                tagged.first_tag_mut().expect("the fixture carries a tag")
+            };
+            tag.take(&ItemKey::TrackArtist).count();
+            tag.take(&ItemKey::TrackArtists).count();
+        }
+        tagged.save_to_path(&path, WriteOptions::default()).unwrap();
+
+        let found = std::fs::metadata(&path).unwrap();
+        let prepared = prepare(
+            &std::collections::HashMap::new(),
+            FoundFile {
+                absolute: path,
+                relative: "a.flac".to_owned(),
+                size_bytes: found.len(),
+                modified_at: found.modified().ok().map(chrono::DateTime::from),
+                suffix: Some("flac".to_owned()),
+            },
+        );
+
+        match prepared {
+            Prepared::Ready(track) => {
+                assert_eq!(
+                    track
+                        .metadata
+                        .artists()
+                        .iter()
+                        .map(|artist| artist.name())
+                        .collect::<Vec<_>>(),
+                    ["Fixture Artist"]
+                );
+            }
+            _ => panic!("expected a prepared track"),
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_track_credit_carries_its_musicbrainz_id() {
+        use lofty::{
+            config::WriteOptions,
+            file::{AudioFile, TaggedFileExt},
+            tag::ItemKey,
+        };
+
+        let root = temp_root("credit-id");
+        let path = root.join("a.flac");
+        std::fs::copy(fixture(), &path).unwrap();
+
+        let mut tagged = lofty::probe::Probe::open(&path).unwrap().read().unwrap();
+        {
+            let has_primary = tagged.primary_tag_mut().is_some();
+            let tag = if has_primary {
+                tagged.primary_tag_mut().expect("checked above")
+            } else {
+                tagged.first_tag_mut().expect("the fixture carries a tag")
+            };
+            tag.take(&ItemKey::MusicBrainzArtistId).count();
+            tag.insert_text(ItemKey::MusicBrainzArtistId, "artist-mb-1".to_owned());
+        }
+        tagged.save_to_path(&path, WriteOptions::default()).unwrap();
+
+        let found = std::fs::metadata(&path).unwrap();
+        let prepared = prepare(
+            &std::collections::HashMap::new(),
+            FoundFile {
+                absolute: path,
+                relative: "a.flac".to_owned(),
+                size_bytes: found.len(),
+                modified_at: found.modified().ok().map(chrono::DateTime::from),
+                suffix: Some("flac".to_owned()),
+            },
+        );
+
+        match prepared {
+            Prepared::Ready(track) => {
+                let artists = track.metadata.artists();
+                assert_eq!(artists.len(), 1);
+                assert_eq!(artists[0].musicbrainz_artist_id(), Some("artist-mb-1"));
+            }
+            _ => panic!("expected a prepared track"),
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}

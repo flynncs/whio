@@ -1,3 +1,6 @@
+#![cfg(feature = "postgres-integration")]
+
+use sqlx::PgPool;
 use std::sync::Arc;
 
 mod support;
@@ -15,11 +18,15 @@ use md5::{Digest, Md5};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
-    identity::secrets::generate_app_secret, playback::PlaybackProvider, providers::YtmAdapter,
+    features::identity::secrets::generate_app_secret, features::playback::PlaybackProvider,
+    features::playback::providers::YtmAdapter,
 };
 
-fn app(credential: Arc<whio_core::identity::service::CredentialService>) -> axum::Router {
-    let ports = StorePorts::new();
+fn app(
+    pool: PgPool,
+    credential: Arc<whio_core::features::identity::service::CredentialService>,
+) -> axum::Router {
+    let ports = StorePorts::new(pool.clone());
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
         Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
@@ -65,10 +72,10 @@ fn failure(code: u16) -> Value {
     })
 }
 
-#[tokio::test]
-async fn ping_without_auth_params_reports_missing_parameter() {
+#[sqlx::test]
+async fn ping_without_auth_params_reports_missing_parameter(pool: PgPool) {
     let response = get(
-        app(support::credential_service()),
+        app(pool.clone(), support::credential_service()),
         "/rest/ping.view?v=1.16.1&c=test-client",
     )
     .await;
@@ -76,10 +83,10 @@ async fn ping_without_auth_params_reports_missing_parameter() {
     assert_eq!(response, failure(10));
 }
 
-#[tokio::test]
-async fn ping_without_any_mechanism_reports_missing_parameter() {
+#[sqlx::test]
+async fn ping_without_any_mechanism_reports_missing_parameter(pool: PgPool) {
     let response = get(
-        app(support::credential_service()),
+        app(pool.clone(), support::credential_service()),
         "/rest/ping.view?u=flynn&v=1.16.1&c=test-client",
     )
     .await;
@@ -87,10 +94,10 @@ async fn ping_without_any_mechanism_reports_missing_parameter() {
     assert_eq!(response, failure(10));
 }
 
-#[tokio::test]
-async fn ping_with_half_a_token_pair_reports_missing_parameter() {
+#[sqlx::test]
+async fn ping_with_half_a_token_pair_reports_missing_parameter(pool: PgPool) {
     let response = get(
-        app(support::credential_service()),
+        app(pool.clone(), support::credential_service()),
         "/rest/ping.view?u=flynn&v=1.16.1&c=test-client&t=abc123",
     )
     .await;
@@ -98,10 +105,10 @@ async fn ping_with_half_a_token_pair_reports_missing_parameter() {
     assert_eq!(response, failure(10));
 }
 
-#[tokio::test]
-async fn ping_with_conflicting_mechanisms_reports_code_43() {
+#[sqlx::test]
+async fn ping_with_conflicting_mechanisms_reports_code_43(pool: PgPool) {
     let response = get(
-        app(support::credential_service()),
+        app(pool.clone(), support::credential_service()),
         "/rest/ping.view?u=flynn&v=1.16.1&c=test-client&p=whio_one&apiKey=whio_two",
     )
     .await;
@@ -109,12 +116,12 @@ async fn ping_with_conflicting_mechanisms_reports_code_43() {
     assert_eq!(response, failure(43));
 }
 
-#[tokio::test]
-async fn ping_with_unknown_api_key_is_indistinguishable_from_wrong_password() {
+#[sqlx::test]
+async fn ping_with_unknown_api_key_is_indistinguishable_from_wrong_password(pool: PgPool) {
     let (service, _known) = credential_service_with_known_api_key();
     let unknown = generate_app_secret();
     let response = get(
-        app(service),
+        app(pool.clone(), service),
         &format!("/rest/ping.view?u=flynn&v=1.16.1&c=test-client&apiKey={unknown}"),
     )
     .await;
@@ -122,11 +129,11 @@ async fn ping_with_unknown_api_key_is_indistinguishable_from_wrong_password() {
     assert_eq!(response, failure(40));
 }
 
-#[tokio::test]
-async fn ping_with_known_api_key_succeeds() {
+#[sqlx::test]
+async fn ping_with_known_api_key_succeeds(pool: PgPool) {
     let (service, secret) = credential_service_with_known_api_key();
     let response = get(
-        app(service),
+        app(pool.clone(), service),
         &format!("/rest/ping.view?u=flynn&v=1.16.1&c=test-client&apiKey={secret}"),
     )
     .await;
@@ -145,8 +152,8 @@ async fn ping_with_known_api_key_succeeds() {
     );
 }
 
-#[tokio::test]
-async fn ping_accepts_salted_token_of_a_stored_app_password() {
+#[sqlx::test]
+async fn ping_accepts_salted_token_of_a_stored_app_password(pool: PgPool) {
     let (service, secret) = credential_service_with_known_app_password();
     let salt = "abcdef123456";
 
@@ -160,7 +167,7 @@ async fn ping_accepts_salted_token_of_a_stored_app_password() {
         .collect();
 
     let response = get(
-        app(service),
+        app(pool.clone(), service),
         &format!("/rest/ping.view?u=flynn&v=1.16.1&c=test-client&t={token}&s={salt}"),
     )
     .await;
@@ -172,13 +179,13 @@ async fn ping_accepts_salted_token_of_a_stored_app_password() {
     );
 }
 
-#[tokio::test]
-async fn ping_accepts_enc_prefixed_password() {
+#[sqlx::test]
+async fn ping_accepts_enc_prefixed_password(pool: PgPool) {
     let (service, secret) = credential_service_with_known_app_password();
     let hex_encoded: String = secret.bytes().map(|byte| format!("{byte:02x}")).collect();
 
     let response = get(
-        app(service),
+        app(pool.clone(), service),
         &format!("/rest/ping.view?u=flynn&v=1.16.1&c=test-client&p=enc:{hex_encoded}"),
     )
     .await;
@@ -186,10 +193,10 @@ async fn ping_accepts_enc_prefixed_password() {
     assert_eq!(response["subsonic-response"]["status"], json!("ok"));
 }
 
-#[tokio::test]
-async fn open_subsonic_extensions_requires_authentication() {
+#[sqlx::test]
+async fn open_subsonic_extensions_requires_authentication(pool: PgPool) {
     let response = get(
-        app(support::credential_service()),
+        app(pool.clone(), support::credential_service()),
         "/rest/getOpenSubsonicExtensions.view",
     )
     .await;
@@ -197,11 +204,11 @@ async fn open_subsonic_extensions_requires_authentication() {
     assert_eq!(response, failure(10));
 }
 
-#[tokio::test]
-async fn open_subsonic_extensions_returns_an_empty_list() {
+#[sqlx::test]
+async fn open_subsonic_extensions_returns_an_empty_list(pool: PgPool) {
     let (service, secret) = credential_service_with_known_api_key();
     let response = get(
-        app(service),
+        app(pool.clone(), service),
         &format!(
             "/rest/getOpenSubsonicExtensions.view?u=flynn&v=1.16.1&c=test-client&apiKey={secret}"
         ),
@@ -223,12 +230,12 @@ async fn open_subsonic_extensions_returns_an_empty_list() {
     );
 }
 
-#[tokio::test]
-async fn unknown_rest_endpoints_answer_with_a_subsonic_envelope_not_product_json() {
+#[sqlx::test]
+async fn unknown_rest_endpoints_answer_with_a_subsonic_envelope_not_product_json(pool: PgPool) {
     // clients probe unimplemented endpoints during discovery; the compat plane
     // must speak subsonic even there
     let response = get(
-        app(support::credential_service()),
+        app(pool.clone(), support::credential_service()),
         "/rest/getIndexes.view?u=flynn&v=1.16.1&c=test-client&apiKey=whio_whatever",
     )
     .await;

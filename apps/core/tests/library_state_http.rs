@@ -1,3 +1,7 @@
+#![cfg(feature = "postgres-integration")]
+
+use sqlx::PgPool;
+use whio_core::features::music_library::test_support::PostgresTrackRepository;
 mod support;
 
 use std::sync::Arc;
@@ -9,17 +13,18 @@ use axum::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use whio_core::{
-    AppState,
-    library::ScanService,
-    playback::PlaybackProvider,
-    providers::YtmAdapter,
-    tracks::{
-        AlbumMetadata, AlbumTrack, ArtistCredit, CatalogueWrite, InMemoryTrackRepository,
-        ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+    app::AppState,
+    features::music_library::domain::{
+        AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
+        TrackMetadata,
     },
+    features::music_library::library::ScanService,
+    features::music_library::test_support::CatalogueWrite,
+    features::playback::PlaybackProvider,
+    features::playback::providers::YtmAdapter,
 };
 
-use support::{StorePorts, credential_service_with_known_app_password};
+use support::{StorePorts, credentials::database_credential_service};
 
 struct Seeded {
     app: axum::Router,
@@ -38,12 +43,12 @@ fn local(external_id: &str) -> SourceIdentity {
     .unwrap()
 }
 
-async fn seeded_app() -> Seeded {
-    let (credential, secret) = credential_service_with_known_app_password();
+async fn seeded_app(pool: PgPool) -> Seeded {
+    let (credential, secret) = database_credential_service(pool.clone()).await;
     let root = std::env::temp_dir().join(format!("whio-state-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&root).unwrap();
 
-    let repository = Arc::new(InMemoryTrackRepository::default());
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let artist = repository
         .resolve_or_create_artist(&ArtistCredit::new("Daft Punk".to_owned(), None).unwrap())
         .await
@@ -105,14 +110,16 @@ async fn seeded_app() -> Seeded {
     let scanner = ScanService::new(ports.catalogue(), ports.sources(), vec![root]);
     scanner.start();
     let (search, library) = ports.bare_catalogue();
-    let library_state = Arc::new(whio_core::library_state::LibraryStateService::new(
-        ports.state(),
-        ports.library(),
-    ));
+    let library_state = Arc::new(
+        whio_core::features::music_library::library_state::LibraryStateService::new(
+            ports.state(),
+            ports.library(),
+        ),
+    );
     let playback = ports.streaming(vec![
         Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
     ]);
-    let app = whio_core::router(
+    let app = whio_core::app::router(
         AppState::new(credential, search, library, playback)
             .with_library_state(library_state)
             .with_scanner(scanner),
@@ -180,15 +187,15 @@ async fn get_authed(app: axum::Router, uri: &str, token: &str) -> (StatusCode, V
     (status, serde_json::from_slice(&body).unwrap())
 }
 
-#[tokio::test]
-async fn subsonic_star_rating_play_and_genre_routes() {
+#[sqlx::test]
+async fn subsonic_star_rating_play_and_genre_routes(pool: PgPool) {
     let Seeded {
         app,
         song,
         album,
         artist,
         secret,
-    } = seeded_app().await;
+    } = seeded_app(pool.clone()).await;
     let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
 
     let body = get(app.clone(), &format!("/rest/getGenres.view?{auth}")).await;
@@ -212,6 +219,11 @@ async fn subsonic_star_rating_play_and_genre_routes() {
     )
     .await;
     assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    get(
+        app.clone(),
+        &format!("/rest/setRating.view?{auth}&id={album}&rating=5"),
+    )
+    .await;
 
     get(
         app.clone(),
@@ -291,9 +303,9 @@ async fn subsonic_star_rating_play_and_genre_routes() {
     assert!(body["subsonic-response"]["starred2"]["song"].is_null());
 }
 
-#[tokio::test]
-async fn subsonic_scan_status_reports_and_starts() {
-    let seeded = seeded_app().await;
+#[sqlx::test]
+async fn subsonic_scan_status_reports_and_starts(pool: PgPool) {
+    let seeded = seeded_app(pool.clone()).await;
     let auth = format!("u=flynn&v=1.16.1&c=test-client&p={}", seeded.secret);
 
     let body = get(
@@ -313,9 +325,9 @@ async fn subsonic_scan_status_reports_and_starts() {
     );
 }
 
-#[tokio::test]
-async fn navidrome_native_exposes_state_and_genres() {
-    let seeded = seeded_app().await;
+#[sqlx::test]
+async fn navidrome_native_exposes_state_and_genres(pool: PgPool) {
+    let seeded = seeded_app(pool.clone()).await;
     let auth = format!("u=flynn&v=1.16.1&c=test-client&p={}", seeded.secret);
 
     get(

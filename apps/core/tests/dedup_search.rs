@@ -1,26 +1,33 @@
+#![cfg(feature = "postgres-integration")]
+
+use sqlx::PgPool;
 use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;
+use whio_core::features::music_library::test_support::PostgresTrackRepository;
 use whio_core::{
-    catalogue::{CatalogueSearch, DedupMode, SearchLimit, SearchQuery, SearchService},
-    request::{RequestContext, RequestId},
-    tracks::{
-        AlbumMetadata, AlbumTrack, CatalogueWrite, InMemoryTrackRepository, LibraryRead,
-        ProviderId, SourceFileFacts, SourceIdentity, SourceLookup, SourceScope, StateStore, Track,
-        TrackMetadata,
+    features::music_library::catalogue::{
+        CatalogueSearch, DedupMode, SearchLimit, SearchQuery, SearchService,
     },
+    features::music_library::domain::{
+        AlbumMetadata, AlbumTrack, ProviderId, SourceIdentity, SourceScope, Track, TrackMetadata,
+    },
+    features::music_library::test_support::{
+        CatalogueWrite, LibraryRead, SourceFileFacts, SourceLookup, StateStore,
+    },
+    platform::request::{RequestContext, RequestId},
 };
 
 struct Fixture {
-    repository: Arc<InMemoryTrackRepository>,
+    repository: Arc<PostgresTrackRepository>,
     root: PathBuf,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    fn new(pool: PgPool) -> Self {
         let root = std::env::temp_dir().join(format!("whio-dedup-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
         Self {
-            repository: Arc::new(InMemoryTrackRepository::default()),
+            repository: Arc::new(PostgresTrackRepository::new(pool)),
             root,
         }
     }
@@ -64,7 +71,10 @@ impl Fixture {
             .unwrap()
     }
 
-    async fn search(&self, mode: DedupMode) -> Vec<whio_core::tracks::TrackHit> {
+    async fn search(
+        &self,
+        mode: DedupMode,
+    ) -> Vec<whio_core::features::music_library::domain::TrackHit> {
         let service = SearchService::new(
             Arc::clone(&self.repository) as Arc<dyn LibraryRead>,
             Arc::clone(&self.repository) as Arc<dyn CatalogueWrite>,
@@ -97,9 +107,9 @@ fn metadata(title: &str) -> TrackMetadata {
     TrackMetadata::from_names(title.into(), vec!["Artist".into()], Some(240000)).unwrap()
 }
 
-#[tokio::test]
-async fn cached_remote_is_replaced_and_its_identity_and_local_album_survive() {
-    let f = Fixture::new();
+#[sqlx::test]
+async fn cached_remote_is_replaced_and_its_identity_and_local_album_survive(pool: PgPool) {
+    let f = Fixture::new(pool.clone());
     let local = f.local("Song", "song.flac").await;
     let remote = f.remote("Song").await;
     let album = f
@@ -132,9 +142,9 @@ async fn cached_remote_is_replaced_and_its_identity_and_local_album_survive() {
     );
 }
 
-#[tokio::test]
-async fn off_and_shadow_leave_both_results_visible() {
-    let f = Fixture::new();
+#[sqlx::test]
+async fn off_and_shadow_leave_both_results_visible(pool: PgPool) {
+    let f = Fixture::new(pool.clone());
     f.local("Song", "song.flac").await;
     f.remote("Song").await;
     for mode in [DedupMode::Off, DedupMode::Shadow] {
@@ -142,9 +152,9 @@ async fn off_and_shadow_leave_both_results_visible() {
     }
 }
 
-#[tokio::test]
-async fn deleted_or_empty_local_file_keeps_remote_result() {
-    let f = Fixture::new();
+#[sqlx::test]
+async fn deleted_or_empty_local_file_keeps_remote_result(pool: PgPool) {
+    let f = Fixture::new(pool.clone());
     f.local("Song", "song.flac").await;
     let remote = f.remote("Song").await;
     std::fs::remove_file(f.root.join("song.flac")).unwrap();
@@ -163,15 +173,15 @@ async fn deleted_or_empty_local_file_keeps_remote_result() {
     );
 }
 
-#[tokio::test]
-async fn ambiguity_and_alternate_recordings_stay_separate() {
+#[sqlx::test]
+async fn ambiguity_and_alternate_recordings_stay_separate(pool: PgPool) {
     for title in [
         "Song (Live)",
         "Song (Acoustic)",
         "Song (Radio Edit)",
         "Song (Blue Room)",
     ] {
-        let f = Fixture::new();
+        let f = Fixture::new(pool.clone());
         f.local(title, "song.flac").await;
         let remote = f.remote("Song").await;
         assert!(
@@ -182,7 +192,7 @@ async fn ambiguity_and_alternate_recordings_stay_separate() {
             "{title}"
         );
     }
-    let f = Fixture::new();
+    let f = Fixture::new(pool.clone());
     f.local("Song", "one.flac").await;
     f.local("Song", "two.flac").await;
     let remote = f.remote("Song").await;
@@ -197,14 +207,16 @@ async fn ambiguity_and_alternate_recordings_stay_separate() {
 struct OneResult;
 
 #[async_trait::async_trait]
-impl whio_core::catalogue::CatalogueProvider for OneResult {
+impl whio_core::features::music_library::catalogue::CatalogueProvider for OneResult {
     async fn search(
         &self,
         _search: &CatalogueSearch,
         _user: Option<&Uuid>,
         _context: &RequestContext,
-    ) -> Result<Vec<whio_core::catalogue::CatalogueCandidate>, whio_core::providers::ProviderError>
-    {
+    ) -> Result<
+        Vec<whio_core::features::music_library::catalogue::CatalogueCandidate>,
+        whio_core::features::music_library::catalogue::ProviderError,
+    > {
         let source = SourceIdentity::new(
             ProviderId::new("youtube_music".into()).unwrap(),
             SourceScope::Global,
@@ -212,16 +224,20 @@ impl whio_core::catalogue::CatalogueProvider for OneResult {
         )
         .unwrap();
         Ok(vec![
-            whio_core::catalogue::CatalogueCandidate::new(source, metadata("Song")).with_album(
-                Some(AlbumMetadata::new("Remote Compilation".into()).unwrap()),
-            ),
+            whio_core::features::music_library::catalogue::CatalogueCandidate::new(
+                source,
+                metadata("Song"),
+            )
+            .with_album(Some(
+                AlbumMetadata::new("Remote Compilation".into()).unwrap(),
+            )),
         ])
     }
 }
 
-#[tokio::test]
-async fn fresh_provider_result_uses_local_state_without_changing_album_or_sources() {
-    let f = Fixture::new();
+#[sqlx::test]
+async fn fresh_provider_result_uses_local_state_without_changing_album_or_sources(pool: PgPool) {
+    let f = Fixture::new(pool.clone());
     let local = f.local("Song", "song.flac").await;
     let album = f
         .repository
@@ -232,11 +248,14 @@ async fn fresh_provider_result_uses_local_state_without_changing_album_or_source
         .set_album_track(album.id(), local.id(), &AlbumTrack::unplaced())
         .await
         .unwrap();
-    let user = Uuid::now_v7();
+    let user = whio_core::features::identity::provision(pool.clone())
+        .create_user("dedup-user", "Dedup User")
+        .await
+        .unwrap();
     f.repository
         .set_rating(
             user,
-            whio_core::tracks::StateTarget::Track(local.id()),
+            whio_core::features::music_library::domain::StateTarget::Track(local.id()),
             Some(5),
         )
         .await
@@ -278,9 +297,9 @@ async fn fresh_provider_result_uses_local_state_without_changing_album_or_source
     );
 }
 
-#[tokio::test]
-async fn generic_demo_version_does_not_bypass_the_demo_veto() {
-    let f = Fixture::new();
+#[sqlx::test]
+async fn generic_demo_version_does_not_bypass_the_demo_veto(pool: PgPool) {
+    let f = Fixture::new(pool.clone());
     f.local("Song (Demo Version)", "song.flac").await;
     let remote = f.remote("Song (Demo Version)").await;
     assert!(
