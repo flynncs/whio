@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use super::PostgresTrackRepository;
 use crate::features::music_library::{
     domain::{
@@ -1527,53 +1525,44 @@ async fn the_genre_facets_use_the_set(pool: sqlx::PgPool) {
     assert_eq!(repository.count_albums(None, absent).await.unwrap(), 0);
 }
 
-#[derive(Default)]
-struct StatementFields {
-    statement: String,
+async fn table_scans(pool: &sqlx::PgPool, table: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COALESCE(seq_scan, 0) + COALESCE(idx_scan, 0) FROM pg_stat_user_tables \
+         WHERE relname = $1",
+    )
+    .bind(table)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
-impl tracing::field::Visit for StatementFields {
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == "db.statement" {
-            self.statement = value.to_owned();
+async fn settled_table_scans(pool: &sqlx::PgPool, table: &str) -> i64 {
+    let mut previous = -1;
+
+    for _ in 0..4 {
+        sqlx::query("SELECT pg_stat_force_next_flush()")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("SELECT 1").execute(pool).await.unwrap();
+        let current = table_scans(pool, table).await;
+
+        if current == previous {
+            return current;
         }
+        previous = current;
     }
 
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "db.statement" {
-            self.statement = format!("{value:?}");
-        }
-    }
-}
-
-struct StatementLog(Arc<parking_lot::Mutex<Vec<String>>>);
-
-impl tracing::Subscriber for StatementLog {
-    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        metadata.target() == "sqlx::query"
-    }
-
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        let mut fields = StatementFields::default();
-        event.record(&mut fields);
-        self.0.lock().push(fields.statement);
-    }
-
-    fn enter(&self, _: &tracing::span::Id) {}
-
-    fn exit(&self, _: &tracing::span::Id) {}
+    previous
 }
 
 #[sqlx::test]
 async fn batch_reads_do_not_add_a_per_track_query(pool: sqlx::PgPool) {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
     let repository = PostgresTrackRepository::new(pool.clone());
 
     for index in 0..20 {
@@ -1586,52 +1575,53 @@ async fn batch_reads_do_not_add_a_per_track_query(pool: sqlx::PgPool) {
             .unwrap();
     }
 
-    let log = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let dispatch = tracing::Dispatch::new(StatementLog(Arc::clone(&log)));
-    let guard = tracing::dispatcher::set_default(&dispatch);
     let filter = TrackListFilter::new();
 
-    log.lock().clear();
+    let genres_before = settled_table_scans(&pool, "track_genres").await;
+    let credits_before = settled_table_scans(&pool, "track_artist_credits").await;
     let small = repository
         .page_tracks(0, 2, TrackOrder::Title, &filter, None)
         .await
         .unwrap();
-    let small_statements = log.lock().clone();
+    let small_genres = settled_table_scans(&pool, "track_genres").await - genres_before;
+    let small_credits = settled_table_scans(&pool, "track_artist_credits").await - credits_before;
 
-    log.lock().clear();
+    let genres_before = settled_table_scans(&pool, "track_genres").await;
+    let credits_before = settled_table_scans(&pool, "track_artist_credits").await;
     let large = repository
         .page_tracks(0, 20, TrackOrder::Title, &filter, None)
         .await
         .unwrap();
-    let large_statements = log.lock().clone();
-    drop(guard);
+    let large_genres = settled_table_scans(&pool, "track_genres").await - genres_before;
+    let large_credits = settled_table_scans(&pool, "track_artist_credits").await - credits_before;
 
     assert_eq!(small.items().len(), 2);
     assert_eq!(large.items().len(), 20);
-    assert!(
-        !small_statements.is_empty(),
-        "the counter sees sqlx statements"
+    assert_eq!(
+        small_genres, 1,
+        "the genre set is read by exactly one statement"
     );
     assert_eq!(
-        small_statements.len(),
-        large_statements.len(),
-        "a page of 20 must not run more statements than a page of 2"
+        small_credits, 1,
+        "the credits are read by exactly one statement"
     );
     assert_eq!(
-        small_statements
-            .iter()
-            .filter(|statement| statement.contains("track_genres"))
-            .count(),
-        1,
-        "one batch read for the genre set"
+        large_genres, small_genres,
+        "a page of 20 must not read the genre set more often than a page of 2"
     );
     assert_eq!(
-        small_statements
-            .iter()
-            .filter(|statement| statement.contains("track_artist_credits"))
-            .count(),
-        1,
-        "one batch read for the credits"
+        large_credits, small_credits,
+        "a page of 20 must not read the credits more often than a page of 2"
+    );
+
+    let genres_before = settled_table_scans(&pool, "track_genres").await;
+    for item in large.items() {
+        repository.find_track(item.track().id()).await.unwrap();
+    }
+    let per_track = settled_table_scans(&pool, "track_genres").await - genres_before;
+    assert_eq!(
+        per_track, 20,
+        "the same counter sees one genre read per track when tracks are read one at a time"
     );
 }
 fn local_facts(path: &str, missing_at: Option<chrono::DateTime<chrono::Utc>>) -> SourceFileFacts {
