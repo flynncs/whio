@@ -4,7 +4,7 @@ use super::PostgresTrackRepository;
 use crate::features::music_library::{
     domain::{
         AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef,
-        ProviderId, SourceIdentity, SourceScope, StateTarget, TrackId, TrackListFilter,
+        CreditRole, ProviderId, SourceIdentity, SourceScope, StateTarget, TrackId, TrackListFilter,
         TrackListScope, TrackMetadata, TrackOrder, TrackPage,
     },
     storage::contracts::{CatalogueWrite, LibraryRead, PlaylistStore, SourceLookup, StateStore},
@@ -1403,6 +1403,54 @@ async fn page_items_carry_album_membership_state_and_sources(pool: sqlx::PgPool)
         .collect::<Vec<_>>();
     providers.sort();
     assert_eq!(providers, ["local", "youtube_music"]);
+}
+
+#[sqlx::test]
+async fn the_artist_list_keeps_primary_credits_only(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let credits = vec![
+        ArtistCredit::new("Clara Schumann".to_owned(), None)
+            .unwrap()
+            .with_role(CreditRole::Composer),
+        ArtistCredit::new("Bill Evans".to_owned(), None)
+            .unwrap()
+            .with_role(CreditRole::Performer),
+    ];
+    let track = repository
+        .get_or_create(
+            source("local", "path-a"),
+            metadata("Song").with_credits(credits),
+        )
+        .await
+        .unwrap();
+
+    let artists = repository.list_artists(0, 10, None).await.unwrap();
+    let names = artists
+        .iter()
+        .map(|artist| artist.artist().name().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Artist"], "a role credit is not a browsable artist");
+    assert_eq!(repository.count_artists(None).await.unwrap(), 1);
+
+    let stored = repository
+        .find_track(track.id())
+        .await
+        .unwrap()
+        .expect("the track is stored");
+    assert_eq!(stored.artists().len(), 1);
+    assert_eq!(
+        stored
+            .metadata()
+            .credits()
+            .iter()
+            .map(|credit| (credit.name(), credit.role()))
+            .collect::<Vec<_>>(),
+        [
+            ("Clara Schumann", Some(CreditRole::Composer)),
+            ("Bill Evans", Some(CreditRole::Performer)),
+        ],
+        "the role credits are still stored and read back"
+    );
 }
 
 #[sqlx::test]

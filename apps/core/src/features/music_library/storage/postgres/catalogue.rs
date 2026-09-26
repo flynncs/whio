@@ -352,13 +352,13 @@ async fn find_or_attach_album(
     if let Some(identifier) = metadata.musicbrainz_release_group_id()
         && let Some(album) = find_album_by_release_group(pool, identifier).await?
     {
-        return Ok(Some(album));
+        return apply_observed_album_facts(pool, album.id(), metadata).await;
     }
 
     if let Some(identifier) = metadata.musicbrainz_release_id()
         && let Some(album) = find_album_by_release(pool, identifier).await?
     {
-        return Ok(Some(album));
+        return apply_observed_album_facts(pool, album.id(), metadata).await;
     }
 
     let Some(existing) = find_album_by_text(pool, metadata.title(), album_artist_id).await? else {
@@ -374,6 +374,14 @@ async fn find_or_attach_album(
         return Ok(None);
     }
 
+    apply_observed_album_facts(pool, existing.id(), metadata).await
+}
+
+async fn apply_observed_album_facts(
+    pool: &PgPool,
+    album_id: &AlbumId,
+    metadata: &AlbumMetadata,
+) -> Result<Option<Album>, TrackRepositoryError> {
     let row = sqlx::query_as::<_, AlbumRow>(&format!(
         r#"
         UPDATE albums
@@ -404,7 +412,7 @@ async fn find_or_attach_album(
     .bind(encode_date_precision(metadata.release_date()))
     .bind(metadata.release_country())
     .bind(metadata.compilation())
-    .bind(existing.id().as_uuid())
+    .bind(album_id.as_uuid())
     .fetch_optional(pool)
     .await
     .map_err(repository_error)?;

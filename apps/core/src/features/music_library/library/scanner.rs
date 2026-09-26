@@ -1603,4 +1603,61 @@ mod tests {
 
         std::fs::remove_dir_all(&root).unwrap();
     }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_re_observed_album_with_a_release_id_gains_the_new_facts(pool: sqlx::PgPool) {
+        let root = temp_root("album-reobserve-id");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Shared Album"),
+                (ItemKey::Year, "2024"),
+                (ItemKey::MusicBrainzReleaseId, "release-1"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        let album = album_id_for(&pool, track_id_for(&pool, "a.flac").await).await;
+        let (release_date, _, country, compilation, year) = album_facts(&pool, album).await;
+        assert_eq!(release_date, None);
+        assert_eq!(country, None);
+        assert_eq!(compilation, None);
+        assert_eq!(year, Some(2024));
+
+        tagged_flac(
+            &root.join("b.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Shared Album"),
+                (ItemKey::MusicBrainzReleaseId, "release-1"),
+                (ItemKey::ReleaseDate, "1999-08-02"),
+                (ItemKey::Unknown("RELEASECOUNTRY".to_owned()), "US"),
+                (ItemKey::FlagCompilation, "1"),
+            ],
+        );
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        let second = album_id_for(&pool, track_id_for(&pool, "b.flac").await).await;
+        assert_eq!(second, album, "the release id matches the stored album");
+        let (release_date, precision, country, compilation, year) = album_facts(&pool, album).await;
+        assert_eq!(
+            release_date,
+            Some(chrono::NaiveDate::from_ymd_opt(1999, 8, 2).unwrap())
+        );
+        assert_eq!(precision.as_deref(), Some("day"));
+        assert_eq!(country.as_deref(), Some("US"));
+        assert_eq!(compilation, Some(true));
+        assert_eq!(
+            year,
+            Some(1999),
+            "the year is re-derived from the release date"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

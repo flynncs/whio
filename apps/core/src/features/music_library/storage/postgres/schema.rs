@@ -160,6 +160,7 @@ pub(crate) const ARTIST_ENGAGED: &str = "(EXISTS (
         SELECT 1 FROM track_artist_credits AS engaged_credit
         JOIN tracks AS t ON t.id = engaged_credit.track_id
         WHERE engaged_credit.artist_id = ar.id
+          AND engaged_credit.role IS NULL
           AND (EXISTS (
                   SELECT 1 FROM track_sources AS owned
                   WHERE owned.track_id = t.id AND owned.provider_id = ANY($3::TEXT[])
@@ -232,6 +233,7 @@ pub(crate) const COUNT_ARTIST_ENGAGED: &str = "(EXISTS (
         SELECT 1 FROM track_artist_credits AS engaged_credit
         JOIN tracks AS t ON t.id = engaged_credit.track_id
         WHERE engaged_credit.artist_id = ar.id
+          AND engaged_credit.role IS NULL
           AND (EXISTS (
                   SELECT 1 FROM track_sources AS owned
                   WHERE owned.track_id = t.id AND owned.provider_id = ANY($1::TEXT[])
