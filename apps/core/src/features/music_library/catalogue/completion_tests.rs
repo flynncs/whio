@@ -74,6 +74,41 @@ impl CatalogueProvider for StubAlbumProvider {
     }
 }
 
+struct PerSourceAlbumProvider {
+    missing: &'static str,
+    fetched: FetchedAlbum,
+    requested: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl CatalogueProvider for PerSourceAlbumProvider {
+    async fn search(
+        &self,
+        _search: &CatalogueSearch,
+        _user: Option<&Uuid>,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn fetch_album(
+        &self,
+        source: &SourceIdentity,
+        _context: &RequestContext,
+    ) -> Result<FetchedAlbum, ProviderError> {
+        self.requested
+            .lock()
+            .unwrap()
+            .push(source.external_id().to_owned());
+
+        if source.external_id() == self.missing {
+            return Err(ProviderError::SourceNotFound);
+        }
+
+        Ok(self.fetched.clone())
+    }
+}
+
 async fn service(
     repository: &Arc<PostgresTrackRepository>,
     provider: Arc<dyn CatalogueProvider>,
@@ -95,7 +130,10 @@ async fn service(
     (completion, sources)
 }
 
-async fn partial_album(repository: &Arc<PostgresTrackRepository>) -> AlbumId {
+async fn partial_album_with_sources(
+    repository: &Arc<PostgresTrackRepository>,
+    provider_sources: &[&str],
+) -> AlbumId {
     let album = repository
         .resolve_or_create_album(&album_metadata())
         .await
@@ -112,16 +150,22 @@ async fn partial_album(repository: &Arc<PostgresTrackRepository>) -> AlbumId {
         )
         .await
         .unwrap();
-    repository
-        .set_album_source(album.id(), &provider_source("MPREb_album"))
-        .await
-        .unwrap();
+    for source in provider_sources {
+        repository
+            .set_album_source(album.id(), &provider_source(source))
+            .await
+            .unwrap();
+    }
     repository
         .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
         .await
         .unwrap();
 
     album.id().clone()
+}
+
+async fn partial_album(repository: &Arc<PostgresTrackRepository>) -> AlbumId {
+    partial_album_with_sources(repository, &["MPREb_album"]).await
 }
 
 #[sqlx::test]
@@ -241,4 +285,79 @@ async fn an_owned_album_never_asks_the_provider(pool: sqlx::PgPool) {
 
     assert_eq!(detail.entries.len(), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[sqlx::test]
+async fn an_unusable_source_falls_through_to_a_working_one(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album_id = partial_album_with_sources(&repository, &["30ce80xVHL4", "MPREb_album"]).await;
+    let requested = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(PerSourceAlbumProvider {
+        missing: "30ce80xVHL4",
+        fetched: FetchedAlbum::new(
+            vec![
+                candidate("vid-2", "traitor"),
+                candidate("vid-3", "drivers license"),
+            ],
+            Some(3),
+        ),
+        requested: Arc::clone(&requested),
+    });
+    let (completion, sources) = service(&repository, provider).await;
+
+    let detail = completion
+        .album_detail(&album_id, None)
+        .await
+        .unwrap()
+        .expect("the album is found");
+
+    assert_eq!(detail.entries.len(), 3);
+    assert_eq!(
+        requested.lock().unwrap().as_slice(),
+        ["30ce80xVHL4", "MPREb_album"],
+        "the unusable source is skipped and the working one completes the album"
+    );
+
+    let state = sources
+        .find_provider_entity_state(&provider_source("MPREb_album"))
+        .await
+        .unwrap()
+        .expect("the working source records its freshness");
+    assert_eq!(state.reported_count(), Some(3));
+    assert!(state.last_error().is_none());
+
+    assert!(
+        sources
+            .find_provider_entity_state(&provider_source("30ce80xVHL4"))
+            .await
+            .unwrap()
+            .is_none(),
+        "a source that cannot identify the album is not recorded as a failure"
+    );
+}
+
+#[sqlx::test]
+async fn an_album_with_only_an_unusable_source_degrades_to_the_partial_album(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album_id = partial_album_with_sources(&repository, &["30ce80xVHL4"]).await;
+    let provider = Arc::new(PerSourceAlbumProvider {
+        missing: "30ce80xVHL4",
+        fetched: FetchedAlbum::new(Vec::new(), None),
+        requested: Arc::new(Mutex::new(Vec::new())),
+    });
+    let (completion, sources) = service(&repository, provider).await;
+
+    let detail = completion
+        .album_detail(&album_id, None)
+        .await
+        .unwrap()
+        .expect("the album is still found");
+
+    assert_eq!(detail.entries.len(), 1);
+    let state = sources
+        .find_provider_entity_state(&provider_source("30ce80xVHL4"))
+        .await
+        .unwrap()
+        .expect("a failure is recorded when every source is unusable");
+    assert!(state.last_error().is_some());
 }

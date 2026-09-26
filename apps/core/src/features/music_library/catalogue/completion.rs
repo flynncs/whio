@@ -82,48 +82,65 @@ impl CompletionService {
             return Ok(Some(detail));
         }
 
-        let provider_source = sources
+        let provider_sources = sources
             .find_album_sources(album_id)
             .await
             .map_err(CatalogueError::Repository)?
             .into_iter()
-            .find(|source| !self.registry.is_library(source.provider_id()));
+            .filter(|source| !self.registry.is_library(source.provider_id()))
+            .collect::<Vec<_>>();
 
-        let Some(provider_source) = provider_source else {
+        if provider_sources.is_empty() {
             return Ok(Some(detail));
-        };
+        }
 
         let member_count = detail.entries.len() as u32;
-        if self
-            .settled(sources, &provider_source, member_count)
-            .await?
-        {
-            return Ok(Some(detail));
+        let mut failure: Option<(SourceIdentity, CatalogueError)> = None;
+
+        for provider_source in provider_sources {
+            if self
+                .settled(sources, &provider_source, member_count)
+                .await?
+            {
+                return Ok(Some(detail));
+            }
+
+            match self.fetch(&provider_source).await {
+                Ok(fetched) => {
+                    let reported_count = fetched.reported_count();
+                    super::materialize::materialize(catalogue, sources, fetched.into_candidates())
+                        .await?;
+                    let state = self.state(reported_count, None)?;
+                    catalogue
+                        .set_provider_entity_state(&provider_source, &state)
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+
+                    return self.library.album_detail(album_id, user).await;
+                }
+                Err(error) => {
+                    let unusable = matches!(
+                        &error,
+                        CatalogueError::Provider(
+                            ProviderError::SourceNotFound | ProviderError::UnsupportedProvider
+                        )
+                    );
+                    if !unusable || failure.is_none() {
+                        failure = Some((provider_source, error));
+                    }
+                }
+            }
         }
 
-        match self.fetch(&provider_source).await {
-            Ok(fetched) => {
-                let reported_count = fetched.reported_count();
-                super::materialize::materialize(catalogue, sources, fetched.into_candidates())
-                    .await?;
-                let state = self.state(reported_count, None)?;
-                catalogue
-                    .set_provider_entity_state(&provider_source, &state)
-                    .await
-                    .map_err(CatalogueError::Repository)?;
-
-                self.library.album_detail(album_id, user).await
-            }
-            Err(error) => {
-                let state = self.state(None, Some(error.to_string()))?;
-                catalogue
-                    .set_provider_entity_state(&provider_source, &state)
-                    .await
-                    .map_err(CatalogueError::Repository)?;
-
-                Ok(Some(detail))
-            }
+        if let Some((provider_source, error)) = failure {
+            let state = self.state(None, Some(error.to_string()))?;
+            catalogue
+                .set_provider_entity_state(&provider_source, &state)
+                .await
+                .map_err(CatalogueError::Repository)?;
         }
+
+        Ok(Some(detail))
     }
 
     fn owned(&self, detail: &AlbumDetail) -> bool {

@@ -4,7 +4,7 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from app.api.catalogue import get_catalogue
-from app.errors import ProviderUnavailableError
+from app.errors import ProviderUnavailableError, SourceNotFoundError
 from app.generated.resolver_v1 import (
     CatalogueAlbum,
     CatalogueArtist,
@@ -133,6 +133,34 @@ class CatalogueRoutesTest(unittest.TestCase):
                 "code": "provider_unavailable",
                 "message": "The provider is temporarily unavailable",
                 "request_id": "request-123",
+            },
+        )
+        self.assertNotIn("private provider details", response.text)
+
+    def test_missing_album_source_matches_the_contract(self) -> None:
+        self.catalogue.fetch_album.side_effect = SourceNotFoundError(
+            "private provider details"
+        )
+
+        response = self.client.post(
+            "/v1/catalogue/album",
+            headers={"X-Request-ID": "request-456"},
+            json={
+                "source": {
+                    "provider_id": "youtube_music",
+                    "external_id": "30ce80xVHL4",
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.headers["X-Request-ID"], "request-456")
+        self.assertEqual(
+            response.json(),
+            {
+                "code": "source_not_found",
+                "message": "The source is unavailable",
+                "request_id": "request-456",
             },
         )
         self.assertNotIn("private provider details", response.text)

@@ -2,9 +2,9 @@ import unittest
 from unittest.mock import Mock
 
 from requests.exceptions import RequestException
-from ytmusicapi.exceptions import YTMusicServerError
+from ytmusicapi.exceptions import YTMusicServerError, YTMusicUserError
 
-from app.errors import ProviderUnavailableError
+from app.errors import ProviderUnavailableError, SourceNotFoundError
 from app.generated.resolver_v1 import SourceIdentity
 from app.youtube.catalogue import (
     YouTubeMusicCatalogue,
@@ -77,6 +77,46 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
         self.assertEqual(
             str(response.results[0].artwork_url), "https://art.test/sour.jpg"
         )
+
+    def test_fetch_album_rejects_a_non_album_id_before_calling_the_provider(
+        self,
+    ) -> None:
+        client = Mock()
+        source = SourceIdentity(
+            provider_id="youtube_music", external_id="30ce80xVHL4"
+        )
+
+        with self.assertRaises(SourceNotFoundError):
+            YouTubeMusicCatalogue(client).fetch_album(source)
+
+        client.get_album.assert_not_called()
+
+    def test_fetch_album_translates_a_rejected_browse_id(self) -> None:
+        client = Mock()
+        client.get_album.side_effect = YTMusicUserError(
+            "Invalid album browseId provided, must start with MPRE."
+        )
+        source = SourceIdentity(
+            provider_id="youtube_music", external_id="MPREb_missing"
+        )
+
+        with self.assertRaises(SourceNotFoundError):
+            YouTubeMusicCatalogue(client).fetch_album(source)
+
+    def test_fetch_album_keeps_provider_failures_unavailable(self) -> None:
+        for failure in [
+            YTMusicServerError("private provider details"),
+            RequestException("private transport details"),
+        ]:
+            with self.subTest(failure=type(failure).__name__):
+                client = Mock()
+                client.get_album.side_effect = failure
+                source = SourceIdentity(
+                    provider_id="youtube_music", external_id="MPREb_album"
+                )
+
+                with self.assertRaises(ProviderUnavailableError):
+                    YouTubeMusicCatalogue(client).fetch_album(source)
 
     def test_search_calls_youtube_music_and_normalizes_results(self) -> None:
         client = Mock()

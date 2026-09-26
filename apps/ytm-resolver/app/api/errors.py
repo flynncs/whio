@@ -6,6 +6,7 @@ from app.errors import (
     PlaybackResolutionError,
     ProviderUnavailableError,
     ResolverError,
+    SourceNotFoundError,
     UnsupportedProviderError,
 )
 from app.generated.resolver_v1 import ErrorCode, ErrorResponse
@@ -18,6 +19,11 @@ ERROR_RESPONSES: dict[
         422,
         ErrorCode.unsupported_provider,
         "The provider is not supported",
+    ),
+    SourceNotFoundError: (
+        404,
+        ErrorCode.source_not_found,
+        "The source is unavailable",
     ),
     PlaybackResolutionError: (
         502,

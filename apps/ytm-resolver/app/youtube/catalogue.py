@@ -3,9 +3,9 @@ from typing import Any
 
 from requests.exceptions import RequestException
 from ytmusicapi import YTMusic
-from ytmusicapi.exceptions import YTMusicServerError
+from ytmusicapi.exceptions import YTMusicServerError, YTMusicUserError
 
-from app.errors import ProviderUnavailableError
+from app.errors import ProviderUnavailableError, SourceNotFoundError
 from app.generated.resolver_v1 import (
     CatalogueAlbum,
     CatalogueArtist,
@@ -14,6 +14,9 @@ from app.generated.resolver_v1 import (
     CatalogueSearchResponse,
     SourceIdentity,
 )
+
+
+ALBUM_BROWSE_ID_PREFIX = "MPRE"
 
 
 class YouTubeMusicCatalogue:
@@ -38,8 +41,12 @@ class YouTubeMusicCatalogue:
         )
 
     def fetch_album(self, source: SourceIdentity) -> CatalogueCandidatesResponse:
+        if not source.external_id.startswith(ALBUM_BROWSE_ID_PREFIX):
+            raise SourceNotFoundError("The source is unavailable")
         try:
             album = self._client.get_album(source.external_id)
+        except YTMusicUserError as error:
+            raise SourceNotFoundError("The source is unavailable") from error
         except (YTMusicServerError, RequestException) as error:
             raise ProviderUnavailableError(
                 "The provider is temporarily unavailable"
