@@ -17,6 +17,9 @@ mod state;
 pub use libraries::PostgresLibraryStore;
 
 #[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_catalogue_keys.rs"]
+mod test_catalogue_keys;
+#[cfg(all(test, feature = "postgres-integration"))]
 mod test_contracts;
 #[cfg(all(test, feature = "postgres-integration"))]
 #[path = "test_libraries.rs"]

@@ -6,7 +6,7 @@ use crate::features::music_library::{
     domain::{
         Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, CreditRole,
         ProviderEntityState, ProviderId, SourceIdentity, SourceScope, Track, TrackId,
-        TrackMetadata,
+        TrackMetadata, normalize_for_matching,
     },
     storage::contracts::{ReconcileReport, SourceFileFacts, TrackRepositoryError},
 };
@@ -338,15 +338,17 @@ async fn find_artist_by_name(
     pool: &PgPool,
     name: &str,
 ) -> Result<Option<Artist>, TrackRepositoryError> {
+    let key = normalize_for_matching(name);
+
     let row = sqlx::query_as::<_, ArtistRow>(&format!(
         r#"
         SELECT {ARTIST_COLUMNS}
         FROM artists
         WHERE musicbrainz_artist_id IS NULL
-          AND name_normalized = lower(regexp_replace(normalize($1, NFC), '\s+', ' ', 'g'))
+          AND name_normalized = $1
         "#
     ))
-    .bind(name)
+    .bind(key)
     .fetch_optional(pool)
     .await
     .map_err(repository_error)?;
@@ -511,18 +513,20 @@ async fn find_album_by_text(
     title: &str,
     album_artist_id: Option<&ArtistId>,
 ) -> Result<Option<Album>, TrackRepositoryError> {
+    let key = normalize_for_matching(title);
+
     let row = sqlx::query_as::<_, AlbumRow>(&format!(
         r#"
         SELECT {ALBUM_COLUMNS}
         FROM albums
         WHERE album_artist_id IS NOT DISTINCT FROM $1
-          AND title_normalized = lower(regexp_replace(normalize($2, NFC), '\s+', ' ', 'g'))
+          AND title_normalized = $2
         ORDER BY (musicbrainz_release_group_id IS NULL), created_at
         LIMIT 1
         "#
     ))
     .bind(album_artist_id.map(|id| *id.as_uuid()))
-    .bind(title)
+    .bind(key)
     .fetch_optional(pool)
     .await
     .map_err(repository_error)?;
