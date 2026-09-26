@@ -1650,12 +1650,28 @@ async fn logged_statements(pool: &sqlx::PgPool) -> i64 {
         .unwrap()
 }
 
-async fn local_row(repository: &PostgresTrackRepository, external_id: &str) -> SourceFileFacts {
+async fn stored_row(
+    repository: &PostgresTrackRepository,
+    source: &SourceIdentity,
+) -> SourceFileFacts {
     repository
-        .find_source_file_facts(&source("local", external_id))
+        .find_source_file_facts(source)
         .await
         .unwrap()
-        .expect("the local row is recorded")
+        .expect("the row is recorded")
+}
+
+async fn local_row(repository: &PostgresTrackRepository, external_id: &str) -> SourceFileFacts {
+    stored_row(repository, &source("local", external_id)).await
+}
+
+fn local_source(scope: &str, external_id: &str) -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new("local".to_owned()).unwrap(),
+        SourceScope::Named(scope.to_owned()),
+        external_id.to_owned(),
+    )
+    .unwrap()
 }
 
 #[sqlx::test]
@@ -1751,6 +1767,177 @@ async fn reconciliation_marks_absent_rows_with_the_supplied_timestamp(pool: sqlx
         .expect("the provider source is recorded");
     assert_eq!(remote_row.path, None);
     assert_eq!(remote_row.missing_at, None);
+}
+
+#[sqlx::test]
+async fn reconciliation_leaves_pathless_and_foreign_provider_rows_alone(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let provider = ProviderId::new("local".to_owned()).unwrap();
+    let scope = SourceScope::Named("/music".to_owned());
+    let now: chrono::DateTime<chrono::Utc> = "2026-09-20T10:00:00Z".parse().unwrap();
+
+    let walked = local_source("/music", "walked.flac");
+    let gone = local_source("/music", "gone.flac");
+    repository
+        .index_source(
+            walked.clone(),
+            metadata("walked.flac"),
+            &local_facts("walked.flac", None),
+        )
+        .await
+        .unwrap();
+    repository
+        .index_source(
+            gone.clone(),
+            metadata("gone.flac"),
+            &local_facts("gone.flac", None),
+        )
+        .await
+        .unwrap();
+
+    let pathless = local_source("/music", "pathless");
+    repository
+        .get_or_create(pathless.clone(), metadata("pathless"))
+        .await
+        .unwrap();
+    repository
+        .set_source_file_facts(
+            &pathless,
+            &SourceFileFacts {
+                path: None,
+                ..local_facts("pathless.flac", None)
+            },
+        )
+        .await
+        .unwrap();
+
+    let foreign = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Named("/music".to_owned()),
+        "video-1".to_owned(),
+    )
+    .unwrap();
+    repository
+        .index_source(
+            foreign.clone(),
+            metadata("Remote"),
+            &local_facts("remote.flac", None),
+        )
+        .await
+        .unwrap();
+
+    let report = repository
+        .reconcile_missing(&provider, &scope, &["walked.flac".to_owned()], now)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report,
+        ReconcileReport {
+            marked_missing: 1,
+            reappeared: 0,
+        }
+    );
+    assert_eq!(stored_row(&repository, &gone).await.missing_at, Some(now));
+    assert_eq!(stored_row(&repository, &walked).await.missing_at, None);
+
+    let pathless_row = stored_row(&repository, &pathless).await;
+    assert_eq!(pathless_row.path, None);
+    assert_eq!(
+        pathless_row.missing_at, None,
+        "a walked provider's row without a path is not a vanished file"
+    );
+
+    let foreign_row = stored_row(&repository, &foreign).await;
+    assert_eq!(foreign_row.path.as_deref(), Some("remote.flac"));
+    assert_eq!(
+        foreign_row.missing_at, None,
+        "another provider's row is not this reconciliation's to mark"
+    );
+}
+
+#[sqlx::test]
+async fn reconciliation_leaves_a_never_walked_scope_alone(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let provider = ProviderId::new("local".to_owned()).unwrap();
+    let walked = SourceScope::Named("/music".to_owned());
+    let elsewhere = SourceScope::Named("/music-elsewhere".to_owned());
+    let elsewhere_at: chrono::DateTime<chrono::Utc> = "2026-08-01T10:00:00Z".parse().unwrap();
+    let now: chrono::DateTime<chrono::Utc> = "2026-09-20T10:00:00Z".parse().unwrap();
+
+    repository
+        .index_source(
+            local_source("/music", "kept.flac"),
+            metadata("kept.flac"),
+            &local_facts("kept.flac", None),
+        )
+        .await
+        .unwrap();
+    repository
+        .index_source(
+            local_source("/music", "gone.flac"),
+            metadata("gone.flac"),
+            &local_facts("gone.flac", None),
+        )
+        .await
+        .unwrap();
+
+    let elsewhere_kept = local_source("/music-elsewhere", "kept.flac");
+    let elsewhere_gone = local_source("/music-elsewhere", "gone.flac");
+    repository
+        .index_source(
+            elsewhere_kept.clone(),
+            metadata("kept.flac"),
+            &local_facts("kept.flac", Some(elsewhere_at)),
+        )
+        .await
+        .unwrap();
+    repository
+        .index_source(
+            elsewhere_gone.clone(),
+            metadata("gone.flac"),
+            &local_facts("gone.flac", None),
+        )
+        .await
+        .unwrap();
+
+    let report = repository
+        .reconcile_missing(&provider, &walked, &["kept.flac".to_owned()], now)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report,
+        ReconcileReport {
+            marked_missing: 1,
+            reappeared: 0,
+        }
+    );
+    assert_eq!(
+        stored_row(&repository, &local_source("/music", "gone.flac"))
+            .await
+            .missing_at,
+        Some(now)
+    );
+
+    assert_eq!(
+        stored_row(&repository, &elsewhere_kept).await.missing_at,
+        Some(elsewhere_at),
+        "a scope that was not walked keeps its mark for the same relative path"
+    );
+    assert_eq!(
+        stored_row(&repository, &elsewhere_gone).await.missing_at,
+        None,
+        "a scope that was not walked gains no mark for the same relative path"
+    );
+    assert_eq!(
+        repository
+            .list_scanned_paths(&provider, &elsewhere)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[sqlx::test]
