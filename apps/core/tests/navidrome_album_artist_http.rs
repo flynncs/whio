@@ -1001,3 +1001,59 @@ async fn navidrome_library_translation_failures_are_mapped(pool: PgPool) {
     let (status, _, _) = request(&broken, token, "/album").await;
     assert_eq!(status, StatusCode::OK, "a broken registry is not blanket");
 }
+
+#[sqlx::test]
+async fn navidrome_album_without_an_album_artist(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let credited = contrast(&fixture).await;
+    let bootleg = add_album(
+        &fixture,
+        "Bootleg",
+        None,
+        None,
+        None,
+        MUSIC_ROOT,
+        "bootleg.flac",
+    )
+    .await;
+    let track = add_track(
+        &fixture,
+        MUSIC_ROOT,
+        "bootleg-track.flac",
+        "Bootleg Track",
+        "Guest",
+        &[],
+    )
+    .await;
+    place(&fixture, &bootleg, &track, 1).await;
+
+    let (status, _, body) = get(&fixture, "/album?name=bootleg").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    let album = &body[0];
+    assert_eq!(album["name"], json!("Bootleg"));
+    assert_eq!(
+        album["albumArtist"],
+        json!(""),
+        "an album with no album artist emits the empty string"
+    );
+    assert_eq!(
+        album["albumArtistId"],
+        json!(""),
+        "and the empty string, never another album's artist id"
+    );
+
+    let (status, _, body) = get(&fixture, &format!("/album/{bootleg}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], json!("Bootleg"));
+    assert_eq!(body["albumArtist"], json!(""));
+    assert_eq!(body["albumArtistId"], json!(""));
+
+    let (status, _, body) = get(&fixture, "/album?name=kept").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["albumArtist"], json!("Daft Punk"));
+    assert_eq!(
+        body[0]["albumArtistId"],
+        json!(credited.daft_punk.to_string())
+    );
+}
