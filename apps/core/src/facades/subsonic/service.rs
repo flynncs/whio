@@ -542,12 +542,13 @@ pub(crate) async fn songs_by_genre(
     request: &SongsByGenreRequest<'_>,
     tags: SourceTags,
 ) -> Result<Vec<models::Child>, BrowseError> {
-    let Some(raw) = request.genre else {
-        return Err(BrowseError::MissingParameter);
+    let genre = match request.genre {
+        None => return Ok(Vec::new()),
+        Some(raw) => match SelectorText::new(raw).map_err(|_| BrowseError::InvalidRequest)? {
+            Some(genre) => genre,
+            None => return Ok(Vec::new()),
+        },
     };
-    let genre = SelectorText::new(raw)
-        .map_err(|_| BrowseError::InvalidRequest)?
-        .ok_or(BrowseError::MissingParameter)?;
     let count = browse_size(request.count, DEFAULT_GENRE_SIZE)?;
     let offset = match request.offset {
         None => 0,

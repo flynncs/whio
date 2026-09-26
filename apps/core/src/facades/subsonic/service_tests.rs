@@ -961,7 +961,7 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
             .unwrap();
     }
 
-    let library = library_over(&repository);
+    let (library, calls) = counting_catalogue(pool.clone(), &[]).await;
     let stored = |genre: Option<&'static str>, count, offset| SongsByGenreRequest {
         genre,
         count,
@@ -986,6 +986,11 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
     .await
     .expect("the stored genre finds the songs");
     assert_eq!(songs_of(&first), ["Rock One", "Rock Three"]);
+    assert_eq!(
+        calls.tracks(),
+        1,
+        "the genre window reaches the library once"
+    );
 
     let second = songs_by_genre(
         &library,
@@ -1007,19 +1012,36 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
     .expect("an unknown genre is an empty page");
     assert!(absent.is_empty());
 
+    let before = calls.tracks();
+
+    let missing = songs_by_genre(&library, None, &stored(None, None, None), SourceTags::Off)
+        .await
+        .expect("an absent genre is the reference's empty page, not an error");
+    assert!(missing.is_empty());
+    let blank = songs_by_genre(
+        &library,
+        None,
+        &stored(Some("   "), None, None),
+        SourceTags::Off,
+    )
+    .await
+    .expect("a blank genre is the same empty page");
+    assert!(blank.is_empty());
+    assert_eq!(
+        calls.tracks(),
+        before,
+        "an absent or blank genre never reaches the library"
+    );
+
+    let long = "a".repeat(501);
+    let over_long = SongsByGenreRequest {
+        genre: Some(&long),
+        count: None,
+        offset: None,
+    };
     assert!(matches!(
-        songs_by_genre(&library, None, &stored(None, None, None), SourceTags::Off).await,
-        Err(BrowseError::MissingParameter)
-    ));
-    assert!(matches!(
-        songs_by_genre(
-            &library,
-            None,
-            &stored(Some("   "), None, None),
-            SourceTags::Off
-        )
-        .await,
-        Err(BrowseError::MissingParameter)
+        songs_by_genre(&library, None, &over_long, SourceTags::Off).await,
+        Err(BrowseError::InvalidRequest)
     ));
     assert!(matches!(
         songs_by_genre(
@@ -1125,8 +1147,15 @@ async fn subsonic_indexes_is_the_artist_index(pool: sqlx::PgPool) {
         .await
         .expect("the index succeeds");
 
-    assert_eq!(indexes.ignored_articles, mapping::IGNORED_ARTICLES);
-    assert!(indexes.last_modified > 0, "lastModified is present");
+    assert_eq!(
+        indexes.ignored_articles, "The El La Los Las Le Les Os As O A",
+        "the wire string is the reference default, not whatever the producer holds"
+    );
+    assert_eq!(
+        indexes.last_modified,
+        i32::MAX,
+        "ms since epoch overflow the generated i32 field, so the value saturates"
+    );
 
     let index = indexes.index.expect("the index list is present");
     let letters = index
@@ -1388,11 +1417,23 @@ async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx:
         )
         .await
         .unwrap();
+    let credited = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Guest".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Another Artist".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
 
-    for (number, title) in [(1u32, "First"), (2, "Second")] {
+    for (album, number, title) in [
+        (album.id().clone(), 1u16, "First"),
+        (album.id().clone(), 2, "Second"),
+        (credited.id().clone(), 1, "Guest Song"),
+    ] {
         let track = repository
             .get_or_create(
-                local_source(&format!("path-{number}")),
+                local_source(&format!("{title}.flac")),
                 TrackMetadata::from_names(
                     title.to_owned(),
                     vec!["Daft Punk".to_owned()],
@@ -1404,9 +1445,9 @@ async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx:
             .unwrap();
         repository
             .set_album_track(
-                album.id(),
+                &album,
                 track.id(),
-                &AlbumTrack::new(Some(1), Some(number as u16), number - 1).unwrap(),
+                &AlbumTrack::new(Some(1), Some(number), u32::from(number) - 1).unwrap(),
             )
             .await
             .unwrap();
@@ -1414,11 +1455,65 @@ async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx:
 
     let library = library_over(&repository);
     let completion = CompletionService::disabled(Arc::new(library_over(&repository)));
-    let summary = library
+    let albums = library
         .album_list(0, u32::MAX, AlbumOrder::Name, AlbumListFilter::new(), None)
         .await
-        .expect("the album list succeeds")
-        .remove(0);
+        .expect("the album list succeeds");
+    let artist = library
+        .artist_list(
+            0,
+            u32::MAX,
+            ArtistSort::Name,
+            &ArtistListFilter::default(),
+            None,
+        )
+        .await
+        .expect("the artist list succeeds")
+        .into_iter()
+        .find(|artist| artist.artist().name() == "Daft Punk")
+        .expect("the credited artist is listed");
+
+    let target = artist.artist().id().clone();
+    let album_artist_membership = albums
+        .iter()
+        .filter(|summary| {
+            summary.album_artist().map(|album_artist| album_artist.id()) == Some(&target)
+        })
+        .map(|summary| summary.album().id().to_string())
+        .collect::<Vec<_>>();
+    let participated = library
+        .track_page(
+            0,
+            PageLimit::new(50).expect("valid page"),
+            TrackOrder::Title,
+            &TrackListFilter::new()
+                .with_artists_id(Some(IdSet::new([target.clone()]).expect("valid id set"))),
+            None,
+        )
+        .await
+        .expect("the credited tracks are read");
+    let mut participation_membership = participated
+        .items()
+        .iter()
+        .filter_map(|view| view.album().map(|album| album.id().to_string()))
+        .collect::<Vec<_>>();
+
+    participation_membership.sort();
+    participation_membership.dedup();
+
+    assert_eq!(
+        (
+            album_artist_membership.len(),
+            participation_membership.len()
+        ),
+        (1, 2),
+        "the fixture separates the album-artist membership from the participation set"
+    );
+
+    let summary = albums
+        .iter()
+        .find(|summary| summary.album().title() == "Discovery")
+        .expect("the album is listed");
     let detail = album_detail(
         &completion,
         &summary.album().id().to_string(),
@@ -1433,24 +1528,24 @@ async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx:
     assert_eq!(detail.duration, (summary.duration_ms() / 1000) as i32);
     assert_eq!(detail.song.len(), summary.track_count() as usize);
 
-    let artist = library
-        .artist_list(
-            0,
-            u32::MAX,
-            ArtistSort::Name,
-            &ArtistListFilter::default(),
-            None,
-        )
-        .await
-        .expect("the artist list succeeds")
-        .remove(0);
     let detail = artist_detail(&library, &artist.artist().id().to_string(), None)
         .await
         .expect("the artist detail succeeds");
+    let files = detail
+        .album
+        .iter()
+        .map(|album| album.id.clone())
+        .collect::<Vec<_>>();
 
     assert_eq!(detail.name, artist.artist().name());
-    assert_eq!(detail.album_count, Some(artist.album_count() as i32));
-    assert_eq!(detail.album.len(), artist.album_count() as usize);
+    assert_eq!(
+        files, album_artist_membership,
+        "the album-artist membership, not the wider participation set a facade recount would fold in"
+    );
+    assert_eq!(
+        detail.album_count,
+        Some(album_artist_membership.len() as i32)
+    );
 
     assert!(matches!(
         album_detail(
