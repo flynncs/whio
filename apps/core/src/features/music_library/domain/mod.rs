@@ -5,6 +5,7 @@ mod dedup;
 mod duplicate_report;
 mod error;
 mod metadata;
+mod page;
 mod playlist;
 mod provider_state;
 mod retention;
@@ -29,6 +30,7 @@ pub use duplicate_report::{
 };
 pub use error::ValidationError;
 pub use metadata::TrackMetadata;
+pub use page::{MAX_PAGE_LIMIT, PageLimit, TrackListFilter, TrackListScope, TrackOrder, TrackPage};
 pub use playlist::{Playlist, PlaylistId};
 pub use provider_state::ProviderEntityState;
 pub use retention::{EvictionReport, RetentionReport};
@@ -43,4 +45,4 @@ pub use state::{
     GenreSummary, LibraryState, MAX_RATING, MIN_RATING, Starred, StateTarget, checked_rating,
 };
 pub(crate) use text::normalize_for_matching;
-pub use track::{Track, TrackHit, TrackId};
+pub use track::{Track, TrackHit, TrackId, TrackView};

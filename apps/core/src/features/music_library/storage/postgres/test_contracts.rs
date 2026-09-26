@@ -2,9 +2,10 @@ use super::PostgresTrackRepository;
 use crate::features::music_library::{
     domain::{
         AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef,
-        ProviderId, SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
+        ProviderId, SourceIdentity, SourceScope, StateTarget, TrackId, TrackListFilter,
+        TrackListScope, TrackMetadata, TrackOrder, TrackPage,
     },
-    storage::contracts::{CatalogueWrite, LibraryRead, SourceLookup, StateStore},
+    storage::contracts::{CatalogueWrite, LibraryRead, PlaylistStore, SourceLookup, StateStore},
 };
 use uuid::Uuid;
 
@@ -888,4 +889,516 @@ async fn genres_aggregate_and_filter_albums(pool: sqlx::PgPool) {
         .await
         .unwrap();
     assert!(none.is_empty());
+}
+
+fn ids_of(page: &TrackPage) -> Vec<TrackId> {
+    page.items()
+        .iter()
+        .map(|item| item.track().id().clone())
+        .collect()
+}
+
+fn sorted_ids(ids: &[TrackId]) -> Vec<TrackId> {
+    let mut sorted = ids.to_vec();
+    sorted.sort_by(|left, right| left.as_uuid().cmp(right.as_uuid()));
+    sorted
+}
+
+async fn set_created_at(
+    pool: &sqlx::PgPool,
+    track: &TrackId,
+    created_at: chrono::DateTime<chrono::Utc>,
+) {
+    sqlx::query("UPDATE tracks SET created_at = $1 WHERE id = $2")
+        .bind(created_at)
+        .bind(track.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn page_tracks_returns_matching_total_and_stable_order(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let mut fixture = Vec::new();
+
+    for index in 0..1001u32 {
+        let title = format!("item{:03}", index % 10);
+        let track = repository
+            .get_or_create(
+                source("local", &format!("path-{index:04}")),
+                metadata(&title),
+            )
+            .await
+            .unwrap();
+
+        fixture.push((title, track.id().clone()));
+    }
+
+    fixture.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.as_uuid().cmp(right.1.as_uuid()))
+    });
+    let expected = fixture.into_iter().map(|(_, id)| id).collect::<Vec<_>>();
+    let filter = TrackListFilter::new();
+    let mut totals = Vec::new();
+
+    for offset in [0u32, 500, 1000] {
+        let page = repository
+            .page_tracks(offset, 500, TrackOrder::Title, &filter, None)
+            .await
+            .unwrap();
+        let expected_page = expected
+            .iter()
+            .skip(offset as usize)
+            .take(500)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert_eq!(page.total(), 1001, "the total at offset {offset}");
+        assert_eq!(ids_of(&page), expected_page, "the page at offset {offset}");
+        assert_eq!(
+            page.items().len(),
+            500usize.min(1001 - offset as usize),
+            "the page size at offset {offset}"
+        );
+        totals.push(page.total());
+    }
+
+    assert_eq!(totals, [1001, 1001, 1001]);
+}
+
+#[sqlx::test]
+async fn deep_offset_beyond_end_reports_exact_total(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = crate::features::identity::provision(pool.clone())
+        .create_user("page-user", "Page User")
+        .await
+        .unwrap();
+
+    for index in 0..3 {
+        repository
+            .get_or_create(
+                source("local", &format!("owned-{index}")),
+                metadata(&format!("owned{index}")),
+            )
+            .await
+            .unwrap();
+    }
+    for index in 0..2 {
+        let track = repository
+            .get_or_create(
+                source("youtube_music", &format!("vid-{index}")),
+                metadata(&format!("remote{index}")),
+            )
+            .await
+            .unwrap();
+        repository
+            .set_starred(user, StateTarget::Track(track.id()), true)
+            .await
+            .unwrap();
+    }
+
+    let engaged = repository
+        .page_tracks(
+            0,
+            500,
+            TrackOrder::Title,
+            &TrackListFilter::new(),
+            Some(user),
+        )
+        .await
+        .unwrap();
+    assert_eq!(engaged.items().len(), 5);
+
+    let engaged_past_end = repository
+        .page_tracks(
+            15,
+            500,
+            TrackOrder::Title,
+            &TrackListFilter::new(),
+            Some(user),
+        )
+        .await
+        .unwrap();
+    assert!(engaged_past_end.items().is_empty());
+    assert_eq!(engaged_past_end.total(), 5);
+
+    let owned = repository
+        .page_tracks(
+            0,
+            500,
+            TrackOrder::Title,
+            &TrackListFilter::new().with_scope(TrackListScope::Owned),
+            Some(user),
+        )
+        .await
+        .unwrap();
+    assert_eq!(owned.items().len(), 3);
+
+    let owned_past_end = repository
+        .page_tracks(
+            13,
+            500,
+            TrackOrder::Title,
+            &TrackListFilter::new().with_scope(TrackListScope::Owned),
+            Some(user),
+        )
+        .await
+        .unwrap();
+    assert!(owned_past_end.items().is_empty());
+    assert_eq!(owned_past_end.total(), 3);
+}
+
+#[sqlx::test]
+async fn engaged_scope_is_principal_derived(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let provision = crate::features::identity::provision(pool.clone());
+    let listener = provision.create_user("listener", "Listener").await.unwrap();
+    let stranger = provision.create_user("stranger", "Stranger").await.unwrap();
+
+    let owned = repository
+        .get_or_create(source("local", "path-owned"), metadata("owned"))
+        .await
+        .unwrap();
+    let favourited = repository
+        .get_or_create(source("youtube_music", "vid-fav"), metadata("favourited"))
+        .await
+        .unwrap();
+    let rated = repository
+        .get_or_create(source("youtube_music", "vid-rated"), metadata("rated"))
+        .await
+        .unwrap();
+    let played = repository
+        .get_or_create(source("youtube_music", "vid-played"), metadata("played"))
+        .await
+        .unwrap();
+    let listed = repository
+        .get_or_create(source("youtube_music", "vid-listed"), metadata("listed"))
+        .await
+        .unwrap();
+
+    repository
+        .set_starred(listener, StateTarget::Track(favourited.id()), true)
+        .await
+        .unwrap();
+    repository
+        .set_rating(listener, StateTarget::Track(rated.id()), Some(4))
+        .await
+        .unwrap();
+    repository
+        .record_play(listener, played.id(), chrono::Utc::now())
+        .await
+        .unwrap();
+    let playlist = repository
+        .create_playlist(listener, "Mixed", None)
+        .await
+        .unwrap();
+    repository
+        .add_playlist_track(listener, playlist.id(), listed.id())
+        .await
+        .unwrap();
+
+    let for_listener = repository
+        .page_tracks(
+            0,
+            500,
+            TrackOrder::Title,
+            &TrackListFilter::new(),
+            Some(listener),
+        )
+        .await
+        .unwrap();
+    let expected = sorted_ids(&[
+        owned.id().clone(),
+        favourited.id().clone(),
+        rated.id().clone(),
+        played.id().clone(),
+        listed.id().clone(),
+    ]);
+    assert_eq!(sorted_ids(&ids_of(&for_listener)), expected);
+    assert_eq!(for_listener.total(), 5);
+
+    let for_stranger = repository
+        .page_tracks(
+            0,
+            500,
+            TrackOrder::Title,
+            &TrackListFilter::new(),
+            Some(stranger),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids_of(&for_stranger), vec![owned.id().clone()]);
+    assert_eq!(for_stranger.total(), 1);
+}
+
+#[sqlx::test]
+async fn anonymous_engaged_scope_equals_owned(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = crate::features::identity::provision(pool.clone())
+        .create_user("anonymous-user", "Anonymous User")
+        .await
+        .unwrap();
+
+    let mut owned_ids = Vec::new();
+    for index in 0..2 {
+        let track = repository
+            .get_or_create(
+                source("local", &format!("owned-{index}")),
+                metadata(&format!("owned{index}")),
+            )
+            .await
+            .unwrap();
+
+        owned_ids.push(track.id().clone());
+    }
+    let favourited = repository
+        .get_or_create(source("youtube_music", "vid-fav"), metadata("favourited"))
+        .await
+        .unwrap();
+    let played = repository
+        .get_or_create(source("youtube_music", "vid-played"), metadata("played"))
+        .await
+        .unwrap();
+    repository
+        .set_starred(user, StateTarget::Track(favourited.id()), true)
+        .await
+        .unwrap();
+    repository
+        .record_play(user, played.id(), chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let anonymous = repository
+        .page_tracks(0, 500, TrackOrder::Title, &TrackListFilter::new(), None)
+        .await
+        .unwrap();
+    let owned = repository
+        .page_tracks(
+            0,
+            500,
+            TrackOrder::Title,
+            &TrackListFilter::new().with_scope(TrackListScope::Owned),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(ids_of(&anonymous), owned_ids);
+    assert_eq!(anonymous.total(), 2);
+    assert_eq!(ids_of(&anonymous), ids_of(&owned));
+    assert_eq!(owned.total(), 2);
+}
+
+#[sqlx::test]
+async fn owned_scope_excludes_engaged_only_tracks(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = crate::features::identity::provision(pool.clone())
+        .create_user("scope-user", "Scope User")
+        .await
+        .unwrap();
+
+    let first = repository
+        .get_or_create(source("local", "path-first"), metadata("first"))
+        .await
+        .unwrap();
+    let second = repository
+        .get_or_create(source("local", "path-second"), metadata("second"))
+        .await
+        .unwrap();
+    let favourited = repository
+        .get_or_create(source("youtube_music", "vid-fav"), metadata("favourited"))
+        .await
+        .unwrap();
+    let rated = repository
+        .get_or_create(source("youtube_music", "vid-rated"), metadata("rated"))
+        .await
+        .unwrap();
+    let played = repository
+        .get_or_create(source("youtube_music", "vid-played"), metadata("played"))
+        .await
+        .unwrap();
+
+    repository
+        .set_starred(user, StateTarget::Track(favourited.id()), true)
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Track(rated.id()), Some(3))
+        .await
+        .unwrap();
+    repository
+        .record_play(user, played.id(), chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let owned = repository
+        .page_tracks(
+            0,
+            500,
+            TrackOrder::Title,
+            &TrackListFilter::new().with_scope(TrackListScope::Owned),
+            Some(user),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sorted_ids(&ids_of(&owned)),
+        sorted_ids(&[first.id().clone(), second.id().clone()])
+    );
+    assert_eq!(owned.total(), 2);
+
+    let engaged = repository
+        .page_tracks(
+            0,
+            500,
+            TrackOrder::Title,
+            &TrackListFilter::new(),
+            Some(user),
+        )
+        .await
+        .unwrap();
+    assert_eq!(engaged.total(), 5);
+}
+
+#[sqlx::test]
+async fn recently_added_orders_descending_with_id_tie_break(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let oldest = repository
+        .get_or_create(source("local", "path-oldest"), metadata("oldest"))
+        .await
+        .unwrap();
+    let newer = repository
+        .get_or_create(source("local", "path-newer"), metadata("newer"))
+        .await
+        .unwrap();
+    let tied = repository
+        .get_or_create(source("local", "path-tied"), metadata("tied"))
+        .await
+        .unwrap();
+
+    let newest_at = chrono::Utc::now();
+    set_created_at(&pool, oldest.id(), newest_at - chrono::Duration::days(2)).await;
+    set_created_at(&pool, newer.id(), newest_at).await;
+    set_created_at(&pool, tied.id(), newest_at).await;
+
+    let expected = if tied.id().as_uuid() < newer.id().as_uuid() {
+        vec![tied.id().clone(), newer.id().clone(), oldest.id().clone()]
+    } else {
+        vec![newer.id().clone(), tied.id().clone(), oldest.id().clone()]
+    };
+
+    let first = repository
+        .page_tracks(
+            0,
+            10,
+            TrackOrder::RecentlyAdded,
+            &TrackListFilter::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let second = repository
+        .page_tracks(
+            0,
+            10,
+            TrackOrder::RecentlyAdded,
+            &TrackListFilter::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(ids_of(&first), expected);
+    assert_eq!(ids_of(&second), expected);
+    assert_eq!(first.total(), 3);
+}
+
+#[sqlx::test]
+async fn page_items_carry_album_membership_state_and_sources(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = crate::features::identity::provision(pool.clone())
+        .create_user("deep-user", "Deep User")
+        .await
+        .unwrap();
+    let album = repository
+        .resolve_or_create_album(&album_metadata("Discovery"))
+        .await
+        .unwrap();
+
+    let alpha = repository
+        .get_or_create(source("local", "path-alpha"), metadata("alpha"))
+        .await
+        .unwrap();
+    let beta = repository
+        .get_or_create(source("local", "path-beta"), metadata("beta"))
+        .await
+        .unwrap();
+    let gamma = repository
+        .get_or_create(
+            source("local", "path-gamma"),
+            identified("gamma", "rec-gamma"),
+        )
+        .await
+        .unwrap();
+    repository
+        .get_or_create(
+            source("youtube_music", "vid-gamma"),
+            identified("gamma", "rec-gamma"),
+        )
+        .await
+        .unwrap();
+
+    for (track, number) in [(&alpha, 1u16), (&beta, 2), (&gamma, 3)] {
+        repository
+            .set_album_track(
+                album.id(),
+                track.id(),
+                &AlbumTrack::new(Some(2), Some(number), u32::from(number) - 1).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    repository
+        .set_starred(user, StateTarget::Track(gamma.id()), true)
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Track(gamma.id()), Some(5))
+        .await
+        .unwrap();
+    repository
+        .record_play(user, gamma.id(), chrono::Utc::now())
+        .await
+        .unwrap();
+
+    let page = repository
+        .page_tracks(2, 1, TrackOrder::Title, &TrackListFilter::new(), Some(user))
+        .await
+        .unwrap();
+    assert_eq!(page.total(), 3);
+    assert_eq!(page.items().len(), 1);
+
+    let item = &page.items()[0];
+    assert_eq!(item.track().id(), gamma.id());
+    assert_eq!(item.track().title(), "gamma");
+    assert_eq!(item.album().map(|album| album.id()), Some(album.id()));
+    assert_eq!(item.album().map(|album| album.title()), Some("Discovery"));
+    let membership = item.membership().expect("the item carries its membership");
+    assert_eq!(membership.disc_number(), Some(2));
+    assert_eq!(membership.track_number(), Some(3));
+    assert_eq!(membership.position(), 2);
+    assert!(item.state().is_starred());
+    assert_eq!(item.state().rating(), Some(5));
+    assert_eq!(item.state().play_count(), 1);
+    let mut providers = item
+        .sources()
+        .iter()
+        .map(|source| source.provider_id().as_str().to_owned())
+        .collect::<Vec<_>>();
+    providers.sort();
+    assert_eq!(providers, ["local", "youtube_music"]);
 }

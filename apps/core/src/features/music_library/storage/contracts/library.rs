@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::features::music_library::domain::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, Artist, ArtistId,
     ArtistSummary, GenreSummary, ProviderEntityState, SourceIdentity, Track, TrackHit, TrackId,
+    TrackListFilter, TrackOrder, TrackPage,
 };
 
 use super::TrackRepositoryError;
@@ -86,6 +87,15 @@ pub trait LibraryRead: Send + Sync {
     async fn count_artists(&self, _user: Option<Uuid>) -> Result<u32, TrackRepositoryError> {
         Ok(0)
     }
+
+    async fn page_tracks(
+        &self,
+        offset: u32,
+        limit: u32,
+        order: TrackOrder,
+        filter: &TrackListFilter,
+        user: Option<Uuid>,
+    ) -> Result<TrackPage, TrackRepositoryError>;
 
     async fn search_tracks(
         &self,

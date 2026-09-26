@@ -63,6 +63,17 @@ impl LibraryRead for FailingTrackRepository {
     ) -> Result<Option<Track>, TrackRepositoryError> {
         Err(TrackRepositoryError::Unavailable)
     }
+
+    async fn page_tracks(
+        &self,
+        _offset: u32,
+        _limit: u32,
+        _order: crate::features::music_library::domain::TrackOrder,
+        _filter: &crate::features::music_library::domain::TrackListFilter,
+        _user: Option<Uuid>,
+    ) -> Result<crate::features::music_library::domain::TrackPage, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
 }
 
 #[async_trait]

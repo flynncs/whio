@@ -7,7 +7,7 @@ use crate::features::music_library::{
     domain::{
         Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, Artist,
         ArtistCredit, ArtistId, ArtistSummary, GenreSummary, LOCAL_PROVIDER_ID, SearchTerms, Track,
-        TrackHit, TrackId,
+        TrackHit, TrackId, TrackListFilter, TrackListScope, TrackOrder, TrackPage, TrackView,
     },
     storage::contracts::TrackRepositoryError,
 };
@@ -16,15 +16,16 @@ use crate::features::music_library::storage::contracts::LibraryRead;
 
 use super::PgStore;
 use super::decode::{
-    album_states, album_summaries_by_ids, attach_album_state, attach_album_states,
-    attach_artist_states, credits_for_tracks, decode_album, decode_album_summary, decode_artist,
-    decode_artist_summary, decode_membership, decode_track, hits_from_rows, repository_error,
-    sources_for_tracks, track_states,
+    album_states, album_summaries_by_ids, albums_for_tracks, attach_album_state,
+    attach_album_states, attach_artist_states, credits_for_tracks, decode_album,
+    decode_album_summary, decode_artist, decode_artist_summary, decode_membership, decode_track,
+    hits_from_rows, repository_error, sources_for_tracks, track_states,
 };
 use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_ENGAGED, ALBUM_OWNED,
     ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS, ARTIST_ENGAGED, AlbumBrowseRow, AlbumRow, ArtistRow,
-    COUNT_ALBUM_ENGAGED, COUNT_ARTIST_ENGAGED, CREDIT_NORMALIZED, TrackSearchRow,
+    COUNT_ALBUM_ENGAGED, COUNT_ARTIST_ENGAGED, CREDIT_NORMALIZED, TRACK_ENGAGED, TRACK_OWNED,
+    TrackPageRow, TrackSearchRow,
 };
 use crate::features::music_library::domain::{
     album_quality, normalize_for_matching, track_quality,
@@ -424,6 +425,88 @@ impl LibraryRead for PgStore {
         u32::try_from(count).map_err(|_| TrackRepositoryError::InvalidData)
     }
 
+    async fn page_tracks(
+        &self,
+        offset: u32,
+        limit: u32,
+        order: TrackOrder,
+        filter: &TrackListFilter,
+        user: Option<Uuid>,
+    ) -> Result<TrackPage, TrackRepositoryError> {
+        let library_ids = self.library_provider_ids();
+        let scope = match filter.scope() {
+            TrackListScope::Engaged => TRACK_ENGAGED,
+            TrackListScope::Owned => TRACK_OWNED,
+        };
+        let rows = sqlx::query_as::<_, TrackPageRow>(&format!(
+            r#"
+            SELECT page.id, page.title, page.duration_ms, page.musicbrainz_recording_id,
+                   page.isrc, page.genre, totals.n AS total
+            FROM (
+                SELECT COUNT(*)::BIGINT AS n
+                FROM tracks AS t
+                WHERE {scope}
+            ) AS totals
+            LEFT JOIN LATERAL (
+                SELECT t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, t.isrc, t.genre
+                FROM tracks AS t
+                WHERE {scope}
+                ORDER BY {}
+                LIMIT $3 OFFSET $4
+            ) AS page ON TRUE
+            "#,
+            track_order_clause(order)
+        ))
+        .bind(user)
+        .bind(&library_ids)
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        let Some(first) = rows.first() else {
+            return Err(TrackRepositoryError::InvalidData);
+        };
+        let total = u32::try_from(first.6).map_err(|_| TrackRepositoryError::InvalidData)?;
+
+        if rows.len() == 1 && first.0.is_none() {
+            return Ok(TrackPage::new(Vec::new(), total));
+        }
+
+        let ids = rows.iter().filter_map(|row| row.0).collect::<Vec<_>>();
+        let mut credits = credits_for_tracks(&self.pool, &ids).await?;
+        let mut sources = sources_for_tracks(&self.pool, &ids).await?;
+        let states = track_states(&self.pool, user, &ids).await?;
+        let mut albums = albums_for_tracks(&self.pool, &ids).await?;
+        let mut items = Vec::with_capacity(ids.len());
+
+        for (id, title, duration_ms, recording_id, isrc, genre, _) in rows {
+            let (Some(id), Some(title)) = (id, title) else {
+                return Err(TrackRepositoryError::InvalidData);
+            };
+            let track = decode_track(
+                id,
+                title,
+                duration_ms,
+                recording_id,
+                isrc,
+                genre,
+                credits.remove(&id).unwrap_or_default(),
+            )?;
+            let (album, membership) = match albums.remove(&id) {
+                Some((album, membership)) => (Some(album), Some(membership)),
+                None => (None, None),
+            };
+            let state = states.get(&id).copied().unwrap_or_default();
+            let sources = sources.remove(&id).unwrap_or_default();
+
+            items.push(TrackView::new(track, album, membership, state, sources));
+        }
+
+        Ok(TrackPage::new(items, total))
+    }
+
     async fn search_tracks(
         &self,
         query: &str,
@@ -794,6 +877,13 @@ fn rank_artists(summaries: &mut [ArtistSummary]) {
                     .cmp(&right.artist().id().to_string())
             })
     });
+}
+
+fn track_order_clause(order: TrackOrder) -> &'static str {
+    match order {
+        TrackOrder::Title => "t.title_normalized ASC, t.id",
+        TrackOrder::RecentlyAdded => "t.created_at DESC, t.id",
+    }
 }
 
 fn album_order_clause(order: AlbumOrder) -> &'static str {

@@ -46,6 +46,16 @@ pub(crate) type TrackSearchRow = (
     Option<String>,
 );
 
+pub(crate) type TrackPageRow = (
+    Option<Uuid>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+);
+
 pub(crate) const ARTIST_COLUMNS: &str = "id, name, sort_name, musicbrainz_artist_id";
 pub(crate) const ALBUM_COLUMNS: &str = "id, title, album_artist_id, year, release_type, label, \
      musicbrainz_release_group_id, musicbrainz_release_id";
@@ -222,6 +232,33 @@ pub(crate) const COUNT_ARTIST_ENGAGED: &str = "(EXISTS (
         SELECT 1 FROM artist_ratings AS rating
         WHERE rating.artist_id = ar.id AND rating.user_id = $2
     ))";
+
+pub(crate) const TRACK_ENGAGED: &str = "(EXISTS (
+        SELECT 1 FROM track_sources AS owned
+        WHERE owned.track_id = t.id AND owned.provider_id = ANY($2::TEXT[])
+    )
+    OR EXISTS (
+        SELECT 1 FROM track_favorites AS fav
+        WHERE fav.track_id = t.id AND fav.user_id = $1
+    )
+    OR EXISTS (
+        SELECT 1 FROM track_ratings AS rating
+        WHERE rating.track_id = t.id AND rating.user_id = $1
+    )
+    OR EXISTS (
+        SELECT 1 FROM track_play_stats AS play
+        WHERE play.track_id = t.id AND play.user_id = $1 AND play.play_count > 0
+    )
+    OR EXISTS (
+        SELECT 1 FROM playlist_entries AS entry
+        JOIN playlists AS list ON list.id = entry.playlist_id
+        WHERE entry.track_id = t.id AND list.user_id = $1
+    ))";
+
+pub(crate) const TRACK_OWNED: &str = "($1::UUID IS NOT NULL OR $1::UUID IS NULL) AND EXISTS (
+        SELECT 1 FROM track_sources AS owned
+        WHERE owned.track_id = t.id AND owned.provider_id = ANY($2::TEXT[])
+    )";
 
 pub(crate) type StateRow = (
     Uuid,

@@ -20,3 +20,7 @@ pub use library::{AlbumDetail, ArtistDetail, LibraryService};
 pub use ports::CatalogueProvider;
 pub use provider_error::ProviderError;
 pub use search::{SearchHit, SearchOutcome, SearchService};
+
+pub use crate::features::music_library::domain::{
+    MAX_PAGE_LIMIT, PageLimit, TrackListFilter, TrackListScope, TrackOrder, TrackPage,
+};

@@ -7,8 +7,8 @@ use crate::features::music_library::{
     {
         domain::{
             AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId,
-            ArtistSummary, Availability, GenreSummary, LibraryState, SourceIdentity, Track,
-            TrackId,
+            ArtistSummary, Availability, GenreSummary, LibraryState, PageLimit, SourceIdentity,
+            Track, TrackId, TrackListFilter, TrackOrder, TrackPage,
         },
         storage::contracts::{LibraryRead, SourceLookup, StateStore},
     },
@@ -195,6 +195,20 @@ impl LibraryService {
         let artist = ArtistSummary::new(artist, albums.len() as u32).with_state(state);
 
         Ok(Some(ArtistDetail { artist, albums }))
+    }
+
+    pub async fn track_page(
+        &self,
+        offset: u32,
+        limit: PageLimit,
+        order: TrackOrder,
+        filter: &TrackListFilter,
+        user: Option<&Uuid>,
+    ) -> Result<TrackPage, CatalogueError> {
+        self.library
+            .page_tracks(offset, limit.get(), order, filter, user.copied())
+            .await
+            .map_err(CatalogueError::Repository)
     }
 
     pub async fn sources(&self, track_id: &TrackId) -> Result<Vec<SourceIdentity>, CatalogueError> {

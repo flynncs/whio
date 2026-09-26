@@ -667,3 +667,79 @@ pub(crate) async fn sources_for_tracks(
 
     Ok(by_track)
 }
+
+pub(crate) async fn albums_for_tracks(
+    pool: &PgPool,
+    track_ids: &[Uuid],
+) -> Result<HashMap<Uuid, (Album, AlbumTrack)>, TrackRepositoryError> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            Option<Uuid>,
+            Option<i16>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i16>,
+            Option<i16>,
+            i32,
+        ),
+    >(
+        r#"
+        SELECT mt.track_id, a.id, a.title, a.album_artist_id, a.year, a.release_type, a.label,
+               a.musicbrainz_release_group_id, a.musicbrainz_release_id,
+               mt.disc_number, mt.track_number, mt.position
+        FROM album_tracks AS mt
+        JOIN albums AS a ON a.id = mt.album_id
+        WHERE mt.track_id = ANY($1)
+        ORDER BY mt.track_id, a.title_normalized, a.id
+        "#,
+    )
+    .bind(track_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(repository_error)?;
+
+    let mut by_track: HashMap<Uuid, (Album, AlbumTrack)> = HashMap::new();
+    for (
+        track_id,
+        album_id,
+        title,
+        album_artist_id,
+        year,
+        release_type,
+        label,
+        group_id,
+        release_id,
+        disc_number,
+        track_number,
+        position,
+    ) in rows
+    {
+        let album = decode_album((
+            album_id,
+            title,
+            album_artist_id,
+            year,
+            release_type,
+            label,
+            group_id,
+            release_id,
+        ))?;
+        let membership = decode_membership(disc_number, track_number, position)?;
+
+        by_track
+            .entry(track_id)
+            .or_insert_with(|| (album, membership));
+    }
+
+    Ok(by_track)
+}

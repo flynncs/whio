@@ -5,7 +5,9 @@ use std::{
 
 use uuid::Uuid;
 
-use super::{Album, ArtistCredit, LibraryState, MatchQuality, SourceIdentity, TrackMetadata};
+use super::{
+    Album, AlbumTrack, ArtistCredit, LibraryState, MatchQuality, SourceIdentity, TrackMetadata,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrackId(Uuid);
@@ -155,6 +157,53 @@ impl TrackHit {
                 self.sources.push(source);
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackView {
+    track: Track,
+    album: Option<Album>,
+    membership: Option<AlbumTrack>,
+    state: LibraryState,
+    sources: Vec<SourceIdentity>,
+}
+
+impl TrackView {
+    pub fn new(
+        track: Track,
+        album: Option<Album>,
+        membership: Option<AlbumTrack>,
+        state: LibraryState,
+        sources: Vec<SourceIdentity>,
+    ) -> Self {
+        Self {
+            track,
+            album,
+            membership,
+            state,
+            sources,
+        }
+    }
+
+    pub fn track(&self) -> &Track {
+        &self.track
+    }
+
+    pub fn album(&self) -> Option<&Album> {
+        self.album.as_ref()
+    }
+
+    pub fn membership(&self) -> Option<&AlbumTrack> {
+        self.membership.as_ref()
+    }
+
+    pub fn state(&self) -> &LibraryState {
+        &self.state
+    }
+
+    pub fn sources(&self) -> &[SourceIdentity] {
+        &self.sources
     }
 }
 

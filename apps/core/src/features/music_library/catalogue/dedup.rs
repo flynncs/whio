@@ -399,6 +399,19 @@ mod tests {
             }
             Ok(self.hits.clone())
         }
+        async fn page_tracks(
+            &self,
+            _: u32,
+            _: u32,
+            _: crate::features::music_library::domain::TrackOrder,
+            _: &crate::features::music_library::domain::TrackListFilter,
+            _: Option<uuid::Uuid>,
+        ) -> Result<
+            crate::features::music_library::domain::TrackPage,
+            crate::features::music_library::storage::contracts::TrackRepositoryError,
+        > {
+            Err(crate::features::music_library::storage::contracts::TrackRepositoryError::Unavailable)
+        }
     }
     #[async_trait::async_trait]
     impl crate::features::music_library::storage::contracts::CatalogueWrite for UnusableCandidates {
