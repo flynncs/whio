@@ -8,6 +8,7 @@ mod metadata;
 mod page;
 mod playlist;
 mod provider_state;
+mod query;
 mod retention;
 mod search;
 mod source;
@@ -33,6 +34,10 @@ pub use metadata::TrackMetadata;
 pub use page::{MAX_PAGE_LIMIT, PageLimit, TrackListFilter, TrackListScope, TrackOrder, TrackPage};
 pub use playlist::{Playlist, PlaylistId};
 pub use provider_state::ProviderEntityState;
+pub use query::{
+    IdSet, MAX_SELECTOR_IDS, MAX_SELECTOR_TEXT, RandomSeed, Range, Resource, RoleSelector, RoleSet,
+    SelectorText, SortDirection,
+};
 pub use retention::{EvictionReport, RetentionReport};
 pub use search::{MatchQuality, SearchConfidence, SearchTerms};
 pub(crate) use search::{album_quality, best_field_quality, track_quality};
