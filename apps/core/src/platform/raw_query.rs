@@ -27,6 +27,10 @@ impl RawQuery {
             .map(|(_, value)| value.as_str())
             .collect()
     }
+
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|(name, _)| name.as_str())
+    }
 }
 
 // serde-based query extractors collapse duplicates and reorder, which breaks
