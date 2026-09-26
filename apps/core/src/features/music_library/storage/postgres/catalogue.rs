@@ -5,9 +5,10 @@ use uuid::Uuid;
 use crate::features::music_library::{
     domain::{
         Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, CreditRole,
-        ProviderEntityState, SourceIdentity, Track, TrackId, TrackMetadata,
+        ProviderEntityState, ProviderId, SourceIdentity, SourceScope, Track, TrackId,
+        TrackMetadata,
     },
-    storage::contracts::{SourceFileFacts, TrackRepositoryError},
+    storage::contracts::{ReconcileReport, SourceFileFacts, TrackRepositoryError},
 };
 
 use crate::features::music_library::storage::contracts::CatalogueWrite;
@@ -52,6 +53,58 @@ impl CatalogueWrite for PgStore {
         tx.commit().await.map_err(repository_error)?;
 
         Ok(Track::new(track_id, metadata))
+    }
+
+    async fn reconcile_missing(
+        &self,
+        provider: &ProviderId,
+        scope: &SourceScope,
+        seen: &[String],
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ReconcileReport, TrackRepositoryError> {
+        let mut tx = self.pool.begin().await.map_err(repository_error)?;
+
+        let marked_missing = sqlx::query(
+            r#"UPDATE track_sources
+            SET missing_at = $3
+            WHERE provider_id = $1 AND source_scope = $2
+              AND path IS NOT NULL
+              AND missing_at IS NULL
+              AND NOT (path = ANY($4))
+            "#,
+        )
+        .bind(provider.as_str())
+        .bind(encode_source_scope(scope))
+        .bind(now)
+        .bind(seen)
+        .execute(&mut *tx)
+        .await
+        .map_err(repository_error)?
+        .rows_affected();
+
+        let reappeared = sqlx::query(
+            r#"UPDATE track_sources
+            SET missing_at = NULL
+            WHERE provider_id = $1 AND source_scope = $2
+              AND path IS NOT NULL
+              AND missing_at IS NOT NULL
+              AND path = ANY($3)
+            "#,
+        )
+        .bind(provider.as_str())
+        .bind(encode_source_scope(scope))
+        .bind(seen)
+        .execute(&mut *tx)
+        .await
+        .map_err(repository_error)?
+        .rows_affected();
+
+        tx.commit().await.map_err(repository_error)?;
+
+        Ok(ReconcileReport {
+            marked_missing: usize::try_from(marked_missing).unwrap_or(usize::MAX),
+            reappeared: usize::try_from(reappeared).unwrap_or(usize::MAX),
+        })
     }
 
     async fn resolve_or_create_artist(

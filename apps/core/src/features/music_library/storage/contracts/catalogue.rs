@@ -2,10 +2,16 @@ use async_trait::async_trait;
 
 use crate::features::music_library::domain::{
     Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, ProviderEntityState,
-    SourceIdentity, Track, TrackId, TrackMetadata,
+    ProviderId, SourceIdentity, SourceScope, Track, TrackId, TrackMetadata,
 };
 
 use super::{SourceFileFacts, TrackRepositoryError};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReconcileReport {
+    pub marked_missing: usize,
+    pub reappeared: usize,
+}
 
 #[async_trait]
 pub trait CatalogueWrite: Send + Sync {
@@ -33,6 +39,16 @@ pub trait CatalogueWrite: Send + Sync {
         self.set_source_file_facts(&source, facts).await?;
 
         Ok(track)
+    }
+
+    async fn reconcile_missing(
+        &self,
+        _provider: &ProviderId,
+        _scope: &SourceScope,
+        _seen: &[String],
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ReconcileReport, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
     }
 
     async fn resolve_or_create_artist(

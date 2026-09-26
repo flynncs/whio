@@ -7,7 +7,10 @@ use crate::features::music_library::{
         CreditRole, ProviderId, SourceIdentity, SourceScope, StateTarget, TrackId, TrackListFilter,
         TrackListScope, TrackMetadata, TrackOrder, TrackPage,
     },
-    storage::contracts::{CatalogueWrite, LibraryRead, PlaylistStore, SourceLookup, StateStore},
+    storage::contracts::{
+        CatalogueWrite, LibraryRead, PlaylistStore, ReconcileReport, SourceFileFacts, SourceLookup,
+        StateStore,
+    },
 };
 use uuid::Uuid;
 
@@ -1630,4 +1633,259 @@ async fn batch_reads_do_not_add_a_per_track_query(pool: sqlx::PgPool) {
         1,
         "one batch read for the credits"
     );
+}
+fn local_facts(path: &str, missing_at: Option<chrono::DateTime<chrono::Utc>>) -> SourceFileFacts {
+    SourceFileFacts {
+        path: Some(path.to_owned()),
+        size_bytes: 42,
+        modified_at: None,
+        missing_at,
+        content_type: None,
+        suffix: Some("flac".to_owned()),
+        container: None,
+        codec: None,
+        bitrate_kbps: None,
+        sample_rate_hz: None,
+        bit_depth: None,
+        channels: None,
+        facts_version: 1,
+        acoustid_fingerprint: None,
+    }
+}
+
+async fn logged_statements(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar("SELECT statements FROM statement_log")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn local_row(repository: &PostgresTrackRepository, external_id: &str) -> SourceFileFacts {
+    repository
+        .find_source_file_facts(&source("local", external_id))
+        .await
+        .unwrap()
+        .expect("the local row is recorded")
+}
+
+#[sqlx::test]
+async fn reconciliation_marks_absent_rows_with_the_supplied_timestamp(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let provider = ProviderId::new("local".to_owned()).unwrap();
+    let scope = SourceScope::Named("/music".to_owned());
+    let disappeared_at: chrono::DateTime<chrono::Utc> = "2026-08-01T10:00:00Z".parse().unwrap();
+    let now: chrono::DateTime<chrono::Utc> = "2026-09-20T10:00:00Z".parse().unwrap();
+    let later: chrono::DateTime<chrono::Utc> = "2026-09-21T10:00:00Z".parse().unwrap();
+
+    for (path, missing_at) in [
+        ("kept.flac", None),
+        ("absent.flac", None),
+        ("already.flac", Some(disappeared_at)),
+    ] {
+        repository
+            .index_source(
+                source("local", path),
+                metadata(path),
+                &local_facts(path, missing_at),
+            )
+            .await
+            .unwrap();
+    }
+
+    let remote = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Named("/music".to_owned()),
+        "video-1".to_owned(),
+    )
+    .unwrap();
+    repository
+        .get_or_create(remote.clone(), metadata("Remote"))
+        .await
+        .unwrap();
+
+    let report = repository
+        .reconcile_missing(&provider, &scope, &["kept.flac".to_owned()], now)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report,
+        ReconcileReport {
+            marked_missing: 1,
+            reappeared: 0,
+        }
+    );
+    assert_eq!(
+        local_row(&repository, "absent.flac").await.missing_at,
+        Some(now),
+        "the stored instant is the caller's, not the clock's"
+    );
+    assert_eq!(
+        local_row(&repository, "already.flac").await.missing_at,
+        Some(disappeared_at)
+    );
+    assert_eq!(local_row(&repository, "kept.flac").await.missing_at, None);
+
+    let report = repository
+        .reconcile_missing(
+            &provider,
+            &scope,
+            &["kept.flac".to_owned(), "absent.flac".to_owned()],
+            later,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report,
+        ReconcileReport {
+            marked_missing: 0,
+            reappeared: 1,
+        }
+    );
+    assert_eq!(
+        local_row(&repository, "absent.flac").await.missing_at,
+        None,
+        "the seen path is cleared"
+    );
+    assert_eq!(
+        local_row(&repository, "already.flac").await.missing_at,
+        Some(disappeared_at),
+        "a path the walk did not see keeps its disappearance date"
+    );
+
+    let remote_row = repository
+        .find_source_file_facts(&remote)
+        .await
+        .unwrap()
+        .expect("the provider source is recorded");
+    assert_eq!(remote_row.path, None);
+    assert_eq!(remote_row.missing_at, None);
+}
+
+#[sqlx::test]
+async fn reconciliation_statement_count_does_not_follow_the_row_count(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let provider = ProviderId::new("local".to_owned()).unwrap();
+    let dense = SourceScope::Named("/music".to_owned());
+    let sparse = SourceScope::Named("/music-sparse".to_owned());
+    let now: chrono::DateTime<chrono::Utc> = "2026-09-20T10:00:00Z".parse().unwrap();
+    let later: chrono::DateTime<chrono::Utc> = "2026-09-21T10:00:00Z".parse().unwrap();
+    let dense_paths = (0..40)
+        .map(|index| format!("bulk/{index:02}.flac"))
+        .collect::<Vec<_>>();
+
+    for path in &dense_paths {
+        repository
+            .index_source(
+                source("local", path),
+                metadata(path),
+                &local_facts(path, None),
+            )
+            .await
+            .unwrap();
+    }
+    repository
+        .index_source(
+            SourceIdentity::new(
+                ProviderId::new("local".to_owned()).unwrap(),
+                sparse.clone(),
+                "only.flac".to_owned(),
+            )
+            .unwrap(),
+            metadata("only.flac"),
+            &local_facts("only.flac", None),
+        )
+        .await
+        .unwrap();
+
+    sqlx::query("CREATE TABLE statement_log (statements BIGINT NOT NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO statement_log (statements) VALUES (0)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"CREATE FUNCTION log_scanned_statement() RETURNS trigger LANGUAGE plpgsql AS $fn$
+        BEGIN
+            UPDATE statement_log SET statements = statements + 1;
+            RETURN NULL;
+        END
+        $fn$"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"CREATE TRIGGER log_scanned_statement AFTER UPDATE ON track_sources
+        FOR EACH STATEMENT EXECUTE FUNCTION log_scanned_statement()"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let before = logged_statements(&pool).await;
+    let dense_report = repository
+        .reconcile_missing(&provider, &dense, &[], now)
+        .await
+        .unwrap();
+    let dense_statements = logged_statements(&pool).await - before;
+
+    let before = logged_statements(&pool).await;
+    let sparse_report = repository
+        .reconcile_missing(&provider, &sparse, &[], now)
+        .await
+        .unwrap();
+    let sparse_statements = logged_statements(&pool).await - before;
+
+    assert_eq!(
+        dense_report,
+        ReconcileReport {
+            marked_missing: 40,
+            reappeared: 0,
+        }
+    );
+    assert_eq!(
+        sparse_report,
+        ReconcileReport {
+            marked_missing: 1,
+            reappeared: 0,
+        }
+    );
+    assert_eq!(
+        dense_statements, 2,
+        "the mark and the clear are one statement each, however many paths are absent"
+    );
+    assert_eq!(
+        sparse_statements, dense_statements,
+        "the statement count does not follow the row count"
+    );
+
+    let before = logged_statements(&pool).await;
+    let cleared = repository
+        .reconcile_missing(&provider, &dense, &dense_paths, later)
+        .await
+        .unwrap();
+    let cleared_statements = logged_statements(&pool).await - before;
+
+    assert_eq!(
+        cleared,
+        ReconcileReport {
+            marked_missing: 0,
+            reappeared: 40,
+        }
+    );
+    assert_eq!(
+        cleared_statements, 2,
+        "one statement clears every reappeared path"
+    );
+
+    let rows = repository
+        .list_scanned_paths(&provider, &dense)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 40);
+    assert!(rows.iter().all(|(_, stored)| stored.missing_at.is_none()));
 }

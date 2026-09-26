@@ -30,6 +30,8 @@ pub struct ScanReport {
     pub untagged: usize,
     pub failed: usize,
     pub missing: usize,
+    pub unwalked: usize,
+    pub empty: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,8 +53,8 @@ struct FoundFile {
 
 enum Prepared {
     Unchanged { relative: String },
-    Untagged,
-    Failed,
+    Untagged { relative: String },
+    Failed { relative: String },
     Ready(Box<PreparedTrack>),
 }
 
@@ -90,6 +92,7 @@ pub async fn scan_with(
 ) -> Result<ScanReport, ScanError> {
     let provider = ProviderId::new(LOCAL_PROVIDER.to_owned())
         .expect("the local provider id is a valid identifier");
+    let now = chrono::Utc::now();
     let mut report = ScanReport::default();
     let mut processed = 0u32;
     let empty = HashMap::new();
@@ -97,7 +100,14 @@ pub async fn scan_with(
     for root in roots {
         let scope = SourceScope::Named(root.display().to_string());
         let known = known_paths(sources, &provider, &scope).await?;
-        let found = walk(root)?;
+        let Ok(found) = walk(root) else {
+            report.unwalked += 1;
+            continue;
+        };
+        if found.is_empty() {
+            report.empty += 1;
+            continue;
+        }
         let mut seen = Vec::with_capacity(found.len());
         let lookup = if mode == ScanMode::Full {
             &empty
@@ -119,8 +129,14 @@ pub async fn scan_with(
                     seen.push(relative);
                     report.unchanged += 1;
                 }
-                Prepared::Untagged => report.untagged += 1,
-                Prepared::Failed => report.failed += 1,
+                Prepared::Untagged { relative } => {
+                    seen.push(relative);
+                    report.untagged += 1;
+                }
+                Prepared::Failed { relative } => {
+                    seen.push(relative);
+                    report.failed += 1;
+                }
                 Prepared::Ready(track) => {
                     let PreparedTrack {
                         relative,
@@ -156,7 +172,14 @@ pub async fn scan_with(
             }
         }
 
-        report.missing += mark_missing(&known, &seen);
+        report.missing += catalogue
+            .reconcile_missing(&provider, &scope, &seen, now)
+            .await?
+            .marked_missing;
+    }
+
+    if !roots.is_empty() && report.unwalked == roots.len() {
+        return Err(ScanError::Unreadable);
     }
 
     Ok(report)
@@ -223,7 +246,11 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
             let external_id = file.relative.clone();
             let album = match album_metadata(&tags) {
                 Ok(album) => album,
-                Err(()) => return Prepared::Untagged,
+                Err(()) => {
+                    return Prepared::Untagged {
+                        relative: file.relative,
+                    };
+                }
             };
             let membership = album_track(&tags);
             let acoustid_fingerprint = tags.acoustid_fingerprint.clone();
@@ -233,7 +260,9 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
                 .and_then(|metadata| metadata.with_recording_id(tags.recording_id))
                 .and_then(|metadata| metadata.with_isrc(tags.isrc))
             else {
-                return Prepared::Untagged;
+                return Prepared::Untagged {
+                    relative: file.relative,
+                };
             };
             let metadata = metadata
                 .with_genres(tags.genres)
@@ -263,8 +292,12 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
                 membership,
             }))
         }
-        Err(TagError::Untagged) => Prepared::Untagged,
-        Err(TagError::Unreadable) => Prepared::Failed,
+        Err(TagError::Untagged) => Prepared::Untagged {
+            relative: file.relative,
+        },
+        Err(TagError::Unreadable) => Prepared::Failed {
+            relative: file.relative,
+        },
     }
 }
 
@@ -357,14 +390,6 @@ async fn known_paths(
         .into_iter()
         .filter_map(|(_, facts)| facts.path.clone().map(|path| (path, facts)))
         .collect())
-}
-
-fn mark_missing(known: &HashMap<String, SourceFileFacts>, seen: &[String]) -> usize {
-    let present: std::collections::HashSet<&str> = seen.iter().map(String::as_str).collect();
-    known
-        .iter()
-        .filter(|(path, facts)| !present.contains(path.as_str()) && facts.missing_at.is_none())
-        .count()
 }
 
 fn walk(root: &Path) -> Result<Vec<FoundFile>, ScanError> {
@@ -476,18 +501,68 @@ mod tests {
         root: &Path,
         relative: &str,
     ) -> SourceFileFacts {
-        let source = SourceIdentity::new(
-            ProviderId::new(LOCAL_PROVIDER.to_owned()).unwrap(),
-            SourceScope::Named(root.display().to_string()),
-            relative.to_owned(),
-        )
-        .unwrap();
+        let source = local_identity(root, relative);
 
         sources
             .find_source_file_facts(&source)
             .await
             .unwrap()
             .expect("the scanned file is recorded")
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    fn local_identity(root: &Path, relative: &str) -> SourceIdentity {
+        SourceIdentity::new(
+            ProviderId::new(LOCAL_PROVIDER.to_owned()).unwrap(),
+            SourceScope::Named(root.display().to_string()),
+            relative.to_owned(),
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    fn local_facts(
+        relative: &str,
+        missing_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> SourceFileFacts {
+        SourceFileFacts {
+            path: Some(relative.to_owned()),
+            size_bytes: 0,
+            modified_at: None,
+            missing_at,
+            content_type: None,
+            suffix: Some("flac".to_owned()),
+            container: None,
+            codec: None,
+            bitrate_kbps: None,
+            sample_rate_hz: None,
+            bit_depth: None,
+            channels: None,
+            facts_version: SOURCE_FACTS_VERSION,
+            acoustid_fingerprint: None,
+        }
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn seed_local_row(
+        catalogue: &Arc<dyn CatalogueWrite>,
+        root: &Path,
+        relative: &str,
+        missing_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) {
+        catalogue
+            .index_source(
+                local_identity(root, relative),
+                TrackMetadata::from_names(
+                    relative.to_owned(),
+                    vec!["Seeded Artist".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+                &local_facts(relative, missing_at),
+            )
+            .await
+            .unwrap();
     }
 
     #[cfg(feature = "postgres-integration")]
@@ -669,10 +744,11 @@ mod tests {
 
     #[cfg(feature = "postgres-integration")]
     #[sqlx::test]
-    async fn a_vanished_file_is_counted_missing_without_touching_the_track(pool: sqlx::PgPool) {
+    async fn a_missing_file_is_marked_and_counted_without_touching_the_track(pool: sqlx::PgPool) {
         let root = temp_root("missing");
         let file = root.join("a.flac");
         std::fs::copy(fixture(), &file).unwrap();
+        std::fs::copy(fixture(), root.join("b.flac")).unwrap();
 
         let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
         let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
@@ -680,14 +756,556 @@ mod tests {
         let first = scan(&catalogue, &sources, std::slice::from_ref(&root))
             .await
             .unwrap();
-        assert_eq!(first.indexed, 1);
+        assert_eq!(first.indexed, 2);
 
         std::fs::remove_file(&file).unwrap();
+        let before = chrono::Utc::now();
         let second = scan(&catalogue, &sources, std::slice::from_ref(&root))
             .await
             .unwrap();
+        let after = chrono::Utc::now();
+
         assert_eq!(second.missing, 1);
         assert_eq!(second.indexed, 0);
+
+        let vanished = stored_facts(&sources, &root, "a.flac").await;
+        let marked_at = vanished
+            .missing_at
+            .expect("a vanished file is marked missing");
+        assert!(marked_at >= before && marked_at <= after);
+        assert_eq!(
+            stored_facts(&sources, &root, "b.flac").await.missing_at,
+            None,
+            "a file still on disk is not marked"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn an_already_missing_row_keeps_its_timestamp(pool: sqlx::PgPool) {
+        let root = temp_root("already-missing");
+        let file = root.join("a.flac");
+        std::fs::copy(fixture(), &file).unwrap();
+        std::fs::copy(fixture(), root.join("keep.flac")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        std::fs::remove_file(&file).unwrap();
+        let marked = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(marked.missing, 1);
+        let disappeared_at = stored_facts(&sources, &root, "a.flac")
+            .await
+            .missing_at
+            .expect("marked by the scan that missed it");
+
+        let again = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            again.missing, 0,
+            "the row was already marked by the earlier scan"
+        );
+        assert_eq!(
+            stored_facts(&sources, &root, "a.flac").await.missing_at,
+            Some(disappeared_at),
+            "the disappearance date is a fact, not a heartbeat"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_reappeared_file_clears_the_mark_on_the_unchanged_fast_path(pool: sqlx::PgPool) {
+        let root = temp_root("reappeared-unchanged");
+        let file = root.join("a.flac");
+        std::fs::copy(fixture(), &file).unwrap();
+        std::fs::copy(fixture(), root.join("keep.flac")).unwrap();
+        let indexed = std::fs::metadata(&file).unwrap();
+        let bytes = std::fs::read(&file).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_facts(&sources, &root, "a.flac").await.size_bytes,
+            indexed.len()
+        );
+
+        std::fs::remove_file(&file).unwrap();
+        let missing = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(missing.missing, 1);
+        assert!(
+            stored_facts(&sources, &root, "a.flac")
+                .await
+                .missing_at
+                .is_some()
+        );
+
+        std::fs::write(&file, &bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(indexed.modified().unwrap())
+            .unwrap();
+        let restored = std::fs::metadata(&file).unwrap();
+        assert_eq!(restored.len(), indexed.len());
+        assert_eq!(restored.modified().unwrap(), indexed.modified().unwrap());
+
+        let reappeared = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reappeared.unchanged, 2,
+            "the restored file keeps its size and mtime, so it takes the fast path"
+        );
+        assert_eq!(reappeared.indexed, 0);
+        assert_eq!(reappeared.missing, 0);
+
+        let facts = stored_facts(&sources, &root, "a.flac").await;
+        assert_eq!(
+            facts.missing_at, None,
+            "only the reconciliation can unmark an unchanged file"
+        );
+        assert_eq!(facts.size_bytes, indexed.len());
+        assert_eq!(
+            facts.modified_at.map(|time| time.timestamp_micros()),
+            Some(
+                chrono::DateTime::<chrono::Utc>::from(indexed.modified().unwrap())
+                    .timestamp_micros()
+            )
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_reappeared_file_with_new_facts_clears_the_mark(pool: sqlx::PgPool) {
+        let root = temp_root("reappeared-facts");
+        let file = root.join("a.flac");
+        std::fs::copy(fixture(), &file).unwrap();
+        std::fs::copy(fixture(), root.join("keep.flac")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            scan(&catalogue, &sources, std::slice::from_ref(&root))
+                .await
+                .unwrap()
+                .missing,
+            1
+        );
+
+        std::fs::copy(wave_fixture(), &file).unwrap();
+        let reappeared = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        assert_eq!(reappeared.indexed, 1);
+        assert_eq!(reappeared.missing, 0);
+
+        let facts = stored_facts(&sources, &root, "a.flac").await;
+        assert_eq!(facts.missing_at, None);
+        assert_eq!(facts.content_type.as_deref(), Some("audio/wav"));
+        assert_eq!(facts.suffix.as_deref(), Some("flac"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_present_but_unusable_file_is_not_marked_missing(pool: sqlx::PgPool) {
+        let root = temp_root("unusable");
+        std::fs::copy(fixture(), root.join("a.flac")).unwrap();
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/silence.flac"),
+            root.join("silent.flac"),
+        )
+        .unwrap();
+        std::fs::write(root.join("broken.flac"), b"not a container lofty can read").unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        seed_local_row(&catalogue, &root, "silent.flac", None).await;
+        seed_local_row(&catalogue, &root, "broken.flac", None).await;
+        seed_local_row(&catalogue, &root, "gone.flac", None).await;
+
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        assert_eq!(report.indexed, 1);
+        assert_eq!(report.untagged, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(
+            report.missing, 1,
+            "only the path the walk did not see is missing"
+        );
+        assert_eq!(
+            stored_facts(&sources, &root, "silent.flac")
+                .await
+                .missing_at,
+            None,
+            "an untagged file the walk saw is present, not missing"
+        );
+        assert_eq!(
+            stored_facts(&sources, &root, "broken.flac")
+                .await
+                .missing_at,
+            None,
+            "an unreadable file the walk saw is present, not missing"
+        );
+        assert!(
+            stored_facts(&sources, &root, "gone.flac")
+                .await
+                .missing_at
+                .is_some()
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn an_empty_root_marks_nothing(pool: sqlx::PgPool) {
+        let root = temp_root("emptied");
+        std::fs::copy(fixture(), root.join("a.flac")).unwrap();
+        std::fs::copy(fixture(), root.join("b.flac")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        let first = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(first.indexed, 2);
+
+        std::fs::remove_file(root.join("a.flac")).unwrap();
+        std::fs::remove_file(root.join("b.flac")).unwrap();
+        let emptied = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        assert_eq!(emptied.empty, 1);
+        assert_eq!(emptied.unwalked, 0);
+        assert_eq!(
+            emptied.missing, 0,
+            "a walk that found no file is not evidence that the root is gone"
+        );
+        assert_eq!(
+            stored_facts(&sources, &root, "a.flac").await.missing_at,
+            None
+        );
+        assert_eq!(
+            stored_facts(&sources, &root, "b.flac").await.missing_at,
+            None
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn no_configured_root_is_a_no_op(pool: sqlx::PgPool) {
+        let store = Arc::new(PostgresTrackRepository::new(pool));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+
+        let report = scan(&catalogue, &sources, &[]).await.unwrap();
+
+        assert_eq!(report, ScanReport::default());
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn an_unwalked_root_marks_nothing(pool: sqlx::PgPool) {
+        let root = temp_root("walked");
+        std::fs::copy(fixture(), root.join("a.flac")).unwrap();
+
+        let holder = temp_root("unwalked");
+        let blocker = holder.join("not-a-directory");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let unreadable = blocker.join("music");
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+
+        let already: chrono::DateTime<chrono::Utc> = "2026-09-01T00:00:00Z".parse().unwrap();
+        seed_local_row(&catalogue, &unreadable, "absent.flac", Some(already)).await;
+        seed_local_row(&catalogue, &unreadable, "present.flac", None).await;
+
+        let report = scan(&catalogue, &sources, &[root.clone(), unreadable.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(report.unwalked, 1);
+        assert_eq!(report.missing, 0);
+        assert_eq!(report.indexed, 1);
+        assert_eq!(
+            stored_facts(&sources, &unreadable, "absent.flac")
+                .await
+                .missing_at,
+            Some(already)
+        );
+        assert_eq!(
+            stored_facts(&sources, &unreadable, "present.flac")
+                .await
+                .missing_at,
+            None
+        );
+        assert_eq!(
+            stored_facts(&sources, &root, "a.flac").await.missing_at,
+            None
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&holder).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_root_that_disappears_entirely_marks_nothing(pool: sqlx::PgPool) {
+        let kept = temp_root("kept-root");
+        std::fs::copy(fixture(), kept.join("a.flac")).unwrap();
+        let vanishing = temp_root("vanishing-root");
+        std::fs::copy(fixture(), vanishing.join("b1.flac")).unwrap();
+        std::fs::copy(fixture(), vanishing.join("b2.flac")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        let roots = [kept.clone(), vanishing.clone()];
+
+        let first = scan(&catalogue, &sources, &roots).await.unwrap();
+        assert_eq!(first.indexed, 3);
+
+        std::fs::remove_file(vanishing.join("b1.flac")).unwrap();
+        let second = scan(&catalogue, &sources, &roots).await.unwrap();
+        assert_eq!(second.missing, 1);
+        let disappeared_at = stored_facts(&sources, &vanishing, "b1.flac")
+            .await
+            .missing_at
+            .expect("marked before the root vanished");
+
+        std::fs::remove_dir_all(&vanishing).unwrap();
+        let third = scan(&catalogue, &sources, &roots).await.unwrap();
+
+        assert_eq!(third.unwalked, 1);
+        assert_eq!(third.missing, 0);
+        assert_eq!(third.unchanged, 1);
+        assert_eq!(third.indexed, 0);
+        assert_eq!(
+            stored_facts(&sources, &vanishing, "b1.flac")
+                .await
+                .missing_at,
+            Some(disappeared_at),
+            "a root that is gone is unknown, not missing"
+        );
+        assert_eq!(
+            stored_facts(&sources, &vanishing, "b2.flac")
+                .await
+                .missing_at,
+            None
+        );
+        assert_eq!(
+            stored_facts(&sources, &kept, "a.flac").await.missing_at,
+            None
+        );
+
+        std::fs::remove_dir_all(&kept).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn every_root_failing_is_an_error(pool: sqlx::PgPool) {
+        let store = Arc::new(PostgresTrackRepository::new(pool));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        let absent = |label: &str| {
+            std::env::temp_dir().join(format!("whio-{label}-{}", uuid::Uuid::now_v7()))
+        };
+
+        let result = scan(&catalogue, &sources, &[absent("gone-a"), absent("gone-b")]).await;
+
+        assert!(matches!(result, Err(ScanError::Unreadable)));
+
+        let single = scan(&catalogue, &sources, &[absent("gone-c")]).await;
+        assert!(matches!(single, Err(ScanError::Unreadable)));
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn the_reconciliation_is_scoped_to_its_root_and_provider(pool: sqlx::PgPool) {
+        let first = temp_root("scoped-first");
+        std::fs::copy(fixture(), first.join("a.flac")).unwrap();
+        std::fs::copy(fixture(), first.join("keep.flac")).unwrap();
+        let second = temp_root("scoped-second");
+        std::fs::copy(fixture(), second.join("b.flac")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+
+        let remote = SourceIdentity::new(
+            ProviderId::new("youtube_music".to_owned()).unwrap(),
+            SourceScope::Named(first.display().to_string()),
+            "video-1".to_owned(),
+        )
+        .unwrap();
+        catalogue
+            .get_or_create(
+                remote.clone(),
+                TrackMetadata::from_names(
+                    "Remote".to_owned(),
+                    vec!["Remote Artist".to_owned()],
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let roots = [first.clone(), second.clone()];
+        let initial = scan(&catalogue, &sources, &roots).await.unwrap();
+        assert_eq!(initial.indexed, 3);
+
+        std::fs::remove_file(first.join("a.flac")).unwrap();
+        let report = scan(&catalogue, &sources, &roots).await.unwrap();
+
+        assert_eq!(report.missing, 1);
+        assert!(
+            stored_facts(&sources, &first, "a.flac")
+                .await
+                .missing_at
+                .is_some()
+        );
+        assert_eq!(
+            stored_facts(&sources, &second, "b.flac").await.missing_at,
+            None,
+            "another root's rows are not this root's to mark"
+        );
+
+        let remote_facts = sources
+            .find_source_file_facts(&remote)
+            .await
+            .unwrap()
+            .expect("the provider source is recorded");
+        assert_eq!(remote_facts.path, None);
+        assert_eq!(remote_facts.missing_at, None);
+
+        std::fs::remove_dir_all(&first).unwrap();
+        std::fs::remove_dir_all(&second).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn one_scan_uses_one_timestamp(pool: sqlx::PgPool) {
+        let first = temp_root("stamped-first");
+        std::fs::copy(fixture(), first.join("a.flac")).unwrap();
+        std::fs::copy(fixture(), first.join("keep.flac")).unwrap();
+        let second = temp_root("stamped-second");
+        std::fs::copy(fixture(), second.join("b.flac")).unwrap();
+        std::fs::copy(fixture(), second.join("keep.flac")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        let roots = [first.clone(), second.clone()];
+        scan(&catalogue, &sources, &roots).await.unwrap();
+
+        std::fs::remove_file(first.join("a.flac")).unwrap();
+        std::fs::remove_file(second.join("b.flac")).unwrap();
+        let before = chrono::Utc::now();
+        let report = scan(&catalogue, &sources, &roots).await.unwrap();
+        let after = chrono::Utc::now();
+
+        assert_eq!(report.missing, 2);
+        let left = stored_facts(&sources, &first, "a.flac")
+            .await
+            .missing_at
+            .expect("marked");
+        let right = stored_facts(&sources, &second, "b.flac")
+            .await
+            .missing_at
+            .expect("marked");
+
+        assert_eq!(left, right);
+        assert!(left >= before && left <= after);
+
+        std::fs::remove_dir_all(&first).unwrap();
+        std::fs::remove_dir_all(&second).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn the_report_counts_agree_with_the_rows_that_changed(pool: sqlx::PgPool) {
+        let root = temp_root("counts");
+        for name in ["a.flac", "b.flac", "c.flac"] {
+            std::fs::copy(fixture(), root.join(name)).unwrap();
+        }
+        let absent = std::env::temp_dir().join(format!("whio-gone-{}", uuid::Uuid::now_v7()));
+        let roots = [root.clone(), absent];
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        let provider = ProviderId::new(LOCAL_PROVIDER.to_owned()).unwrap();
+        let scope = SourceScope::Named(root.display().to_string());
+
+        let initial = scan(&catalogue, &sources, &roots).await.unwrap();
+        assert_eq!(initial.indexed, 3);
+        assert_eq!(
+            initial.unwalked, 1,
+            "the second root never existed and is skipped"
+        );
+
+        std::fs::remove_file(root.join("a.flac")).unwrap();
+        std::fs::remove_file(root.join("b.flac")).unwrap();
+        let second = scan(&catalogue, &sources, &roots).await.unwrap();
+
+        let marked = |rows: Vec<(SourceIdentity, SourceFileFacts)>| {
+            rows.into_iter()
+                .filter(|(_, facts)| facts.missing_at.is_some())
+                .count()
+        };
+        let rows = sources.list_scanned_paths(&provider, &scope).await.unwrap();
+
+        assert_eq!(second.missing, 2);
+        assert_eq!(second.missing, marked(rows));
+        assert_eq!(second.unwalked, 1);
+
+        let third = scan(&catalogue, &sources, &roots).await.unwrap();
+        let rows = sources.list_scanned_paths(&provider, &scope).await.unwrap();
+
+        assert_eq!(third.missing, 0, "an already marked row changes nothing");
+        assert_eq!(marked(rows), 2);
+        assert_eq!(third.unwalked, 1);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
