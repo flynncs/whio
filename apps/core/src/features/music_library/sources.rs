@@ -28,6 +28,12 @@ pub struct RecordedLocalFile {
     pub missing: bool,
     pub content_type: Option<String>,
     pub suffix: Option<String>,
+    pub container: Option<String>,
+    pub codec: Option<String>,
+    pub bitrate_kbps: Option<u32>,
+    pub sample_rate_hz: Option<u32>,
+    pub bit_depth: Option<u8>,
+    pub channels: Option<u8>,
 }
 
 pub struct SourceQueries {
@@ -59,6 +65,12 @@ impl SourceQueries {
                     missing: facts.missing_at.is_some(),
                     content_type: facts.content_type,
                     suffix: facts.suffix,
+                    container: facts.container,
+                    codec: facts.codec,
+                    bitrate_kbps: facts.bitrate_kbps,
+                    sample_rate_hz: facts.sample_rate_hz,
+                    bit_depth: facts.bit_depth,
+                    channels: facts.channels,
                 })
             })
             .map_err(Into::into)

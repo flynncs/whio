@@ -51,6 +51,13 @@ impl Fixture {
                     missing_at: None,
                     content_type: None,
                     suffix: Some("flac".into()),
+                    container: None,
+                    codec: None,
+                    bitrate_kbps: None,
+                    sample_rate_hz: None,
+                    bit_depth: None,
+                    channels: None,
+                    facts_version: 0,
                     acoustid_fingerprint: None,
                 },
             )

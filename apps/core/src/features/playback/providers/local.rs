@@ -175,6 +175,13 @@ mod tests {
             missing_at: None,
             content_type: None,
             suffix: Some("flac".to_owned()),
+            container: Some("flac".to_owned()),
+            codec: Some("flac".to_owned()),
+            bitrate_kbps: Some(900),
+            sample_rate_hz: Some(44_100),
+            bit_depth: Some(16),
+            channels: Some(2),
+            facts_version: 1,
             acoustid_fingerprint: None,
         }
     }

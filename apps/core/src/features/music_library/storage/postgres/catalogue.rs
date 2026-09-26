@@ -14,8 +14,8 @@ use crate::features::music_library::storage::contracts::CatalogueWrite;
 
 use super::PgStore;
 use super::decode::{
-    decode_album, decode_artist, encode_duration_ms, encode_smallint, encode_source_scope,
-    repository_error,
+    decode_album, decode_artist, encode_byte, encode_duration_ms, encode_facts_version,
+    encode_integer, encode_smallint, encode_source_scope, repository_error,
 };
 use super::schema::{ALBUM_COLUMNS, ARTIST_COLUMNS, AlbumRow, ArtistRow};
 
@@ -491,8 +491,10 @@ async fn set_source_file_facts_in(
     sqlx::query(
         r#"UPDATE track_sources
         SET path = $1, size_bytes = $2, modified_at = $3, missing_at = $4,
-            content_type = $5, suffix = $6, acoustid_fingerprint = $7
-        WHERE provider_id = $8 AND source_scope = $9 AND external_id = $10
+            content_type = $5, suffix = $6, acoustid_fingerprint = $7,
+            container = $8, codec = $9, bitrate_kbps = $10, sample_rate_hz = $11,
+            bit_depth = $12, channels = $13, facts_version = $14
+        WHERE provider_id = $15 AND source_scope = $16 AND external_id = $17
         "#,
     )
     .bind(facts.path.as_deref())
@@ -502,6 +504,13 @@ async fn set_source_file_facts_in(
     .bind(facts.content_type.as_deref())
     .bind(facts.suffix.as_deref())
     .bind(facts.acoustid_fingerprint.as_deref())
+    .bind(facts.container.as_deref())
+    .bind(facts.codec.as_deref())
+    .bind(encode_integer(facts.bitrate_kbps)?)
+    .bind(encode_integer(facts.sample_rate_hz)?)
+    .bind(encode_byte(facts.bit_depth))
+    .bind(encode_byte(facts.channels))
+    .bind(encode_facts_version(facts.facts_version)?)
     .bind(source.provider_id().as_str())
     .bind(encode_source_scope(source.source_scope()))
     .bind(source.external_id())

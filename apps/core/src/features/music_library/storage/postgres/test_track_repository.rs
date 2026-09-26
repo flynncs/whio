@@ -5,6 +5,7 @@ use crate::features::music_library::domain::{
     AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef, KeepReason,
     MatchQuality, ProviderId, SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
 };
+use crate::features::music_library::sources::SourceQueries;
 use crate::features::music_library::storage::contracts::{
     CatalogueWrite, DuplicateReport, LibraryRead, SourceFileFacts, SourceLookup, StateStore,
     TrackRepositoryError,
@@ -276,6 +277,13 @@ async fn source_file_facts_round_trip_for_a_local_file(pool: PgPool) {
         missing_at: None,
         content_type: Some("audio/flac".to_owned()),
         suffix: Some("flac".to_owned()),
+        container: Some("flac".to_owned()),
+        codec: Some("flac".to_owned()),
+        bitrate_kbps: Some(900),
+        sample_rate_hz: Some(44_100),
+        bit_depth: Some(16),
+        channels: Some(2),
+        facts_version: 1,
         acoustid_fingerprint: Some("AQAA-test".to_owned()),
     };
     repository
@@ -294,6 +302,84 @@ async fn source_file_facts_round_trip_for_a_local_file(pool: PgPool) {
             .unwrap(),
         vec![(source, facts)]
     );
+}
+
+#[sqlx::test]
+
+async fn a_provider_source_records_no_local_facts(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let source = source("video-without-facts");
+    repository
+        .get_or_create(source.clone(), metadata("Song", &["Artist"], Some(1_000)))
+        .await
+        .unwrap();
+
+    let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i16)>(
+        r#"
+        SELECT count(container)::BIGINT,
+               count(codec)::BIGINT,
+               count(bitrate_kbps)::BIGINT,
+               count(sample_rate_hz)::BIGINT,
+               count(bit_depth)::BIGINT,
+               count(channels)::BIGINT,
+               min(facts_version)
+        FROM track_sources
+        WHERE provider_id = $1 AND source_scope = $2 AND external_id = $3
+        "#,
+    )
+    .bind("youtube_music")
+    .bind("named:test-installation")
+    .bind("video-without-facts")
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        row,
+        (0, 0, 0, 0, 0, 0, 0),
+        "a provider row states none of the local representation facts"
+    );
+}
+
+#[sqlx::test]
+
+async fn recorded_local_file_exposes_the_stored_facts(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let source = local_source("recording-1.flac");
+    let mut stored = facts("recording-1.flac", 42, "flac");
+    stored.content_type = Some("audio/flac".to_owned());
+    stored.container = Some("flac".to_owned());
+    stored.codec = Some("flac".to_owned());
+    stored.bitrate_kbps = Some(900);
+    stored.sample_rate_hz = Some(44_100);
+    stored.bit_depth = Some(16);
+    stored.channels = Some(2);
+    repository
+        .index_source(
+            source.clone(),
+            metadata("Song", &["Artist"], Some(1_000)),
+            &stored,
+        )
+        .await
+        .unwrap();
+
+    let queries = SourceQueries::new(Arc::clone(&repository) as Arc<dyn SourceLookup>);
+    let recorded = queries
+        .recorded_local_file(&source)
+        .await
+        .unwrap()
+        .expect("the file is recorded");
+
+    assert_eq!(recorded.path.as_deref(), Some("recording-1.flac"));
+    assert!(!recorded.missing);
+    assert_eq!(recorded.content_type.as_deref(), Some("audio/flac"));
+    assert_eq!(recorded.suffix.as_deref(), Some("flac"));
+    assert_eq!(recorded.container.as_deref(), Some("flac"));
+    assert_eq!(recorded.codec.as_deref(), Some("flac"));
+    assert_eq!(recorded.bitrate_kbps, Some(900));
+    assert_eq!(recorded.sample_rate_hz, Some(44_100));
+    assert_eq!(recorded.bit_depth, Some(16));
+    assert_eq!(recorded.channels, Some(2));
 }
 
 fn credit(name: &str, identifier: Option<&str>) -> ArtistCredit {
@@ -1241,6 +1327,13 @@ fn facts(path: &str, size_bytes: u64, suffix: &str) -> SourceFileFacts {
         missing_at: None,
         content_type: None,
         suffix: Some(suffix.to_owned()),
+        container: None,
+        codec: None,
+        bitrate_kbps: None,
+        sample_rate_hz: None,
+        bit_depth: None,
+        channels: None,
+        facts_version: 1,
         acoustid_fingerprint: None,
     }
 }
@@ -1848,6 +1941,13 @@ async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_iden
                 missing_at: None,
                 content_type: None,
                 suffix: Some("flac".into()),
+                container: None,
+                codec: None,
+                bitrate_kbps: None,
+                sample_rate_hz: None,
+                bit_depth: None,
+                channels: None,
+                facts_version: 1,
                 acoustid_fingerprint: None,
             },
         )

@@ -62,6 +62,13 @@ async fn app(pool: PgPool) -> (Router, TrackId, PathBuf) {
                 missing_at: None,
                 content_type: None,
                 suffix: Some("flac".to_owned()),
+                container: None,
+                codec: None,
+                bitrate_kbps: None,
+                sample_rate_hz: None,
+                bit_depth: None,
+                channels: None,
+                facts_version: 0,
                 acoustid_fingerprint: None,
             },
         )

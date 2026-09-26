@@ -13,13 +13,15 @@ use crate::features::music_library::{
     storage::contracts::{CatalogueWrite, SourceFileFacts, SourceLookup, TrackRepositoryError},
 };
 
-use super::tags::{TagError, read_tags};
+use super::tags::{TagError, content_type_for_container, read_tags};
 
 const AUDIO_EXTENSIONS: &[&str] = &[
     "flac", "mp3", "m4a", "mp4", "ogg", "oga", "opus", "wav", "aiff", "aif", "ape", "wv", "mpc",
 ];
 
 pub const LOCAL_PROVIDER: &str = "local";
+
+const SOURCE_FACTS_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
@@ -195,6 +197,13 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
         missing_at: None,
         content_type: None,
         suffix: file.suffix,
+        container: None,
+        codec: None,
+        bitrate_kbps: None,
+        sample_rate_hz: None,
+        bit_depth: None,
+        channels: None,
+        facts_version: SOURCE_FACTS_VERSION,
         acoustid_fingerprint: None,
     };
 
@@ -202,6 +211,7 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
         && previous.size_bytes == file.size_bytes
         && previous.modified_at.map(|time| time.timestamp_micros())
             == file.modified_at.map(|time| time.timestamp_micros())
+        && previous.facts_version >= SOURCE_FACTS_VERSION
     {
         return Prepared::Unchanged {
             relative: file.relative,
@@ -228,6 +238,17 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
             };
 
             facts.acoustid_fingerprint = acoustid_fingerprint;
+            facts.content_type = tags
+                .container
+                .as_deref()
+                .and_then(content_type_for_container)
+                .map(str::to_owned);
+            facts.container = tags.container;
+            facts.codec = tags.codec;
+            facts.bitrate_kbps = tags.bitrate_kbps;
+            facts.sample_rate_hz = tags.sample_rate_hz;
+            facts.bit_depth = tags.bit_depth;
+            facts.channels = tags.channels;
 
             Prepared::Ready(Box::new(PreparedTrack {
                 relative: file.relative,
@@ -412,6 +433,178 @@ mod tests {
     }
 
     #[cfg(feature = "postgres-integration")]
+    fn wave_fixture() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.wav")
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn stored_facts(
+        sources: &Arc<dyn SourceLookup>,
+        root: &Path,
+        relative: &str,
+    ) -> SourceFileFacts {
+        let source = SourceIdentity::new(
+            ProviderId::new(LOCAL_PROVIDER.to_owned()).unwrap(),
+            SourceScope::Named(root.display().to_string()),
+            relative.to_owned(),
+        )
+        .unwrap();
+
+        sources
+            .find_source_file_facts(&source)
+            .await
+            .unwrap()
+            .expect("the scanned file is recorded")
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn scan_records_representation_facts_from_the_file(pool: sqlx::PgPool) {
+        let root = temp_root("representation");
+        std::fs::copy(fixture(), root.join("a.flac")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(report.indexed, 1);
+
+        let facts = stored_facts(&sources, &root, "a.flac").await;
+        assert_eq!(facts.container.as_deref(), Some("flac"));
+        assert_eq!(facts.codec.as_deref(), Some("flac"));
+        assert_eq!(facts.content_type.as_deref(), Some("audio/flac"));
+        assert_eq!(facts.suffix.as_deref(), Some("flac"));
+        assert_eq!(facts.bitrate_kbps, Some(123));
+        assert_eq!(facts.sample_rate_hz, Some(44_100));
+        assert_eq!(facts.bit_depth, Some(16));
+        assert_eq!(facts.channels, Some(1));
+        assert_eq!(facts.facts_version, SOURCE_FACTS_VERSION);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_mislabelled_suffix_does_not_decide_the_container(pool: sqlx::PgPool) {
+        let root = temp_root("mislabelled");
+        std::fs::copy(fixture(), root.join("a.mp3")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(report.indexed, 1);
+
+        let facts = stored_facts(&sources, &root, "a.mp3").await;
+        assert_eq!(facts.container.as_deref(), Some("flac"));
+        assert_eq!(facts.codec.as_deref(), Some("flac"));
+        assert_eq!(facts.content_type.as_deref(), Some("audio/flac"));
+        assert_eq!(facts.suffix.as_deref(), Some("mp3"));
+        assert_eq!(facts.bit_depth, Some(16));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn facts_version_backfills_on_an_incremental_scan(pool: sqlx::PgPool) {
+        let root = temp_root("backfill");
+        std::fs::copy(fixture(), root.join("a.flac")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        let source = SourceIdentity::new(
+            ProviderId::new(LOCAL_PROVIDER.to_owned()).unwrap(),
+            SourceScope::Named(root.display().to_string()),
+            "a.flac".to_owned(),
+        )
+        .unwrap();
+
+        let first = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(first.indexed, 1);
+
+        let current = stored_facts(&sources, &root, "a.flac").await;
+        let stale = SourceFileFacts {
+            content_type: None,
+            container: None,
+            codec: None,
+            bitrate_kbps: None,
+            sample_rate_hz: None,
+            bit_depth: None,
+            channels: None,
+            facts_version: 0,
+            ..current
+        };
+        catalogue
+            .set_source_file_facts(&source, &stale)
+            .await
+            .unwrap();
+
+        let second = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(
+            second.indexed, 1,
+            "a row below the extractor version is re-read"
+        );
+        assert_eq!(second.unchanged, 0);
+
+        let refreshed = stored_facts(&sources, &root, "a.flac").await;
+        assert_eq!(refreshed.facts_version, SOURCE_FACTS_VERSION);
+        assert_eq!(refreshed.container.as_deref(), Some("flac"));
+        assert_eq!(refreshed.content_type.as_deref(), Some("audio/flac"));
+        assert_eq!(refreshed.bitrate_kbps, Some(123));
+
+        let third = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(third.unchanged, 1);
+        assert_eq!(third.indexed, 0);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn absent_properties_stay_absent(pool: sqlx::PgPool) {
+        let root = temp_root("absent");
+        std::fs::copy(wave_fixture(), root.join("a.wav")).unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(report.indexed, 1);
+
+        let facts = stored_facts(&sources, &root, "a.wav").await;
+        assert_eq!(facts.container.as_deref(), Some("wav"));
+        assert_eq!(facts.content_type.as_deref(), Some("audio/wav"));
+        assert_eq!(
+            facts.codec, None,
+            "a WAV container does not imply exactly one codec"
+        );
+        assert_eq!(facts.bitrate_kbps, Some(706));
+        assert_eq!(facts.sample_rate_hz, Some(44_100));
+        assert_eq!(facts.bit_depth, Some(16));
+        assert_eq!(facts.channels, Some(1));
+        assert_eq!(facts.facts_version, SOURCE_FACTS_VERSION);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
     #[sqlx::test]
     async fn a_second_scan_skips_unchanged_files_and_does_not_report_them_missing(
         pool: sqlx::PgPool,
@@ -483,6 +676,12 @@ mod tests {
             Some("11111111-2222-3333-4444-555555555555")
         );
         assert!(tags.duration_ms.is_some_and(|ms| ms > 0));
+        assert_eq!(tags.container.as_deref(), Some("flac"));
+        assert_eq!(tags.codec.as_deref(), Some("flac"));
+        assert_eq!(tags.bitrate_kbps, Some(123));
+        assert_eq!(tags.sample_rate_hz, Some(44_100));
+        assert_eq!(tags.bit_depth, Some(16));
+        assert_eq!(tags.channels, Some(1));
     }
 
     #[cfg(feature = "postgres-integration")]

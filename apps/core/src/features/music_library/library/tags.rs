@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use lofty::config::ParseOptions;
-use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::file::{AudioFile, FileType, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::{Accessor, ItemKey};
 use lofty::probe::Probe;
+use lofty::properties::FileProperties;
 use lofty::tag::Tag;
 
 #[derive(Debug, thiserror::Error)]
@@ -41,16 +42,25 @@ pub struct TrackTags {
     pub acoustid_fingerprint: Option<String>,
     pub artist_ids: Vec<String>,
     pub duration_ms: Option<u64>,
+    pub container: Option<String>,
+    pub codec: Option<String>,
+    pub bitrate_kbps: Option<u32>,
+    pub sample_rate_hz: Option<u32>,
+    pub bit_depth: Option<u8>,
+    pub channels: Option<u8>,
 }
 
 pub fn read_tags(path: &Path) -> Result<TrackTags, TagError> {
     let tagged = Probe::open(path)
         .map_err(|_| TagError::Unreadable)?
         .options(ParseOptions::new().read_properties(true))
+        .guess_file_type()
+        .map_err(|_| TagError::Unreadable)?
         .read()
         .map_err(|_| TagError::Unreadable)?;
 
     let duration_ms = tagged.properties().duration().as_millis() as u64;
+    let representation = representation(tagged.file_type(), tagged.properties());
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
 
     let Some(tag) = tag else {
@@ -110,7 +120,78 @@ pub fn read_tags(path: &Path) -> Result<TrackTags, TagError> {
         acoustid_fingerprint: raw_text(tag, &["ACOUSTID_FINGERPRINT", "ACOUSTID FINGERPRINT"]),
         artist_ids,
         duration_ms: Some(duration_ms),
+        container: representation.container,
+        codec: representation.codec,
+        bitrate_kbps: representation.bitrate_kbps,
+        sample_rate_hz: representation.sample_rate_hz,
+        bit_depth: representation.bit_depth,
+        channels: representation.channels,
     })
+}
+
+struct Representation {
+    container: Option<String>,
+    codec: Option<String>,
+    bitrate_kbps: Option<u32>,
+    sample_rate_hz: Option<u32>,
+    bit_depth: Option<u8>,
+    channels: Option<u8>,
+}
+
+pub(crate) fn content_type_for_container(container: &str) -> Option<&'static str> {
+    match container {
+        "flac" => Some("audio/flac"),
+        "mpeg" => Some("audio/mpeg"),
+        "mp4" => Some("audio/mp4"),
+        "aac" => Some("audio/aac"),
+        "ogg" => Some("audio/ogg"),
+        "wav" => Some("audio/wav"),
+        "aiff" => Some("audio/aiff"),
+        _ => None,
+    }
+}
+
+fn representation(file_type: FileType, properties: &FileProperties) -> Representation {
+    let (container, codec) = match file_type {
+        FileType::Flac => (Some("flac".to_owned()), Some("flac".to_owned())),
+        FileType::Mpeg => (Some("mpeg".to_owned()), None),
+        FileType::Mp4 => (Some("mp4".to_owned()), None),
+        FileType::Aac => (Some("aac".to_owned()), Some("aac".to_owned())),
+        FileType::Opus => (Some("ogg".to_owned()), Some("opus".to_owned())),
+        FileType::Vorbis => (Some("ogg".to_owned()), Some("vorbis".to_owned())),
+        FileType::Speex => (Some("ogg".to_owned()), Some("speex".to_owned())),
+        FileType::Wav => (Some("wav".to_owned()), None),
+        FileType::Aiff => (Some("aiff".to_owned()), None),
+        FileType::Ape => (Some("ape".to_owned()), None),
+        FileType::Mpc => (Some("mpc".to_owned()), None),
+        FileType::WavPack => (Some("wavpack".to_owned()), None),
+        FileType::Custom(name) => (custom_container(name), None),
+        _ => (None, None),
+    };
+
+    Representation {
+        container,
+        codec,
+        bitrate_kbps: positive(properties.audio_bitrate())
+            .or_else(|| positive(properties.overall_bitrate())),
+        sample_rate_hz: positive(properties.sample_rate()),
+        bit_depth: positive(properties.bit_depth()),
+        channels: positive(properties.channels()),
+    }
+}
+
+fn custom_container(name: &str) -> Option<String> {
+    let plausible = !name.is_empty()
+        && name.len() <= 40
+        && name
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit());
+
+    plausible.then(|| name.to_owned())
+}
+
+fn positive<T: Default + PartialOrd>(value: Option<T>) -> Option<T> {
+    value.filter(|value| *value > T::default())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +360,122 @@ fn parse_compilation(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn file_properties(
+        overall_bitrate: Option<u32>,
+        audio_bitrate: Option<u32>,
+        sample_rate: Option<u32>,
+    ) -> FileProperties {
+        FileProperties::new(
+            std::time::Duration::from_secs(1),
+            overall_bitrate,
+            audio_bitrate,
+            sample_rate,
+            Some(16),
+            Some(2),
+            None,
+        )
+    }
+
+    #[test]
+    fn the_container_table_states_only_what_the_file_implies() {
+        let properties = file_properties(Some(900), Some(900), Some(44_100));
+
+        for (file_type, container, codec, content_type) in [
+            (
+                FileType::Flac,
+                Some("flac"),
+                Some("flac"),
+                Some("audio/flac"),
+            ),
+            (FileType::Mpeg, Some("mpeg"), None, Some("audio/mpeg")),
+            (FileType::Mp4, Some("mp4"), None, Some("audio/mp4")),
+            (FileType::Aac, Some("aac"), Some("aac"), Some("audio/aac")),
+            (FileType::Opus, Some("ogg"), Some("opus"), Some("audio/ogg")),
+            (
+                FileType::Vorbis,
+                Some("ogg"),
+                Some("vorbis"),
+                Some("audio/ogg"),
+            ),
+            (
+                FileType::Speex,
+                Some("ogg"),
+                Some("speex"),
+                Some("audio/ogg"),
+            ),
+            (FileType::Wav, Some("wav"), None, Some("audio/wav")),
+            (FileType::Aiff, Some("aiff"), None, Some("audio/aiff")),
+            (FileType::Ape, Some("ape"), None, None),
+            (FileType::Mpc, Some("mpc"), None, None),
+            (FileType::WavPack, Some("wavpack"), None, None),
+            (FileType::Custom("myformat"), Some("myformat"), None, None),
+            (FileType::Custom("not a format"), None, None, None),
+        ] {
+            let reported = representation(file_type, &properties);
+
+            assert_eq!(reported.container.as_deref(), container, "{file_type:?}");
+            assert_eq!(reported.codec.as_deref(), codec, "{file_type:?}");
+            assert_eq!(
+                reported
+                    .container
+                    .as_deref()
+                    .and_then(content_type_for_container),
+                content_type,
+                "{file_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_positive_reported_value_is_absence() {
+        let reported = representation(
+            FileType::Wav,
+            &FileProperties::new(
+                std::time::Duration::from_secs(1),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+            ),
+        );
+
+        assert_eq!(reported.bitrate_kbps, None);
+        assert_eq!(reported.sample_rate_hz, None);
+        assert_eq!(reported.bit_depth, None);
+        assert_eq!(reported.channels, None);
+        assert_eq!(reported.container.as_deref(), Some("wav"));
+    }
+
+    #[test]
+    fn an_unreadable_audio_bitrate_falls_back_to_the_overall_bitrate() {
+        let reported = representation(
+            FileType::Mpeg,
+            &file_properties(Some(320), Some(0), Some(44_100)),
+        );
+
+        assert_eq!(reported.bitrate_kbps, Some(320));
+        assert_eq!(reported.sample_rate_hz, Some(44_100));
+        assert_eq!(reported.bit_depth, Some(16));
+        assert_eq!(reported.channels, Some(2));
+    }
+
+    #[test]
+    fn the_wave_fixture_reports_its_container_and_its_real_properties() {
+        let fixture =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.wav");
+        let tags = read_tags(&fixture).unwrap();
+
+        assert_eq!(tags.title, "Fixture Wave");
+        assert_eq!(tags.container.as_deref(), Some("wav"));
+        assert_eq!(tags.codec, None);
+        assert_eq!(tags.bitrate_kbps, Some(706));
+        assert_eq!(tags.sample_rate_hz, Some(44_100));
+        assert_eq!(tags.bit_depth, Some(16));
+        assert_eq!(tags.channels, Some(1));
+    }
 
     #[test]
     fn compilation_flags_parse_the_common_spellings() {

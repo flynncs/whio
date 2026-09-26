@@ -9,7 +9,7 @@ use crate::features::music_library::{
         LibraryState, ProviderId, SourceIdentity, SourceScope, Track, TrackHit, TrackId,
         TrackMetadata,
     },
-    storage::contracts::TrackRepositoryError,
+    storage::contracts::{SourceFileFacts, TrackRepositoryError},
 };
 
 use super::schema::{
@@ -156,6 +156,96 @@ pub(crate) fn decode_smallint(value: Option<i16>) -> Result<Option<u16>, TrackRe
         .map(u16::try_from)
         .transpose()
         .map_err(|_| TrackRepositoryError::InvalidData)
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct SourceFileFactsRow {
+    pub(crate) path: Option<String>,
+    pub(crate) size_bytes: Option<i64>,
+    pub(crate) modified_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) missing_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) content_type: Option<String>,
+    pub(crate) suffix: Option<String>,
+    pub(crate) container: Option<String>,
+    pub(crate) codec: Option<String>,
+    pub(crate) bitrate_kbps: Option<i32>,
+    pub(crate) sample_rate_hz: Option<i32>,
+    pub(crate) bit_depth: Option<i16>,
+    pub(crate) channels: Option<i16>,
+    pub(crate) facts_version: i16,
+    pub(crate) acoustid_fingerprint: Option<String>,
+}
+
+pub(crate) fn decode_file_facts(
+    row: SourceFileFactsRow,
+) -> Result<SourceFileFacts, TrackRepositoryError> {
+    Ok(SourceFileFacts {
+        path: row.path,
+        size_bytes: row.size_bytes.unwrap_or_default().max(0) as u64,
+        modified_at: row.modified_at,
+        missing_at: row.missing_at,
+        content_type: row.content_type,
+        suffix: row.suffix,
+        container: row.container,
+        codec: row.codec,
+        bitrate_kbps: decode_integer(row.bitrate_kbps)?,
+        sample_rate_hz: decode_integer(row.sample_rate_hz)?,
+        bit_depth: decode_byte(row.bit_depth)?,
+        channels: decode_byte(row.channels)?,
+        facts_version: decode_facts_version(row.facts_version)?,
+        acoustid_fingerprint: row.acoustid_fingerprint,
+    })
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct ScannedPathRow {
+    pub(crate) provider_id: String,
+    pub(crate) source_scope: String,
+    pub(crate) external_id: String,
+    #[sqlx(flatten)]
+    pub(crate) facts: SourceFileFactsRow,
+}
+
+pub(crate) fn decode_scanned_path(
+    row: ScannedPathRow,
+) -> Result<(SourceIdentity, SourceFileFacts), TrackRepositoryError> {
+    Ok((
+        decode_source(row.provider_id, row.source_scope, row.external_id)?,
+        decode_file_facts(row.facts)?,
+    ))
+}
+
+pub(crate) fn encode_integer(value: Option<u32>) -> Result<Option<i32>, TrackRepositoryError> {
+    value
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| TrackRepositoryError::InvalidData)
+}
+
+pub(crate) fn decode_integer(value: Option<i32>) -> Result<Option<u32>, TrackRepositoryError> {
+    value
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| TrackRepositoryError::InvalidData)
+}
+
+pub(crate) fn encode_byte(value: Option<u8>) -> Option<i16> {
+    value.map(i16::from)
+}
+
+pub(crate) fn decode_byte(value: Option<i16>) -> Result<Option<u8>, TrackRepositoryError> {
+    value
+        .map(u8::try_from)
+        .transpose()
+        .map_err(|_| TrackRepositoryError::InvalidData)
+}
+
+pub(crate) fn encode_facts_version(value: u16) -> Result<i16, TrackRepositoryError> {
+    i16::try_from(value).map_err(|_| TrackRepositoryError::InvalidData)
+}
+
+pub(crate) fn decode_facts_version(value: i16) -> Result<u16, TrackRepositoryError> {
+    u16::try_from(value).map_err(|_| TrackRepositoryError::InvalidData)
 }
 
 pub(crate) fn decode_source(
