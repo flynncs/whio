@@ -75,14 +75,6 @@ impl SearchTerms {
         }
     }
 
-    pub fn normalized(&self) -> &str {
-        &self.normalized
-    }
-
-    pub fn tokens(&self) -> &[String] {
-        &self.tokens
-    }
-
     pub fn is_empty(&self) -> bool {
         self.tokens.is_empty()
     }
