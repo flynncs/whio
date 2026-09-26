@@ -1175,7 +1175,15 @@ async fn subsonic_indexes_is_the_artist_index(pool: sqlx::PgPool) {
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
 
     for name in ["Daft Punk", "The Beatles", "99 Posse", "Las Vegas"] {
-        repository
+        let album = repository
+            .resolve_or_create_album(
+                &AlbumMetadata::new(format!("{name} album"))
+                    .unwrap()
+                    .with_album_artist(ArtistCredit::new(name.to_owned(), None).unwrap()),
+            )
+            .await
+            .unwrap();
+        let track = repository
             .get_or_create(
                 local_source(&format!("{name}.flac")),
                 TrackMetadata::from_names(
@@ -1185,6 +1193,10 @@ async fn subsonic_indexes_is_the_artist_index(pool: sqlx::PgPool) {
                 )
                 .unwrap(),
             )
+            .await
+            .unwrap();
+        repository
+            .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
             .await
             .unwrap();
     }
