@@ -120,10 +120,6 @@ pub(crate) fn artist_count_expressions(membership: &str) -> (String, String) {
     (album_count, song_count)
 }
 
-pub(crate) fn artist_all_roles_count_expressions() -> (String, String) {
-    artist_count_expressions(&artist_membership(Some(""), true))
-}
-
 pub(crate) fn artist_album_artist_membership() -> String {
     artist_membership(None, true)
 }

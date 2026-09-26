@@ -55,9 +55,7 @@ pub(crate) async fn search(
     let request = SearchRequest::new(
         SearchQuery::new(query.to_owned()).map_err(|_| SearchError::InvalidSearch)?,
         *windows,
-        ArtistListFilter::new().with_role(Some(
-            RoleSet::new([RoleSelector::AlbumArtist]).map_err(|_| SearchError::InvalidSearch)?,
-        )),
+        album_artist_filter().map_err(|_| SearchError::InvalidSearch)?,
     );
 
     search_service
@@ -484,7 +482,7 @@ pub(crate) async fn album_detail(
     Ok(mapping::album_detail_with_songs(&detail, tags))
 }
 
-fn album_artist_filter() -> Result<ArtistListFilter, ValidationError> {
+pub(crate) fn album_artist_filter() -> Result<ArtistListFilter, ValidationError> {
     let role = RoleSet::new([RoleSelector::AlbumArtist])?;
 
     Ok(ArtistListFilter::new().with_role(Some(role)))
@@ -664,14 +662,9 @@ pub(crate) async fn indexes(
     scanner: &ScanService,
     user: Option<&Uuid>,
 ) -> Result<models::Indexes, BrowseError> {
+    let filter = album_artist_filter().map_err(|_| BrowseError::InvalidRequest)?;
     let artists = library
-        .artist_list(
-            0,
-            u32::MAX,
-            ArtistSort::Name,
-            &ArtistListFilter::default(),
-            user,
-        )
+        .artist_list(0, u32::MAX, ArtistSort::Name, &filter, user)
         .await
         .map_err(BrowseError::Catalogue)?;
     let last_modified = scanner.status().last_scan.unwrap_or_else(chrono::Utc::now);
