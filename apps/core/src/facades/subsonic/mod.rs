@@ -151,17 +151,32 @@ pub(crate) async fn search3(
         return SubsonicError::MissingParameter.into_response();
     };
     let user_uuid = principal.user_id.as_uuid();
-    match service::search(
-        state.search(),
-        &context,
-        Some(&user_uuid),
-        q,
-        query.get("songCount"),
-        query.get("songOffset"),
-        state.source_tags(),
-    )
-    .await
-    {
+    let result = if q.is_empty() {
+        match enumeration_request(&query) {
+            Ok(request) => {
+                service::enumerate(
+                    state.library(),
+                    Some(&user_uuid),
+                    &request,
+                    state.source_tags(),
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        service::search(
+            state.search(),
+            &context,
+            Some(&user_uuid),
+            q,
+            query.get("songCount"),
+            query.get("songOffset"),
+            state.source_tags(),
+        )
+        .await
+    };
+    match result {
         Ok(result) => Json(search3_envelope(result)).into_response(),
         Err(service::SearchError::InvalidSearch) => {
             let mut response = Json(failed_envelope(
@@ -188,6 +203,39 @@ pub(crate) async fn search3(
             response
         }
     }
+}
+
+fn enumeration_request(
+    query: &RawQuery,
+) -> Result<service::EnumerationRequest, service::SearchError> {
+    Ok(service::EnumerationRequest {
+        songs: enumeration_window(query.get("songCount"), query.get("songOffset"))?,
+        albums: enumeration_window(query.get("albumCount"), query.get("albumOffset"))?,
+        artists: enumeration_window(query.get("artistCount"), query.get("artistOffset"))?,
+    })
+}
+
+fn enumeration_window(
+    raw_count: Option<&str>,
+    raw_offset: Option<&str>,
+) -> Result<service::EnumerationWindow, service::SearchError> {
+    const DEFAULT_COUNT: u32 = 20;
+    let count = match raw_count {
+        None => DEFAULT_COUNT,
+        Some(raw) => raw
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| service::SearchError::InvalidSearch)?,
+    };
+    let offset = match raw_offset {
+        None => 0,
+        Some(raw) => raw
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| service::SearchError::InvalidSearch)?,
+    };
+
+    service::EnumerationWindow::new(count, offset)
 }
 
 pub(crate) async fn get_album_list2(

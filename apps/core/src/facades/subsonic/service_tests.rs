@@ -477,3 +477,68 @@ async fn artists_group_into_indexes(pool: sqlx::PgPool) {
     assert_eq!(names, ["#", "D"]);
     assert_eq!(indexes[1].artist.as_ref().unwrap()[0].name, "Daft Punk");
 }
+
+#[test]
+fn enumeration_windows_reject_counts_above_the_page_limit() {
+    assert!(matches!(
+        EnumerationWindow::new(MAX_PAGE_LIMIT, 0),
+        Ok(window) if window.count == MAX_PAGE_LIMIT
+    ));
+    assert!(matches!(
+        EnumerationWindow::new(0, 5),
+        Ok(window) if window.count == 0 && window.offset == 5
+    ));
+    assert!(matches!(
+        EnumerationWindow::new(MAX_PAGE_LIMIT + 1, 0),
+        Err(SearchError::InvalidSearch)
+    ));
+}
+
+#[sqlx::test]
+async fn enumerate_pages_each_kind_independently(pool: sqlx::PgPool) {
+    let library = album_catalogue(
+        pool.clone(),
+        &["Discovery", "Homework", "Random Access Memories"],
+    )
+    .await;
+    let request = EnumerationRequest {
+        songs: EnumerationWindow::new(1, 1).expect("valid window"),
+        albums: EnumerationWindow::new(1, 2).expect("valid window"),
+        artists: EnumerationWindow::new(1, 0).expect("valid window"),
+    };
+
+    let result = enumerate(&library, None, &request, SourceTags::Off)
+        .await
+        .expect("the enumeration succeeds");
+
+    assert_eq!(
+        result
+            .songs
+            .iter()
+            .map(|song| song.title.clone())
+            .collect::<Vec<_>>(),
+        ["Homework track"]
+    );
+    assert_eq!(result.albums.len(), 1);
+    assert_eq!(result.albums[0].name, "Random Access Memories");
+    assert_eq!(result.artists.len(), 1);
+    assert_eq!(result.artists[0].name, "Daft Punk");
+}
+
+#[sqlx::test]
+async fn enumerate_skips_kinds_with_a_zero_count(pool: sqlx::PgPool) {
+    let library = album_catalogue(pool.clone(), &["Discovery", "Homework"]).await;
+    let request = EnumerationRequest {
+        songs: EnumerationWindow::new(0, 0).expect("valid window"),
+        albums: EnumerationWindow::new(2, 0).expect("valid window"),
+        artists: EnumerationWindow::new(0, 0).expect("valid window"),
+    };
+
+    let result = enumerate(&library, None, &request, SourceTags::Off)
+        .await
+        .expect("the enumeration succeeds");
+
+    assert!(result.songs.is_empty());
+    assert!(result.artists.is_empty());
+    assert_eq!(result.albums.len(), 2);
+}

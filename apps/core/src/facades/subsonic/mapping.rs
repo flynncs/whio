@@ -6,7 +6,7 @@ use crate::{
     features::music_library::catalogue::{AlbumDetail, ArtistDetail, SearchHit},
     features::music_library::domain::{
         Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary, GenreSummary,
-        LibraryState, Playlist, SourceIdentity, Track,
+        LibraryState, Playlist, SourceIdentity, Track, TrackView,
     },
     features::music_library::playlists::PlaylistDetail,
 };
@@ -20,6 +20,18 @@ pub(crate) fn child_from_hit(hit: &SearchHit, tags: SourceTags) -> models::Child
         tags,
         None,
         hit.state(),
+    )
+}
+
+pub(crate) fn child_from_view(view: &TrackView, tags: SourceTags) -> models::Child {
+    child_from_track(
+        view.track(),
+        view.album().map(Album::id),
+        view.album().map(Album::title),
+        view.sources(),
+        tags,
+        view.membership(),
+        *view.state(),
     )
 }
 

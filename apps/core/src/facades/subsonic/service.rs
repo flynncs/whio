@@ -6,8 +6,9 @@ use uuid::Uuid;
 use crate::{
     facades::SourceTags,
     features::music_library::catalogue::{
-        CatalogueError, CatalogueSearch, CompletionService, LibraryService, SearchLimit,
-        SearchOffset, SearchQuery, SearchService,
+        CatalogueError, CatalogueSearch, CompletionService, LibraryService, MAX_PAGE_LIMIT,
+        PageLimit, SearchLimit, SearchOffset, SearchQuery, SearchService, TrackListFilter,
+        TrackOrder,
     },
     features::music_library::domain::{
         AlbumId, AlbumListFilter, AlbumOrder, ArtistId, StateTarget, TrackId,
@@ -99,6 +100,91 @@ pub(crate) async fn search(
                 .collect(),
         })
         .map_err(SearchError::Catalogue)
+}
+
+pub(crate) struct EnumerationWindow {
+    pub(crate) count: u32,
+    pub(crate) offset: u32,
+}
+
+impl EnumerationWindow {
+    pub(crate) fn new(count: u32, offset: u32) -> Result<Self, SearchError> {
+        if count > MAX_PAGE_LIMIT {
+            return Err(SearchError::InvalidSearch);
+        }
+
+        Ok(Self { count, offset })
+    }
+}
+
+pub(crate) struct EnumerationRequest {
+    pub(crate) songs: EnumerationWindow,
+    pub(crate) albums: EnumerationWindow,
+    pub(crate) artists: EnumerationWindow,
+}
+
+pub(crate) async fn enumerate(
+    library: &LibraryService,
+    user: Option<&Uuid>,
+    request: &EnumerationRequest,
+    tags: SourceTags,
+) -> Result<SearchResult, SearchError> {
+    let songs = if request.songs.count == 0 {
+        Vec::new()
+    } else {
+        let limit = PageLimit::new(request.songs.count).map_err(|_| SearchError::InvalidSearch)?;
+
+        library
+            .track_page(
+                request.songs.offset,
+                limit,
+                TrackOrder::Title,
+                &TrackListFilter::new(),
+                user,
+            )
+            .await
+            .map_err(SearchError::Catalogue)?
+            .items()
+            .iter()
+            .map(|view| mapping::child_from_view(view, tags))
+            .collect()
+    };
+
+    let albums = if request.albums.count == 0 {
+        Vec::new()
+    } else {
+        library
+            .album_list(
+                request.albums.offset,
+                request.albums.count,
+                AlbumOrder::Title,
+                AlbumListFilter::new(),
+                user,
+            )
+            .await
+            .map_err(SearchError::Catalogue)?
+            .iter()
+            .map(mapping::album_from_summary)
+            .collect()
+    };
+
+    let artists = if request.artists.count == 0 {
+        Vec::new()
+    } else {
+        library
+            .artist_list(request.artists.offset, request.artists.count, user)
+            .await
+            .map_err(SearchError::Catalogue)?
+            .iter()
+            .map(mapping::artist_from_summary)
+            .collect()
+    };
+
+    Ok(SearchResult {
+        songs,
+        albums,
+        artists,
+    })
 }
 
 const DEFAULT_BROWSE_SIZE: u32 = 100;
