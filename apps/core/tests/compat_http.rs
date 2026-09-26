@@ -430,6 +430,24 @@ async fn get_authed(
     (status, headers, serde_json::from_slice(&body).unwrap())
 }
 
+async fn store_local_track(pool: &PgPool, external_id: &str, title: &str, artist: &str) {
+    let source = SourceIdentity::new(
+        ProviderId::new("local".to_owned()).expect("valid provider"),
+        SourceScope::Named("/music".to_owned()),
+        external_id.to_owned(),
+    )
+    .expect("valid source");
+
+    PostgresTrackRepository::new(pool.clone())
+        .get_or_create(
+            source,
+            TrackMetadata::from_names(title.to_owned(), vec![artist.to_owned()], Some(200_000))
+                .expect("valid metadata"),
+        )
+        .await
+        .expect("a stored track");
+}
+
 #[sqlx::test]
 async fn song_list_rejects_missing_and_forged_tokens(pool: PgPool) {
     let (service, _) = credential_service_with_known_app_password();
@@ -459,23 +477,10 @@ async fn song_list_rejects_missing_and_forged_tokens(pool: PgPool) {
 #[sqlx::test]
 async fn song_list_returns_mapped_tracks_for_a_login_token(pool: PgPool) {
     use support::services;
-    use whio_core::{
-        features::music_library::catalogue::CatalogueCandidate,
-        features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
-    };
 
     let (service, secret) = credential_service_with_known_app_password();
-    let candidate = CatalogueCandidate::new(
-        SourceIdentity::new(
-            ProviderId::new("youtube".to_owned()).expect("valid provider"),
-            SourceScope::Global,
-            "vid-1".to_owned(),
-        )
-        .expect("valid source"),
-        TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
-            .expect("valid metadata"),
-    );
-    let (search, library, playback) = services(pool.clone(), vec![Ok(vec![candidate])]);
+    store_local_track(&pool, "path-a", "song", "artist").await;
+    let (search, library, playback) = services(pool.clone(), Vec::new());
     let app = router(service.clone(), search, library, playback);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
@@ -494,9 +499,11 @@ async fn song_list_returns_mapped_tracks_for_a_login_token(pool: PgPool) {
     assert!(body[0]["id"].as_str().is_some_and(|v| !v.is_empty()));
     assert_eq!(headers["x-total-count"], "1");
 
-    let (status, _, body) = get_authed(app, "/compat/navidrome/api/song", token).await;
+    let (status, headers, body) = get_authed(app, "/compat/navidrome/api/song", token).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!([]));
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["title"], json!("song"));
+    assert_eq!(headers["x-total-count"], "1");
 }
 
 #[sqlx::test]
@@ -505,10 +512,12 @@ async fn source_tags_label_the_artist_in_both_song_surfaces(pool: PgPool) {
     use whio_core::{
         facades::SourceTags,
         features::music_library::catalogue::CatalogueCandidate,
-        features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+        features::music_library::domain::{
+            ProviderId, SourceIdentity, SourceScope, TrackId, TrackMetadata,
+        },
     };
 
-    let (service, secret) = credential_service_with_known_app_password();
+    let (service, secret) = support::credentials::database_credential_service(pool.clone()).await;
     let candidate = CatalogueCandidate::new(
         SourceIdentity::new(
             ProviderId::new("youtube_music".to_owned()).expect("valid provider"),
@@ -519,25 +528,14 @@ async fn source_tags_label_the_artist_in_both_song_surfaces(pool: PgPool) {
         TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
-    let (search, library, playback) = services(
-        pool.clone(),
-        vec![Ok(vec![candidate.clone()]), Ok(vec![candidate])],
-    );
+    let (search, library, playback) = services(pool.clone(), vec![Ok(vec![candidate])]);
     let app = router_with_source_tags(service, search, library, playback, SourceTags::ArtistPrefix);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
-
-    let (status, _, body) = get_authed(
-        app.clone(),
-        "/compat/navidrome/api/song?title=song&_start=0&_end=9",
-        token,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body[0]["artist"], json!("[YTM] artist"));
+    let user: uuid::Uuid = login["id"].as_str().unwrap().parse().unwrap();
 
     let search = get(
-        app,
+        app.clone(),
         &format!(
             "/compat/subsonic/rest/search3.view?u=flynn&v=1.16.1&c=test-client&p={secret}&query=song"
         ),
@@ -547,6 +545,24 @@ async fn source_tags_label_the_artist_in_both_song_surfaces(pool: PgPool) {
         search["subsonic-response"]["searchResult3"]["song"][0]["artist"],
         json!("[YTM] artist")
     );
+    let track_id: TrackId = search["subsonic-response"]["searchResult3"]["song"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    PostgresTrackRepository::new(pool.clone())
+        .set_rating(user, StateTarget::Track(&track_id), Some(3))
+        .await
+        .unwrap();
+
+    let (status, _, body) = get_authed(
+        app,
+        "/compat/navidrome/api/song?title=song&_start=0&_end=9",
+        token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["artist"], json!("[YTM] artist"));
 }
 
 #[sqlx::test]
@@ -985,23 +1001,10 @@ async fn navidrome_playlist_surface_lists_its_songs(pool: PgPool) {
 #[sqlx::test]
 async fn song_detail_returns_the_searched_song(pool: PgPool) {
     use support::services;
-    use whio_core::{
-        features::music_library::catalogue::CatalogueCandidate,
-        features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
-    };
 
     let (service, secret) = credential_service_with_known_app_password();
-    let candidate = CatalogueCandidate::new(
-        SourceIdentity::new(
-            ProviderId::new("youtube".to_owned()).expect("valid provider"),
-            SourceScope::Global,
-            "vid-1".to_owned(),
-        )
-        .expect("valid source"),
-        TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
-            .expect("valid metadata"),
-    );
-    let (search, library, playback) = services(pool.clone(), vec![Ok(vec![candidate])]);
+    store_local_track(&pool, "path-a", "song", "artist").await;
+    let (search, library, playback) = services(pool.clone(), Vec::new());
     let app = router(service.clone(), search, library, playback);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();

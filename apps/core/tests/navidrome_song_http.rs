@@ -205,6 +205,7 @@ async fn title_filter_matches_normalised_text(pool: PgPool) {
         "Instant Crush",
         "One More Time",
         "100% Pure",
+        "100 Songs",
         "under_score",
         "underXscore",
     ]
@@ -230,8 +231,8 @@ async fn title_filter_matches_normalised_text(pool: PgPool) {
 
     let (status, headers, body) = get(fixture.app.clone(), &fixture.token, "?title=%20%20").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(titles(&body).len(), 5);
-    assert_eq!(total(&headers), "5");
+    assert_eq!(titles(&body).len(), 6);
+    assert_eq!(total(&headers), "6");
 
     let (status, headers, body) = get(fixture.app.clone(), &fixture.token, "?title=100%25").await;
     assert_eq!(status, StatusCode::OK);
