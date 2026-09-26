@@ -563,7 +563,7 @@ impl LibraryRead for PgStore {
             credit_matches = credit.any(),
             title_rank = title.rank(),
         ))
-        .bind(query)
+        .bind(query.trim())
         .bind(LOCAL_PROVIDER_ID)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
@@ -614,7 +614,7 @@ impl LibraryRead for PgStore {
             artist_matches = artist.any(),
             title_rank = title.rank(),
         ))
-        .bind(query)
+        .bind(query.trim())
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -688,7 +688,7 @@ impl LibraryRead for PgStore {
             sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(
                 &statement,
             )
-            .bind(query)
+            .bind(query.trim())
             .bind(i64::from(limit));
 
         for value in predicates.values() {

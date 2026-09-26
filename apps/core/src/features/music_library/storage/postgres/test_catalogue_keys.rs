@@ -436,3 +436,85 @@ async fn a_partial_nbsp_query_finds_a_role_filtered_artist(pool: PgPool) {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].artist().name(), name);
 }
+
+#[sqlx::test]
+
+async fn a_padded_track_query_matches_the_stored_title(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let stored = repository
+        .get_or_create(source("padded-track"), metadata("Song One"))
+        .await
+        .unwrap();
+
+    let trimmed = repository
+        .search_tracks("Song One", 25, None)
+        .await
+        .unwrap();
+    let padded = repository
+        .search_tracks("  Song One  ", 25, None)
+        .await
+        .unwrap();
+
+    assert_eq!(track_count(&pool).await, 1);
+    assert_eq!(trimmed.len(), 1);
+    assert_eq!(trimmed[0].track().id(), stored.id());
+    assert_eq!(padded.len(), 1);
+    assert_eq!(padded[0].track().id(), stored.id());
+}
+
+#[sqlx::test]
+
+async fn a_padded_album_query_matches_the_stored_album(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let stored = repository
+        .resolve_or_create_album(&album("Song One").with_album_artist(credit("Cage the Elephant")))
+        .await
+        .unwrap();
+
+    let padded = repository
+        .search_albums("  Song One  ", 25, None)
+        .await
+        .unwrap();
+
+    assert_eq!(album_count(&pool).await, 1);
+    assert_eq!(padded.len(), 1);
+    assert_eq!(padded[0].album().id(), stored.id());
+}
+
+#[sqlx::test]
+
+async fn a_padded_artist_query_matches_the_stored_artist(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let stored = repository
+        .resolve_or_create_artist(&credit("Song One Artist"))
+        .await
+        .unwrap();
+
+    let padded = repository
+        .search_artists("  Song One  ", 25, None, &ArtistListFilter::new())
+        .await
+        .unwrap();
+
+    assert_eq!(artist_count(&pool).await, 1);
+    assert_eq!(padded.len(), 1);
+    assert_eq!(padded[0].artist().id(), stored.id());
+}
+
+#[sqlx::test]
+
+async fn a_padded_stored_title_is_still_reachable(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let stored = repository
+        .get_or_create(source("padded-stored"), metadata("  Song One  "))
+        .await
+        .unwrap();
+
+    let hits = repository
+        .search_tracks("Song One", 25, None)
+        .await
+        .unwrap();
+
+    assert_eq!(track_count(&pool).await, 1);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].track().id(), stored.id());
+}
