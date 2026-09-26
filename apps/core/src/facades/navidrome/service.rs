@@ -141,8 +141,8 @@ fn album_from_summary(summary: &AlbumSummary) -> Album {
     Album {
         id: album.id().to_string(),
         name: album.title().to_owned(),
-        album_artist: artist.map_or_else(String::new, |artist| artist.name().to_owned()),
-        album_artist_id: artist.map_or_else(String::new, |artist| artist.id().to_string()),
+        album_artist: artist.map(|artist| artist.name().to_owned()),
+        album_artist_id: artist.map(|artist| artist.id().to_string()),
         song_count: summary.track_count(),
         duration: summary.duration_ms() as f32 / 1000.0,
         cover_art: Some(CoverArtTarget::album(album.id()).encode()),

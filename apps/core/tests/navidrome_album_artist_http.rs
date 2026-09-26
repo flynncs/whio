@@ -1032,22 +1032,14 @@ async fn navidrome_album_without_an_album_artist(pool: PgPool) {
     assert_eq!(body.as_array().unwrap().len(), 1);
     let album = &body[0];
     assert_eq!(album["name"], json!("Bootleg"));
-    assert_eq!(
-        album["albumArtist"],
-        json!(""),
-        "an album with no album artist emits the empty string"
-    );
-    assert_eq!(
-        album["albumArtistId"],
-        json!(""),
-        "and the empty string, never another album's artist id"
-    );
+    absent(album, "albumArtist");
+    absent(album, "albumArtistId");
 
     let (status, _, body) = get(&fixture, &format!("/album/{bootleg}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["name"], json!("Bootleg"));
-    assert_eq!(body["albumArtist"], json!(""));
-    assert_eq!(body["albumArtistId"], json!(""));
+    absent(&body, "albumArtist");
+    absent(&body, "albumArtistId");
 
     let (status, _, body) = get(&fixture, "/album?name=kept").await;
     assert_eq!(status, StatusCode::OK);
