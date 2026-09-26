@@ -1490,6 +1490,14 @@ fn track_order_clause(
     }
 }
 
+fn album_play_count(user_bind: u8) -> String {
+    format!(
+        "COALESCE((SELECT SUM(plays.play_count) FROM track_play_stats AS plays \
+          JOIN album_tracks AS plays_member ON plays_member.track_id = plays.track_id \
+          WHERE plays_member.album_id = a.id AND plays.user_id = ${user_bind}), 0)"
+    )
+}
+
 fn album_role_clause(
     role: RoleSelector,
     artists: Option<&str>,
@@ -1644,6 +1652,12 @@ async fn album_selector_clauses(
         ));
     }
 
+    if let Some(play_count) = filter.play_count() {
+        let clause = predicates.u32_range(&album_play_count(1), play_count);
+
+        predicates.push(clause);
+    }
+
     if let Some(recently_played) = filter.recently_played() {
         let clause = "EXISTS (SELECT 1 FROM track_play_stats AS sel_played \
                       JOIN album_tracks AS sel_played_member \
@@ -1738,11 +1752,7 @@ fn album_order_clause(
               WHERE rating.album_id = a.id AND rating.user_id = $1) \
              {dir} NULLS LAST, a.id"
         ),
-        AlbumOrder::PlayCount => format!(
-            "COALESCE((SELECT SUM(plays.play_count) FROM track_play_stats AS plays \
-              JOIN album_tracks AS plays_member ON plays_member.track_id = plays.track_id \
-              WHERE plays_member.album_id = a.id AND plays.user_id = $1), 0) {dir}, a.id"
-        ),
+        AlbumOrder::PlayCount => format!("{} {dir}, a.id", album_play_count(1)),
         AlbumOrder::PlayDate => format!(
             "(SELECT MAX(plays.last_played_at) FROM track_play_stats AS plays \
               JOIN album_tracks AS plays_member ON plays_member.track_id = plays.track_id \

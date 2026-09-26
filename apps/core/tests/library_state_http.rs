@@ -303,6 +303,104 @@ async fn subsonic_star_rating_play_and_genre_routes(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn subsonic_state_list_types_filter_their_membership(pool: PgPool) {
+    let Seeded {
+        app,
+        song,
+        album,
+        artist,
+        secret,
+    } = seeded_app(pool.clone()).await;
+    let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let plain = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Homework".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let plain_track = repository
+        .get_or_create(
+            local("path-c"),
+            TrackMetadata::from_names(
+                "Third".to_owned(),
+                vec!["Daft Punk".to_owned()],
+                Some(3_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(plain.id(), plain_track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    for (path, query) in [
+        (
+            "star.view",
+            format!("id={song}&albumId={album}&artistId={artist}"),
+        ),
+        ("setRating.view", format!("id={album}&rating=5")),
+        ("scrobble.view", format!("id={song}")),
+        ("scrobble.view", format!("id={song}")),
+    ] {
+        get(app.clone(), &format!("/rest/{path}?{auth}&{query}")).await;
+    }
+
+    let albums_of = |body: &Value| {
+        body["subsonic-response"]["albumList2"]["album"]
+            .as_array()
+            .map(|albums| {
+                albums
+                    .iter()
+                    .map(|album| album["name"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    for list_type in ["starred", "frequent", "recent", "highest"] {
+        let body = get(
+            app.clone(),
+            &format!("/rest/getAlbumList2.view?{auth}&type={list_type}"),
+        )
+        .await;
+
+        assert_eq!(
+            albums_of(&body),
+            ["Discovery"],
+            "type {list_type} returns only the album that has the state"
+        );
+
+        let body = get(
+            app.clone(),
+            &format!("/rest/getAlbumList2.view?{auth}&type={list_type}&size=1&offset=1"),
+        )
+        .await;
+
+        assert!(
+            albums_of(&body).is_empty(),
+            "a client paging {list_type} past the state-bearing album sees nothing"
+        );
+    }
+
+    let body = get(
+        app.clone(),
+        &format!("/rest/getAlbumList2.view?{auth}&type=alphabeticalByName"),
+    )
+    .await;
+
+    assert_eq!(
+        albums_of(&body),
+        ["Discovery", "Homework"],
+        "the state-less album is engaged and browsable, so only the type excludes it"
+    );
+}
+
+#[sqlx::test]
 async fn subsonic_scan_status_reports_and_starts(pool: PgPool) {
     let seeded = seeded_app(pool.clone()).await;
     whio_core::features::identity::provision(pool.clone())

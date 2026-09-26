@@ -363,6 +363,7 @@ async fn count_equals_the_list_for_every_selector(pool: PgPool) {
     let music = register_library(&pool, "main", LOCAL_ROOT).await;
     let elsewhere = register_library(&pool, "elsewhere", OTHER_ROOT).await;
     let since = chrono::Utc::now() - chrono::Duration::days(7);
+    let widened = chrono::Utc::now() - chrono::Duration::days(30);
 
     let fixtures: Vec<(&str, AlbumListFilter, Vec<&AlbumId>)> = vec![
         (
@@ -447,6 +448,21 @@ async fn count_equals_the_list_for_every_selector(pool: PgPool) {
             vec![&fixture.other],
         ),
         (
+            "recently_played false",
+            AlbumListFilter::new().with_recently_played(Some(false)),
+            vec![&fixture.kept, &fixture.third, &fixture.remote],
+        ),
+        (
+            "play_count",
+            AlbumListFilter::new().with_play_count(Some(range(Some(1), None))),
+            vec![&fixture.other],
+        ),
+        (
+            "play_count zero",
+            AlbumListFilter::new().with_play_count(Some(range(Some(0), Some(0)))),
+            vec![&fixture.kept, &fixture.third, &fixture.remote],
+        ),
+        (
             "date_added",
             AlbumListFilter::new().with_date_added(Some(range(Some(since), None))),
             vec![&fixture.other, &fixture.third],
@@ -457,8 +473,13 @@ async fn count_equals_the_list_for_every_selector(pool: PgPool) {
             vec![&fixture.other],
         ),
         (
+            "missing false",
+            AlbumListFilter::new().with_missing(Some(false)),
+            vec![&fixture.kept, &fixture.third, &fixture.remote],
+        ),
+        (
             "library_id",
-            AlbumListFilter::new().with_library_id(Some(IdSet::new([music]).unwrap())),
+            AlbumListFilter::new().with_library_id(Some(IdSet::new([music.clone()]).unwrap())),
             vec![&fixture.kept, &fixture.third],
         ),
         (
@@ -501,13 +522,21 @@ async fn count_equals_the_list_for_every_selector(pool: PgPool) {
 
     let all = AlbumListFilter::new()
         .with_name(selector("kept"))
+        .with_artist_id(Some(artist_id_set(&[&fixture.kept_artist])))
+        .with_album_artist_id(Some(artist_id_set(&[&fixture.kept_artist])))
+        .with_artists_id(Some(artist_id_set(&[&fixture.composer])))
+        .with_role(Some(role_set(&[RoleSelector::Composer])))
         .with_genre(Some(text_set(&["rock"])))
+        .with_year(Some(range(Some(1990), Some(2010))))
         .with_compilation(Some(false))
         .with_starred(Some(true))
         .with_has_rating(Some(true))
-        .with_year(Some(range(Some(1990), Some(2010))))
-        .with_role(Some(role_set(&[RoleSelector::Composer])))
-        .with_artist_id(Some(artist_id_set(&[&fixture.kept_artist])));
+        .with_rating(Some(range(Some(4), Some(5))))
+        .with_play_count(Some(range(Some(0), Some(0))))
+        .with_recently_played(Some(false))
+        .with_date_added(Some(range(Some(widened), None)))
+        .with_missing(Some(false))
+        .with_library_id(Some(IdSet::new([music.clone()]).unwrap()));
 
     assert_eq!(
         listed(&repository, AlbumOrder::Name, &all, Some(&user)).await,
@@ -1310,6 +1339,99 @@ async fn value_order_for_song_count_and_duration(pool: PgPool) {
         "duration descending is not the song_count order"
     );
     assert_ne!(ids(&by_count_desc), ids(&descending));
+}
+
+#[sqlx::test]
+async fn play_count_selector_and_sort_read_the_same_aggregate(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("play-count", "Play Count")
+        .await
+        .unwrap();
+    let mut albums = Vec::new();
+
+    for (index, (title, plays)) in [("Played", 2u32), ("Once", 1), ("Silent", 0)]
+        .into_iter()
+        .enumerate()
+    {
+        let album_row = repository
+            .resolve_or_create_album(&album(title))
+            .await
+            .unwrap();
+        let track = repository
+            .get_or_create(
+                source("local", &format!("plays-{index}.flac")),
+                metadata_by("member", "Narrator"),
+            )
+            .await
+            .unwrap();
+        place(&repository, album_row.id(), track.id()).await;
+
+        for _ in 0..plays {
+            repository
+                .record_play(user, track.id(), chrono::Utc::now())
+                .await
+                .unwrap();
+        }
+
+        albums.push(album_row.id().clone());
+    }
+
+    let ordered = repository
+        .list_albums(
+            0,
+            500,
+            AlbumOrder::PlayCount,
+            AlbumListFilter::new(),
+            Some(user),
+        )
+        .await
+        .unwrap();
+    let counts = ordered
+        .iter()
+        .map(|summary| {
+            (
+                summary.album().title().to_owned(),
+                summary.state().play_count(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        counts,
+        vec![
+            ("Played".to_owned(), 2),
+            ("Once".to_owned(), 1),
+            ("Silent".to_owned(), 0)
+        ],
+        "the play_count sort keeps the unplayed album last"
+    );
+
+    let played = AlbumListFilter::new().with_play_count(Some(range(Some(1), None)));
+
+    assert_eq!(
+        listed(&repository, AlbumOrder::PlayCount, &played, Some(&user)).await,
+        vec![albums[0].clone(), albums[1].clone()],
+        "the selector returns exactly the albums the sort orders above zero"
+    );
+    assert_eq!(total(&repository, &played, Some(&user)).await, 2);
+
+    let twice = AlbumListFilter::new().with_play_count(Some(range(Some(2), None)));
+
+    assert_eq!(
+        listed(&repository, AlbumOrder::PlayCount, &twice, Some(&user)).await,
+        vec![albums[0].clone()]
+    );
+    assert_eq!(total(&repository, &twice, Some(&user)).await, 1);
+
+    let unplayed = AlbumListFilter::new().with_play_count(Some(range(Some(0), Some(0))));
+
+    assert_eq!(
+        listed(&repository, AlbumOrder::PlayCount, &unplayed, Some(&user)).await,
+        vec![albums[2].clone()],
+        "a zero bound matches the album with no member plays"
+    );
+    assert_eq!(total(&repository, &unplayed, Some(&user)).await, 1);
 }
 
 #[sqlx::test]

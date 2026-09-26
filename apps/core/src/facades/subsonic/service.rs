@@ -284,10 +284,18 @@ fn album_list_order(
             filter.with_scope(AlbumListScope::Owned),
         )),
         "random" => Ok((AlbumOrder::Random, filter)),
-        "starred" => Ok((AlbumOrder::StarredAt, filter)),
-        "frequent" => Ok((AlbumOrder::PlayCount, filter)),
-        "recent" => Ok((AlbumOrder::PlayDate, filter)),
-        "highest" => Ok((AlbumOrder::Rating, filter)),
+        "starred" => Ok((AlbumOrder::StarredAt, filter.with_starred(Some(true)))),
+        "frequent" => Ok((
+            AlbumOrder::PlayCount,
+            filter.with_play_count(Some(
+                Range::new(Some(1), None).map_err(|_| BrowseError::InvalidRequest)?,
+            )),
+        )),
+        "recent" => Ok((
+            AlbumOrder::PlayDate,
+            filter.with_recently_played(Some(true)),
+        )),
+        "highest" => Ok((AlbumOrder::Rating, filter.with_has_rating(Some(true)))),
         "byYear" => {
             let from = request
                 .from_year

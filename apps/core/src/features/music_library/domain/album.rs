@@ -633,6 +633,7 @@ pub struct AlbumListFilter {
     starred: Option<bool>,
     has_rating: Option<bool>,
     rating: Option<Range<u8>>,
+    play_count: Option<Range<u32>>,
     recently_played: Option<bool>,
     date_added: Option<Range<chrono::DateTime<chrono::Utc>>>,
     missing: Option<bool>,
@@ -703,6 +704,11 @@ impl AlbumListFilter {
 
     pub fn with_rating(mut self, rating: Option<Range<u8>>) -> Self {
         self.rating = rating;
+        self
+    }
+
+    pub fn with_play_count(mut self, play_count: Option<Range<u32>>) -> Self {
+        self.play_count = play_count;
         self
     }
 
@@ -785,6 +791,10 @@ impl AlbumListFilter {
 
     pub fn rating(&self) -> Option<Range<u8>> {
         self.rating
+    }
+
+    pub fn play_count(&self) -> Option<Range<u32>> {
+        self.play_count
     }
 
     pub fn recently_played(&self) -> Option<bool> {

@@ -730,6 +730,51 @@ fn newest_carries_the_owned_scope_in_the_filter() {
 }
 
 #[test]
+fn state_types_carry_their_membership_in_the_filter() {
+    for (list_type, order) in [
+        ("starred", AlbumOrder::StarredAt),
+        ("frequent", AlbumOrder::PlayCount),
+        ("recent", AlbumOrder::PlayDate),
+        ("highest", AlbumOrder::Rating),
+    ] {
+        let request = AlbumListRequest {
+            list_type,
+            size: None,
+            offset: None,
+            from_year: None,
+            to_year: None,
+            genre: None,
+        };
+        let (observed, filter) = album_list_order(&request).expect("the type is supported");
+
+        assert_eq!(observed, order, "{list_type}");
+
+        let membership = match list_type {
+            "starred" => filter.starred(),
+            "recent" => filter.recently_played(),
+            "highest" => filter.has_rating(),
+            _ => None,
+        };
+
+        if list_type == "frequent" {
+            assert_eq!(
+                filter.play_count(),
+                Some(Range::new(Some(1u32), None).unwrap()),
+                "frequent means a positive album play count"
+            );
+        } else {
+            assert_eq!(membership, Some(true), "{list_type} filters on its state");
+        }
+
+        assert_eq!(
+            filter.resolved_direction(observed),
+            SortDirection::Descending,
+            "{list_type} keeps its natural direction"
+        );
+    }
+}
+
+#[test]
 fn by_year_carries_its_range_and_direction() {
     let ascending = AlbumListRequest {
         list_type: "byYear",
