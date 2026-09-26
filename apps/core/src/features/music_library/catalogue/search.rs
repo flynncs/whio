@@ -29,6 +29,7 @@ pub struct SearchService {
     state: Arc<dyn StateStore>,
     providers: Vec<Arc<dyn CatalogueProvider>>,
     dedup_mode: DedupMode,
+    dedup_budget: Duration,
 }
 
 pub struct SearchOutcome {
@@ -150,6 +151,7 @@ impl SearchService {
             state,
             providers: Vec::new(),
             dedup_mode: DedupMode::Suppress,
+            dedup_budget: super::dedup::DEFAULT_DEDUP_BUDGET,
         }
     }
 
@@ -167,11 +169,17 @@ impl SearchService {
             state,
             providers,
             dedup_mode: DedupMode::Suppress,
+            dedup_budget: super::dedup::DEFAULT_DEDUP_BUDGET,
         }
     }
 
     pub fn with_dedup_mode(mut self, mode: DedupMode) -> Self {
         self.dedup_mode = mode;
+        self
+    }
+
+    pub fn with_dedup_budget(mut self, budget: Duration) -> Self {
+        self.dedup_budget = budget;
         self
     }
 
@@ -202,6 +210,7 @@ impl SearchService {
             user.copied(),
             context,
             self.dedup_mode,
+            self.dedup_budget,
         )
         .await;
         let albums = self

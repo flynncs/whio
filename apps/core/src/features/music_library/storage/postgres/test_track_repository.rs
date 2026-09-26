@@ -2008,7 +2008,8 @@ async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_iden
         Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
         Arc::clone(&repository) as Arc<dyn SourceLookup>,
         Arc::clone(&repository) as Arc<dyn StateStore>,
-    );
+    )
+    .with_dedup_budget(std::time::Duration::from_secs(10));
     let search = SearchRequest::uniform(
         SearchQuery::new("Song".into()).unwrap(),
         SearchWindow::new(SearchLimit::new(25).unwrap(), SearchOffset::new(0).unwrap()),

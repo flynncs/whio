@@ -17,7 +17,7 @@ pub enum DedupMode {
     Suppress,
 }
 
-const SUPPRESSION_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+pub(crate) const DEFAULT_DEDUP_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub(crate) struct Ports<'a> {
     pub(crate) library: &'a Arc<dyn LibraryRead>,
@@ -32,6 +32,7 @@ pub(crate) async fn apply(
     user: Option<uuid::Uuid>,
     context: &RequestContext,
     mode: DedupMode,
+    budget: std::time::Duration,
 ) -> (Vec<TrackHit>, Vec<TrackHit>) {
     if mode == DedupMode::Off {
         return (known, fresh);
@@ -39,15 +40,12 @@ pub(crate) async fn apply(
     let started = std::time::Instant::now();
     let hits = known.iter().chain(&fresh).cloned().collect::<Vec<_>>();
     if mode == DedupMode::Shadow {
-        let _ = tokio::time::timeout(
-            SUPPRESSION_BUDGET,
-            shadow(ports.library, ports.sources, &hits, context),
-        )
-        .await;
+        let _ = tokio::time::timeout(budget, shadow(ports.library, ports.sources, &hits, context))
+            .await;
         return (known, fresh);
     }
     match tokio::time::timeout(
-        SUPPRESSION_BUDGET,
+        budget,
         replacements(ports.library, ports.sources, ports.state, &hits, user),
     )
     .await
@@ -478,6 +476,7 @@ mod tests {
                 None,
                 &context(),
                 DedupMode::Suppress,
+                DEFAULT_DEDUP_BUDGET,
             )
             .await;
             assert_eq!(known[0].track().id(), remote.track().id());

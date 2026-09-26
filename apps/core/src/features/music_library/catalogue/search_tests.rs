@@ -828,3 +828,22 @@ async fn the_library_fills_the_page_when_providers_return_nothing(pool: sqlx::Pg
             .all(|hit| hit.match_quality().is_some())
     );
 }
+#[test]
+fn the_default_budget_is_unchanged() {
+    let store = Arc::new(FailingTrackRepository);
+    let bare = SearchService::new(
+        Arc::clone(&store) as Arc<dyn LibraryRead>,
+        Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&store) as Arc<dyn SourceLookup>,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+    );
+    assert_eq!(bare.dedup_budget, Duration::from_millis(50));
+    let with_providers = SearchService::with_providers(
+        Arc::clone(&store) as Arc<dyn LibraryRead>,
+        Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&store) as Arc<dyn SourceLookup>,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        Vec::new(),
+    );
+    assert_eq!(with_providers.dedup_budget, Duration::from_millis(50));
+}

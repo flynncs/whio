@@ -1,7 +1,7 @@
 #![cfg(feature = "postgres-integration")]
 
 use sqlx::PgPool;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use uuid::Uuid;
 use whio_core::features::music_library::test_support::PostgresTrackRepository;
 use whio_core::{
@@ -17,6 +17,9 @@ use whio_core::{
     },
     platform::request::{RequestContext, RequestId},
 };
+
+const WITHIN_BUDGET: Duration = Duration::from_secs(10);
+const BEYOND_BUDGET: Duration = Duration::ZERO;
 
 struct Fixture {
     repository: Arc<PostgresTrackRepository>,
@@ -82,6 +85,7 @@ impl Fixture {
     async fn search(
         &self,
         mode: DedupMode,
+        budget: Duration,
     ) -> Vec<whio_core::features::music_library::domain::TrackHit> {
         let service = SearchService::new(
             Arc::clone(&self.repository) as Arc<dyn LibraryRead>,
@@ -89,7 +93,8 @@ impl Fixture {
             Arc::clone(&self.repository) as Arc<dyn SourceLookup>,
             Arc::clone(&self.repository) as Arc<dyn StateStore>,
         )
-        .with_dedup_mode(mode);
+        .with_dedup_mode(mode)
+        .with_dedup_budget(budget);
         service
             .search(
                 &SearchRequest::uniform(
@@ -129,7 +134,7 @@ async fn cached_remote_is_replaced_and_its_identity_and_local_album_survive(pool
         .set_album_track(album.id(), local.id(), &AlbumTrack::unplaced())
         .await
         .unwrap();
-    let hits = f.search(DedupMode::Suppress).await;
+    let hits = f.search(DedupMode::Suppress, WITHIN_BUDGET).await;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].track().id(), local.id());
     assert_eq!(hits[0].album().unwrap().title(), "Local Album");
@@ -151,12 +156,42 @@ async fn cached_remote_is_replaced_and_its_identity_and_local_album_survive(pool
 }
 
 #[sqlx::test]
-async fn off_and_shadow_leave_both_results_visible(pool: PgPool) {
+async fn suppression_within_budget_replaces_the_remote_hit(pool: PgPool) {
+    let f = Fixture::new(pool.clone());
+    let local = f.local("Song", "song.flac").await;
+    let remote = f.remote("Song").await;
+    let hits = f.search(DedupMode::Suppress, WITHIN_BUDGET).await;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].track().id(), local.id());
+    assert!(
+        f.repository
+            .find_track(remote.id())
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[sqlx::test]
+async fn suppression_beyond_budget_keeps_the_remote_hit(pool: PgPool) {
+    let f = Fixture::new(pool.clone());
+    let local = f.local("Song", "song.flac").await;
+    let remote = f.remote("Song").await;
+    let hits = f.search(DedupMode::Suppress, BEYOND_BUDGET).await;
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().any(|hit| hit.track().id() == remote.id()));
+    assert!(hits.iter().any(|hit| hit.track().id() == local.id()));
+}
+
+#[sqlx::test]
+async fn off_and_shadow_are_unaffected(pool: PgPool) {
     let f = Fixture::new(pool.clone());
     f.local("Song", "song.flac").await;
     f.remote("Song").await;
     for mode in [DedupMode::Off, DedupMode::Shadow] {
-        assert_eq!(f.search(mode).await.len(), 2);
+        for budget in [WITHIN_BUDGET, BEYOND_BUDGET] {
+            assert_eq!(f.search(mode, budget).await.len(), 2);
+        }
     }
 }
 
@@ -167,14 +202,14 @@ async fn deleted_or_empty_local_file_keeps_remote_result(pool: PgPool) {
     let remote = f.remote("Song").await;
     std::fs::remove_file(f.root.join("song.flac")).unwrap();
     assert!(
-        f.search(DedupMode::Suppress)
+        f.search(DedupMode::Suppress, WITHIN_BUDGET)
             .await
             .iter()
             .any(|hit| hit.track().id() == remote.id())
     );
     std::fs::write(f.root.join("song.flac"), b"").unwrap();
     assert!(
-        f.search(DedupMode::Suppress)
+        f.search(DedupMode::Suppress, WITHIN_BUDGET)
             .await
             .iter()
             .any(|hit| hit.track().id() == remote.id())
@@ -193,7 +228,7 @@ async fn ambiguity_and_alternate_recordings_stay_separate(pool: PgPool) {
         f.local(title, "song.flac").await;
         let remote = f.remote("Song").await;
         assert!(
-            f.search(DedupMode::Suppress)
+            f.search(DedupMode::Suppress, WITHIN_BUDGET)
                 .await
                 .iter()
                 .any(|hit| hit.track().id() == remote.id()),
@@ -205,7 +240,7 @@ async fn ambiguity_and_alternate_recordings_stay_separate(pool: PgPool) {
     f.local("Song", "two.flac").await;
     let remote = f.remote("Song").await;
     assert!(
-        f.search(DedupMode::Suppress)
+        f.search(DedupMode::Suppress, WITHIN_BUDGET)
             .await
             .iter()
             .any(|hit| hit.track().id() == remote.id())
@@ -274,7 +309,8 @@ async fn fresh_provider_result_uses_local_state_without_changing_album_or_source
         Arc::clone(&f.repository) as Arc<dyn SourceLookup>,
         Arc::clone(&f.repository) as Arc<dyn StateStore>,
         vec![Arc::new(OneResult)],
-    );
+    )
+    .with_dedup_budget(WITHIN_BUDGET);
     let result = service
         .search(
             &SearchRequest::uniform(
@@ -311,7 +347,7 @@ async fn generic_demo_version_does_not_bypass_the_demo_veto(pool: PgPool) {
     f.local("Song (Demo Version)", "song.flac").await;
     let remote = f.remote("Song (Demo Version)").await;
     assert!(
-        f.search(DedupMode::Suppress)
+        f.search(DedupMode::Suppress, WITHIN_BUDGET)
             .await
             .iter()
             .any(|hit| hit.track().id() == remote.id())
