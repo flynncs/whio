@@ -7,11 +7,13 @@ use crate::{
     features::music_library::catalogue::{CatalogueCandidate, CatalogueProvider},
     features::music_library::{
         domain::{
-            AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
-            TrackMetadata,
+            AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, Resource, SourceIdentity,
+            SourceScope, TrackMetadata,
         },
+        library::ScanService,
         test_support::PostgresTrackRepository,
     },
+    platform::raw_query::RawQuery,
     platform::request::{RequestContext, RequestId},
 };
 use async_trait::async_trait;
@@ -23,6 +25,8 @@ use std::{
     },
 };
 use uuid::Uuid;
+
+use super::super::enumeration_request;
 
 struct StubCatalogue {
     responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ProviderError>>>,
@@ -890,5 +894,591 @@ fn by_genre_carries_one_normalised_name() {
     assert!(matches!(
         album_list_order(&over_long),
         Err(BrowseError::InvalidRequest)
+    ));
+}
+
+fn library_over(repository: &Arc<PostgresTrackRepository>) -> LibraryService {
+    LibraryService::new(
+        Arc::clone(repository) as Arc<dyn LibraryRead>,
+        Arc::clone(repository) as Arc<dyn SourceLookup>,
+        Arc::clone(repository) as Arc<dyn StateStore>,
+    )
+}
+
+fn local_source(external_id: &str) -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new("local".to_owned()).unwrap(),
+        SourceScope::Named("/music".to_owned()),
+        external_id.to_owned(),
+    )
+    .unwrap()
+}
+
+async fn seed_three_kinds(pool: &sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+
+    for (album_title, artist, first) in [
+        ("Album A", "Artist One", 1u32),
+        ("Album B", "Artist Two", 3),
+        ("Album C", "Artist Three", 5),
+    ] {
+        let album = repository
+            .resolve_or_create_album(
+                &AlbumMetadata::new(album_title.to_owned())
+                    .unwrap()
+                    .with_album_artist(ArtistCredit::new(artist.to_owned(), None).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        for number in [first, first + 1] {
+            let track = repository
+                .get_or_create(
+                    local_source(&format!("path-{number:02}")),
+                    TrackMetadata::from_names(
+                        format!("song-{number:02}"),
+                        vec![artist.to_owned()],
+                        Some(1_000),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            repository
+                .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+                .await
+                .unwrap();
+        }
+    }
+}
+
+fn songs_of(children: &[whio_subsonic_api::models::Child]) -> Vec<String> {
+    children.iter().map(|child| child.title.clone()).collect()
+}
+
+#[sqlx::test]
+async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+
+    for title in ["Rock One", "Rock Two", "Rock Three"] {
+        repository
+            .get_or_create(
+                local_source(&format!("{title}.flac")),
+                TrackMetadata::from_names(
+                    title.to_owned(),
+                    vec!["Daft Punk".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap()
+                .with_genres(vec!["Pop".to_owned(), "Rock".to_owned()]),
+            )
+            .await
+            .unwrap();
+    }
+
+    let library = library_over(&repository);
+    let stored = |genre: Option<&'static str>, count, offset| SongsByGenreRequest {
+        genre,
+        count,
+        offset,
+    };
+
+    let projection: String = sqlx::query_scalar("SELECT genre FROM tracks ORDER BY title LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        projection, "Pop",
+        "the projection holds the first genre only"
+    );
+
+    let first = songs_by_genre(
+        &library,
+        None,
+        &stored(Some("Rock"), Some("2"), Some("0")),
+        SourceTags::Off,
+    )
+    .await
+    .expect("the stored genre finds the songs");
+    assert_eq!(songs_of(&first), ["Rock One", "Rock Three"]);
+
+    let second = songs_by_genre(
+        &library,
+        None,
+        &stored(Some("Rock"), Some("2"), Some("2")),
+        SourceTags::Off,
+    )
+    .await
+    .expect("the offset pages the same membership");
+    assert_eq!(songs_of(&second), ["Rock Two"]);
+
+    let absent = songs_by_genre(
+        &library,
+        None,
+        &stored(Some("Jazz"), None, None),
+        SourceTags::Off,
+    )
+    .await
+    .expect("an unknown genre is an empty page");
+    assert!(absent.is_empty());
+
+    assert!(matches!(
+        songs_by_genre(&library, None, &stored(None, None, None), SourceTags::Off).await,
+        Err(BrowseError::MissingParameter)
+    ));
+    assert!(matches!(
+        songs_by_genre(
+            &library,
+            None,
+            &stored(Some("   "), None, None),
+            SourceTags::Off
+        )
+        .await,
+        Err(BrowseError::MissingParameter)
+    ));
+    assert!(matches!(
+        songs_by_genre(
+            &library,
+            None,
+            &stored(Some("Rock"), Some("many"), None),
+            SourceTags::Off
+        )
+        .await,
+        Err(BrowseError::InvalidRequest)
+    ));
+}
+
+#[sqlx::test]
+async fn subsonic_random_songs_is_one_permutation(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+
+    for index in 0..40u32 {
+        repository
+            .get_or_create(
+                local_source(&format!("random-{index:03}.flac")),
+                TrackMetadata::from_names(
+                    format!("random {index:03}"),
+                    vec!["Narrator".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let library = library_over(&repository);
+    let user = Uuid::now_v7();
+    let day = chrono::Utc::now().date_naive();
+    let seed = RandomSeed::for_request(Some(user), Resource::Track, day);
+    let other = RandomSeed::for_request(Some(Uuid::now_v7()), Resource::Track, day);
+    let request = |size: &'static str| RandomSongsRequest {
+        size: Some(size),
+        genre: None,
+        from_year: None,
+        to_year: None,
+    };
+
+    let whole = random_songs(&library, Some(&user), &request("40"), seed, SourceTags::Off)
+        .await
+        .expect("the random page succeeds");
+    let again = random_songs(&library, Some(&user), &request("40"), seed, SourceTags::Off)
+        .await
+        .expect("the random page succeeds");
+    let head = random_songs(&library, Some(&user), &request("10"), seed, SourceTags::Off)
+        .await
+        .expect("the random page succeeds");
+    let elsewhere = random_songs(
+        &library,
+        Some(&user),
+        &request("40"),
+        other,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the random page succeeds");
+
+    assert_eq!(whole.len(), 40);
+    assert_eq!(
+        songs_of(&whole),
+        songs_of(&again),
+        "the same derived seed repeats the order"
+    );
+    assert_eq!(
+        songs_of(&head),
+        songs_of(&whole)[..10],
+        "a smaller window is the head of one permutation"
+    );
+    assert_ne!(
+        songs_of(&whole),
+        songs_of(&elsewhere),
+        "a different seed is a different permutation"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_indexes_is_the_artist_index(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+
+    for name in ["Daft Punk", "The Beatles", "99 Posse", "Las Vegas"] {
+        repository
+            .get_or_create(
+                local_source(&format!("{name}.flac")),
+                TrackMetadata::from_names(
+                    format!("{name} song"),
+                    vec![name.to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let library = library_over(&repository);
+    let indexes = indexes(&library, &ScanService::disabled(), None)
+        .await
+        .expect("the index succeeds");
+
+    assert_eq!(indexes.ignored_articles, mapping::IGNORED_ARTICLES);
+    assert!(indexes.last_modified > 0, "lastModified is present");
+
+    let index = indexes.index.expect("the index list is present");
+    let letters = index
+        .iter()
+        .map(|index| index.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(letters, ["#", "B", "D", "V"]);
+
+    let filed = index
+        .iter()
+        .flat_map(|index| index.artist.clone().unwrap_or_default())
+        .map(|artist| artist.name)
+        .collect::<Vec<_>>();
+    let listed = artists(&library, None)
+        .await
+        .expect("the artist list succeeds")
+        .iter()
+        .map(|artist| artist.name.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        filed.len(),
+        listed.len(),
+        "the grouping keeps the membership"
+    );
+    for name in listed {
+        assert!(
+            filed.contains(&name),
+            "{name} is filed under an index letter"
+        );
+    }
+    assert!(
+        index[1]
+            .artist
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|artist| artist.name == "The Beatles"),
+        "the article is ignored when the letter is chosen"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_music_directory_walks_entities(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Discovery".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let mut songs = Vec::new();
+
+    for (number, title) in [(1u32, "First"), (2, "Second")] {
+        let track = repository
+            .get_or_create(
+                local_source(&format!("path-{number}")),
+                TrackMetadata::from_names(
+                    title.to_owned(),
+                    vec!["Daft Punk".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        repository
+            .set_album_track(
+                album.id(),
+                track.id(),
+                &AlbumTrack::new(Some(1), Some(number as u16), number - 1).unwrap(),
+            )
+            .await
+            .unwrap();
+        songs.push(track.id().to_string());
+    }
+
+    let library = library_over(&repository);
+    let artist = artists(&library, None)
+        .await
+        .expect("the artist list succeeds")
+        .remove(0);
+    let artist_id = artist.id.clone();
+
+    let directory = music_directory(&library, &artist_id, None, SourceTags::Off)
+        .await
+        .expect("the artist directory resolves");
+    assert_eq!(directory.id, artist_id);
+    assert_eq!(directory.name, "Daft Punk");
+
+    let children = directory.child.expect("the artist has children");
+    assert_eq!(children.len(), 1);
+    assert!(children[0].is_dir);
+    assert_eq!(children[0].title, "Discovery");
+    assert_eq!(children[0].id, album.id().to_string());
+    assert_eq!(children[0].artist.as_deref(), Some("Daft Punk"));
+    assert!(
+        children.iter().all(|child| child.path.is_none()),
+        "no filesystem path is exposed"
+    );
+
+    let album_id = children[0].id.clone();
+    let directory = music_directory(&library, &album_id, None, SourceTags::Off)
+        .await
+        .expect("the album directory resolves");
+    assert_eq!(directory.id, album_id);
+    assert_eq!(directory.parent.as_deref(), Some(artist_id.as_str()));
+    assert_eq!(directory.name, "Discovery");
+
+    let children = directory.child.expect("the album has children");
+    assert_eq!(songs_of(&children), ["First", "Second"]);
+    assert_eq!(
+        children
+            .iter()
+            .map(|child| child.id.clone())
+            .collect::<Vec<_>>(),
+        songs,
+        "the child ids are the canonical track ids"
+    );
+    assert!(children.iter().all(|child| !child.is_dir));
+    assert!(
+        children.iter().all(|child| child.path.is_none()),
+        "no filesystem path is exposed"
+    );
+
+    let provider_album = repository
+        .resolve_or_create_album(&AlbumMetadata::new("Provider Only".to_owned()).unwrap())
+        .await
+        .unwrap();
+    let provider_track = repository
+        .get_or_create(
+            source("vid-1"),
+            TrackMetadata::from_names(
+                "Provider Song".to_owned(),
+                vec!["Daft Punk".to_owned()],
+                Some(2_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            provider_album.id(),
+            provider_track.id(),
+            &AlbumTrack::unplaced(),
+        )
+        .await
+        .unwrap();
+
+    let detail = library
+        .album_detail(provider_album.id(), None)
+        .await
+        .expect("the album read succeeds")
+        .expect("the album is known");
+    let directory = music_directory(
+        &library,
+        &provider_album.id().to_string(),
+        None,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the provider album resolves");
+
+    assert_eq!(
+        directory
+            .child
+            .unwrap_or_default()
+            .iter()
+            .map(|child| child.id.clone())
+            .collect::<Vec<_>>(),
+        detail
+            .entries
+            .iter()
+            .map(|entry| entry.track().id().to_string())
+            .collect::<Vec<_>>(),
+        "a provider-only entity is reported as the library reports it"
+    );
+    assert_eq!(
+        detail
+            .entries
+            .iter()
+            .map(|entry| entry.track().id().to_string())
+            .collect::<Vec<_>>(),
+        [provider_track.id().to_string()],
+        "the library reports the provider track"
+    );
+
+    assert!(matches!(
+        music_directory(&library, &Uuid::now_v7().to_string(), None, SourceTags::Off).await,
+        Err(BrowseError::AlbumNotFound)
+    ));
+    assert!(matches!(
+        music_directory(&library, "not-a-uuid", None, SourceTags::Off).await,
+        Err(BrowseError::ArtistNotFound)
+    ));
+}
+
+#[sqlx::test]
+async fn subsonic_search3_windows_are_per_type(pool: sqlx::PgPool) {
+    seed_three_kinds(&pool).await;
+    let library = library_over(&Arc::new(PostgresTrackRepository::new(pool.clone())));
+
+    let request = enumeration_request(&RawQuery::parse(
+        "songCount=2&songOffset=1&albumCount=1&albumOffset=1&artistCount=1&artistOffset=2",
+    ))
+    .expect("the windows parse");
+    let result = enumerate(&library, None, &request, SourceTags::Off)
+        .await
+        .expect("the enumeration succeeds");
+
+    assert_eq!(songs_of(&result.songs), ["song-02", "song-03"]);
+    assert_eq!(
+        result
+            .albums
+            .iter()
+            .map(|album| album.name.clone())
+            .collect::<Vec<_>>(),
+        ["Album B"]
+    );
+    assert_eq!(
+        result
+            .artists
+            .iter()
+            .map(|artist| artist.name.clone())
+            .collect::<Vec<_>>(),
+        ["Artist Two"]
+    );
+
+    let only_songs =
+        enumeration_request(&RawQuery::parse("songCount=1")).expect("the window parses");
+    let result = enumerate(&library, None, &only_songs, SourceTags::Off)
+        .await
+        .expect("the enumeration succeeds");
+
+    assert_eq!(songs_of(&result.songs), ["song-01"]);
+    assert_eq!(
+        result.albums.len(),
+        3,
+        "a request with only songCount does not truncate the albums"
+    );
+    assert_eq!(
+        result.artists.len(),
+        3,
+        "a request with only songCount does not truncate the artists"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Discovery".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+
+    for (number, title) in [(1u32, "First"), (2, "Second")] {
+        let track = repository
+            .get_or_create(
+                local_source(&format!("path-{number}")),
+                TrackMetadata::from_names(
+                    title.to_owned(),
+                    vec!["Daft Punk".to_owned()],
+                    Some(1_000),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        repository
+            .set_album_track(
+                album.id(),
+                track.id(),
+                &AlbumTrack::new(Some(1), Some(number as u16), number - 1).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let library = library_over(&repository);
+    let completion = CompletionService::disabled(Arc::new(library_over(&repository)));
+    let summary = library
+        .album_list(0, u32::MAX, AlbumOrder::Name, AlbumListFilter::new(), None)
+        .await
+        .expect("the album list succeeds")
+        .remove(0);
+    let detail = album_detail(
+        &completion,
+        &summary.album().id().to_string(),
+        None,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the album detail succeeds");
+
+    assert_eq!(detail.name, summary.album().title());
+    assert_eq!(detail.song_count, summary.track_count() as i32);
+    assert_eq!(detail.duration, (summary.duration_ms() / 1000) as i32);
+    assert_eq!(detail.song.len(), summary.track_count() as usize);
+
+    let artist = library
+        .artist_list(
+            0,
+            u32::MAX,
+            ArtistSort::Name,
+            &ArtistListFilter::default(),
+            None,
+        )
+        .await
+        .expect("the artist list succeeds")
+        .remove(0);
+    let detail = artist_detail(&library, &artist.artist().id().to_string(), None)
+        .await
+        .expect("the artist detail succeeds");
+
+    assert_eq!(detail.name, artist.artist().name());
+    assert_eq!(detail.album_count, Some(artist.album_count() as i32));
+    assert_eq!(detail.album.len(), artist.album_count() as usize);
+
+    assert!(matches!(
+        album_detail(
+            &completion,
+            &Uuid::now_v7().to_string(),
+            None,
+            SourceTags::Off
+        )
+        .await,
+        Err(BrowseError::AlbumNotFound)
+    ));
+    assert!(matches!(
+        artist_detail(&library, &Uuid::now_v7().to_string(), None).await,
+        Err(BrowseError::ArtistNotFound)
     ));
 }

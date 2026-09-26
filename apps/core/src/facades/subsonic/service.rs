@@ -12,8 +12,9 @@ use crate::{
     },
     features::music_library::domain::{
         AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, ArtistListFilter,
-        ArtistSort, IdSet, Range, SelectorText, SortDirection, StateTarget, TrackId,
+        ArtistSort, IdSet, RandomSeed, Range, SelectorText, SortDirection, StateTarget, TrackId,
     },
+    features::music_library::library::ScanService,
     features::music_library::library_state::{LibraryStateError, LibraryStateService},
     platform::request::RequestContext,
 };
@@ -535,26 +536,202 @@ pub(crate) async fn artist_detail(
 }
 
 pub(crate) fn artist_indexes(artists: Vec<models::ArtistId3>) -> Vec<models::IndexId3> {
-    let mut indexes: Vec<models::IndexId3> = Vec::new();
+    mapping::group_by_index(artists, |artist| artist.name.as_str())
+        .into_iter()
+        .map(|(name, artists)| models::IndexId3 {
+            name,
+            artist: Some(artists),
+        })
+        .collect()
+}
 
-    for artist in artists {
-        let name = index_letter(&artist.name);
-        match indexes.iter_mut().find(|index| index.name == name) {
-            Some(index) => index.artist.get_or_insert_with(Vec::new).push(artist),
-            None => indexes.push(models::IndexId3 {
-                name,
-                artist: Some(vec![artist]),
-            }),
+pub(crate) struct SongsByGenreRequest<'a> {
+    pub(crate) genre: Option<&'a str>,
+    pub(crate) count: Option<&'a str>,
+    pub(crate) offset: Option<&'a str>,
+}
+
+pub(crate) struct RandomSongsRequest<'a> {
+    pub(crate) size: Option<&'a str>,
+    pub(crate) genre: Option<&'a str>,
+    pub(crate) from_year: Option<&'a str>,
+    pub(crate) to_year: Option<&'a str>,
+}
+
+const DEFAULT_GENRE_SIZE: u32 = 10;
+const DEFAULT_RANDOM_SIZE: u32 = 10;
+
+pub(crate) async fn songs_by_genre(
+    library: &LibraryService,
+    user: Option<&Uuid>,
+    request: &SongsByGenreRequest<'_>,
+    tags: SourceTags,
+) -> Result<Vec<models::Child>, BrowseError> {
+    let Some(raw) = request.genre else {
+        return Err(BrowseError::MissingParameter);
+    };
+    let genre = SelectorText::new(raw)
+        .map_err(|_| BrowseError::InvalidRequest)?
+        .ok_or(BrowseError::MissingParameter)?;
+    let count = browse_size(request.count, DEFAULT_GENRE_SIZE)?;
+    let offset = match request.offset {
+        None => 0,
+        Some(raw) => raw
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| BrowseError::InvalidRequest)?,
+    };
+
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let limit = PageLimit::new(count).map_err(|_| BrowseError::InvalidRequest)?;
+    let set = IdSet::new([genre]).map_err(|_| BrowseError::InvalidRequest)?;
+    let filter = TrackListFilter::new().with_genre(Some(set));
+
+    library
+        .track_page(offset, limit, TrackOrder::Title, &filter, user)
+        .await
+        .map(|page| {
+            page.items()
+                .iter()
+                .map(|view| mapping::child_from_view(view, tags))
+                .collect()
+        })
+        .map_err(BrowseError::Catalogue)
+}
+
+pub(crate) async fn random_songs(
+    library: &LibraryService,
+    user: Option<&Uuid>,
+    request: &RandomSongsRequest<'_>,
+    seed: RandomSeed,
+    tags: SourceTags,
+) -> Result<Vec<models::Child>, BrowseError> {
+    let size = browse_size(request.size, DEFAULT_RANDOM_SIZE)?;
+    let mut filter = TrackListFilter::new().with_random_seed(Some(seed));
+
+    if let Some(raw) = request.genre {
+        let genre = SelectorText::new(raw).map_err(|_| BrowseError::InvalidRequest)?;
+
+        if let Some(genre) = genre {
+            let set = IdSet::new([genre]).map_err(|_| BrowseError::InvalidRequest)?;
+            filter = filter.with_genre(Some(set));
         }
     }
 
-    indexes
+    let from = year_bound(request.from_year)?;
+    let to = year_bound(request.to_year)?;
+
+    if from.is_some() || to.is_some() {
+        let Ok(year) = Range::new(from, to) else {
+            return Ok(Vec::new());
+        };
+
+        filter = filter.with_year(Some(year));
+    }
+
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let limit = PageLimit::new(size).map_err(|_| BrowseError::InvalidRequest)?;
+
+    library
+        .track_page(0, limit, TrackOrder::Random, &filter, user)
+        .await
+        .map(|page| {
+            page.items()
+                .iter()
+                .map(|view| mapping::child_from_view(view, tags))
+                .collect()
+        })
+        .map_err(BrowseError::Catalogue)
 }
 
-fn index_letter(name: &str) -> String {
-    match name.chars().next() {
-        Some(letter) if letter.is_ascii_alphabetic() => letter.to_ascii_uppercase().to_string(),
-        _ => "#".to_owned(),
+fn browse_size(raw: Option<&str>, default: u32) -> Result<u32, BrowseError> {
+    match raw {
+        None => Ok(default),
+        Some(raw) => raw
+            .trim()
+            .parse::<u32>()
+            .map(|size| size.min(MAX_BROWSE_SIZE))
+            .map_err(|_| BrowseError::InvalidRequest),
+    }
+}
+
+fn year_bound(raw: Option<&str>) -> Result<Option<i32>, BrowseError> {
+    match raw {
+        None => Ok(None),
+        Some(raw) => {
+            let year = raw
+                .trim()
+                .parse::<i32>()
+                .map_err(|_| BrowseError::InvalidRequest)?;
+
+            Ok((year != 0).then_some(year))
+        }
+    }
+}
+
+pub(crate) async fn indexes(
+    library: &LibraryService,
+    scanner: &ScanService,
+    user: Option<&Uuid>,
+) -> Result<models::Indexes, BrowseError> {
+    let artists = library
+        .artist_list(
+            0,
+            u32::MAX,
+            ArtistSort::Name,
+            &ArtistListFilter::default(),
+            user,
+        )
+        .await
+        .map_err(BrowseError::Catalogue)?;
+    let last_modified = scanner.status().last_scan.unwrap_or_else(chrono::Utc::now);
+
+    Ok(models::Indexes {
+        ignored_articles: mapping::IGNORED_ARTICLES.to_owned(),
+        last_modified: i32::try_from(last_modified.timestamp_millis()).unwrap_or(i32::MAX),
+        shortcut: None,
+        child: None,
+        index: Some(mapping::artist_index(artists)),
+    })
+}
+
+pub(crate) async fn music_directory(
+    library: &LibraryService,
+    raw_id: &str,
+    user: Option<&Uuid>,
+    tags: SourceTags,
+) -> Result<models::Directory, BrowseError> {
+    let artist_id: ArtistId = raw_id.parse().map_err(|_| BrowseError::ArtistNotFound)?;
+
+    if let Some(detail) = library
+        .artist_detail(&artist_id, user)
+        .await
+        .map_err(BrowseError::Catalogue)?
+    {
+        return Ok(mapping::music_directory(
+            mapping::DirectoryTarget::Artist(&detail),
+            tags,
+        ));
+    }
+
+    let album_id: AlbumId = raw_id.parse().map_err(|_| BrowseError::AlbumNotFound)?;
+
+    match library
+        .album_detail(&album_id, user)
+        .await
+        .map_err(BrowseError::Catalogue)?
+    {
+        Some(detail) => Ok(mapping::music_directory(
+            mapping::DirectoryTarget::Album(&detail),
+            tags,
+        )),
+        None => Err(BrowseError::AlbumNotFound),
     }
 }
 

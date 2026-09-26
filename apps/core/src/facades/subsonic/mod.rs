@@ -16,7 +16,7 @@ use whio_subsonic_api::models;
 
 use crate::{
     features::identity::{domain::Principal, service::AuthError},
-    features::music_library::domain::TrackId,
+    features::music_library::domain::{RandomSeed, Resource, TrackId},
     features::music_library::library::{ScanMode, ScanRequestError},
     features::music_library::playlists::{PlaylistEdit, PlaylistError},
     features::playback::{DeliveryError, PlaybackError},
@@ -28,8 +28,9 @@ pub(crate) use auth::SubsonicAuth;
 use auth::SubsonicError;
 use envelope::{
     album_envelope, album_list2_envelope, artist_envelope, artists_envelope,
-    create_playlist_envelope, extensions_envelope, failed_envelope, genres_envelope, ok_envelope,
-    playlist_envelope, playlists_envelope, scan_status_envelope, search3_envelope,
+    create_playlist_envelope, directory_envelope, extensions_envelope, failed_envelope,
+    genres_envelope, indexes_envelope, ok_envelope, playlist_envelope, playlists_envelope,
+    random_songs_envelope, scan_status_envelope, search3_envelope, songs_by_genre_envelope,
     starred2_envelope, start_scan_envelope, user_envelope,
 };
 use state::SubsonicState;
@@ -43,6 +44,19 @@ where
         ("/ping", get(ping).post(ping)),
         ("/getUser", get(get_user).post(get_user)),
         ("/search3", get(search3).post(search3)),
+        (
+            "/getSongsByGenre",
+            get(get_songs_by_genre).post(get_songs_by_genre),
+        ),
+        (
+            "/getRandomSongs",
+            get(get_random_songs).post(get_random_songs),
+        ),
+        ("/getIndexes", get(get_indexes).post(get_indexes)),
+        (
+            "/getMusicDirectory",
+            get(get_music_directory).post(get_music_directory),
+        ),
         ("/getAlbumList2", get(get_album_list2)),
         ("/getAlbum", get(get_album)),
         ("/getArtists", get(get_artists)),
@@ -322,6 +336,102 @@ pub(crate) async fn get_artist(
 
     match service::artist_detail(state.library(), id, Some(&user)).await {
         Ok(artist) => Json(artist_envelope(artist)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_songs_by_genre(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let user = principal.user_id.as_uuid();
+    let request = service::SongsByGenreRequest {
+        genre: query.get("genre"),
+        count: query.get("count"),
+        offset: query.get("offset"),
+    };
+
+    match service::songs_by_genre(state.library(), Some(&user), &request, state.source_tags()).await
+    {
+        Ok(songs) => Json(songs_by_genre_envelope(songs)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_random_songs(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let user = principal.user_id.as_uuid();
+    let request = service::RandomSongsRequest {
+        size: query.get("size"),
+        genre: query.get("genre"),
+        from_year: query.get("fromYear"),
+        to_year: query.get("toYear"),
+    };
+    let seed =
+        RandomSeed::for_request(Some(user), Resource::Track, chrono::Utc::now().date_naive());
+
+    match service::random_songs(
+        state.library(),
+        Some(&user),
+        &request,
+        seed,
+        state.source_tags(),
+    )
+    .await
+    {
+        Ok(songs) => Json(random_songs_envelope(songs)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_indexes(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let user = principal.user_id.as_uuid();
+
+    match service::indexes(state.library(), state.scanner(), Some(&user)).await {
+        Ok(indexes) => Json(indexes_envelope(indexes)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_music_directory(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(id) = query.get("id") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+    let user = principal.user_id.as_uuid();
+
+    match service::music_directory(state.library(), id, Some(&user), state.source_tags()).await {
+        Ok(directory) => Json(directory_envelope(directory)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
 }

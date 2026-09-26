@@ -335,3 +335,79 @@ pub(crate) fn genres_envelope(genres: Vec<models::Genre>) -> models::GetGenresRe
         )),
     }
 }
+
+pub(crate) fn songs_by_genre_envelope(
+    songs: Vec<models::Child>,
+) -> models::GetSongsByGenreResponse {
+    models::GetSongsByGenreResponse {
+        subsonic_response: Some(Box::new(
+            models::GetSongsByGenreResponseSubsonicResponse::GetSongsByGenreSuccessResponse(
+                Box::new(models::GetSongsByGenreSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_songs_by_genre_success_response::Status::Ok,
+                    songs_by_genre: Box::new(models::Songs {
+                        song: (!songs.is_empty()).then_some(songs),
+                    }),
+                }),
+            ),
+        )),
+    }
+}
+
+pub(crate) fn random_songs_envelope(songs: Vec<models::Child>) -> models::GetRandomSongsResponse {
+    models::GetRandomSongsResponse {
+        subsonic_response: Some(Box::new(
+            models::GetRandomSongsResponseSubsonicResponse::GetRandomSongsSuccessResponse(
+                Box::new(models::GetRandomSongsSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_random_songs_success_response::Status::Ok,
+                    random_songs: Box::new(models::Songs {
+                        song: (!songs.is_empty()).then_some(songs),
+                    }),
+                }),
+            ),
+        )),
+    }
+}
+
+pub(crate) fn indexes_envelope(indexes: models::Indexes) -> models::GetIndexesResponse {
+    models::GetIndexesResponse {
+        subsonic_response: Some(Box::new(
+            models::GetIndexesResponseSubsonicResponse::GetIndexesSuccessResponse(Box::new(
+                models::GetIndexesSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_indexes_success_response::Status::Ok,
+                    indexes: Box::new(indexes),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn directory_envelope(
+    directory: models::Directory,
+) -> models::GetMusicDirectoryResponse {
+    models::GetMusicDirectoryResponse {
+        subsonic_response: Some(Box::new(
+            models::GetMusicDirectoryResponseSubsonicResponse::GetMusicDirectorySuccessResponse(
+                Box::new(models::GetMusicDirectorySuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_music_directory_success_response::Status::Ok,
+                    directory: Box::new(directory),
+                }),
+            ),
+        )),
+    }
+}

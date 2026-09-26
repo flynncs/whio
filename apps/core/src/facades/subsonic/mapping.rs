@@ -320,6 +320,150 @@ impl AlbumFields {
     }
 }
 
+pub(crate) const IGNORED_ARTICLES: &str = "The El La Los Las Le Les Os As O A";
+
+pub(crate) fn index_letter(name: &str) -> String {
+    let name = strip_article(name);
+
+    match name.chars().next() {
+        Some(letter) if letter.is_ascii_alphabetic() => letter.to_ascii_uppercase().to_string(),
+        _ => "#".to_owned(),
+    }
+}
+
+fn strip_article(name: &str) -> &str {
+    for article in IGNORED_ARTICLES.split(' ') {
+        if let Some(rest) = name.strip_prefix(article)
+            && let Some(rest) = rest.strip_prefix(' ')
+        {
+            return rest;
+        }
+    }
+
+    name
+}
+
+pub(crate) fn group_by_index<T>(items: Vec<T>, name: impl Fn(&T) -> &str) -> Vec<(String, Vec<T>)> {
+    let mut groups: Vec<(String, Vec<T>)> = Vec::new();
+
+    for item in items {
+        let letter = index_letter(name(&item));
+
+        match groups.iter_mut().find(|(existing, _)| *existing == letter) {
+            Some((_, group)) => group.push(item),
+            None => groups.push((letter, vec![item])),
+        }
+    }
+
+    groups.sort_by(|left, right| left.0.cmp(&right.0));
+    groups
+}
+
+pub(crate) fn artist_index(artists: Vec<ArtistSummary>) -> Vec<models::Index> {
+    group_by_index(artists, |summary| summary.artist().name())
+        .into_iter()
+        .map(|(name, artists)| models::Index {
+            name,
+            artist: Some(artists.iter().map(legacy_artist).collect()),
+        })
+        .collect()
+}
+
+fn legacy_artist(summary: &ArtistSummary) -> models::Artist {
+    let artist = summary.artist();
+
+    models::Artist {
+        id: artist.id().to_string(),
+        name: artist.name().to_owned(),
+        artist_image_url: None,
+        starred: summary.state().starred_at().map(|at| at.fixed_offset()),
+        user_rating: summary.state().rating().map(i32::from),
+        average_rating: None,
+    }
+}
+
+pub(crate) enum DirectoryTarget<'a> {
+    Artist(&'a ArtistDetail),
+    Album(&'a AlbumDetail),
+}
+
+pub(crate) fn music_directory(target: DirectoryTarget<'_>, tags: SourceTags) -> models::Directory {
+    match target {
+        DirectoryTarget::Artist(detail) => {
+            let artist = detail.artist.artist();
+
+            models::Directory {
+                id: artist.id().to_string(),
+                parent: None,
+                name: artist.name().to_owned(),
+                starred: detail
+                    .artist
+                    .state()
+                    .starred_at()
+                    .map(|at| at.fixed_offset()),
+                user_rating: detail.artist.state().rating().map(i32::from),
+                play_count: play_count(detail.artist.state()),
+                average_rating: None,
+                child: Some(detail.albums.iter().map(album_child).collect()),
+            }
+        }
+        DirectoryTarget::Album(detail) => {
+            let album = detail.album.album();
+
+            models::Directory {
+                id: album.id().to_string(),
+                parent: album.album_artist_id().map(|id| id.to_string()),
+                name: album.title().to_owned(),
+                starred: detail
+                    .album
+                    .state()
+                    .starred_at()
+                    .map(|at| at.fixed_offset()),
+                user_rating: detail.album.state().rating().map(i32::from),
+                play_count: play_count(detail.album.state()),
+                average_rating: None,
+                child: Some(
+                    detail
+                        .entries
+                        .iter()
+                        .map(|entry| child_from_entry(entry, album.id(), album.title(), tags))
+                        .collect(),
+                ),
+            }
+        }
+    }
+}
+
+fn play_count(state: LibraryState) -> Option<i32> {
+    i32::try_from(state.play_count())
+        .ok()
+        .filter(|count| *count > 0)
+}
+
+fn album_child(summary: &AlbumSummary) -> models::Child {
+    let album = summary.album();
+    let artist = summary.album_artist();
+
+    models::Child {
+        id: album.id().to_string(),
+        parent: album.album_artist_id().map(|id| id.to_string()),
+        is_dir: true,
+        title: album.title().to_owned(),
+        album: Some(album.title().to_owned()),
+        artist: artist.map(|artist| artist.name().to_owned()),
+        year: album.year(),
+        cover_art: Some(CoverArtTarget::album(album.id()).encode()),
+        duration: Some((summary.duration_ms() / 1000) as i32),
+        created: Some(summary.created_at().fixed_offset()),
+        starred: summary.state().starred_at().map(|at| at.fixed_offset()),
+        play_count: play_count(summary.state()),
+        user_rating: summary.state().rating().map(i32::from),
+        artist_id: album.album_artist_id().map(|id| id.to_string()),
+        media_type: Some(models::MediaType::Album),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +583,34 @@ mod tests {
             mapped.cover_art.as_deref(),
             Some(format!("al-{}", mapped.id).as_str())
         );
+    }
+
+    #[test]
+    fn an_index_letter_follows_the_ignored_articles() {
+        assert_eq!(index_letter("Daft Punk"), "D");
+        assert_eq!(index_letter("The Beatles"), "B");
+        assert_eq!(index_letter("Las Vegas"), "V");
+        assert_eq!(index_letter("A Perfect Circle"), "P");
+        assert_eq!(index_letter("Los Lobos"), "L");
+        assert_eq!(index_letter("99 Posse"), "#");
+        assert_eq!(index_letter("the beatles"), "T");
+        assert_eq!(index_letter(""), "#");
+    }
+
+    #[test]
+    fn grouping_files_each_item_under_its_letter_in_order() {
+        let groups = group_by_index(
+            vec!["The Beatles", "Daft Punk", "99 Posse", "Bjork"],
+            |name| name,
+        );
+        let names = groups
+            .iter()
+            .map(|(letter, _)| letter.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, ["#", "B", "D"]);
+        assert_eq!(groups[0].1, ["99 Posse"]);
+        assert_eq!(groups[1].1, ["The Beatles", "Bjork"]);
+        assert_eq!(groups[2].1, ["Daft Punk"]);
     }
 }
