@@ -415,10 +415,19 @@ async fn total_agrees_with_the_list_for_every_selector(pool: PgPool) {
         .get_or_create(source("local", "delta.flac"), metadata("delta"))
         .await
         .unwrap();
+    let compilation_album = repository
+        .resolve_or_create_album(&album("Various").with_compilation(Some(true)))
+        .await
+        .unwrap();
+    let epsilon = repository
+        .get_or_create(source("local", "epsilon.flac"), metadata("epsilon"))
+        .await
+        .unwrap();
 
     let alpha_id = alpha.id().clone();
     let beta_id = beta.id().clone();
     let delta_id = delta.id().clone();
+    let epsilon_id = epsilon.id().clone();
 
     repository
         .set_album_track(kept_album.id(), &alpha_id, &AlbumTrack::unplaced())
@@ -426,6 +435,10 @@ async fn total_agrees_with_the_list_for_every_selector(pool: PgPool) {
         .unwrap();
     repository
         .set_album_track(other_album.id(), &beta_id, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    repository
+        .set_album_track(compilation_album.id(), &epsilon_id, &AlbumTrack::unplaced())
         .await
         .unwrap();
     repository
@@ -503,6 +516,11 @@ async fn total_agrees_with_the_list_for_every_selector(pool: PgPool) {
             vec![&alpha_id],
         ),
         (
+            "compilation true",
+            TrackListFilter::new().with_compilation(Some(true)),
+            vec![&epsilon_id],
+        ),
+        (
             "starred",
             TrackListFilter::new().with_starred(Some(true)),
             vec![&alpha_id],
@@ -540,7 +558,7 @@ async fn total_agrees_with_the_list_for_every_selector(pool: PgPool) {
         (
             "duration",
             TrackListFilter::new().with_duration(Some(range(Some(500), Some(2_000)))),
-            vec![&alpha_id, &beta_id, &delta_id],
+            vec![&alpha_id, &beta_id, &delta_id, &epsilon_id],
         ),
         (
             "bitrate",
@@ -580,7 +598,7 @@ async fn total_agrees_with_the_list_for_every_selector(pool: PgPool) {
         (
             "library_id",
             TrackListFilter::new().with_library_id(Some(IdSet::new([music.clone()]).unwrap())),
-            vec![&alpha_id, &delta_id],
+            vec![&alpha_id, &delta_id, &epsilon_id],
         ),
         (
             "library_id elsewhere",
@@ -859,7 +877,10 @@ async fn absent_values_sort_last_in_both_directions(pool: PgPool) {
         .unwrap();
     let mut rated = Vec::new();
 
-    for index in 0..4u8 {
+    for (index, rating) in [None, Some(1u8), Some(2), Some(2), Some(3)]
+        .into_iter()
+        .enumerate()
+    {
         let track = repository
             .get_or_create(
                 source("local", &format!("rated-{index}.flac")),
@@ -869,9 +890,9 @@ async fn absent_values_sort_last_in_both_directions(pool: PgPool) {
             .unwrap();
         let id = track.id().clone();
 
-        if index > 0 {
+        if let Some(rating) = rating {
             repository
-                .set_rating(user, StateTarget::Track(&id), Some(index))
+                .set_rating(user, StateTarget::Track(&id), Some(rating))
                 .await
                 .unwrap();
         }
@@ -880,6 +901,10 @@ async fn absent_values_sort_last_in_both_directions(pool: PgPool) {
     }
 
     let unrated = rated[0].clone();
+    let one = rated[1].clone();
+    let three = rated[4].clone();
+    let mut equal = [rated[2].clone(), rated[3].clone()];
+    equal.sort_by(|left, right| left.as_uuid().cmp(right.as_uuid()));
     let ascending = page_at(
         &repository,
         0,
@@ -892,12 +917,13 @@ async fn absent_values_sort_last_in_both_directions(pool: PgPool) {
     assert_eq!(
         ascending,
         vec![
-            rated[1].clone(),
-            rated[2].clone(),
-            rated[3].clone(),
+            one.clone(),
+            equal[0].clone(),
+            equal[1].clone(),
+            three.clone(),
             unrated.clone()
         ],
-        "the unrated track sorts last in ascending order"
+        "equal ratings fall back to the t.id tie-break and the unrated track sorts last"
     );
 
     let descending = page_at(
@@ -912,12 +938,13 @@ async fn absent_values_sort_last_in_both_directions(pool: PgPool) {
     assert_eq!(
         descending,
         vec![
-            rated[3].clone(),
-            rated[2].clone(),
-            rated[1].clone(),
+            three.clone(),
+            equal[0].clone(),
+            equal[1].clone(),
+            one.clone(),
             unrated.clone()
         ],
-        "the unrated track sorts last in the natural descending order too"
+        "the same tie-break holds in the natural descending order, with the unrated track last"
     );
 
     let explicit = page_at(
@@ -1012,6 +1039,12 @@ async fn random_is_repeatable_per_seed_and_not_persistent(pool: PgPool) {
     .unwrap();
 
     let first = TrackListFilter::new().with_random_seed(Some(RandomSeed::new(4_242)));
+    let filtered = TrackListFilter::new()
+        .with_title(selector("random 00"))
+        .with_random_seed(Some(RandomSeed::new(4_242)));
+    let other_filtered = filtered
+        .clone()
+        .with_random_seed(Some(RandomSeed::new(9_999)));
     let second = TrackListFilter::new().with_random_seed(Some(RandomSeed::new(9_999)));
     let whole = page_at(&repository, 0, 500, TrackOrder::Random, &first, None).await;
     let other_seed = page_at(&repository, 0, 500, TrackOrder::Random, &second, None).await;
@@ -1054,6 +1087,37 @@ async fn random_is_repeatable_per_seed_and_not_persistent(pool: PgPool) {
         whole.iter().skip(10).take(10).cloned().collect::<Vec<_>>(),
         page_at(&repository, 10, 10, TrackOrder::Random, &first, None).await,
         "the second page continues the same permutation"
+    );
+
+    let filtered_whole = page_at(&repository, 0, 500, TrackOrder::Random, &filtered, None).await;
+
+    assert_eq!(filtered_whole.len(), 10, "the selector narrows membership");
+    assert_eq!(
+        total_of(&repository, TrackOrder::Random, &filtered, None).await,
+        10
+    );
+    assert_eq!(
+        page_at(&repository, 0, 2, TrackOrder::Random, &filtered, None).await,
+        filtered_whole[..2].to_vec(),
+        "a selector keeps the page a head of the same seeded permutation"
+    );
+    assert_eq!(
+        page_at(&repository, 0, 2, TrackOrder::Random, &filtered, None).await,
+        page_at(&repository, 0, 2, TrackOrder::Random, &filtered, None).await,
+        "and repeats"
+    );
+    assert_ne!(
+        filtered_whole,
+        page_at(
+            &repository,
+            0,
+            500,
+            TrackOrder::Random,
+            &other_filtered,
+            None
+        )
+        .await,
+        "a second seed permutes the filtered membership too"
     );
 
     let after = sqlx::query_as::<_, (Uuid, String, chrono::DateTime<chrono::Utc>)>(
@@ -1751,6 +1815,10 @@ fn unknown_values_and_bad_ranges_are_explicit_errors() {
     assert_eq!(SortDirection::parse("sideways"), None);
     assert!(matches!(
         Range::new(Some(5), Some(1)),
+        Err(ValidationError::Invalid { field: "range" })
+    ));
+    assert!(matches!(
+        Range::new(None::<i32>, None),
         Err(ValidationError::Invalid { field: "range" })
     ));
     assert!(matches!(

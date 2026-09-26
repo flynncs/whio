@@ -76,6 +76,10 @@ pub struct Range<T> {
 
 impl<T: Ord + Copy> Range<T> {
     pub fn new(from: Option<T>, to: Option<T>) -> Result<Self, ValidationError> {
+        if from.is_none() && to.is_none() {
+            return Err(ValidationError::Invalid { field: "range" });
+        }
+
         if let (Some(from), Some(to)) = (from, to)
             && from > to
         {
@@ -330,6 +334,10 @@ mod tests {
         assert!(Range::new(Some(5i32), None).is_ok());
         assert!(matches!(
             Range::new(Some(5i32), Some(1)),
+            Err(ValidationError::Invalid { field: "range" })
+        ));
+        assert!(matches!(
+            Range::new(None::<i32>, None),
             Err(ValidationError::Invalid { field: "range" })
         ));
     }
