@@ -14,4 +14,7 @@ pub enum ValidationError {
         min: u32,
         max: u32,
     },
+
+    #[error("{field} is not a valid value")]
+    Invalid { field: &'static str },
 }

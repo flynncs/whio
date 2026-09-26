@@ -22,6 +22,10 @@ pub(crate) fn router(state: AppState) -> Router {
             post(music_library::api::native::search),
         )
         .route(
+            "/api/v1/library/tracks",
+            get(music_library::api::native::library_tracks),
+        )
+        .route(
             "/playback/tracks/{track_id}/stream",
             get(playback::api::native::stream),
         )

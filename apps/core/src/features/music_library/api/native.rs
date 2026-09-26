@@ -1,6 +1,8 @@
 use axum::{
     Extension, Json,
     extract::{State, rejection::JsonRejection},
+    http::HeaderValue,
+    response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -9,9 +11,11 @@ use crate::{
     features::identity::api::native::AuthenticatedPrincipal,
     features::music_library::api::errors::ApiError,
     features::music_library::catalogue::{
-        CatalogueSearch, SearchHit, SearchLimit, SearchOffset, SearchQuery, ValidationError,
+        CatalogueSearch, MAX_PAGE_LIMIT, PageLimit, SearchHit, SearchLimit, SearchOffset,
+        SearchQuery, TrackListFilter, TrackListScope, TrackOrder, ValidationError,
     },
-    features::music_library::domain::Availability,
+    features::music_library::domain::{AlbumTrack, Availability, TrackView},
+    platform::raw_query::RawQuery,
     platform::request::RequestContext,
 };
 
@@ -164,4 +168,170 @@ pub(crate) async fn artwork(
         Ok(ArtworkOutcome::Missing) => Err(ApiError::NotFound(context)),
         Err(error) => Err(ApiError::Artwork { context, error }),
     }
+}
+
+pub(crate) struct LibraryTracksQuery {
+    offset: u32,
+    limit: PageLimit,
+    order: TrackOrder,
+    scope: TrackListScope,
+}
+
+impl LibraryTracksQuery {
+    const DEFAULT_OFFSET: u32 = 0;
+    const DEFAULT_LIMIT: u32 = 50;
+    const MIN_LIMIT: u32 = 1;
+
+    fn parse(query: &RawQuery) -> Result<Self, ValidationError> {
+        let offset = match query.get("offset") {
+            Some(raw) => raw
+                .parse()
+                .map_err(|_| ValidationError::Invalid { field: "offset" })?,
+            None => Self::DEFAULT_OFFSET,
+        };
+        let raw_limit = match query.get("limit") {
+            Some(raw) => raw
+                .parse()
+                .map_err(|_| ValidationError::Invalid { field: "limit" })?,
+            None => Self::DEFAULT_LIMIT,
+        };
+        let limit = PageLimit::new(raw_limit).map_err(|_| ValidationError::OutOfRange {
+            field: "limit",
+            min: Self::MIN_LIMIT,
+            max: MAX_PAGE_LIMIT,
+        })?;
+        let order = match query.get("order") {
+            Some(raw) => {
+                TrackOrder::parse(raw).ok_or(ValidationError::Invalid { field: "order" })?
+            }
+            None => TrackOrder::default(),
+        };
+        let scope = match query.get("scope") {
+            Some(raw) => {
+                TrackListScope::parse(raw).ok_or(ValidationError::Invalid { field: "scope" })?
+            }
+            None => TrackListScope::default(),
+        };
+
+        Ok(Self {
+            offset,
+            limit,
+            order,
+            scope,
+        })
+    }
+}
+
+#[derive(Serialize)]
+pub(crate) struct TrackPageResponse {
+    items: Vec<TrackPageItem>,
+    total: u32,
+}
+
+#[derive(Serialize)]
+pub(crate) struct TrackPageItem {
+    id: String,
+    title: String,
+    artists: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    album: Option<TrackPageAlbum>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disc_number: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    track_number: Option<u16>,
+    starred: bool,
+    play_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rating: Option<u8>,
+    ownership: String,
+    availability: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct TrackPageAlbum {
+    id: String,
+    title: String,
+}
+
+impl TrackPageItem {
+    fn from_view(view: TrackView, availability: Availability) -> Self {
+        let state = view.state();
+
+        Self {
+            id: view.track().id().to_string(),
+            title: view.track().title().to_owned(),
+            artists: view
+                .track()
+                .artists()
+                .iter()
+                .map(|artist| artist.name().to_owned())
+                .collect(),
+            duration_ms: view.track().duration_ms(),
+            album: view.album().map(|album| TrackPageAlbum {
+                id: album.id().to_string(),
+                title: album.title().to_owned(),
+            }),
+            disc_number: view.membership().and_then(AlbumTrack::disc_number),
+            track_number: view.membership().and_then(AlbumTrack::track_number),
+            starred: state.is_starred(),
+            play_count: state.play_count(),
+            rating: state.rating(),
+            ownership: if availability.is_owned() {
+                "owned"
+            } else {
+                "provider"
+            }
+            .to_owned(),
+            availability: availability.as_str().to_owned(),
+        }
+    }
+}
+
+pub(crate) async fn library_tracks(
+    State(state): State<NativeState>,
+    Extension(context): Extension<RequestContext>,
+    AuthenticatedPrincipal(principal): AuthenticatedPrincipal,
+    query: RawQuery,
+) -> Result<axum::response::Response, ApiError> {
+    let request = LibraryTracksQuery::parse(&query).map_err(|error| ApiError::InvalidRequest {
+        context: context.clone(),
+        error,
+    })?;
+    let filter = TrackListFilter::new().with_scope(request.scope);
+    let user_uuid = principal.user_id.as_uuid();
+
+    let page = state
+        .library
+        .track_page(
+            request.offset,
+            request.limit,
+            request.order,
+            &filter,
+            Some(&user_uuid),
+        )
+        .await
+        .map_err(|error| ApiError::Catalogue {
+            context: context.clone(),
+            error,
+        })?;
+
+    let (views, total) = page.into_parts();
+    let items = views
+        .into_iter()
+        .map(|view| {
+            let availability = state.library.availability(view.sources());
+
+            TrackPageItem::from_view(view, availability)
+        })
+        .collect();
+
+    let mut response = Json(TrackPageResponse { items, total }).into_response();
+    response.headers_mut().insert(
+        "x-total-count",
+        HeaderValue::from_str(&total.to_string()).expect("a count is a valid header value"),
+    );
+
+    Ok(response)
 }
