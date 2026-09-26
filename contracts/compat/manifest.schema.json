@@ -218,7 +218,7 @@
     },
     "owner_task": {
       "type": "string",
-      "pattern": "^[FLSJEAVN][0-9]{2}$",
+      "pattern": "^[FLSJEAVN][0-9]{2}[a-z]?$",
       "description": "task-ledger ID from docs/implementation-tasks.md. the check script resolves it against the task-ID set extracted from a ledger file passed with --tasks (or a plain path argument) or found at <root>/docs/implementation-tasks.md|.json, and against its embedded ledger ID set when no ledger file exists. the docs tree is gitignored, so a checkout without it still validates."
     },
     "profile": {

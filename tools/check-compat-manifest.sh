@@ -104,7 +104,7 @@ LEDGER_TASKS = {
     "N01", "N02", "N03", "N04", "N05", "N06", "N07", "N90",
 }
 
-TASK_ID = re.compile(r"^[FLSJEAVN][0-9]{2}$")
+TASK_ID = re.compile(r"^[FLSJEAVN][0-9]{2}[a-z]?$")
 
 PINNED_COUNTS = {
     "subsonic": 48,

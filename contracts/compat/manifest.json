@@ -2639,7 +2639,7 @@
       "client_type": "string",
       "fact_owner": "metadata",
       "proposed_value": "track.genres[]",
-      "owner_task": "V02",
+      "owner_task": "L05b",
       "facade_owner": "V05",
       "status": "unproved"
     },
@@ -2666,7 +2666,7 @@
       "client_type": "boolean",
       "fact_owner": "metadata",
       "proposed_value": "album.compilation",
-      "owner_task": "V02",
+      "owner_task": "L05b",
       "facade_owner": "V05",
       "status": "unproved"
     },
@@ -2756,7 +2756,7 @@
       "client_type": "boolean",
       "fact_owner": "source facts",
       "proposed_value": "no present local source in selected library scope",
-      "owner_task": "L05",
+      "owner_task": "L07",
       "facade_owner": "V05",
       "status": "unproved"
     },
@@ -2999,7 +2999,7 @@
       "client_type": "date",
       "fact_owner": "metadata",
       "proposed_value": "track.original_date with precision",
-      "owner_task": "V02",
+      "owner_task": "L05b",
       "facade_owner": "V05",
       "status": "unproved"
     },
@@ -3080,7 +3080,7 @@
       "client_type": "string",
       "fact_owner": "metadata",
       "proposed_value": "album.labels[]",
-      "owner_task": "V02",
+      "owner_task": "L05b",
       "facade_owner": "V05",
       "status": "unproved"
     },
@@ -3089,7 +3089,7 @@
       "client_type": "date",
       "fact_owner": "metadata",
       "proposed_value": "track.recording_date with precision",
-      "owner_task": "V02",
+      "owner_task": "L05b",
       "facade_owner": "V05",
       "status": "unproved"
     },
@@ -3098,7 +3098,7 @@
       "client_type": "string",
       "fact_owner": "metadata",
       "proposed_value": "album.release_country",
-      "owner_task": "V02",
+      "owner_task": "L05b",
       "facade_owner": "V05",
       "status": "unproved"
     },
@@ -3107,7 +3107,7 @@
       "client_type": "date",
       "fact_owner": "metadata",
       "proposed_value": "release date with precision",
-      "owner_task": "V02",
+      "owner_task": "L05b",
       "facade_owner": "V05",
       "status": "unproved"
     },
@@ -3125,7 +3125,7 @@
       "client_type": "string",
       "fact_owner": "metadata",
       "proposed_value": "album.release_type",
-      "owner_task": "V02",
+      "owner_task": "L05b",
       "facade_owner": "V05",
       "status": "unproved"
     },
@@ -3323,7 +3323,7 @@
       "client_type": "number",
       "fact_owner": "metadata",
       "proposed_value": "track/album release-context year",
-      "owner_task": "V02",
+      "owner_task": "L05b",
       "facade_owner": "V05",
       "status": "unproved"
     }
