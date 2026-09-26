@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::PostgresTrackRepository;
 use crate::features::music_library::{
     domain::{
@@ -825,14 +827,14 @@ async fn genres_aggregate_and_filter_albums(pool: sqlx::PgPool) {
     let rock = repository
         .get_or_create(
             source("local", "path-a"),
-            metadata("One").with_genre(Some("Rock".to_owned())).unwrap(),
+            metadata("One").with_genres(vec!["Rock".to_owned()]),
         )
         .await
         .unwrap();
     let pop = repository
         .get_or_create(
             source("local", "path-b"),
-            metadata("Two").with_genre(Some("Pop".to_owned())).unwrap(),
+            metadata("Two").with_genres(vec!["Pop".to_owned()]),
         )
         .await
         .unwrap();
@@ -1401,4 +1403,183 @@ async fn page_items_carry_album_membership_state_and_sources(pool: sqlx::PgPool)
         .collect::<Vec<_>>();
     providers.sort();
     assert_eq!(providers, ["local", "youtube_music"]);
+}
+
+#[sqlx::test]
+async fn the_genre_facets_use_the_set(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album = repository
+        .resolve_or_create_album(&album_metadata("Discovery"))
+        .await
+        .unwrap();
+    let rock_and_pop = repository
+        .get_or_create(
+            source("local", "path-a"),
+            metadata("One").with_genres(vec!["Pop".to_owned(), "Rock".to_owned()]),
+        )
+        .await
+        .unwrap();
+    let jazz = repository
+        .get_or_create(
+            source("local", "path-b"),
+            metadata("Two").with_genres(vec!["Jazz".to_owned()]),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), rock_and_pop.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), jazz.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let genres = repository.list_genres().await.unwrap();
+    assert_eq!(genres.len(), 3, "each value of a multi-valued track counts");
+    for genre in &genres {
+        assert_eq!(genre.song_count(), 1, "{}", genre.genre());
+        assert_eq!(genre.album_count(), 1, "{}", genre.genre());
+    }
+    let mut names = genres
+        .iter()
+        .map(|genre| genre.genre().to_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["Jazz", "Pop", "Rock"]);
+
+    let filter = AlbumListFilter::new().with_genre(Some("rock".to_owned()));
+    let rock_albums = repository
+        .list_albums(0, 10, AlbumOrder::Title, filter.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        rock_albums.len(),
+        1,
+        "a non-first genre still finds the album"
+    );
+    assert_eq!(rock_albums[0].album().id(), album.id());
+    assert_eq!(
+        repository.count_albums(None, filter).await.unwrap(),
+        1,
+        "the count and the page move together"
+    );
+
+    let absent = AlbumListFilter::new().with_genre(Some("Polka".to_owned()));
+    assert!(
+        repository
+            .list_albums(0, 10, AlbumOrder::Title, absent.clone(), None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(repository.count_albums(None, absent).await.unwrap(), 0);
+}
+
+#[derive(Default)]
+struct StatementFields {
+    statement: String,
+}
+
+impl tracing::field::Visit for StatementFields {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "db.statement" {
+            self.statement = value.to_owned();
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "db.statement" {
+            self.statement = format!("{value:?}");
+        }
+    }
+}
+
+struct StatementLog(Arc<parking_lot::Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for StatementLog {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target() == "sqlx::query"
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut fields = StatementFields::default();
+        event.record(&mut fields);
+        self.0.lock().push(fields.statement);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[sqlx::test]
+async fn batch_reads_do_not_add_a_per_track_query(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+
+    for index in 0..20 {
+        repository
+            .get_or_create(
+                source("local", &format!("path-{index}")),
+                metadata(&format!("Song {index:02}")).with_genres(vec!["Rock".to_owned()]),
+            )
+            .await
+            .unwrap();
+    }
+
+    let log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let dispatch = tracing::Dispatch::new(StatementLog(Arc::clone(&log)));
+    let guard = tracing::dispatcher::set_default(&dispatch);
+    let filter = TrackListFilter::new();
+
+    log.lock().clear();
+    let small = repository
+        .page_tracks(0, 2, TrackOrder::Title, &filter, None)
+        .await
+        .unwrap();
+    let small_statements = log.lock().clone();
+
+    log.lock().clear();
+    let large = repository
+        .page_tracks(0, 20, TrackOrder::Title, &filter, None)
+        .await
+        .unwrap();
+    let large_statements = log.lock().clone();
+    drop(guard);
+
+    assert_eq!(small.items().len(), 2);
+    assert_eq!(large.items().len(), 20);
+    assert!(
+        !small_statements.is_empty(),
+        "the counter sees sqlx statements"
+    );
+    assert_eq!(
+        small_statements.len(),
+        large_statements.len(),
+        "a page of 20 must not run more statements than a page of 2"
+    );
+    assert_eq!(
+        small_statements
+            .iter()
+            .filter(|statement| statement.contains("track_genres"))
+            .count(),
+        1,
+        "one batch read for the genre set"
+    );
+    assert_eq!(
+        small_statements
+            .iter()
+            .filter(|statement| statement.contains("track_artist_credits"))
+            .count(),
+        1,
+        "one batch read for the credits"
+    );
 }

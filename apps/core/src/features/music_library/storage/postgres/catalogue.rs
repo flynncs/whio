@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::features::music_library::{
     domain::{
-        Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId,
+        Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, CreditRole,
         ProviderEntityState, SourceIdentity, Track, TrackId, TrackMetadata,
     },
     storage::contracts::{SourceFileFacts, TrackRepositoryError},
@@ -14,10 +14,13 @@ use crate::features::music_library::storage::contracts::CatalogueWrite;
 
 use super::PgStore;
 use super::decode::{
-    decode_album, decode_artist, encode_byte, encode_duration_ms, encode_facts_version,
-    encode_integer, encode_smallint, encode_source_scope, repository_error,
+    decode_album, decode_artist, encode_byte, encode_date, encode_date_precision,
+    encode_duration_ms, encode_facts_version, encode_integer, encode_smallint, encode_source_scope,
+    repository_error,
 };
 use super::schema::{ALBUM_COLUMNS, ARTIST_COLUMNS, AlbumRow, ArtistRow};
+
+type ResolvedCredit = (String, ArtistId, Option<CreditRole>);
 
 #[async_trait]
 impl CatalogueWrite for PgStore {
@@ -26,7 +29,7 @@ impl CatalogueWrite for PgStore {
         source: SourceIdentity,
         metadata: TrackMetadata,
     ) -> Result<Track, TrackRepositoryError> {
-        let credits = resolve_credits(&self.pool, metadata.artists()).await?;
+        let credits = resolve_credits(&self.pool, &metadata).await?;
 
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
         let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits).await?;
@@ -41,7 +44,7 @@ impl CatalogueWrite for PgStore {
         metadata: TrackMetadata,
         facts: &SourceFileFacts,
     ) -> Result<Track, TrackRepositoryError> {
-        let credits = resolve_credits(&self.pool, metadata.artists()).await?;
+        let credits = resolve_credits(&self.pool, &metadata).await?;
 
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
         let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits).await?;
@@ -162,12 +165,15 @@ impl CatalogueWrite for PgStore {
 
         sqlx::query(
             r#"
-            INSERT INTO album_tracks (album_id, track_id, disc_number, track_number, position)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO album_tracks
+                (album_id, track_id, disc_number, track_number, position, disc_total, track_total)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (album_id, track_id) DO UPDATE
             SET disc_number = EXCLUDED.disc_number,
                 track_number = EXCLUDED.track_number,
-                position = EXCLUDED.position
+                position = EXCLUDED.position,
+                disc_total = EXCLUDED.disc_total,
+                track_total = EXCLUDED.track_total
             "#,
         )
         .bind(album_id.as_uuid())
@@ -175,6 +181,8 @@ impl CatalogueWrite for PgStore {
         .bind(encode_smallint(membership.disc_number())?)
         .bind(encode_smallint(membership.track_number())?)
         .bind(i32::try_from(membership.position()).map_err(|_| TrackRepositoryError::InvalidData)?)
+        .bind(encode_smallint(membership.disc_total())?)
+        .bind(encode_smallint(membership.track_total())?)
         .execute(&mut *tx)
         .await
         .map_err(repository_error)?;
@@ -365,20 +373,25 @@ async fn find_or_attach_album(
     if existing_has_identifier && incoming_has_identifier {
         return Ok(None);
     }
-    if !incoming_has_identifier {
-        return Ok(Some(existing));
-    }
 
     let row = sqlx::query_as::<_, AlbumRow>(&format!(
         r#"
         UPDATE albums
         SET musicbrainz_release_group_id = COALESCE($1, musicbrainz_release_group_id),
             musicbrainz_release_id = COALESCE($2, musicbrainz_release_id),
-            year = COALESCE(year, $3),
-            release_type = COALESCE(release_type, $4),
-            label = COALESCE(label, $5),
+            release_type = COALESCE($4, release_type),
+            label = COALESCE($5, label),
+            release_date = COALESCE($6, release_date),
+            release_date_precision = COALESCE($7, release_date_precision),
+            release_country = COALESCE($8, release_country),
+            compilation = COALESCE($9, compilation),
+            year = COALESCE(
+                EXTRACT(YEAR FROM COALESCE($6, release_date))::SMALLINT,
+                $3,
+                year
+            ),
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = $6
+        WHERE id = $10
         RETURNING {ALBUM_COLUMNS}
         "#
     ))
@@ -387,6 +400,10 @@ async fn find_or_attach_album(
     .bind(metadata.year())
     .bind(metadata.release_type())
     .bind(metadata.label())
+    .bind(encode_date(metadata.release_date()))
+    .bind(encode_date_precision(metadata.release_date()))
+    .bind(metadata.release_country())
+    .bind(metadata.compilation())
     .bind(existing.id().as_uuid())
     .fetch_optional(pool)
     .await
@@ -457,13 +474,18 @@ async fn insert_album(
     metadata: &AlbumMetadata,
     album_artist_id: Option<&ArtistId>,
 ) -> Result<Option<Album>, TrackRepositoryError> {
+    let year = metadata
+        .release_date()
+        .map(|date| date.year())
+        .or(metadata.year());
     let row = sqlx::query_as::<_, AlbumRow>(&format!(
         r#"
         INSERT INTO albums (
             id, title, album_artist_id, year, release_type, label,
-            musicbrainz_release_group_id, musicbrainz_release_id
+            musicbrainz_release_group_id, musicbrainz_release_id,
+            release_date, release_date_precision, release_country, compilation
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         ON CONFLICT DO NOTHING
         RETURNING {ALBUM_COLUMNS}
         "#
@@ -471,11 +493,15 @@ async fn insert_album(
     .bind(AlbumId::new().as_uuid())
     .bind(metadata.title())
     .bind(album_artist_id.map(|id| *id.as_uuid()))
-    .bind(metadata.year())
+    .bind(year)
     .bind(metadata.release_type())
     .bind(metadata.label())
     .bind(metadata.musicbrainz_release_group_id())
     .bind(metadata.musicbrainz_release_id())
+    .bind(encode_date(metadata.release_date()))
+    .bind(encode_date_precision(metadata.release_date()))
+    .bind(metadata.release_country())
+    .bind(metadata.compilation())
     .fetch_optional(pool)
     .await
     .map_err(repository_error)?;
@@ -524,7 +550,7 @@ async fn get_or_create_in(
     connection: &mut PgConnection,
     source: &SourceIdentity,
     metadata: &TrackMetadata,
-    credits: &[(String, ArtistId)],
+    credits: &[ResolvedCredit],
 ) -> Result<TrackId, TrackRepositoryError> {
     let track_id = match resolve_identified_track(connection, metadata).await? {
         Some(identified) => {
@@ -547,6 +573,7 @@ async fn get_or_create_in(
 
     update_track_metadata(connection, &track_id, metadata).await?;
     replace_artist_credits(connection, &track_id, credits).await?;
+    replace_track_genres(connection, &track_id, metadata.genres()).await?;
 
     Ok(track_id)
 }
@@ -705,8 +732,11 @@ async fn insert_candidate_track(
 ) -> Result<bool, TrackRepositoryError> {
     sqlx::query_scalar::<_, Uuid>(
         r#"
-        INSERT INTO tracks (id, title, duration_ms, musicbrainz_recording_id, isrc, genre)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO tracks (
+            id, title, duration_ms, musicbrainz_recording_id, isrc, genre,
+            recording_date, recording_date_precision, original_date, original_date_precision
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (musicbrainz_recording_id) WHERE musicbrainz_recording_id IS NOT NULL
         DO NOTHING
         RETURNING id
@@ -717,7 +747,11 @@ async fn insert_candidate_track(
     .bind(encode_duration_ms(metadata.duration_ms())?)
     .bind(metadata.musicbrainz_recording_id())
     .bind(metadata.isrc())
-    .bind(metadata.genre())
+    .bind(metadata.primary_genre())
+    .bind(encode_date(metadata.recording_date()))
+    .bind(encode_date_precision(metadata.recording_date()))
+    .bind(encode_date(metadata.original_date()))
+    .bind(encode_date_precision(metadata.original_date()))
     .fetch_optional(&mut *connection)
     .await
     .map(|row| row.is_some())
@@ -792,16 +826,24 @@ async fn update_track_metadata(
             duration_ms = $2,
             musicbrainz_recording_id = COALESCE($3, musicbrainz_recording_id),
             isrc = COALESCE($4, isrc),
-            genre = COALESCE($5, genre),
+            genre = $5,
+            recording_date = $6,
+            recording_date_precision = $7,
+            original_date = $8,
+            original_date_precision = $9,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = $6
+        WHERE id = $10
         "#,
     )
     .bind(metadata.title())
     .bind(encode_duration_ms(metadata.duration_ms())?)
     .bind(metadata.musicbrainz_recording_id())
     .bind(metadata.isrc())
-    .bind(metadata.genre())
+    .bind(metadata.primary_genre())
+    .bind(encode_date(metadata.recording_date()))
+    .bind(encode_date_precision(metadata.recording_date()))
+    .bind(encode_date(metadata.original_date()))
+    .bind(encode_date_precision(metadata.original_date()))
     .bind(track_id.as_uuid())
     .execute(&mut *connection)
     .await
@@ -814,10 +856,41 @@ async fn update_track_metadata(
     Ok(())
 }
 
+async fn replace_track_genres(
+    connection: &mut PgConnection,
+    track_id: &TrackId,
+    genres: &[String],
+) -> Result<(), TrackRepositoryError> {
+    sqlx::query("DELETE FROM track_genres WHERE track_id = $1")
+        .bind(track_id.as_uuid())
+        .execute(&mut *connection)
+        .await
+        .map_err(repository_error)?;
+
+    for (position, name) in genres.iter().enumerate() {
+        let position = i32::try_from(position).map_err(|_| TrackRepositoryError::InvalidData)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO track_genres (track_id, position, name)
+            VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(track_id.as_uuid())
+        .bind(position)
+        .bind(name)
+        .execute(&mut *connection)
+        .await
+        .map_err(repository_error)?;
+    }
+
+    Ok(())
+}
+
 async fn replace_artist_credits(
     connection: &mut PgConnection,
     track_id: &TrackId,
-    credits: &[(String, ArtistId)],
+    credits: &[ResolvedCredit],
 ) -> Result<(), TrackRepositoryError> {
     sqlx::query(
         r#"
@@ -830,19 +903,20 @@ async fn replace_artist_credits(
     .await
     .map_err(repository_error)?;
 
-    for (position, (name, artist_id)) in credits.iter().enumerate() {
+    for (position, (name, artist_id, role)) in credits.iter().enumerate() {
         let position = i32::try_from(position).map_err(|_| TrackRepositoryError::InvalidData)?;
 
         sqlx::query(
             r#"
-            INSERT INTO track_artist_credits (track_id, position, name, artist_id)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO track_artist_credits (track_id, position, name, artist_id, role)
+            VALUES ($1, $2, $3, $4, $5)
             "#,
         )
         .bind(track_id.as_uuid())
         .bind(position)
         .bind(name)
         .bind(artist_id.as_uuid())
+        .bind(role.map(|role| role.as_str()))
         .execute(&mut *connection)
         .await
         .map_err(repository_error)?;
@@ -853,13 +927,14 @@ async fn replace_artist_credits(
 
 async fn resolve_credits(
     pool: &PgPool,
-    credits: &[ArtistCredit],
-) -> Result<Vec<(String, ArtistId)>, TrackRepositoryError> {
-    let mut resolved = Vec::with_capacity(credits.len());
+    metadata: &TrackMetadata,
+) -> Result<Vec<ResolvedCredit>, TrackRepositoryError> {
+    let credits = metadata.artists().iter().chain(metadata.credits());
+    let mut resolved = Vec::with_capacity(metadata.artists().len() + metadata.credits().len());
 
     for credit in credits {
         let artist = resolve_artist(pool, credit).await?;
-        resolved.push((credit.name().to_owned(), artist.id().clone()));
+        resolved.push((credit.name().to_owned(), artist.id().clone(), credit.role()));
     }
 
     Ok(resolved)

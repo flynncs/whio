@@ -6,15 +6,15 @@ use uuid::Uuid;
 use crate::features::music_library::{
     domain::{
         Album, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistSummary,
-        LibraryState, ProviderId, SourceIdentity, SourceScope, Track, TrackHit, TrackId,
-        TrackMetadata,
+        CreditRole, DatePrecision, LibraryState, PartialDate, ProviderId, SourceIdentity,
+        SourceScope, Track, TrackHit, TrackId, TrackMetadata,
     },
     storage::contracts::{SourceFileFacts, TrackRepositoryError},
 };
 
 use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_SEARCH_COLUMNS, AlbumBrowseRow, AlbumRow,
-    ArtistRow, StateRow, TrackSearchRow,
+    ArtistRow, StateRow, TRACK_COLUMNS, TrackRecord, TrackSearchRow,
 };
 
 pub(crate) fn decode_artist(row: ArtistRow) -> Result<Artist, TrackRepositoryError> {
@@ -106,43 +106,72 @@ pub(crate) fn decode_artist_summary(
     Ok(ArtistSummary::new(artist, album_count))
 }
 pub(crate) fn decode_track(
-    id: Uuid,
-    title: String,
-    duration_ms: Option<i64>,
-    recording_id: Option<String>,
-    isrc: Option<String>,
-    genre: Option<String>,
-    artists: Vec<ArtistCredit>,
+    record: TrackRecord,
+    genres: Vec<String>,
+    credits: Vec<ArtistCredit>,
 ) -> Result<Track, TrackRepositoryError> {
-    let duration_ms = duration_ms
+    let duration_ms = record
+        .duration_ms
         .map(u64::try_from)
         .transpose()
         .map_err(|_| TrackRepositoryError::InvalidData)?;
-    let metadata = TrackMetadata::new(title, artists, duration_ms)
+    let recording_date = decode_date(record.recording_date, record.recording_date_precision)?;
+    let original_date = decode_date(record.original_date, record.original_date_precision)?;
+    let (artists, roles) = credits
+        .into_iter()
+        .partition::<Vec<_>, _>(|credit| credit.role().is_none());
+    let metadata = TrackMetadata::new(record.title, artists, duration_ms)
         .map_err(|_| TrackRepositoryError::InvalidData)?
-        .with_recording_id(recording_id)
+        .with_recording_id(record.musicbrainz_recording_id)
         .map_err(|_| TrackRepositoryError::InvalidData)?
-        .with_isrc(isrc)
+        .with_isrc(record.isrc)
         .map_err(|_| TrackRepositoryError::InvalidData)?
-        .with_genre(genre)
-        .map_err(|_| TrackRepositoryError::InvalidData)?;
+        .with_genres(genres)
+        .with_credits(roles)
+        .with_recording_date(recording_date)
+        .with_original_date(original_date);
 
-    Ok(Track::new(TrackId::from_uuid(id), metadata))
+    Ok(Track::new(TrackId::from_uuid(record.id), metadata))
+}
+
+pub(crate) fn encode_date(value: Option<PartialDate>) -> Option<chrono::NaiveDate> {
+    value.map(|date| date.date())
+}
+
+pub(crate) fn encode_date_precision(value: Option<PartialDate>) -> Option<&'static str> {
+    value.map(|date| date.precision().as_str())
+}
+
+pub(crate) fn decode_date(
+    date: Option<chrono::NaiveDate>,
+    precision: Option<String>,
+) -> Result<Option<PartialDate>, TrackRepositoryError> {
+    match (date, precision) {
+        (None, None) => Ok(None),
+        (Some(date), Some(precision)) => Ok(Some(PartialDate::new(
+            date,
+            DatePrecision::parse(&precision).ok_or(TrackRepositoryError::InvalidData)?,
+        ))),
+        _ => Err(TrackRepositoryError::InvalidData),
+    }
 }
 
 pub(crate) fn decode_membership(
     disc_number: Option<i16>,
     track_number: Option<i16>,
     position: i32,
+    disc_total: Option<i16>,
+    track_total: Option<i16>,
 ) -> Result<AlbumTrack, TrackRepositoryError> {
     let position = u32::try_from(position).map_err(|_| TrackRepositoryError::InvalidData)?;
 
-    AlbumTrack::new(
+    Ok(AlbumTrack::new(
         decode_smallint(disc_number)?,
         decode_smallint(track_number)?,
         position,
     )
-    .map_err(|_| TrackRepositoryError::InvalidData)
+    .map_err(|_| TrackRepositoryError::InvalidData)?
+    .with_totals(decode_smallint(disc_total)?, decode_smallint(track_total)?))
 }
 pub(crate) fn encode_smallint(value: Option<u16>) -> Result<Option<i16>, TrackRepositoryError> {
     value
@@ -527,7 +556,7 @@ pub(crate) async fn tracks_by_ids(
 
     let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
         r#"
-        SELECT t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, t.isrc, t.genre,
+        SELECT {TRACK_COLUMNS},
                {ALBUM_SEARCH_COLUMNS}
         FROM tracks AS t
         LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
@@ -635,37 +664,30 @@ pub(crate) async fn hits_from_rows(
     rows: Vec<TrackSearchRow>,
     user: Option<Uuid>,
 ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
-    let track_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
+    let track_ids = rows.iter().map(|row| row.track.id).collect::<Vec<_>>();
     let mut credits = credits_for_tracks(pool, &track_ids).await?;
+    let mut genres = genres_for_tracks(pool, &track_ids).await?;
     let mut sources = sources_for_tracks(pool, &track_ids).await?;
     let states = track_states(pool, user, &track_ids).await?;
     let mut hits = Vec::with_capacity(rows.len());
 
     for row in rows {
-        let (
-            id,
-            title,
-            duration_ms,
-            recording_id,
-            isrc,
-            genre,
+        let TrackSearchRow {
+            track,
             album_id,
             album_title,
             album_artist_id,
             year,
             release_type,
             label,
-            group_id,
-            release_id,
-        ) = row;
+            musicbrainz_release_group_id: group_id,
+            musicbrainz_release_id: release_id,
+        } = row;
+        let id = track.id;
 
         let track = decode_track(
-            id,
-            title,
-            duration_ms,
-            recording_id,
-            isrc,
-            genre,
+            track,
+            genres.remove(&id).unwrap_or_default(),
             credits.remove(&id).unwrap_or_default(),
         )?;
         let album = match (album_id, album_title) {
@@ -702,9 +724,9 @@ pub(crate) async fn credits_for_tracks(
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>)>(
         r#"
-        SELECT credits.track_id, credits.name, artists.musicbrainz_artist_id
+        SELECT credits.track_id, credits.name, artists.musicbrainz_artist_id, credits.role
         FROM track_artist_credits AS credits
         LEFT JOIN artists ON artists.id = credits.artist_id
         WHERE credits.track_id = ANY($1)
@@ -717,11 +739,45 @@ pub(crate) async fn credits_for_tracks(
     .map_err(repository_error)?;
 
     let mut by_track: HashMap<Uuid, Vec<ArtistCredit>> = HashMap::new();
-    for (track_id, name, identifier) in rows {
-        let credit =
-            ArtistCredit::new(name, identifier).map_err(|_| TrackRepositoryError::InvalidData)?;
+    for (track_id, name, identifier, role) in rows {
+        let credit = match role {
+            Some(role) => ArtistCredit::new(name, identifier)
+                .map_err(|_| TrackRepositoryError::InvalidData)?
+                .with_role(CreditRole::parse(&role).ok_or(TrackRepositoryError::InvalidData)?),
+            None => ArtistCredit::new(name, identifier)
+                .map_err(|_| TrackRepositoryError::InvalidData)?,
+        };
 
         by_track.entry(track_id).or_default().push(credit);
+    }
+
+    Ok(by_track)
+}
+
+pub(crate) async fn genres_for_tracks(
+    pool: &PgPool,
+    track_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<String>>, TrackRepositoryError> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT track_id, name
+        FROM track_genres
+        WHERE track_id = ANY($1)
+        ORDER BY track_id, position
+        "#,
+    )
+    .bind(track_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(repository_error)?;
+
+    let mut by_track: HashMap<Uuid, Vec<String>> = HashMap::new();
+    for (track_id, name) in rows {
+        by_track.entry(track_id).or_default().push(name);
     }
 
     Ok(by_track)
@@ -781,13 +837,16 @@ pub(crate) async fn albums_for_tracks(
             Option<i16>,
             Option<i16>,
             i32,
+            Option<i16>,
+            Option<i16>,
             Option<String>,
         ),
     >(
         r#"
         SELECT mt.track_id, a.id, a.title, a.album_artist_id, a.year, a.release_type, a.label,
                a.musicbrainz_release_group_id, a.musicbrainz_release_id,
-               mt.disc_number, mt.track_number, mt.position, album_artist.name
+               mt.disc_number, mt.track_number, mt.position, mt.disc_total, mt.track_total,
+               album_artist.name
         FROM album_tracks AS mt
         JOIN albums AS a ON a.id = mt.album_id
         LEFT JOIN artists AS album_artist ON album_artist.id = a.album_artist_id
@@ -814,6 +873,8 @@ pub(crate) async fn albums_for_tracks(
         disc_number,
         track_number,
         position,
+        disc_total,
+        track_total,
         album_artist,
     ) in rows
     {
@@ -827,7 +888,8 @@ pub(crate) async fn albums_for_tracks(
             group_id,
             release_id,
         ))?;
-        let membership = decode_membership(disc_number, track_number, position)?;
+        let membership =
+            decode_membership(disc_number, track_number, position, disc_total, track_total)?;
 
         by_track
             .entry(track_id)

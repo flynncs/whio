@@ -5,9 +5,9 @@ use uuid::Uuid;
 
 use crate::features::music_library::{
     domain::{
-        Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, Artist,
-        ArtistCredit, ArtistId, ArtistSummary, GenreSummary, LOCAL_PROVIDER_ID, SearchTerms, Track,
-        TrackHit, TrackId, TrackListFilter, TrackListScope, TrackOrder, TrackPage, TrackView,
+        Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, Artist, ArtistId,
+        ArtistSummary, GenreSummary, LOCAL_PROVIDER_ID, SearchTerms, Track, TrackHit, TrackId,
+        TrackListFilter, TrackListScope, TrackOrder, TrackPage, TrackView,
     },
     storage::contracts::TrackRepositoryError,
 };
@@ -19,13 +19,13 @@ use super::decode::{
     album_states, album_summaries_by_ids, albums_for_tracks, attach_album_state,
     attach_album_states, attach_artist_states, credits_for_tracks, decode_album,
     decode_album_summary, decode_artist, decode_artist_summary, decode_membership, decode_track,
-    hits_from_rows, repository_error, sources_for_tracks, track_states,
+    genres_for_tracks, hits_from_rows, repository_error, sources_for_tracks, track_states,
 };
 use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_ENGAGED, ALBUM_OWNED,
-    ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS, ARTIST_ENGAGED, AlbumBrowseRow, AlbumRow, ArtistRow,
-    COUNT_ALBUM_ENGAGED, COUNT_ARTIST_ENGAGED, CREDIT_NORMALIZED, TRACK_ENGAGED, TRACK_OWNED,
-    TrackPageRow, TrackSearchRow,
+    ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS, ARTIST_ENGAGED, AlbumBrowseRow, AlbumEntryRow, AlbumRow,
+    ArtistRow, COUNT_ALBUM_ENGAGED, COUNT_ARTIST_ENGAGED, CREDIT_NORMALIZED, TRACK_COLUMNS,
+    TRACK_ENGAGED, TRACK_OWNED, TrackPageRow, TrackRecord, TrackSearchRow,
 };
 use crate::features::music_library::domain::{
     album_quality, normalize_for_matching, track_quality,
@@ -34,54 +34,26 @@ use crate::features::music_library::domain::{
 #[async_trait]
 impl LibraryRead for PgStore {
     async fn find_track(&self, track_id: &TrackId) -> Result<Option<Track>, TrackRepositoryError> {
-        let row: Option<(
-            String,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = sqlx::query_as(
-            r#"SELECT title, duration_ms, musicbrainz_recording_id, isrc, genre
-            FROM tracks
-            WHERE id = $1
-            "#,
-        )
+        let row = sqlx::query_as::<_, TrackRecord>(&format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks AS t WHERE t.id = $1"
+        ))
         .bind(track_id.as_uuid())
         .fetch_optional(&self.pool)
         .await
         .map_err(repository_error)?;
 
-        let Some((title, duration_ms, recording_id, isrc, genre)) = row else {
+        let Some(record) = row else {
             return Ok(None);
         };
 
-        let credits: Vec<(String, Option<String>)> = sqlx::query_as(
-            r#"SELECT credits.name, artists.musicbrainz_artist_id
-            FROM track_artist_credits AS credits
-            LEFT JOIN artists ON artists.id = credits.artist_id
-            WHERE credits.track_id = $1
-            ORDER BY credits.position
-            "#,
-        )
-        .bind(track_id.as_uuid())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(repository_error)?;
-
-        let artists = credits
-            .into_iter()
-            .map(|(name, identifier)| ArtistCredit::new(name, identifier))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| TrackRepositoryError::InvalidData)?;
+        let ids = [*track_id.as_uuid()];
+        let mut credits = credits_for_tracks(&self.pool, &ids).await?;
+        let mut genres = genres_for_tracks(&self.pool, &ids).await?;
 
         Ok(Some(decode_track(
-            *track_id.as_uuid(),
-            title,
-            duration_ms,
-            recording_id,
-            isrc,
-            genre,
-            artists,
+            record,
+            genres.remove(&ids[0]).unwrap_or_default(),
+            credits.remove(&ids[0]).unwrap_or_default(),
         )?))
     }
 
@@ -150,63 +122,43 @@ impl LibraryRead for PgStore {
         album_id: &AlbumId,
         user: Option<Uuid>,
     ) -> Result<Vec<AlbumEntry>, TrackRepositoryError> {
-        let rows = sqlx::query_as::<
-            _,
-            (
-                Uuid,
-                String,
-                Option<i64>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<i16>,
-                Option<i16>,
-                i32,
-            ),
-        >(
+        let rows = sqlx::query_as::<_, AlbumEntryRow>(&format!(
             r#"
-            SELECT t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, t.isrc, t.genre,
-                   mt.disc_number, mt.track_number, mt.position
+            SELECT {TRACK_COLUMNS},
+                   mt.disc_number, mt.track_number, mt.position, mt.disc_total, mt.track_total
             FROM album_tracks AS mt
             JOIN tracks AS t ON t.id = mt.track_id
             WHERE mt.album_id = $1
             ORDER BY COALESCE(mt.disc_number, 1), mt.track_number NULLS LAST,
                      mt.position, mt.track_id
-            "#,
-        )
+            "#
+        ))
         .bind(album_id.as_uuid())
         .fetch_all(&self.pool)
         .await
         .map_err(repository_error)?;
 
-        let track_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
+        let track_ids = rows.iter().map(|row| row.track.id).collect::<Vec<_>>();
         let mut credits = credits_for_tracks(&self.pool, &track_ids).await?;
+        let mut genres = genres_for_tracks(&self.pool, &track_ids).await?;
         let mut sources = sources_for_tracks(&self.pool, &track_ids).await?;
         let states = track_states(&self.pool, user, &track_ids).await?;
         let mut entries = Vec::with_capacity(rows.len());
 
-        for (
-            id,
-            title,
-            duration_ms,
-            recording_id,
-            isrc,
-            genre,
-            disc_number,
-            track_number,
-            position,
-        ) in rows
-        {
+        for row in rows {
+            let id = row.track.id;
             let track = decode_track(
-                id,
-                title,
-                duration_ms,
-                recording_id,
-                isrc,
-                genre,
+                row.track,
+                genres.remove(&id).unwrap_or_default(),
                 credits.remove(&id).unwrap_or_default(),
             )?;
-            let membership = decode_membership(disc_number, track_number, position)?;
+            let membership = decode_membership(
+                row.disc_number,
+                row.track_number,
+                row.position,
+                row.disc_total,
+                row.track_total,
+            )?;
             let state = states.get(&id).copied().unwrap_or_default();
             let sources = sources.remove(&id).unwrap_or_default();
 
@@ -305,9 +257,10 @@ impl LibraryRead for PgStore {
                   ))
               AND ($4::TEXT IS NULL OR EXISTS (
                       SELECT 1 FROM album_tracks AS genre_tracks
-                      JOIN tracks AS genre_track ON genre_track.id = genre_tracks.track_id
+                      JOIN track_genres AS genre ON genre.track_id = genre_tracks.track_id
                       WHERE genre_tracks.album_id = a.id
-                        AND lower(genre_track.genre) = lower($4)
+                        AND genre.name_normalized =
+                            lower(regexp_replace(normalize($4, NFC), '\s+', ' ', 'g'))
                   ))
               AND ($5::SMALLINT IS NULL OR a.year >= $5)
               AND ($6::SMALLINT IS NULL OR a.year <= $6)
@@ -390,9 +343,10 @@ impl LibraryRead for PgStore {
                   ))
               AND ($4::TEXT IS NULL OR EXISTS (
                       SELECT 1 FROM album_tracks AS genre_tracks
-                      JOIN tracks AS genre_track ON genre_track.id = genre_tracks.track_id
+                      JOIN track_genres AS genre ON genre.track_id = genre_tracks.track_id
                       WHERE genre_tracks.album_id = a.id
-                        AND lower(genre_track.genre) = lower($4)
+                        AND genre.name_normalized =
+                            lower(regexp_replace(normalize($4, NFC), '\s+', ' ', 'g'))
                   ))
               AND ($5::SMALLINT IS NULL OR a.year >= $5)
               AND ($6::SMALLINT IS NULL OR a.year <= $6)
@@ -441,7 +395,8 @@ impl LibraryRead for PgStore {
         let rows = sqlx::query_as::<_, TrackPageRow>(&format!(
             r#"
             SELECT page.id, page.title, page.duration_ms, page.musicbrainz_recording_id,
-                   page.isrc, page.genre, totals.n AS total
+                   page.isrc, page.recording_date, page.recording_date_precision,
+                   page.original_date, page.original_date_precision, totals.n AS total
             FROM (
                 SELECT COUNT(*)::BIGINT AS n
                 FROM tracks AS t
@@ -449,7 +404,7 @@ impl LibraryRead for PgStore {
                   AND ($5::TEXT IS NULL OR t.title_normalized LIKE $5)
             ) AS totals
             LEFT JOIN LATERAL (
-                SELECT t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, t.isrc, t.genre
+                SELECT {TRACK_COLUMNS}
                 FROM tracks AS t
                 WHERE {scope}
                   AND ($5::TEXT IS NULL OR t.title_normalized LIKE $5)
@@ -483,6 +438,7 @@ impl LibraryRead for PgStore {
 
         let ids = rows.iter().filter_map(|row| row.id).collect::<Vec<_>>();
         let mut credits = credits_for_tracks(&self.pool, &ids).await?;
+        let mut genres = genres_for_tracks(&self.pool, &ids).await?;
         let mut sources = sources_for_tracks(&self.pool, &ids).await?;
         let states = track_states(&self.pool, user, &ids).await?;
         let mut albums = albums_for_tracks(&self.pool, &ids).await?;
@@ -493,12 +449,18 @@ impl LibraryRead for PgStore {
                 return Err(TrackRepositoryError::InvalidData);
             };
             let track = decode_track(
-                id,
-                title,
-                row.duration_ms,
-                row.musicbrainz_recording_id,
-                row.isrc,
-                row.genre,
+                TrackRecord {
+                    id,
+                    title,
+                    duration_ms: row.duration_ms,
+                    musicbrainz_recording_id: row.musicbrainz_recording_id,
+                    isrc: row.isrc,
+                    recording_date: row.recording_date,
+                    recording_date_precision: row.recording_date_precision,
+                    original_date: row.original_date,
+                    original_date_precision: row.original_date_precision,
+                },
+                genres.remove(&id).unwrap_or_default(),
                 credits.remove(&id).unwrap_or_default(),
             )?;
             let (album, membership, album_artist) = match albums.remove(&id) {
@@ -541,7 +503,7 @@ impl LibraryRead for PgStore {
         let contains = format!("%{}%", escape_like(&needle));
         let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
             r#"
-            SELECT t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, t.isrc, t.genre,
+            SELECT {TRACK_COLUMNS},
                    {ALBUM_SEARCH_COLUMNS}
             FROM tracks AS t
             LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
@@ -760,7 +722,7 @@ impl LibraryRead for PgStore {
 
         let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
             r#"
-            SELECT t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, t.isrc, t.genre,
+            SELECT {TRACK_COLUMNS},
                    {ALBUM_SEARCH_COLUMNS}
             FROM tracks AS t
             LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
@@ -796,7 +758,7 @@ impl LibraryRead for PgStore {
 
         let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
             r#"
-            SELECT t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, t.isrc, t.genre,
+            SELECT {TRACK_COLUMNS},
                    {ALBUM_SEARCH_COLUMNS}
             FROM tracks AS t
             LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
@@ -829,12 +791,12 @@ impl LibraryRead for PgStore {
     async fn list_genres(&self) -> Result<Vec<GenreSummary>, TrackRepositoryError> {
         let rows = sqlx::query_as::<_, (String, i64, i64)>(
             r#"
-            SELECT MIN(t.genre), COUNT(*)::BIGINT, COUNT(DISTINCT mt.album_id)::BIGINT
-            FROM tracks AS t
-            LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
-            WHERE t.genre IS NOT NULL AND btrim(t.genre) <> ''
-            GROUP BY lower(t.genre)
-            ORDER BY lower(t.genre), MIN(t.genre)
+            SELECT MIN(genre.name), COUNT(DISTINCT genre.track_id)::BIGINT,
+                   COUNT(DISTINCT mt.album_id)::BIGINT
+            FROM track_genres AS genre
+            LEFT JOIN album_tracks AS mt ON mt.track_id = genre.track_id
+            GROUP BY genre.name_normalized
+            ORDER BY genre.name_normalized, MIN(genre.name)
             "#,
         )
         .fetch_all(&self.pool)

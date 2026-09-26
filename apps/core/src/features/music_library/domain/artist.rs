@@ -139,6 +139,61 @@ impl ArtistSummary {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CreditRole {
+    Arranger,
+    Composer,
+    Conductor,
+    Djmixer,
+    Director,
+    Engineer,
+    Lyricist,
+    Mixer,
+    Performer,
+    Producer,
+    Remixer,
+}
+
+impl CreditRole {
+    pub const ALL: [CreditRole; 11] = [
+        CreditRole::Arranger,
+        CreditRole::Composer,
+        CreditRole::Conductor,
+        CreditRole::Djmixer,
+        CreditRole::Director,
+        CreditRole::Engineer,
+        CreditRole::Lyricist,
+        CreditRole::Mixer,
+        CreditRole::Performer,
+        CreditRole::Producer,
+        CreditRole::Remixer,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CreditRole::Arranger => "arranger",
+            CreditRole::Composer => "composer",
+            CreditRole::Conductor => "conductor",
+            CreditRole::Djmixer => "djmixer",
+            CreditRole::Director => "director",
+            CreditRole::Engineer => "engineer",
+            CreditRole::Lyricist => "lyricist",
+            CreditRole::Mixer => "mixer",
+            CreditRole::Performer => "performer",
+            CreditRole::Producer => "producer",
+            CreditRole::Remixer => "remixer",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+
+        Self::ALL
+            .into_iter()
+            .find(|role| role.as_str().eq_ignore_ascii_case(value))
+    }
+}
+
 /// a name as a track or album credits it, with the identifier when the source
 /// supplied one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -146,6 +201,7 @@ pub struct ArtistCredit {
     name: String,
     musicbrainz_artist_id: Option<String>,
     provider: Option<SourceIdentity>,
+    role: Option<CreditRole>,
 }
 
 impl ArtistCredit {
@@ -161,11 +217,17 @@ impl ArtistCredit {
                 MAX_IDENTIFIER,
             )?,
             provider: None,
+            role: None,
         })
     }
 
     pub fn with_provider(mut self, provider: Option<SourceIdentity>) -> Self {
         self.provider = provider;
+        self
+    }
+
+    pub fn with_role(mut self, role: CreditRole) -> Self {
+        self.role = Some(role);
         self
     }
 
@@ -180,6 +242,10 @@ impl ArtistCredit {
     pub fn provider(&self) -> Option<&SourceIdentity> {
         self.provider.as_ref()
     }
+
+    pub fn role(&self) -> Option<CreditRole> {
+        self.role
+    }
 }
 
 impl From<&Artist> for ArtistCredit {
@@ -188,6 +254,7 @@ impl From<&Artist> for ArtistCredit {
             name: artist.name.clone(),
             musicbrainz_artist_id: artist.musicbrainz_artist_id.clone(),
             provider: None,
+            role: None,
         }
     }
 }
@@ -218,5 +285,31 @@ mod tests {
     fn credit_keeps_a_blank_identifier_as_absent() {
         let credit = ArtistCredit::new("Daft Punk".to_owned(), Some("  ".to_owned())).unwrap();
         assert_eq!(credit.musicbrainz_artist_id(), None);
+    }
+
+    #[test]
+    fn a_primary_credit_carries_no_role() {
+        let credit = ArtistCredit::new("Daft Punk".to_owned(), None).unwrap();
+        assert_eq!(credit.role(), None);
+
+        let composed = credit.with_role(CreditRole::Composer);
+        assert_eq!(composed.role(), Some(CreditRole::Composer));
+    }
+
+    #[test]
+    fn credit_roles_round_trip_through_the_stored_form() {
+        for role in CreditRole::ALL {
+            assert_eq!(CreditRole::parse(role.as_str()), Some(role));
+
+            let credit = ArtistCredit::new("A".to_owned(), None)
+                .unwrap()
+                .with_role(role);
+            assert_eq!(credit.role().unwrap().as_str(), role.as_str());
+        }
+
+        assert_eq!(CreditRole::parse(" Composer "), Some(CreditRole::Composer));
+        assert_eq!(CreditRole::parse("djmixer"), Some(CreditRole::Djmixer));
+        assert_eq!(CreditRole::parse("other"), None);
+        assert_eq!(CreditRole::parse(""), None);
     }
 }

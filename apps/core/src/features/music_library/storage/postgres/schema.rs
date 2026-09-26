@@ -29,22 +29,43 @@ pub(crate) struct AlbumBrowseRow {
     pub(crate) track_count: i64,
     pub(crate) duration_ms: i64,
 }
-pub(crate) type TrackSearchRow = (
-    Uuid,
-    String,
-    Option<i64>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<Uuid>,
-    Option<String>,
-    Option<Uuid>,
-    Option<i16>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
+#[derive(sqlx::FromRow)]
+pub(crate) struct TrackRecord {
+    pub(crate) id: Uuid,
+    pub(crate) title: String,
+    pub(crate) duration_ms: Option<i64>,
+    pub(crate) musicbrainz_recording_id: Option<String>,
+    pub(crate) isrc: Option<String>,
+    pub(crate) recording_date: Option<chrono::NaiveDate>,
+    pub(crate) recording_date_precision: Option<String>,
+    pub(crate) original_date: Option<chrono::NaiveDate>,
+    pub(crate) original_date_precision: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct TrackSearchRow {
+    #[sqlx(flatten)]
+    pub(crate) track: TrackRecord,
+    pub(crate) album_id: Option<Uuid>,
+    pub(crate) album_title: Option<String>,
+    pub(crate) album_artist_id: Option<Uuid>,
+    pub(crate) year: Option<i16>,
+    pub(crate) release_type: Option<String>,
+    pub(crate) label: Option<String>,
+    pub(crate) musicbrainz_release_group_id: Option<String>,
+    pub(crate) musicbrainz_release_id: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct AlbumEntryRow {
+    #[sqlx(flatten)]
+    pub(crate) track: TrackRecord,
+    pub(crate) disc_number: Option<i16>,
+    pub(crate) track_number: Option<i16>,
+    pub(crate) position: i32,
+    pub(crate) disc_total: Option<i16>,
+    pub(crate) track_total: Option<i16>,
+}
 
 #[derive(sqlx::FromRow)]
 pub(crate) struct TrackPageRow {
@@ -53,15 +74,23 @@ pub(crate) struct TrackPageRow {
     pub(crate) duration_ms: Option<i64>,
     pub(crate) musicbrainz_recording_id: Option<String>,
     pub(crate) isrc: Option<String>,
-    pub(crate) genre: Option<String>,
+    pub(crate) recording_date: Option<chrono::NaiveDate>,
+    pub(crate) recording_date_precision: Option<String>,
+    pub(crate) original_date: Option<chrono::NaiveDate>,
+    pub(crate) original_date_precision: Option<String>,
     pub(crate) total: i64,
 }
 
 pub(crate) const ARTIST_COLUMNS: &str = "id, name, sort_name, musicbrainz_artist_id";
+pub(crate) const TRACK_COLUMNS: &str = "t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, \
+     t.isrc, t.recording_date, t.recording_date_precision, t.original_date, \
+     t.original_date_precision";
 pub(crate) const ALBUM_COLUMNS: &str = "id, title, album_artist_id, year, release_type, label, \
      musicbrainz_release_group_id, musicbrainz_release_id";
-pub(crate) const ALBUM_SEARCH_COLUMNS: &str = "a.id, a.title, a.album_artist_id, a.year, a.release_type, \
-     a.label, a.musicbrainz_release_group_id, a.musicbrainz_release_id";
+pub(crate) const ALBUM_SEARCH_COLUMNS: &str = "a.id AS album_id, a.title AS album_title, \
+     a.album_artist_id AS album_artist_id, a.year AS year, a.release_type AS release_type, \
+     a.label AS label, a.musicbrainz_release_group_id AS musicbrainz_release_group_id, \
+     a.musicbrainz_release_id AS musicbrainz_release_id";
 pub(crate) const ALBUM_BROWSE_COLUMNS: &str = "a.id, a.title, a.album_artist_id, a.year, a.release_type, \
      a.label, a.musicbrainz_release_group_id, a.musicbrainz_release_id, a.created_at, \
      ar.id AS artist_id, ar.name AS artist_name, ar.sort_name AS artist_sort_name, \

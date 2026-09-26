@@ -72,8 +72,7 @@ async fn seeded_app(pool: PgPool) -> Seeded {
                 Some(1_000),
             )
             .unwrap()
-            .with_genre(Some("Rock".to_owned()))
-            .unwrap(),
+            .with_genres(vec!["Rock".to_owned()]),
         )
         .await
         .unwrap();

@@ -1728,9 +1728,7 @@ async fn per_user_state_and_genres_round_trip(pool: PgPool) {
     let track = repository
         .get_or_create(
             local_source("path-a"),
-            metadata("First", &["Daft Punk"], Some(1_000))
-                .with_genre(Some("Rock".to_owned()))
-                .unwrap(),
+            metadata("First", &["Daft Punk"], Some(1_000)).with_genres(vec!["Rock".to_owned()]),
         )
         .await
         .unwrap();

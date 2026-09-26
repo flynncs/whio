@@ -14,6 +14,7 @@ use super::{
 const MAX_TITLE: usize = 500;
 const MAX_TEXT: usize = 500;
 const MAX_IDENTIFIER: usize = 64;
+const MAX_COUNTRY: usize = 120;
 const MIN_YEAR: i64 = 1000;
 const MAX_YEAR: i64 = 3000;
 
@@ -131,6 +132,113 @@ impl Album {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DatePrecision {
+    Year,
+    Month,
+    Day,
+}
+
+impl DatePrecision {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DatePrecision::Year => "year",
+            DatePrecision::Month => "month",
+            DatePrecision::Day => "day",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "year" => Some(DatePrecision::Year),
+            "month" => Some(DatePrecision::Month),
+            "day" => Some(DatePrecision::Day),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PartialDate {
+    date: chrono::NaiveDate,
+    precision: DatePrecision,
+}
+
+impl PartialDate {
+    pub fn new(date: chrono::NaiveDate, precision: DatePrecision) -> Self {
+        Self { date, precision }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let head = value.trim().split('T').next()?;
+        let parts = head.split(['-', '/']).collect::<Vec<_>>();
+
+        let (year, month, day) = match parts.as_slice() {
+            [year] => (component(year, 4)?, None, None),
+            [year, month] => (component(year, 4)?, Some(component(month, 2)?), None),
+            [year, month, day] => (
+                component(year, 4)?,
+                Some(component(month, 2)?),
+                Some(component(day, 2)?),
+            ),
+            _ => return None,
+        };
+
+        if !(MIN_YEAR..=MAX_YEAR).contains(&i64::from(year)) {
+            return None;
+        }
+        let year = i32::try_from(year).ok()?;
+
+        let (date, precision) = match (month, day) {
+            (None, _) => (
+                chrono::NaiveDate::from_ymd_opt(year, 1, 1)?,
+                DatePrecision::Year,
+            ),
+            (Some(month), None) => (
+                chrono::NaiveDate::from_ymd_opt(year, month, 1)?,
+                DatePrecision::Month,
+            ),
+            (Some(month), Some(day)) => (
+                chrono::NaiveDate::from_ymd_opt(year, month, day)?,
+                DatePrecision::Day,
+            ),
+        };
+
+        Some(Self { date, precision })
+    }
+
+    pub fn as_str(&self) -> String {
+        match self.precision {
+            DatePrecision::Year => self.date.format("%Y").to_string(),
+            DatePrecision::Month => self.date.format("%Y-%m").to_string(),
+            DatePrecision::Day => self.date.format("%Y-%m-%d").to_string(),
+        }
+    }
+
+    pub fn date(&self) -> chrono::NaiveDate {
+        self.date
+    }
+
+    pub fn precision(&self) -> DatePrecision {
+        self.precision
+    }
+
+    pub fn year(&self) -> i32 {
+        chrono::Datelike::year(&self.date)
+    }
+}
+
+fn component(value: &str, max_digits: usize) -> Option<u32> {
+    if value.is_empty()
+        || value.len() > max_digits
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    value.parse().ok()
+}
+
 /// what a writer knows about an album before the repository decides whether it
 /// already exists.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -142,6 +250,9 @@ pub struct AlbumMetadata {
     label: Option<String>,
     musicbrainz_release_group_id: Option<String>,
     musicbrainz_release_id: Option<String>,
+    release_date: Option<PartialDate>,
+    release_country: Option<String>,
+    compilation: Option<bool>,
     provider: Option<SourceIdentity>,
 }
 
@@ -155,6 +266,9 @@ impl AlbumMetadata {
             label: None,
             musicbrainz_release_group_id: None,
             musicbrainz_release_id: None,
+            release_date: None,
+            release_country: None,
+            compilation: None,
             provider: None,
         })
     }
@@ -209,6 +323,23 @@ impl AlbumMetadata {
         Ok(self)
     }
 
+    pub fn with_release_date(mut self, release_date: Option<PartialDate>) -> Self {
+        self.release_date = release_date;
+        self
+    }
+
+    pub fn with_release_country(mut self, release_country: Option<String>) -> Self {
+        self.release_country = optional("release_country", release_country, MAX_COUNTRY)
+            .ok()
+            .flatten();
+        self
+    }
+
+    pub fn with_compilation(mut self, compilation: Option<bool>) -> Self {
+        self.compilation = compilation;
+        self
+    }
+
     pub fn title(&self) -> &str {
         &self.title
     }
@@ -236,6 +367,18 @@ impl AlbumMetadata {
     pub fn musicbrainz_release_id(&self) -> Option<&str> {
         self.musicbrainz_release_id.as_deref()
     }
+
+    pub fn release_date(&self) -> Option<PartialDate> {
+        self.release_date
+    }
+
+    pub fn release_country(&self) -> Option<&str> {
+        self.release_country.as_deref()
+    }
+
+    pub fn compilation(&self) -> Option<bool> {
+        self.compilation
+    }
 }
 
 /// a track's place on an album.
@@ -244,6 +387,8 @@ pub struct AlbumTrack {
     disc_number: Option<u16>,
     track_number: Option<u16>,
     position: u32,
+    disc_total: Option<u16>,
+    track_total: Option<u16>,
 }
 
 impl AlbumTrack {
@@ -266,6 +411,8 @@ impl AlbumTrack {
             disc_number,
             track_number,
             position,
+            disc_total: None,
+            track_total: None,
         })
     }
 
@@ -274,7 +421,15 @@ impl AlbumTrack {
             disc_number: None,
             track_number: None,
             position: 0,
+            disc_total: None,
+            track_total: None,
         }
+    }
+
+    pub fn with_totals(mut self, disc_total: Option<u16>, track_total: Option<u16>) -> Self {
+        self.disc_total = disc_total.filter(|total| *total >= 1);
+        self.track_total = track_total.filter(|total| *total >= 1);
+        self
     }
 
     pub fn disc_number(&self) -> Option<u16> {
@@ -287,6 +442,14 @@ impl AlbumTrack {
 
     pub fn position(&self) -> u32 {
         self.position
+    }
+
+    pub fn disc_total(&self) -> Option<u16> {
+        self.disc_total
+    }
+
+    pub fn track_total(&self) -> Option<u16> {
+        self.track_total
     }
 }
 
@@ -548,5 +711,121 @@ mod tests {
             })
         ));
         assert_eq!(AlbumTrack::new(None, Some(3), 2).unwrap().position(), 2);
+    }
+
+    #[test]
+    fn a_partial_date_states_only_what_the_tag_text_did() {
+        let year = PartialDate::parse("1987").unwrap();
+        assert_eq!(year.precision(), DatePrecision::Year);
+        assert_eq!(
+            year.date(),
+            chrono::NaiveDate::from_ymd_opt(1987, 1, 1).unwrap()
+        );
+        assert_eq!(year.year(), 1987);
+        assert_eq!(year.as_str(), "1987");
+
+        let month = PartialDate::parse("1987-06").unwrap();
+        assert_eq!(month.precision(), DatePrecision::Month);
+        assert_eq!(
+            month.date(),
+            chrono::NaiveDate::from_ymd_opt(1987, 6, 1).unwrap()
+        );
+        assert_eq!(month.as_str(), "1987-06");
+
+        let day = PartialDate::parse("1987-06-23").unwrap();
+        assert_eq!(day.precision(), DatePrecision::Day);
+        assert_eq!(day.as_str(), "1987-06-23");
+
+        let stamped = PartialDate::parse("1987-06-23T10:00:00").unwrap();
+        assert_eq!(stamped.precision(), DatePrecision::Day);
+        assert_eq!(stamped.as_str(), "1987-06-23");
+    }
+
+    #[test]
+    fn a_year_only_tag_never_gains_a_day_claim() {
+        for text in ["1987", "1987", " 1987 "] {
+            assert_eq!(
+                PartialDate::parse(text).unwrap().precision(),
+                DatePrecision::Year
+            );
+        }
+    }
+
+    #[test]
+    fn an_unparsable_date_is_absence() {
+        for text in [
+            "",
+            "  ",
+            "not a date",
+            "87",
+            "1987-13",
+            "1987-02-30",
+            "1987-00-00",
+            "1987-06-23-01",
+            "999",
+            "3001",
+        ] {
+            assert_eq!(PartialDate::parse(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn date_precisions_round_trip_through_their_stored_form() {
+        for (precision, stored) in [
+            (DatePrecision::Year, "year"),
+            (DatePrecision::Month, "month"),
+            (DatePrecision::Day, "day"),
+        ] {
+            assert_eq!(precision.as_str(), stored);
+            assert_eq!(DatePrecision::parse(stored), Some(precision));
+        }
+
+        assert_eq!(DatePrecision::parse("century"), None);
+    }
+
+    #[test]
+    fn album_metadata_keeps_the_new_release_facts_and_drops_an_over_long_country() {
+        let metadata = AlbumMetadata::new("Discovery".to_owned())
+            .unwrap()
+            .with_release_date(PartialDate::parse("2001-03"))
+            .with_release_country(Some("  US ".to_owned()))
+            .with_compilation(Some(true));
+
+        assert_eq!(metadata.release_date().unwrap().as_str(), "2001-03");
+        assert_eq!(metadata.release_country(), Some("US"));
+        assert_eq!(metadata.compilation(), Some(true));
+
+        let absent = AlbumMetadata::new("Discovery".to_owned())
+            .unwrap()
+            .with_release_date(None)
+            .with_release_country(None)
+            .with_compilation(None);
+        assert_eq!(absent.release_date(), None);
+        assert_eq!(absent.release_country(), None);
+        assert_eq!(absent.compilation(), None);
+
+        let over_long = AlbumMetadata::new("Discovery".to_owned())
+            .unwrap()
+            .with_release_country(Some("x".repeat(121)));
+        assert_eq!(over_long.release_country(), None);
+    }
+
+    #[test]
+    fn membership_totals_keep_only_stated_values() {
+        let placed = AlbumTrack::new(Some(1), Some(3), 2)
+            .unwrap()
+            .with_totals(Some(2), Some(12));
+        assert_eq!(placed.disc_total(), Some(2));
+        assert_eq!(placed.track_total(), Some(12));
+
+        let absent = AlbumTrack::new(Some(1), Some(3), 2).unwrap();
+        assert_eq!(absent.disc_total(), None);
+        assert_eq!(absent.track_total(), None);
+
+        let zero = AlbumTrack::new(Some(1), Some(3), 2)
+            .unwrap()
+            .with_totals(Some(0), Some(0));
+        assert_eq!(zero.disc_total(), None);
+        assert_eq!(zero.track_total(), None);
     }
 }

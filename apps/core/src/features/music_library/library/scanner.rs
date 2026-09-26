@@ -21,7 +21,7 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 
 pub const LOCAL_PROVIDER: &str = "local";
 
-const SOURCE_FACTS_VERSION: u16 = 1;
+const SOURCE_FACTS_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
@@ -227,15 +227,19 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
             };
             let membership = album_track(&tags);
             let acoustid_fingerprint = tags.acoustid_fingerprint.clone();
-            let credits = track_credits(&tags);
+            let (primary, roles) = track_credits(&tags);
 
-            let Ok(metadata) = TrackMetadata::new(tags.title, credits, tags.duration_ms)
+            let Ok(metadata) = TrackMetadata::new(tags.title, primary, tags.duration_ms)
                 .and_then(|metadata| metadata.with_recording_id(tags.recording_id))
                 .and_then(|metadata| metadata.with_isrc(tags.isrc))
-                .and_then(|metadata| metadata.with_genre(tags.genre))
             else {
                 return Prepared::Untagged;
             };
+            let metadata = metadata
+                .with_genres(tags.genres)
+                .with_credits(roles)
+                .with_recording_date(tags.recording_date)
+                .with_original_date(tags.original_date);
 
             facts.acoustid_fingerprint = acoustid_fingerprint;
             facts.content_type = tags
@@ -283,6 +287,12 @@ fn album_metadata(tags: &super::TrackTags) -> Result<Option<AlbumMetadata>, ()> 
         .and_then(|album| album.with_label(tags.label.clone()))
         .and_then(|album| album.with_release_group_id(tags.release_group_id.clone()))
         .and_then(|album| album.with_release_id(tags.release_id.clone()))
+        .map(|album| {
+            album
+                .with_release_date(tags.release_date)
+                .with_release_country(tags.country.clone())
+                .with_compilation(tags.compilation)
+        })
         .map(Some)
         .map_err(|_| ())
 }
@@ -298,26 +308,43 @@ fn album_track(tags: &super::TrackTags) -> Option<AlbumTrack> {
         .filter(|number| *number >= 1);
     let position = track_number.map_or(0, |number| u32::from(number) - 1);
 
-    AlbumTrack::new(disc_number, track_number, position).ok()
+    AlbumTrack::new(disc_number, track_number, position)
+        .ok()
+        .map(|membership| membership.with_totals(total(tags.disc_total), total(tags.track_total)))
 }
 
-fn track_credits(tags: &super::TrackTags) -> Vec<ArtistCredit> {
-    if !tags.artists.is_empty() {
-        return tags
-            .artists
+fn total(value: Option<u32>) -> Option<u16> {
+    value.and_then(|value| u16::try_from(value).ok())
+}
+
+fn track_credits(tags: &super::TrackTags) -> (Vec<ArtistCredit>, Vec<ArtistCredit>) {
+    let primary = if !tags.artists.is_empty() {
+        tags.artists
             .iter()
             .enumerate()
             .filter_map(|(index, name)| {
                 ArtistCredit::new(name.clone(), tags.artist_ids.get(index).cloned()).ok()
             })
-            .collect();
-    }
+            .collect()
+    } else {
+        tags.album_artist
+            .as_ref()
+            .and_then(|name| ArtistCredit::new(name.clone(), tags.album_artist_id.clone()).ok())
+            .into_iter()
+            .collect()
+    };
 
-    tags.album_artist
-        .as_ref()
-        .and_then(|name| ArtistCredit::new(name.clone(), tags.album_artist_id.clone()).ok())
-        .into_iter()
-        .collect()
+    let roles = tags
+        .credits
+        .iter()
+        .filter_map(|credit| {
+            ArtistCredit::new(credit.name.clone(), credit.musicbrainz_artist_id.clone())
+                .ok()
+                .map(|artist| artist.with_role(credit.role))
+        })
+        .collect();
+
+    (primary, roles)
 }
 
 async fn known_paths(
@@ -387,11 +414,17 @@ fn is_audio(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "postgres-integration")]
+    use super::super::tags::tagged_flac;
     use super::*;
     #[cfg(feature = "postgres-integration")]
     use crate::features::music_library::{
         storage::contracts::LibraryRead, storage::postgres::PostgresTrackRepository,
     };
+    #[cfg(feature = "postgres-integration")]
+    use lofty::prelude::ItemKey;
+    #[cfg(feature = "postgres-integration")]
+    use uuid::Uuid;
 
     fn temp_root(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("whio-{label}-{}", uuid::Uuid::now_v7()));
@@ -670,7 +703,7 @@ mod tests {
         assert_eq!(tags.track_number, Some(3));
         assert_eq!(tags.disc_number, Some(1));
         assert_eq!(tags.year, Some(2024));
-        assert_eq!(tags.genre.as_deref(), Some("Test"));
+        assert_eq!(tags.genres, vec!["Test".to_owned()]);
         assert_eq!(
             tags.recording_id.as_deref(),
             Some("11111111-2222-3333-4444-555555555555")
@@ -845,6 +878,728 @@ mod tests {
             }
             _ => panic!("expected a prepared track"),
         }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn store(pool: &sqlx::PgPool) -> (Arc<dyn CatalogueWrite>, Arc<dyn SourceLookup>) {
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+
+        (catalogue, sources)
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn track_id_for(pool: &sqlx::PgPool, relative: &str) -> Uuid {
+        sqlx::query_scalar("SELECT track_id FROM track_sources WHERE external_id = $1")
+            .bind(relative)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn stored_genres(pool: &sqlx::PgPool, track_id: Uuid) -> Vec<(i32, String)> {
+        sqlx::query_as(
+            "SELECT position, name FROM track_genres WHERE track_id = $1 ORDER BY position",
+        )
+        .bind(track_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn genre_projection(pool: &sqlx::PgPool, track_id: Uuid) -> Option<String> {
+        sqlx::query_scalar("SELECT genre FROM tracks WHERE id = $1")
+            .bind(track_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn stored_credits(
+        pool: &sqlx::PgPool,
+        track_id: Uuid,
+    ) -> Vec<(i32, String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT position, name, role FROM track_artist_credits WHERE track_id = $1 \
+             ORDER BY position",
+        )
+        .bind(track_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn stored_dates(
+        pool: &sqlx::PgPool,
+        track_id: Uuid,
+    ) -> (
+        Option<chrono::NaiveDate>,
+        Option<String>,
+        Option<chrono::NaiveDate>,
+        Option<String>,
+    ) {
+        sqlx::query_as(
+            "SELECT recording_date, recording_date_precision, original_date, \
+             original_date_precision FROM tracks WHERE id = $1",
+        )
+        .bind(track_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn album_facts(
+        pool: &sqlx::PgPool,
+        album_id: Uuid,
+    ) -> (
+        Option<chrono::NaiveDate>,
+        Option<String>,
+        Option<String>,
+        Option<bool>,
+        Option<i16>,
+    ) {
+        sqlx::query_as(
+            "SELECT release_date, release_date_precision, release_country, compilation, year \
+             FROM albums WHERE id = $1",
+        )
+        .bind(album_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn album_id_for(pool: &sqlx::PgPool, track_id: Uuid) -> Uuid {
+        sqlx::query_scalar("SELECT album_id FROM album_tracks WHERE track_id = $1")
+            .bind(track_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn multi_valued_genres_round_trip(pool: sqlx::PgPool) {
+        let root = temp_root("multi-genre");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::Genre, "Rock"),
+                (ItemKey::Genre, "Pop"),
+                (ItemKey::Genre, "Jazz"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(report.indexed, 1);
+
+        let track_id = track_id_for(&pool, "a.flac").await;
+        assert_eq!(
+            stored_genres(&pool, track_id).await,
+            vec![
+                (0, "Rock".to_owned()),
+                (1, "Pop".to_owned()),
+                (2, "Jazz".to_owned())
+            ]
+        );
+        assert_eq!(
+            genre_projection(&pool, track_id).await.as_deref(),
+            Some("Rock")
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn retag_replaces_the_genre_set(pool: sqlx::PgPool) {
+        let root = temp_root("retag");
+        let file = root.join("a.flac");
+        tagged_flac(&file, &[(ItemKey::Genre, "Rock"), (ItemKey::Genre, "Pop")]);
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        let track_id = track_id_for(&pool, "a.flac").await;
+        assert_eq!(stored_genres(&pool, track_id).await.len(), 2);
+
+        tagged_flac(&file, &[(ItemKey::Genre, "Jazz")]);
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_genres(&pool, track_id).await,
+            vec![(0, "Jazz".to_owned())]
+        );
+        assert_eq!(
+            genre_projection(&pool, track_id).await.as_deref(),
+            Some("Jazz")
+        );
+
+        tagged_flac(&file, &[]);
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert!(stored_genres(&pool, track_id).await.is_empty());
+        assert_eq!(genre_projection(&pool, track_id).await, None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn duplicate_normalised_genres_collapse(pool: sqlx::PgPool) {
+        let root = temp_root("genre-dedupe");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::Genre, "Rock"),
+                (ItemKey::Genre, "rock "),
+                (ItemKey::Genre, "ROCK"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        let track_id = track_id_for(&pool, "a.flac").await;
+
+        assert_eq!(
+            stored_genres(&pool, track_id).await,
+            vec![(0, "Rock".to_owned())]
+        );
+        assert_eq!(
+            genre_projection(&pool, track_id).await.as_deref(),
+            Some("Rock")
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn credit_roles_are_stored_and_ordered(pool: sqlx::PgPool) {
+        let root = temp_root("credit-roles");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::TrackArtist, "Primary One"),
+                (ItemKey::TrackArtist, "Primary Two"),
+                (ItemKey::Composer, "Clara Schumann"),
+                (ItemKey::Performer, "Bill Evans (piano)"),
+                (ItemKey::Composer, "Bill Evans"),
+                (ItemKey::Producer, "Bill Evans"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        let track_id = track_id_for(&pool, "a.flac").await;
+
+        assert_eq!(
+            stored_credits(&pool, track_id).await,
+            vec![
+                (0, "Primary One".to_owned(), None),
+                (1, "Primary Two".to_owned(), None),
+                (2, "Clara Schumann".to_owned(), Some("composer".to_owned())),
+                (3, "Bill Evans".to_owned(), Some("composer".to_owned())),
+                (4, "Bill Evans".to_owned(), Some("performer".to_owned())),
+                (5, "Bill Evans".to_owned(), Some("producer".to_owned())),
+            ]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn unknown_role_tags_are_not_mapped(pool: sqlx::PgPool) {
+        let root = temp_root("unknown-role");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::TrackArtist, "Fixture Artist"),
+                (ItemKey::Unknown("OTHERROLE".to_owned()), "Nobody"),
+                (ItemKey::Unknown("MOOD".to_owned()), "chill"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        let track_id = track_id_for(&pool, "a.flac").await;
+
+        assert_eq!(
+            stored_credits(&pool, track_id).await,
+            vec![(0, "Fixture Artist".to_owned(), None)]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn dates_keep_their_precision(pool: sqlx::PgPool) {
+        let root = temp_root("dates");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Dated Album"),
+                (ItemKey::RecordingDate, "1987"),
+                (ItemKey::OriginalReleaseDate, "1979-05"),
+                (ItemKey::ReleaseDate, "2024-05-06"),
+            ],
+        );
+        tagged_flac(
+            &root.join("b.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Undated Album"),
+                (ItemKey::RecordingDate, "sometime"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        let dated = track_id_for(&pool, "a.flac").await;
+        let (recording, recording_precision, original, original_precision) =
+            stored_dates(&pool, dated).await;
+        assert_eq!(
+            recording,
+            Some(chrono::NaiveDate::from_ymd_opt(1987, 1, 1).unwrap())
+        );
+        assert_eq!(
+            recording_precision.as_deref(),
+            Some("year"),
+            "a year-only tag must not claim a day"
+        );
+        assert_eq!(
+            original,
+            Some(chrono::NaiveDate::from_ymd_opt(1979, 5, 1).unwrap())
+        );
+        assert_eq!(original_precision.as_deref(), Some("month"));
+
+        let album = album_id_for(&pool, dated).await;
+        let (release_date, release_precision, ..) = album_facts(&pool, album).await;
+        assert_eq!(
+            release_date,
+            Some(chrono::NaiveDate::from_ymd_opt(2024, 5, 6).unwrap())
+        );
+        assert_eq!(release_precision.as_deref(), Some("day"));
+
+        let undated = track_id_for(&pool, "b.flac").await;
+        assert_eq!(
+            stored_dates(&pool, undated).await,
+            (None, None, None, None),
+            "an unparsable date is absence, not a fabricated day"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn album_year_agrees_with_release_date(pool: sqlx::PgPool) {
+        let root = temp_root("album-year");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Dated Album"),
+                (ItemKey::Year, "2024"),
+                (ItemKey::ReleaseDate, "2024-05-06"),
+            ],
+        );
+        tagged_flac(
+            &root.join("b.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Year Only Album"),
+                (ItemKey::Year, "2019"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        let dated = album_id_for(&pool, track_id_for(&pool, "a.flac").await).await;
+        let (release_date, _, _, _, year) = album_facts(&pool, dated).await;
+        assert_eq!(
+            release_date,
+            Some(chrono::NaiveDate::from_ymd_opt(2024, 5, 6).unwrap())
+        );
+        assert_eq!(year, Some(2024));
+
+        let year_only = album_id_for(&pool, track_id_for(&pool, "b.flac").await).await;
+        let (release_date, precision, _, _, year) = album_facts(&pool, year_only).await;
+        assert_eq!(year, Some(2019));
+        assert_eq!(release_date, None);
+        assert_eq!(precision, None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn membership_totals_round_trip(pool: sqlx::PgPool) {
+        let root = temp_root("totals");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Totalled Album"),
+                (ItemKey::TrackNumber, "3"),
+                (ItemKey::DiscNumber, "1"),
+                (ItemKey::TrackTotal, "12"),
+                (ItemKey::DiscTotal, "2"),
+            ],
+        );
+        tagged_flac(
+            &root.join("b.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Totalled Album"),
+                (ItemKey::TrackNumber, "4"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        let album = album_id_for(&pool, track_id_for(&pool, "a.flac").await).await;
+        let entries = (store.as_ref() as &dyn LibraryRead)
+            .find_album_entries(
+                &crate::features::music_library::domain::AlbumId::from_uuid(album),
+                None,
+            )
+            .await
+            .unwrap();
+        let totalled = entries
+            .iter()
+            .find(|entry| {
+                entry.track().title() == "Fixture Song"
+                    && entry.membership().track_number() == Some(3)
+            })
+            .expect("the totalled membership");
+        assert_eq!(totalled.membership().disc_total(), Some(2));
+        assert_eq!(totalled.membership().track_total(), Some(12));
+
+        let absent = entries
+            .iter()
+            .find(|entry| entry.membership().track_number() == Some(4))
+            .expect("the membership without totals");
+        assert_eq!(absent.membership().disc_total(), None);
+        assert_eq!(absent.membership().track_total(), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn country_and_compilation_are_persisted(pool: sqlx::PgPool) {
+        let root = temp_root("album-country");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Stated Album"),
+                (ItemKey::Unknown("RELEASECOUNTRY".to_owned()), "GB"),
+                (ItemKey::FlagCompilation, "1"),
+            ],
+        );
+        tagged_flac(
+            &root.join("b.flac"),
+            &[(ItemKey::AlbumTitle, "Silent Album")],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        let stated = album_id_for(&pool, track_id_for(&pool, "a.flac").await).await;
+        let (_, _, country, compilation, _) = album_facts(&pool, stated).await;
+        assert_eq!(country.as_deref(), Some("GB"));
+        assert_eq!(compilation, Some(true));
+
+        let silent = album_id_for(&pool, track_id_for(&pool, "b.flac").await).await;
+        let (_, _, country, compilation, _) = album_facts(&pool, silent).await;
+        assert_eq!(country, None);
+        assert_eq!(compilation, None, "an unstated compilation is not false");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn absent_facts_stay_absent(pool: sqlx::PgPool) {
+        let root = temp_root("absent-facts");
+        tagged_flac(&root.join("a.flac"), &[(ItemKey::AlbumTitle, "Bare Album")]);
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        let track_id = track_id_for(&pool, "a.flac").await;
+
+        assert!(stored_genres(&pool, track_id).await.is_empty());
+        assert_eq!(genre_projection(&pool, track_id).await, None);
+        assert_eq!(
+            stored_credits(&pool, track_id).await,
+            vec![(0, "Fixture Artist".to_owned(), None)],
+            "no empty-string role and no invented credit"
+        );
+        assert_eq!(
+            stored_dates(&pool, track_id).await,
+            (None, None, None, None)
+        );
+
+        let album = album_id_for(&pool, track_id).await;
+        let (release_date, precision, country, compilation, _) = album_facts(&pool, album).await;
+        assert_eq!(release_date, None);
+        assert_eq!(precision, None);
+        assert_eq!(country, None);
+        assert_eq!(compilation, None);
+
+        let totals: (Option<i16>, Option<i16>) =
+            sqlx::query_as("SELECT disc_total, track_total FROM album_tracks WHERE track_id = $1")
+                .bind(track_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(totals, (None, None));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn the_new_facts_survive_an_unchanged_rescan(pool: sqlx::PgPool) {
+        let root = temp_root("facts-backfill");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::Genre, "Rock"),
+                (ItemKey::Composer, "Clara Schumann"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+        let source = SourceIdentity::new(
+            ProviderId::new(LOCAL_PROVIDER.to_owned()).unwrap(),
+            SourceScope::Named(root.display().to_string()),
+            "a.flac".to_owned(),
+        )
+        .unwrap();
+
+        let first = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(first.indexed, 1);
+        let track_id = track_id_for(&pool, "a.flac").await;
+        assert_eq!(stored_genres(&pool, track_id).await.len(), 1);
+
+        let current = sources
+            .find_source_file_facts(&source)
+            .await
+            .unwrap()
+            .expect("the scanned file is recorded");
+        assert_eq!(current.facts_version, SOURCE_FACTS_VERSION);
+        assert_eq!(SOURCE_FACTS_VERSION, 2);
+
+        catalogue
+            .set_source_file_facts(
+                &source,
+                &SourceFileFacts {
+                    facts_version: 1,
+                    ..current
+                },
+            )
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM track_genres WHERE track_id = $1")
+            .bind(track_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM track_artist_credits WHERE track_id = $1 AND role IS NOT NULL")
+            .bind(track_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let second = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(
+            second.indexed, 1,
+            "a row below the extractor version is re-read"
+        );
+        assert_eq!(
+            stored_genres(&pool, track_id).await,
+            vec![(0, "Rock".to_owned())]
+        );
+        assert_eq!(
+            stored_credits(&pool, track_id).await,
+            vec![
+                (0, "Fixture Artist".to_owned(), None),
+                (1, "Clara Schumann".to_owned(), Some("composer".to_owned())),
+            ]
+        );
+
+        let third = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(third.unchanged, 1);
+        assert_eq!(third.indexed, 0);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn an_over_long_or_invalid_value_is_dropped_not_fatal(pool: sqlx::PgPool) {
+        let root = temp_root("invalid-values");
+        let over_long_genre = "g".repeat(201);
+        let over_long_performer = "p".repeat(501);
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::Genre, over_long_genre.as_str()),
+                (ItemKey::Genre, "Jazz"),
+                (ItemKey::Performer, over_long_performer.as_str()),
+                (ItemKey::Performer, " (piano)"),
+                (ItemKey::Composer, "Clara Schumann"),
+                (ItemKey::RecordingDate, "not a date"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(report.indexed, 1, "an invalid value must not lose the row");
+        assert_eq!(report.untagged, 0);
+
+        let track_id = track_id_for(&pool, "a.flac").await;
+        assert_eq!(
+            stored_genres(&pool, track_id).await,
+            vec![(0, "Jazz".to_owned())]
+        );
+        assert_eq!(
+            stored_credits(&pool, track_id).await,
+            vec![
+                (0, "Fixture Artist".to_owned(), None),
+                (1, "Clara Schumann".to_owned(), Some("composer".to_owned())),
+            ]
+        );
+        assert_eq!(
+            stored_dates(&pool, track_id).await,
+            (None, None, None, None)
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_genre_list_beyond_the_bound_is_truncated(pool: sqlx::PgPool) {
+        let root = temp_root("genre-truncation");
+        let names = (0..18)
+            .map(|index| format!("genre-{index}"))
+            .collect::<Vec<_>>();
+        let items = names
+            .iter()
+            .map(|name| (ItemKey::Genre, name.as_str()))
+            .collect::<Vec<_>>();
+        tagged_flac(&root.join("a.flac"), &items);
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        let track_id = track_id_for(&pool, "a.flac").await;
+        let stored = stored_genres(&pool, track_id).await;
+
+        assert_eq!(stored.len(), 16);
+        assert_eq!(stored[0], (0, "genre-0".to_owned()));
+        assert_eq!(stored[15], (15, "genre-15".to_owned()));
+        assert_eq!(
+            genre_projection(&pool, track_id).await.as_deref(),
+            Some("genre-0")
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_re_observed_album_gains_the_new_facts(pool: sqlx::PgPool) {
+        let root = temp_root("album-reobserve");
+        tagged_flac(
+            &root.join("a.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Shared Album"),
+                (ItemKey::Year, "2024"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        let album = album_id_for(&pool, track_id_for(&pool, "a.flac").await).await;
+        let (release_date, _, country, compilation, year) = album_facts(&pool, album).await;
+        assert_eq!(release_date, None);
+        assert_eq!(country, None);
+        assert_eq!(compilation, None);
+        assert_eq!(year, Some(2024));
+
+        tagged_flac(
+            &root.join("b.flac"),
+            &[
+                (ItemKey::AlbumTitle, "Shared Album"),
+                (ItemKey::ReleaseDate, "1999-08-02"),
+                (ItemKey::Unknown("RELEASECOUNTRY".to_owned()), "US"),
+                (ItemKey::FlagCompilation, "1"),
+            ],
+        );
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        let second = album_id_for(&pool, track_id_for(&pool, "b.flac").await).await;
+        assert_eq!(second, album, "the text-matched album is re-observed");
+        let (release_date, precision, country, compilation, year) = album_facts(&pool, album).await;
+        assert_eq!(
+            release_date,
+            Some(chrono::NaiveDate::from_ymd_opt(1999, 8, 2).unwrap())
+        );
+        assert_eq!(precision.as_deref(), Some("day"));
+        assert_eq!(country.as_deref(), Some("US"));
+        assert_eq!(compilation, Some(true));
+        assert_eq!(
+            year,
+            Some(1999),
+            "the year is re-derived from the release date"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }

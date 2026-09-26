@@ -18,9 +18,9 @@ mod track;
 
 pub use album::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
-    AlbumTrack,
+    AlbumTrack, DatePrecision, PartialDate,
 };
-pub use artist::{Artist, ArtistCredit, ArtistId, ArtistSummary};
+pub use artist::{Artist, ArtistCredit, ArtistId, ArtistSummary, CreditRole};
 pub use artwork::ArtworkRef;
 pub use dedup::{
     MATCHER_VERSION, MatchDecision, MatchRecord, MatchStatus, ParsedTitle, RecordingIndex,

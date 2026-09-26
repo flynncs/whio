@@ -72,7 +72,7 @@ fn child_from_track(
         duration: track.duration_ms().map(|ms| (ms / 1000) as i32),
         disc_number: membership.and_then(AlbumTrack::disc_number).map(i32::from),
         album_id: album_id.map(AlbumId::to_string),
-        genre: track.metadata().genre().map(str::to_owned),
+        genre: track.metadata().primary_genre().map(str::to_owned),
         user_rating: state.rating().map(i32::from),
         play_count: i32::try_from(state.play_count())
             .ok()
