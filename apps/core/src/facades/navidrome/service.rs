@@ -10,9 +10,10 @@ use crate::{
     },
     features::music_library::domain::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistListFilter,
-        ArtistSort, ArtistSummary, GenreSummary, MAX_PAGE_LIMIT, PageLimit, PlaylistId,
-        SelectorText, TrackId, TrackListFilter, TrackOrder, TrackView,
+        ArtistSort, ArtistSummary, GenreSummary, IdSet, MAX_PAGE_LIMIT, PageLimit, PlaylistId,
+        SelectorText, SortDirection, TrackId, TrackListFilter, TrackOrder, TrackView,
     },
+    features::music_library::library::{LibraryId, LibraryRegistrationError, LibraryRegistry},
     features::music_library::playlists::{PlaylistDetail, PlaylistError, PlaylistService},
 };
 
@@ -40,6 +41,9 @@ pub(crate) enum SongError {
 
     #[error("playlist request failed")]
     Playlist(#[source] PlaylistError),
+
+    #[error("library registry read failed")]
+    Registry(#[source] LibraryRegistrationError),
 }
 
 fn song_from(hit: &SearchHit, tags: SourceTags) -> Song {
@@ -141,22 +145,10 @@ fn album_from_summary(summary: &AlbumSummary) -> Album {
         album_artist_id: artist.map_or_else(String::new, |artist| artist.id().to_string()),
         song_count: summary.track_count(),
         duration: summary.duration_ms() as f32 / 1000.0,
-        size: 0,
         cover_art: Some(CoverArtTarget::album(album.id()).encode()),
         year: album.year(),
-        min_year: album.year().unwrap_or(0),
-        max_year: album.year().unwrap_or(0),
-        compilation: false,
         created_at: created_at.clone(),
         updated_at: created_at,
-        genres: None,
-        library_id: 1,
-        library_name: "whio".to_owned(),
-        library_path: String::new(),
-        order_album_name: album.title().to_lowercase(),
-        order_album_artist_name: artist
-            .map_or_else(String::new, |artist| artist.name().to_lowercase()),
-        external_info_updated_at: None,
         starred: state.is_starred(),
         starred_at: state.starred_at().map(|at| at.to_rfc3339()),
         rating: state.rating().unwrap_or(0),
@@ -173,14 +165,9 @@ fn artist_from_summary(summary: &ArtistSummary) -> Artist {
         id: artist.id().to_string(),
         name: artist.name().to_owned(),
         album_count: summary.album_count(),
-        song_count: 0,
-        size: 0,
-        missing: false,
+        song_count: summary.song_count(),
         cover_art: Some(CoverArtTarget::artist(artist.id()).encode()),
-        sort_artist_name: artist
-            .sort_name()
-            .map_or_else(|| artist.name().to_lowercase(), str::to_owned),
-        order_artist_name: artist.name().to_lowercase(),
+        sort_artist_name: artist.sort_name().map(str::to_owned),
         mbz_artist_id: artist.musicbrainz_artist_id().map(str::to_owned),
         starred: state.is_starred(),
         starred_at: state.starred_at().map(|at| at.to_rfc3339()),
@@ -288,52 +275,27 @@ pub(crate) async fn album_songs(
         .collect())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn album_list(
     library: &LibraryService,
     credential: &CredentialService,
     token: &str,
     order: AlbumOrder,
     filter: AlbumListFilter,
-    artist_id: Option<&str>,
     start: u32,
     end: u32,
 ) -> Result<(Vec<Album>, u32), SongError> {
     let user = authorize(credential, token).await?;
-    let (offset, limit) = page(start, end);
+    let (offset, limit) = page(start, end)?;
+    let total = library
+        .album_count(Some(&user), filter.clone())
+        .await
+        .map_err(SongError::Catalogue)?;
+    let albums = library
+        .album_list(offset, limit, order, filter, Some(&user))
+        .await
+        .map_err(SongError::Catalogue)?;
 
-    match artist_id {
-        Some(raw) => {
-            let artist_id: ArtistId = raw.parse().map_err(|_| SongError::InvalidSearch)?;
-            let detail = library
-                .artist_detail(&artist_id, Some(&user))
-                .await
-                .map_err(SongError::Catalogue)?
-                .ok_or(SongError::NotFound)?;
-            let total = detail.albums.len() as u32;
-            let albums = detail
-                .albums
-                .iter()
-                .skip(offset as usize)
-                .take(limit as usize)
-                .map(album_from_summary)
-                .collect();
-
-            Ok((albums, total))
-        }
-        None => {
-            let total = library
-                .album_count(Some(&user), filter.clone())
-                .await
-                .map_err(SongError::Catalogue)?;
-            let albums = library
-                .album_list(offset, limit, order, filter, Some(&user))
-                .await
-                .map_err(SongError::Catalogue)?;
-
-            Ok((albums.iter().map(album_from_summary).collect(), total))
-        }
-    }
+    Ok((albums.iter().map(album_from_summary).collect(), total))
 }
 
 pub(crate) async fn album_detail(
@@ -419,23 +381,19 @@ pub(crate) async fn artist_list(
     library: &LibraryService,
     credential: &CredentialService,
     token: &str,
+    sort: ArtistSort,
+    filter: ArtistListFilter,
     start: u32,
     end: u32,
 ) -> Result<(Vec<Artist>, u32), SongError> {
     let user = authorize(credential, token).await?;
-    let (offset, limit) = page(start, end);
+    let (offset, limit) = page(start, end)?;
     let total = library
-        .artist_count(Some(&user), &ArtistListFilter::default())
+        .artist_count(Some(&user), &filter)
         .await
         .map_err(SongError::Catalogue)?;
     let artists = library
-        .artist_list(
-            offset,
-            limit,
-            ArtistSort::Name,
-            &ArtistListFilter::default(),
-            Some(&user),
-        )
+        .artist_list(offset, limit, sort, &filter, Some(&user))
         .await
         .map_err(SongError::Catalogue)?;
 
@@ -459,20 +417,69 @@ pub(crate) async fn artist_detail(
     Ok(artist_from_summary(&detail.artist))
 }
 
-pub(crate) fn album_order(sort: Option<&str>) -> AlbumOrder {
-    let sort = sort.unwrap_or_default().to_ascii_lowercase();
-    let sort = sort.replace('_', "");
-
-    match sort.as_str() {
-        "albumartist" | "artist" => AlbumOrder::AlbumArtist,
-        "recentlyadded" | "createdat" => AlbumOrder::RecentlyAdded,
-        "year" => AlbumOrder::MaxYear,
-        "playcount" => AlbumOrder::PlayCount,
-        "playdate" | "lastplayed" => AlbumOrder::PlayDate,
-        "rating" => AlbumOrder::Rating,
-        "starredat" | "starred" => AlbumOrder::StarredAt,
-        _ => AlbumOrder::Name,
+pub(crate) fn album_order(sort: Option<&str>) -> Result<AlbumOrder, SongError> {
+    match sort {
+        None => Ok(AlbumOrder::default()),
+        Some("name") => Ok(AlbumOrder::Name),
+        Some("album_artist" | "albumartist") => Ok(AlbumOrder::AlbumArtist),
+        Some("artist") => Ok(AlbumOrder::Artist),
+        Some("duration") => Ok(AlbumOrder::Duration),
+        Some("songCount") => Ok(AlbumOrder::SongCount),
+        Some("max_year") => Ok(AlbumOrder::MaxYear),
+        Some("recently_added" | "recentlyadded" | "createdAt") => Ok(AlbumOrder::DateAdded),
+        Some("starred_at") => Ok(AlbumOrder::StarredAt),
+        Some("rating") => Ok(AlbumOrder::Rating),
+        Some("play_count") => Ok(AlbumOrder::PlayCount),
+        Some("play_date") => Ok(AlbumOrder::PlayDate),
+        Some("random") => Ok(AlbumOrder::Random),
+        Some(_) => Err(SongError::InvalidSearch),
     }
+}
+
+pub(crate) fn artist_sort(sort: Option<&str>) -> Result<ArtistSort, SongError> {
+    match sort {
+        None => Ok(ArtistSort::default()),
+        Some("name") => Ok(ArtistSort::Name),
+        Some("albumCount") => Ok(ArtistSort::AlbumCount),
+        Some("songCount") => Ok(ArtistSort::SongCount),
+        Some("starred_at") => Ok(ArtistSort::StarredAt),
+        Some("rating") => Ok(ArtistSort::Rating),
+        Some("playCount") => Ok(ArtistSort::PlayCount),
+        Some(_) => Err(SongError::InvalidSearch),
+    }
+}
+
+pub(crate) fn sort_direction(order: Option<&str>) -> Result<Option<SortDirection>, SongError> {
+    match order {
+        None => Ok(None),
+        Some(raw) => match raw.to_ascii_lowercase().as_str() {
+            "asc" => Ok(Some(SortDirection::Ascending)),
+            "desc" => Ok(Some(SortDirection::Descending)),
+            _ => Err(SongError::InvalidSearch),
+        },
+    }
+}
+
+pub(crate) async fn canonical_libraries(
+    libraries: &LibraryRegistry,
+    requested: &[i32],
+) -> Result<IdSet<LibraryId>, SongError> {
+    let known = match libraries.libraries().await {
+        Ok(known) => known,
+        Err(LibraryRegistrationError::Disabled) => return Err(SongError::InvalidSearch),
+        Err(error) => return Err(SongError::Registry(error)),
+    };
+    let mut canonical = Vec::with_capacity(requested.len());
+
+    for numeric_id in requested {
+        let library = known
+            .iter()
+            .find(|library| library.numeric_id() == *numeric_id)
+            .ok_or(SongError::InvalidSearch)?;
+        canonical.push(library.id().clone());
+    }
+
+    IdSet::new(canonical).map_err(|_| SongError::InvalidSearch)
 }
 
 pub(crate) async fn genre_list(
@@ -497,11 +504,17 @@ async fn authorize(credential: &CredentialService, token: &str) -> Result<Uuid, 
     }
 }
 
-fn page(start: u32, end: u32) -> (u32, u32) {
+fn page(start: u32, end: u32) -> Result<(u32, u32), SongError> {
     if end > start {
-        (start, end - start)
+        let limit = end - start;
+
+        if limit > MAX_PAGE_LIMIT {
+            return Err(SongError::InvalidSearch);
+        }
+
+        Ok((start, limit))
     } else {
-        (start, DEFAULT_PAGE_SIZE)
+        Ok((start, DEFAULT_PAGE_SIZE))
     }
 }
 

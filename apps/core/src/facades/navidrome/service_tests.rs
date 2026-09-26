@@ -433,3 +433,109 @@ fn track_maps_to_song() {
     assert_eq!(song.duration, 180.0);
     assert!(!song.id.is_empty());
 }
+
+#[test]
+fn every_album_sort_name_maps_exactly_or_is_rejected() {
+    for (foreign, expected) in [
+        ("name", AlbumOrder::Name),
+        ("album_artist", AlbumOrder::AlbumArtist),
+        ("albumartist", AlbumOrder::AlbumArtist),
+        ("artist", AlbumOrder::Artist),
+        ("duration", AlbumOrder::Duration),
+        ("songCount", AlbumOrder::SongCount),
+        ("max_year", AlbumOrder::MaxYear),
+        ("recently_added", AlbumOrder::DateAdded),
+        ("recentlyadded", AlbumOrder::DateAdded),
+        ("createdAt", AlbumOrder::DateAdded),
+        ("starred_at", AlbumOrder::StarredAt),
+        ("rating", AlbumOrder::Rating),
+        ("play_count", AlbumOrder::PlayCount),
+        ("play_date", AlbumOrder::PlayDate),
+        ("random", AlbumOrder::Random),
+    ] {
+        assert!(
+            matches!(album_order(Some(foreign)), Ok(order) if order == expected),
+            "{foreign} must map to {expected:?}"
+        );
+    }
+
+    assert!(matches!(album_order(None), Ok(AlbumOrder::Name)));
+
+    for unknown in [
+        "",
+        "Name",
+        "song_count",
+        "albumCount",
+        "year",
+        "explicitStatus",
+        "playCount",
+        "recentlyAdded",
+        "starred",
+    ] {
+        assert!(
+            matches!(album_order(Some(unknown)), Err(SongError::InvalidSearch)),
+            "{unknown} must not fall back to a sort"
+        );
+    }
+}
+
+#[test]
+fn every_artist_sort_name_maps_exactly_or_is_rejected() {
+    for (foreign, expected) in [
+        ("name", ArtistSort::Name),
+        ("albumCount", ArtistSort::AlbumCount),
+        ("songCount", ArtistSort::SongCount),
+        ("starred_at", ArtistSort::StarredAt),
+        ("rating", ArtistSort::Rating),
+        ("playCount", ArtistSort::PlayCount),
+    ] {
+        assert!(
+            matches!(artist_sort(Some(foreign)), Ok(sort) if sort == expected),
+            "{foreign} must map to {expected:?}"
+        );
+    }
+
+    assert!(matches!(artist_sort(None), Ok(ArtistSort::Name)));
+
+    for unknown in [
+        "",
+        "album_count",
+        "song_count",
+        "play_count",
+        "Name",
+        "random",
+    ] {
+        assert!(
+            matches!(artist_sort(Some(unknown)), Err(SongError::InvalidSearch)),
+            "{unknown} must not fall back to a sort"
+        );
+    }
+}
+
+#[test]
+fn the_order_parameter_is_an_explicit_direction() {
+    assert!(matches!(sort_direction(None), Ok(None)));
+    assert!(matches!(
+        sort_direction(Some("asc")),
+        Ok(Some(SortDirection::Ascending))
+    ));
+    assert!(matches!(
+        sort_direction(Some("ASC")),
+        Ok(Some(SortDirection::Ascending))
+    ));
+    assert!(matches!(
+        sort_direction(Some("desc")),
+        Ok(Some(SortDirection::Descending))
+    ));
+    assert!(matches!(
+        sort_direction(Some("DESC")),
+        Ok(Some(SortDirection::Descending))
+    ));
+
+    for unknown in ["", "ascending", "down", "1"] {
+        assert!(matches!(
+            sort_direction(Some(unknown)),
+            Err(SongError::InvalidSearch)
+        ));
+    }
+}
