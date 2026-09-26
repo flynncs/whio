@@ -593,7 +593,7 @@ async fn search_matches_albums_and_their_artists(pool: sqlx::PgPool) {
 
     assert_eq!(
         repository
-            .search_artists("daft", 10, None)
+            .search_artists("daft", 10, None, &ArtistListFilter::default())
             .await
             .unwrap()
             .len(),
@@ -601,7 +601,7 @@ async fn search_matches_albums_and_their_artists(pool: sqlx::PgPool) {
     );
     assert!(
         repository
-            .search_artists("nope", 10, None)
+            .search_artists("nope", 10, None, &ArtistListFilter::default())
             .await
             .unwrap()
             .is_empty()

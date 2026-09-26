@@ -1315,7 +1315,10 @@ async fn search_artists_collapses_rows_sharing_a_name(pool: PgPool) {
         .await
         .unwrap();
 
-    let artists = repository.search_artists("cage", 10, None).await.unwrap();
+    let artists = repository
+        .search_artists("cage", 10, None, &ArtistListFilter::default())
+        .await
+        .unwrap();
     assert_eq!(artists.len(), 1);
     assert_eq!(artists[0].artist().id(), identified.id());
     assert!(artists[0].artist().musicbrainz_artist_id().is_some());
@@ -1718,7 +1721,10 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
     assert_eq!(albums[0].album().id(), album.id());
     assert_eq!(albums[0].track_count(), 1);
 
-    let artists = repository.search_artists("daft", 10, None).await.unwrap();
+    let artists = repository
+        .search_artists("daft", 10, None, &ArtistListFilter::default())
+        .await
+        .unwrap();
     assert!(
         artists
             .iter()
@@ -1726,7 +1732,7 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
     );
     assert!(
         repository
-            .search_artists("nope", 10, None)
+            .search_artists("nope", 10, None, &ArtistListFilter::default())
             .await
             .unwrap()
             .is_empty()

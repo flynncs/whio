@@ -6,12 +6,20 @@ use axum::{
 };
 use serde_json::Value;
 use sqlx::PgPool;
+use std::collections::BTreeSet;
 use tower::ServiceExt;
-use whio_core::features::music_library::catalogue::{CatalogueCandidate, ProviderError};
-use whio_core::features::music_library::domain::{
-    AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+use whio_core::features::music_library::catalogue::{
+    CatalogueCandidate, ProviderError, SearchLimit, SearchOffset, SearchQuery,
+    SearchRequest as CatalogueSearchRequest, SearchWindow,
 };
-use whio_core::features::music_library::test_support::{CatalogueWrite, PostgresTrackRepository};
+use whio_core::features::music_library::domain::{
+    AlbumMetadata, AlbumTrack, ArtistCredit, ArtistListFilter, ArtistSort, CreditRole, ProviderId,
+    RoleSelector, RoleSet, SourceIdentity, SourceScope, TrackMetadata,
+};
+use whio_core::features::music_library::test_support::{
+    CatalogueWrite, LibraryRead, PostgresTrackRepository,
+};
+use whio_core::platform::request::{RequestContext, RequestId};
 
 mod support;
 
@@ -289,4 +297,117 @@ async fn the_provider_is_called_once(pool: PgPool) {
     assert_eq!(names(&body, "song", "title"), ["Song Track 00"]);
     assert_eq!(names(&body, "album", "name"), ["Song Album 0"]);
     assert_eq!(names(&body, "artist", "name"), ["Song Artist 0"]);
+}
+
+async fn seed_album_artist_membership(pool: &PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Search Album".to_owned())
+                .unwrap()
+                .with_album_artist(
+                    ArtistCredit::new("Search Albumartist".to_owned(), None).unwrap(),
+                ),
+        )
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(
+            local_source("path-search-credit"),
+            TrackMetadata::from_names(
+                "Search Song".to_owned(),
+                vec!["Search Trackcredit".to_owned()],
+                Some(1_000),
+            )
+            .unwrap()
+            .with_credits(vec![
+                ArtistCredit::new("Search Composer".to_owned(), None)
+                    .unwrap()
+                    .with_role(CreditRole::Composer),
+            ]),
+        )
+        .await
+        .unwrap();
+
+    repository
+        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn search3_query_artists_are_album_artists(pool: PgPool) {
+    seed_album_artist_membership(&pool).await;
+    let (app, secret) = client(pool, empty_responses(1));
+    let auth = auth_query(&secret);
+
+    let body = get(app, &search3("query=search", &auth)).await;
+
+    assert_eq!(
+        names(&body, "artist", "name"),
+        ["Search Albumartist"],
+        "search3's query arm returns the album artists, not every credited artist"
+    );
+}
+
+#[sqlx::test]
+async fn native_search_artists_are_unchanged(pool: PgPool) {
+    seed_album_artist_membership(&pool).await;
+    let (search, _, _) = services(pool, empty_responses(1));
+    let request = CatalogueSearchRequest::uniform(
+        SearchQuery::new("search".to_owned()).unwrap(),
+        SearchWindow::new(SearchLimit::new(20).unwrap(), SearchOffset::new(0).unwrap()),
+    );
+    let context = RequestContext::new(RequestId::new("native-search".to_owned()).unwrap());
+
+    let outcome = search.search(&request, None, &context).await.unwrap();
+
+    assert_eq!(
+        outcome
+            .artists
+            .iter()
+            .map(|summary| summary.artist().name().to_owned())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "Search Albumartist".to_owned(),
+            "Search Trackcredit".to_owned(),
+            "Search Composer".to_owned(),
+        ]),
+        "the native search keeps searching every credited artist"
+    );
+}
+
+#[sqlx::test]
+async fn the_read_takes_one_membership(pool: PgPool) {
+    seed_album_artist_membership(&pool).await;
+    let repository = PostgresTrackRepository::new(pool);
+
+    let filters = [
+        ArtistListFilter::default(),
+        ArtistListFilter::new().with_role(Some(RoleSet::new([RoleSelector::AlbumArtist]).unwrap())),
+        ArtistListFilter::new().with_role(Some(RoleSet::new([RoleSelector::Composer]).unwrap())),
+    ];
+
+    for filter in filters {
+        let listed = repository
+            .list_artists(0, 25, ArtistSort::Name, &filter, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.artist().name().to_owned())
+            .filter(|name| name.starts_with("Search "))
+            .collect::<BTreeSet<_>>();
+        let searched = repository
+            .search_artists("search", 25, None, &filter)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.artist().name().to_owned())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            searched, listed,
+            "the search read and the artist list share one membership expression"
+        );
+    }
 }

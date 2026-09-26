@@ -10,7 +10,8 @@ use crate::{
     },
     features::music_library::{
         domain::{
-            AlbumSummary, ArtistSummary, SearchConfidence, SearchTerms, TrackId, best_field_quality,
+            AlbumSummary, ArtistListFilter, ArtistSummary, SearchConfidence, SearchTerms, TrackId,
+            best_field_quality,
         },
         storage::contracts::{CatalogueWrite, LibraryRead, SourceLookup, StateStore},
     },
@@ -98,15 +99,28 @@ impl SearchWindows {
 pub struct SearchRequest {
     query: SearchQuery,
     windows: SearchWindows,
+    artist_filter: ArtistListFilter,
 }
 
 impl SearchRequest {
-    pub fn new(query: SearchQuery, windows: SearchWindows) -> Self {
-        Self { query, windows }
+    pub fn new(
+        query: SearchQuery,
+        windows: SearchWindows,
+        artist_filter: ArtistListFilter,
+    ) -> Self {
+        Self {
+            query,
+            windows,
+            artist_filter,
+        }
     }
 
     pub fn uniform(query: SearchQuery, window: SearchWindow) -> Self {
-        Self::new(query, SearchWindows::uniform(window))
+        Self::new(
+            query,
+            SearchWindows::uniform(window),
+            ArtistListFilter::default(),
+        )
     }
 
     pub fn query(&self) -> &SearchQuery {
@@ -115,6 +129,10 @@ impl SearchRequest {
 
     pub fn windows(&self) -> &SearchWindows {
         &self.windows
+    }
+
+    pub fn artist_filter(&self) -> &ArtistListFilter {
+        &self.artist_filter
     }
 }
 
@@ -193,7 +211,12 @@ impl SearchService {
             .map_err(CatalogueError::Repository)?;
         let artists = self
             .library
-            .search_artists(&query, windows.artists().target(), user.copied())
+            .search_artists(
+                &query,
+                windows.artists().target(),
+                user.copied(),
+                request.artist_filter(),
+            )
             .await
             .map_err(CatalogueError::Repository)?;
 

@@ -126,6 +126,7 @@ pub trait LibraryRead: Send + Sync {
         _query: &str,
         _limit: u32,
         _user: Option<Uuid>,
+        _filter: &ArtistListFilter,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }

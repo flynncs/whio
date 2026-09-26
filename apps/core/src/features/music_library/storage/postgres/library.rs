@@ -22,11 +22,10 @@ use crate::features::music_library::storage::contracts::LibraryRead;
 use super::PgStore;
 use super::PostgresLibraryStore;
 use super::decode::{
-    album_states, albums_for_tracks, artist_all_roles_count_expressions, artist_count_expressions,
-    attach_album_state, attach_album_states, attach_artist_states, credits_for_tracks,
-    decode_album, decode_album_summary, decode_artist, decode_artist_summary, decode_membership,
-    decode_track, genres_for_tracks, hits_from_rows, repository_error, sources_for_tracks,
-    track_states,
+    album_states, albums_for_tracks, artist_count_expressions, attach_album_state,
+    attach_album_states, attach_artist_states, credits_for_tracks, decode_album,
+    decode_album_summary, decode_artist, decode_artist_summary, decode_membership, decode_track,
+    genres_for_tracks, hits_from_rows, repository_error, sources_for_tracks, track_states,
 };
 use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS,
@@ -676,6 +675,7 @@ impl LibraryRead for PgStore {
         query: &str,
         limit: u32,
         user: Option<Uuid>,
+        filter: &ArtistListFilter,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         let terms = SearchTerms::new(query);
 
@@ -687,10 +687,11 @@ impl LibraryRead for PgStore {
         let tokens = terms.tokens().to_vec();
         let prefix = format!("{}%", escape_like(&needle));
         let contains = format!("%{}%", escape_like(&needle));
-        let (album_count, song_count) = artist_all_roles_count_expressions();
-        let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(
-            &format!(
-                r#"
+        let mut predicates = TrackPredicates::new(6);
+        let selectors = artist_membership_selectors(filter, &mut predicates);
+        let membership = predicates.where_clause();
+        let statement = format!(
+            r#"
             SELECT picked.id, picked.name, picked.sort_name, picked.musicbrainz_artist_id,
                    picked.album_count, picked.song_count
             FROM (
@@ -700,10 +701,11 @@ impl LibraryRead for PgStore {
                        {album_count} AS album_count,
                        {song_count} AS song_count
                 FROM artists AS ar
-                WHERE ar.name_normalized = $1
+                WHERE (ar.name_normalized = $1
                    OR ar.name_normalized LIKE $2
                    OR string_to_array(ar.name_normalized, ' ') @> $3
-                   OR (array_length($3, 1) > 1 AND ar.name_normalized LIKE $4)
+                   OR (array_length($3, 1) > 1 AND ar.name_normalized LIKE $4))
+                  {membership}
                 ORDER BY ar.name_normalized,
                          (ar.musicbrainz_artist_id IS NULL),
                          album_count DESC,
@@ -719,17 +721,28 @@ impl LibraryRead for PgStore {
                 END,
                 picked.name_normalized, picked.id
             LIMIT $5
-            "#
-            ),
-        )
-        .bind(&needle)
-        .bind(&prefix)
-        .bind(tokens.as_slice())
-        .bind(&contains)
-        .bind(i64::from(limit))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(repository_error)?;
+            "#,
+            album_count = selectors.album_count,
+            song_count = selectors.song_count,
+        );
+        let mut query =
+            sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(
+                &statement,
+            )
+            .bind(&needle)
+            .bind(&prefix)
+            .bind(tokens.as_slice())
+            .bind(&contains)
+            .bind(i64::from(limit));
+
+        for value in predicates.values() {
+            query = value.bind(query);
+        }
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(repository_error)?;
 
         let mut summaries = rows
             .into_iter()
@@ -1853,6 +1866,26 @@ fn artist_role_membership(role: Option<&RoleSet>, predicates: &mut TrackPredicat
     artist_membership(credit_condition.as_deref(), album_artist)
 }
 
+fn artist_membership_selectors(
+    filter: &ArtistListFilter,
+    predicates: &mut TrackPredicates,
+) -> ArtistSelectors {
+    let membership = artist_role_membership(filter.role(), predicates);
+    let (album_count, song_count) = artist_count_expressions(&membership);
+
+    if filter.role().is_some() {
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM ({membership}) AS artist_membership)"
+        ));
+    }
+
+    ArtistSelectors {
+        membership,
+        album_count,
+        song_count,
+    }
+}
+
 async fn artist_selector_clauses(
     pool: &PgPool,
     filter: &ArtistListFilter,
@@ -1864,14 +1897,7 @@ async fn artist_selector_clauses(
         predicates.push(format!("ar.name_normalized LIKE {pattern}"));
     }
 
-    let membership = artist_role_membership(filter.role(), predicates);
-    let (album_count, song_count) = artist_count_expressions(&membership);
-
-    if filter.role().is_some() {
-        predicates.push(format!(
-            "EXISTS (SELECT 1 FROM ({membership}) AS artist_membership)"
-        ));
-    }
+    let selectors = artist_membership_selectors(filter, predicates);
 
     if let Some(starred) = filter.starred() {
         let clause = "EXISTS (SELECT 1 FROM artist_favorites AS sel_artist_favorite \
@@ -1943,11 +1969,7 @@ async fn artist_selector_clauses(
         });
     }
 
-    Ok(ArtistSelectors {
-        membership,
-        album_count,
-        song_count,
-    })
+    Ok(selectors)
 }
 
 fn artist_order_clause(

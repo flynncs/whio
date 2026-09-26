@@ -1568,7 +1568,7 @@ async fn every_producer_agrees_on_artist_counts(pool: PgPool) {
     .map(|(id, albums, songs)| (*id.as_uuid(), (albums, songs)))
     .collect::<BTreeMap<_, _>>();
     let from_search = repository
-        .search_artists("artist", 25, None)
+        .search_artists("artist", 25, None, &ArtistListFilter::default())
         .await
         .unwrap()
         .into_iter()
@@ -1668,7 +1668,10 @@ async fn song_count_is_computed_on_every_producer(pool: PgPool) {
         "a constant song_count cannot satisfy both artists"
     );
 
-    let search = repository.search_artists("artist", 25, None).await.unwrap();
+    let search = repository
+        .search_artists("artist", 25, None, &ArtistListFilter::default())
+        .await
+        .unwrap();
 
     assert_eq!(
         summary_of(&search, &wide).song_count(),

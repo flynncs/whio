@@ -11,7 +11,8 @@ use crate::{
     },
     features::music_library::domain::{
         AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, ArtistListFilter,
-        ArtistSort, IdSet, RandomSeed, Range, SelectorText, SortDirection, StateTarget, TrackId,
+        ArtistSort, IdSet, RandomSeed, Range, RoleSelector, RoleSet, SelectorText, SortDirection,
+        StateTarget, TrackId,
     },
     features::music_library::library::ScanService,
     features::music_library::library_state::{LibraryStateError, LibraryStateService},
@@ -54,6 +55,9 @@ pub(crate) async fn search(
     let request = SearchRequest::new(
         SearchQuery::new(query.to_owned()).map_err(|_| SearchError::InvalidSearch)?,
         *windows,
+        ArtistListFilter::new().with_role(Some(
+            RoleSet::new([RoleSelector::AlbumArtist]).map_err(|_| SearchError::InvalidSearch)?,
+        )),
     );
 
     search_service
