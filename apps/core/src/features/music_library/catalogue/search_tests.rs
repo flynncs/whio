@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use super::*;
 use crate::{
     features::music_library::catalogue::{
-        CatalogueCandidate, SearchLimit, SearchOffset, SearchQuery,
+        CatalogueCandidate, SearchLimit, SearchOffset, SearchQuery, SearchRequest, SearchWindow,
     },
     features::music_library::{
         domain::{
@@ -140,16 +140,22 @@ fn candidate(external_id: &str, title: &str) -> CatalogueCandidate {
     CatalogueCandidate::new(source, metadata)
 }
 
-fn search() -> CatalogueSearch {
-    CatalogueSearch::new(
+fn search() -> SearchRequest {
+    SearchRequest::uniform(
         SearchQuery::new("Daft Punk".to_owned()).unwrap(),
-        SearchLimit::new(10).unwrap(),
+        window(10, 0),
     )
 }
 
-fn search_with_offset(limit: u32, offset: u32) -> CatalogueSearch {
-    CatalogueSearch::new_with_offset(
+fn search_with_offset(limit: u32, offset: u32) -> SearchRequest {
+    SearchRequest::uniform(
         SearchQuery::new("Daft Punk".to_owned()).unwrap(),
+        window(limit, offset),
+    )
+}
+
+fn window(limit: u32, offset: u32) -> SearchWindow {
+    SearchWindow::new(
         SearchLimit::new(limit).unwrap(),
         SearchOffset::new(offset).unwrap(),
     )
@@ -722,10 +728,8 @@ async fn a_strong_library_match_is_reported_as_strong(pool: sqlx::PgPool) {
         .await
         .unwrap();
     let catalogue = Fixture { store: repository }.bare();
-    let search = CatalogueSearch::new(
-        SearchQuery::new("zebra".to_owned()).unwrap(),
-        SearchLimit::new(10).unwrap(),
-    );
+    let search =
+        SearchRequest::uniform(SearchQuery::new("zebra".to_owned()).unwrap(), window(10, 0));
 
     let outcome = catalogue.search(&search, None, &context()).await.unwrap();
 
@@ -741,10 +745,7 @@ async fn a_stopword_query_is_weak_confidence(pool: sqlx::PgPool) {
         .await
         .unwrap();
     let catalogue = Fixture { store: repository }.bare();
-    let search = CatalogueSearch::new(
-        SearchQuery::new("the".to_owned()).unwrap(),
-        SearchLimit::new(10).unwrap(),
-    );
+    let search = SearchRequest::uniform(SearchQuery::new("the".to_owned()).unwrap(), window(10, 0));
 
     let outcome = catalogue.search(&search, None, &context()).await.unwrap();
 
@@ -761,10 +762,7 @@ async fn a_weak_query_puts_provider_discoveries_first(pool: sqlx::PgPool) {
         .unwrap();
     let resolver = StubProvider::new(vec![Ok(vec![candidate("vid-1", "Provider Song")])]);
     let catalogue = Fixture { store: repository }.service(vec![provider(resolver)]);
-    let search = CatalogueSearch::new(
-        SearchQuery::new("the".to_owned()).unwrap(),
-        SearchLimit::new(10).unwrap(),
-    );
+    let search = SearchRequest::uniform(SearchQuery::new("the".to_owned()).unwrap(), window(10, 0));
 
     let outcome = catalogue.search(&search, None, &context()).await.unwrap();
 

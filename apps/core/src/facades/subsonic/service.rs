@@ -6,9 +6,8 @@ use uuid::Uuid;
 use crate::{
     facades::SourceTags,
     features::music_library::catalogue::{
-        CatalogueError, CatalogueSearch, CompletionService, LibraryService, MAX_PAGE_LIMIT,
-        PageLimit, SearchLimit, SearchOffset, SearchQuery, SearchService, TrackListFilter,
-        TrackOrder,
+        CatalogueError, CompletionService, LibraryService, MAX_PAGE_LIMIT, PageLimit, SearchQuery,
+        SearchRequest, SearchService, SearchWindows, TrackListFilter, TrackOrder,
     },
     features::music_library::domain::{
         AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, ArtistListFilter,
@@ -41,8 +40,7 @@ pub(crate) async fn search(
     context: &RequestContext,
     user: Option<&uuid::Uuid>,
     query: &str,
-    count: Option<&str>,
-    offset: Option<&str>,
+    windows: &SearchWindows,
     tags: SourceTags,
 ) -> Result<SearchResult, SearchError> {
     if query.is_empty() {
@@ -53,36 +51,13 @@ pub(crate) async fn search(
         });
     }
 
-    const DEFAULT_COUNT: u32 = 20;
-    let limit = match count {
-        None => DEFAULT_COUNT,
-        Some(raw) => raw
-            .trim()
-            .parse::<u32>()
-            .map_err(|_| SearchError::InvalidSearch)?,
-    }
-    .min(25);
-    let offset = match offset {
-        None => 0,
-        Some(raw) => raw
-            .trim()
-            .parse::<u32>()
-            .map_err(|_| SearchError::InvalidSearch)?,
-    };
-
-    let search = match (
-        SearchQuery::new(query.to_owned()),
-        SearchLimit::new(limit),
-        SearchOffset::new(offset),
-    ) {
-        (Ok(query), Ok(limit), Ok(offset)) => {
-            CatalogueSearch::new_with_offset(query, limit, offset)
-        }
-        _ => return Err(SearchError::InvalidSearch),
-    };
+    let request = SearchRequest::new(
+        SearchQuery::new(query.to_owned()).map_err(|_| SearchError::InvalidSearch)?,
+        *windows,
+    );
 
     search_service
-        .search(&search, user, context)
+        .search(&request, user, context)
         .await
         .map(|outcome| SearchResult {
             songs: outcome

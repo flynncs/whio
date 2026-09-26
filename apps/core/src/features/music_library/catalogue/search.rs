@@ -37,6 +37,87 @@ pub struct SearchOutcome {
     pub confidence: SearchConfidence,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchWindow {
+    limit: SearchLimit,
+    offset: SearchOffset,
+}
+
+impl SearchWindow {
+    pub fn new(limit: SearchLimit, offset: SearchOffset) -> Self {
+        Self { limit, offset }
+    }
+
+    pub fn limit(self) -> SearchLimit {
+        self.limit
+    }
+
+    pub fn offset(self) -> SearchOffset {
+        self.offset
+    }
+
+    fn target(self) -> u32 {
+        u32::from(self.limit.get()).saturating_add(self.offset.get())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchWindows {
+    tracks: SearchWindow,
+    albums: SearchWindow,
+    artists: SearchWindow,
+}
+
+impl SearchWindows {
+    pub fn new(tracks: SearchWindow, albums: SearchWindow, artists: SearchWindow) -> Self {
+        Self {
+            tracks,
+            albums,
+            artists,
+        }
+    }
+
+    pub fn uniform(window: SearchWindow) -> Self {
+        Self::new(window, window, window)
+    }
+
+    pub fn tracks(&self) -> SearchWindow {
+        self.tracks
+    }
+
+    pub fn albums(&self) -> SearchWindow {
+        self.albums
+    }
+
+    pub fn artists(&self) -> SearchWindow {
+        self.artists
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchRequest {
+    query: SearchQuery,
+    windows: SearchWindows,
+}
+
+impl SearchRequest {
+    pub fn new(query: SearchQuery, windows: SearchWindows) -> Self {
+        Self { query, windows }
+    }
+
+    pub fn uniform(query: SearchQuery, window: SearchWindow) -> Self {
+        Self::new(query, SearchWindows::uniform(window))
+    }
+
+    pub fn query(&self) -> &SearchQuery {
+        &self.query
+    }
+
+    pub fn windows(&self) -> &SearchWindows {
+        &self.windows
+    }
+}
+
 impl SearchService {
     pub fn new(
         library: Arc<dyn LibraryRead>,
@@ -78,20 +159,20 @@ impl SearchService {
 
     pub async fn search(
         &self,
-        search: &CatalogueSearch,
+        request: &SearchRequest,
         user: Option<&Uuid>,
         context: &RequestContext,
     ) -> Result<SearchOutcome, CatalogueError> {
-        let window = Self::provider_target(search);
-        let query = search.query().as_str().to_owned();
+        let windows = request.windows();
+        let query = request.query().as_str().to_owned();
 
         let known = self
             .library
-            .search_tracks(&query, window, user.copied())
+            .search_tracks(&query, windows.tracks().target(), user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
         let (fresh, first_error, any_success) =
-            self.fan_out(search, user, context, PROVIDER_BUDGET).await;
+            self.fan_out(request, user, context, PROVIDER_BUDGET).await;
         let (known, fresh) = super::dedup::apply(
             super::dedup::Ports {
                 library: &self.library,
@@ -107,17 +188,17 @@ impl SearchService {
         .await;
         let albums = self
             .library
-            .search_albums(&query, window, user.copied())
+            .search_albums(&query, windows.albums().target(), user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
         let artists = self
             .library
-            .search_artists(&query, window, user.copied())
+            .search_artists(&query, windows.artists().target(), user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
 
         Self::finalize(
-            search,
+            request,
             known,
             fresh,
             albums,
@@ -129,15 +210,15 @@ impl SearchService {
 
     async fn fan_out(
         &self,
-        search: &CatalogueSearch,
+        request: &SearchRequest,
         user: Option<&Uuid>,
         context: &RequestContext,
         budget: Duration,
     ) -> (Vec<SearchHit>, Option<CatalogueError>, bool) {
         let mut tasks = JoinSet::new();
         let concurrency = Arc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY));
-        let query = search.query().clone();
-        let target = Self::provider_target(search);
+        let query = request.query().clone();
+        let target = request.windows().tracks().target();
         for (index, provider) in self.providers.iter().enumerate() {
             let permit = Arc::clone(&concurrency);
             let pending = Self::search_source(
@@ -201,7 +282,7 @@ impl SearchService {
     }
 
     fn finalize(
-        search: &CatalogueSearch,
+        request: &SearchRequest,
         known: Vec<SearchHit>,
         fresh: Vec<SearchHit>,
         albums: Vec<AlbumSummary>,
@@ -209,9 +290,11 @@ impl SearchService {
         first_error: Option<CatalogueError>,
         any_success: bool,
     ) -> Result<SearchOutcome, CatalogueError> {
-        let limit = search.limit().get() as usize;
-        let offset = search.offset().get() as usize;
-        let terms = SearchTerms::new(search.query().as_str());
+        let windows = request.windows();
+        let tracks_window = windows.tracks();
+        let albums_window = windows.albums();
+        let artists_window = windows.artists();
+        let terms = SearchTerms::new(request.query().as_str());
         let confidence = Self::library_confidence(&terms, &known);
 
         let mut positions: HashMap<TrackId, usize> = HashMap::new();
@@ -240,7 +323,7 @@ impl SearchService {
             .into_iter()
             .partition(|hit| hit.match_quality().is_some());
         if !provider_hits.is_empty() {
-            library_hits.truncate(Self::library_window(Self::provider_target(search)) as usize);
+            library_hits.truncate(Self::library_window(tracks_window.target()) as usize);
         }
         let ordered = match confidence {
             SearchConfidence::Strong => library_hits
@@ -254,9 +337,21 @@ impl SearchService {
         };
 
         Ok(SearchOutcome {
-            tracks: ordered.into_iter().skip(offset).take(limit).collect(),
-            albums: albums.into_iter().skip(offset).take(limit).collect(),
-            artists: artists.into_iter().skip(offset).take(limit).collect(),
+            tracks: ordered
+                .into_iter()
+                .skip(tracks_window.offset().get() as usize)
+                .take(tracks_window.limit().get() as usize)
+                .collect(),
+            albums: albums
+                .into_iter()
+                .skip(albums_window.offset().get() as usize)
+                .take(albums_window.limit().get() as usize)
+                .collect(),
+            artists: artists
+                .into_iter()
+                .skip(artists_window.offset().get() as usize)
+                .take(artists_window.limit().get() as usize)
+                .collect(),
             confidence,
         })
     }
@@ -289,10 +384,6 @@ impl SearchService {
         }
 
         window - window.div_ceil(PROVIDER_WINDOW_DIVISOR)
-    }
-
-    fn provider_target(search: &CatalogueSearch) -> u32 {
-        u32::from(search.limit().get()).saturating_add(search.offset().get())
     }
 
     async fn search_source(

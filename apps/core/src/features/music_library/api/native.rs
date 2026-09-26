@@ -15,9 +15,10 @@ use crate::{
     features::identity::api::native::AuthenticatedPrincipal,
     features::music_library::api::errors::ApiError,
     features::music_library::catalogue::{
-        AlbumListFilter, AlbumListScope, AlbumOrder, ArtistListFilter, ArtistSort, CatalogueSearch,
-        MAX_PAGE_LIMIT, PageLimit, SearchHit, SearchLimit, SearchOffset, SearchQuery,
-        TrackListFilter, TrackListScope, TrackOrder, ValidationError,
+        AlbumListFilter, AlbumListScope, AlbumOrder, ArtistListFilter, ArtistSort, MAX_PAGE_LIMIT,
+        PageLimit, SearchHit, SearchLimit, SearchOffset, SearchQuery,
+        SearchRequest as CatalogueRequest, SearchWindow, TrackListFilter, TrackListScope,
+        TrackOrder, ValidationError,
     },
     features::music_library::domain::{
         AlbumId, AlbumSummary, AlbumTrack, ArtistId, ArtistSummary, Availability, IdSet,
@@ -43,15 +44,16 @@ pub(crate) struct SearchRequest {
     offset: u32,
 }
 
-impl TryFrom<SearchRequest> for CatalogueSearch {
+impl TryFrom<SearchRequest> for CatalogueRequest {
     type Error = ValidationError;
 
     fn try_from(value: SearchRequest) -> Result<Self, Self::Error> {
-        Ok(Self::new_with_offset(
-            SearchQuery::new(value.query)?,
+        let window = SearchWindow::new(
             SearchLimit::new(value.limit)?,
             SearchOffset::new(value.offset)?,
-        ))
+        );
+
+        Ok(Self::uniform(SearchQuery::new(value.query)?, window))
     }
 }
 
@@ -108,7 +110,7 @@ pub(crate) async fn search(
         error,
     })?;
 
-    let search = CatalogueSearch::try_from(request).map_err(|error| ApiError::InvalidRequest {
+    let search = CatalogueRequest::try_from(request).map_err(|error| ApiError::InvalidRequest {
         context: context.clone(),
         error,
     })?;
@@ -773,7 +775,8 @@ pub(crate) struct ArtistPageItem {
     id: String,
     name: String,
     album_count: u32,
-    song_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    song_count: Option<u32>,
     starred: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     rating: Option<u8>,

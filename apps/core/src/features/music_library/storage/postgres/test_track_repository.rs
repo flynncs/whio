@@ -1955,7 +1955,7 @@ async fn dedup_candidates_return_local_matches_and_strip_qualifiers(pool: PgPool
 async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_identity(pool: PgPool) {
     use crate::{
         features::music_library::catalogue::{
-            CatalogueSearch, SearchLimit, SearchQuery, SearchService,
+            SearchLimit, SearchOffset, SearchQuery, SearchRequest, SearchService, SearchWindow,
         },
         platform::request::{RequestContext, RequestId},
     };
@@ -2003,9 +2003,9 @@ async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_iden
         Arc::clone(&repository) as Arc<dyn SourceLookup>,
         Arc::clone(&repository) as Arc<dyn StateStore>,
     );
-    let search = CatalogueSearch::new(
+    let search = SearchRequest::uniform(
         SearchQuery::new("Song".into()).unwrap(),
-        SearchLimit::new(25).unwrap(),
+        SearchWindow::new(SearchLimit::new(25).unwrap(), SearchOffset::new(0).unwrap()),
     );
     let context = RequestContext::new(RequestId::new("pg-dedup".into()).unwrap());
     let outcome = service.search(&search, None, &context).await.unwrap();

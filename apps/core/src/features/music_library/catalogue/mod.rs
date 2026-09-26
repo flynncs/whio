@@ -19,7 +19,9 @@ pub use error::CatalogueError;
 pub use library::{AlbumDetail, ArtistDetail, LibraryService};
 pub use ports::CatalogueProvider;
 pub use provider_error::ProviderError;
-pub use search::{SearchHit, SearchOutcome, SearchService};
+pub use search::{
+    SearchHit, SearchOutcome, SearchRequest, SearchService, SearchWindow, SearchWindows,
+};
 
 pub use crate::features::music_library::domain::{
     AlbumListFilter, AlbumListScope, AlbumOrder, ArtistListFilter, ArtistSort, IdSet,

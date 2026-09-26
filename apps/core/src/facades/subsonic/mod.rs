@@ -16,6 +16,7 @@ use whio_subsonic_api::models;
 
 use crate::{
     features::identity::{domain::Principal, service::AuthError},
+    features::music_library::catalogue::{SearchLimit, SearchOffset, SearchWindow, SearchWindows},
     features::music_library::domain::{RandomSeed, Resource, TrackId},
     features::music_library::library::{ScanMode, ScanRequestError},
     features::music_library::playlists::{PlaylistEdit, PlaylistError},
@@ -179,16 +180,20 @@ pub(crate) async fn search3(
             Err(error) => Err(error),
         }
     } else {
-        service::search(
-            state.search(),
-            &context,
-            Some(&user_uuid),
-            q,
-            query.get("songCount"),
-            query.get("songOffset"),
-            state.source_tags(),
-        )
-        .await
+        match search_windows(&query) {
+            Ok(windows) => {
+                service::search(
+                    state.search(),
+                    &context,
+                    Some(&user_uuid),
+                    q,
+                    &windows,
+                    state.source_tags(),
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        }
     };
     match result {
         Ok(result) => Json(search3_envelope(result)).into_response(),
@@ -233,6 +238,37 @@ fn enumeration_window(
     raw_count: Option<&str>,
     raw_offset: Option<&str>,
 ) -> Result<service::EnumerationWindow, service::SearchError> {
+    let (count, offset) = window_params(raw_count, raw_offset)?;
+
+    service::EnumerationWindow::new(count, offset)
+}
+
+fn search_windows(query: &RawQuery) -> Result<SearchWindows, service::SearchError> {
+    Ok(SearchWindows::new(
+        search_window(query.get("songCount"), query.get("songOffset"))?,
+        search_window(query.get("albumCount"), query.get("albumOffset"))?,
+        search_window(query.get("artistCount"), query.get("artistOffset"))?,
+    ))
+}
+
+fn search_window(
+    raw_count: Option<&str>,
+    raw_offset: Option<&str>,
+) -> Result<SearchWindow, service::SearchError> {
+    let (count, offset) = window_params(raw_count, raw_offset)?;
+    let limit = SearchLimit::new(count.min(MAX_SEARCH_COUNT))
+        .map_err(|_| service::SearchError::InvalidSearch)?;
+    let offset = SearchOffset::new(offset).map_err(|_| service::SearchError::InvalidSearch)?;
+
+    Ok(SearchWindow::new(limit, offset))
+}
+
+const MAX_SEARCH_COUNT: u32 = 25;
+
+fn window_params(
+    raw_count: Option<&str>,
+    raw_offset: Option<&str>,
+) -> Result<(u32, u32), service::SearchError> {
     const DEFAULT_COUNT: u32 = 20;
     let count = match raw_count {
         None => DEFAULT_COUNT,
@@ -249,7 +285,7 @@ fn enumeration_window(
             .map_err(|_| service::SearchError::InvalidSearch)?,
     };
 
-    service::EnumerationWindow::new(count, offset)
+    Ok((count, offset))
 }
 
 pub(crate) async fn get_album_list2(

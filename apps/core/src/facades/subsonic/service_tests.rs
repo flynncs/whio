@@ -4,7 +4,7 @@ use crate::features::music_library::test_support::{
 };
 use crate::{
     features::music_library::catalogue::ProviderError,
-    features::music_library::catalogue::{CatalogueCandidate, CatalogueProvider},
+    features::music_library::catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch},
     features::music_library::{
         domain::{
             AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, Resource, SourceIdentity,
@@ -26,7 +26,7 @@ use std::{
 };
 use uuid::Uuid;
 
-use super::super::enumeration_request;
+use super::super::{enumeration_request, search_window};
 
 struct StubCatalogue {
     responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ProviderError>>>,
@@ -139,6 +139,10 @@ fn candidate_with_index(index: u32) -> CatalogueCandidate {
     )
 }
 
+fn windows(count: Option<&str>, offset: Option<&str>) -> SearchWindows {
+    SearchWindows::uniform(search_window(count, offset).expect("window parses"))
+}
+
 #[sqlx::test]
 async fn search_maps_tracks_and_short_circuits_empty(pool: sqlx::PgPool) {
     let service = catalogue(pool.clone(), vec![Ok(vec![candidate()])]);
@@ -147,8 +151,7 @@ async fn search_maps_tracks_and_short_circuits_empty(pool: sqlx::PgPool) {
         &context(),
         None,
         "song",
-        Some("10"),
-        None,
+        &windows(Some("10"), None),
         SourceTags::Off,
     )
     .await
@@ -165,8 +168,7 @@ async fn search_maps_tracks_and_short_circuits_empty(pool: sqlx::PgPool) {
         &context(),
         None,
         "",
-        None,
-        None,
+        &windows(None, None),
         SourceTags::Off,
     )
     .await
@@ -178,29 +180,14 @@ async fn search_maps_tracks_and_short_circuits_empty(pool: sqlx::PgPool) {
 
 #[sqlx::test]
 async fn paging_caps_slices_and_rejects(pool: sqlx::PgPool) {
-    let result = search(
-        &catalogue(pool.clone(), vec![]),
-        &context(),
-        None,
-        "song",
-        Some("many"),
-        None,
-        SourceTags::Off,
-    )
-    .await;
-    assert!(matches!(result, Err(SearchError::InvalidSearch)));
-
-    let result = search(
-        &catalogue(pool.clone(), vec![]),
-        &context(),
-        None,
-        "song",
-        None,
-        Some("1001"),
-        SourceTags::Off,
-    )
-    .await;
-    assert!(matches!(result, Err(SearchError::InvalidSearch)));
+    assert!(matches!(
+        search_window(Some("many"), None),
+        Err(SearchError::InvalidSearch)
+    ));
+    assert!(matches!(
+        search_window(None, Some("1001")),
+        Err(SearchError::InvalidSearch)
+    ));
 
     let service = paged_catalogue(pool.clone(), 25);
     async fn songs(
@@ -214,8 +201,7 @@ async fn paging_caps_slices_and_rejects(pool: sqlx::PgPool) {
             context,
             None,
             "song",
-            Some(count),
-            Some(offset),
+            &windows(Some(count), Some(offset)),
             SourceTags::Off,
         )
         .await
@@ -239,8 +225,7 @@ async fn paging_caps_slices_and_rejects(pool: sqlx::PgPool) {
         &context,
         None,
         "song",
-        Some("100"),
-        None,
+        &windows(Some("100"), None),
         SourceTags::Off,
     )
     .await

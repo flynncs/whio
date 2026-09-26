@@ -6,7 +6,8 @@ use uuid::Uuid;
 use whio_core::features::music_library::test_support::PostgresTrackRepository;
 use whio_core::{
     features::music_library::catalogue::{
-        CatalogueSearch, DedupMode, SearchLimit, SearchQuery, SearchService,
+        CatalogueSearch, DedupMode, SearchLimit, SearchOffset, SearchQuery, SearchRequest,
+        SearchService, SearchWindow,
     },
     features::music_library::domain::{
         AlbumMetadata, AlbumTrack, ProviderId, SourceIdentity, SourceScope, Track, TrackMetadata,
@@ -91,9 +92,9 @@ impl Fixture {
         .with_dedup_mode(mode);
         service
             .search(
-                &CatalogueSearch::new(
+                &SearchRequest::uniform(
                     SearchQuery::new("Song".into()).unwrap(),
-                    SearchLimit::new(25).unwrap(),
+                    SearchWindow::new(SearchLimit::new(25).unwrap(), SearchOffset::default()),
                 ),
                 None,
                 &RequestContext::new(RequestId::new("dedup-test".into()).unwrap()),
@@ -276,9 +277,9 @@ async fn fresh_provider_result_uses_local_state_without_changing_album_or_source
     );
     let result = service
         .search(
-            &CatalogueSearch::new(
+            &SearchRequest::uniform(
                 SearchQuery::new("Song".into()).unwrap(),
-                SearchLimit::new(25).unwrap(),
+                SearchWindow::new(SearchLimit::new(25).unwrap(), SearchOffset::default()),
             ),
             Some(&user),
             &RequestContext::new(RequestId::new("fresh".into()).unwrap()),
