@@ -388,6 +388,7 @@ async fn album_list_maps_types_and_rejects_unknown(pool: sqlx::PgPool) {
             from_year: None,
             to_year: None,
             genre: None,
+            library_id: None,
         },
         None,
     )
@@ -408,6 +409,7 @@ async fn album_list_maps_types_and_rejects_unknown(pool: sqlx::PgPool) {
             from_year: None,
             to_year: None,
             genre: None,
+            library_id: None,
         },
         None,
     )
@@ -426,6 +428,7 @@ async fn album_list_maps_types_and_rejects_unknown(pool: sqlx::PgPool) {
                 from_year: None,
                 to_year: None,
                 genre: None,
+                library_id: None,
             },
             None,
         )
@@ -442,6 +445,7 @@ async fn album_list_maps_types_and_rejects_unknown(pool: sqlx::PgPool) {
                 from_year: None,
                 to_year: None,
                 genre: None,
+                library_id: None,
             },
             None,
         )
@@ -736,6 +740,7 @@ fn newest_carries_the_owned_scope_in_the_filter() {
         from_year: None,
         to_year: None,
         genre: None,
+        library_id: None,
     };
     let (order, filter) = album_list_order(&newest).expect("the type is supported");
 
@@ -758,6 +763,7 @@ fn newest_carries_the_owned_scope_in_the_filter() {
         from_year: None,
         to_year: None,
         genre: None,
+        library_id: None,
     };
     let (order, filter) = album_list_order(&frequent).expect("the type is supported");
 
@@ -784,6 +790,7 @@ fn state_types_carry_their_membership_in_the_filter() {
             from_year: None,
             to_year: None,
             genre: None,
+            library_id: None,
         };
         let (observed, filter) = album_list_order(&request).expect("the type is supported");
 
@@ -823,6 +830,7 @@ fn by_year_carries_its_range_and_direction() {
         from_year: Some("1990"),
         to_year: Some("2000"),
         genre: None,
+        library_id: None,
     };
     let (order, filter) = album_list_order(&ascending).expect("the type is supported");
 
@@ -840,6 +848,7 @@ fn by_year_carries_its_range_and_direction() {
         from_year: Some("2000"),
         to_year: Some("1990"),
         genre: None,
+        library_id: None,
     };
     let (order, filter) = album_list_order(&inverted).expect("the type is supported");
 
@@ -861,6 +870,7 @@ fn by_year_carries_its_range_and_direction() {
         from_year: None,
         to_year: Some("1990"),
         genre: None,
+        library_id: None,
     };
 
     assert!(album_list_order(&missing).is_err());
@@ -872,6 +882,7 @@ fn by_year_carries_its_range_and_direction() {
         from_year: Some("many"),
         to_year: Some("1990"),
         genre: None,
+        library_id: None,
     };
 
     assert!(matches!(
@@ -889,6 +900,7 @@ fn by_genre_carries_one_normalised_name() {
         from_year: None,
         to_year: None,
         genre: Some("  Rock "),
+        library_id: None,
     };
     let (order, filter) = album_list_order(&rock).expect("the type is supported");
 
@@ -906,6 +918,7 @@ fn by_genre_carries_one_normalised_name() {
         from_year: None,
         to_year: None,
         genre: Some("   "),
+        library_id: None,
     };
 
     assert!(matches!(
@@ -921,6 +934,7 @@ fn by_genre_carries_one_normalised_name() {
         from_year: None,
         to_year: None,
         genre: Some(&long),
+        library_id: None,
     };
 
     assert!(matches!(
@@ -1013,6 +1027,7 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
         genre,
         count,
         offset,
+        library_id: None,
     };
 
     let projection: String = sqlx::query_scalar("SELECT genre FROM tracks ORDER BY title LIMIT 1")
@@ -1085,6 +1100,7 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
         genre: Some(&long),
         count: None,
         offset: None,
+        library_id: None,
     };
     assert!(matches!(
         songs_by_genre(&library, None, &over_long, SourceTags::Off).await,
@@ -1131,6 +1147,7 @@ async fn subsonic_random_songs_is_one_permutation(pool: sqlx::PgPool) {
         genre: None,
         from_year: None,
         to_year: None,
+        library_id: None,
     };
 
     let whole = random_songs(&library, Some(&user), &request("40"), seed, SourceTags::Off)

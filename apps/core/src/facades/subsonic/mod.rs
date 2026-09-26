@@ -302,6 +302,11 @@ pub(crate) async fn get_album_list2(
         return SubsonicError::MissingParameter.into_response();
     };
     let user = principal.user_id.as_uuid();
+    let library_id =
+        match service::music_folder_scope(state.libraries(), &query.all("musicFolderId")).await {
+            Ok(library_id) => library_id,
+            Err(error) => return browse_failure_response(&context, error),
+        };
     let request = service::AlbumListRequest {
         list_type,
         size: query.get("size"),
@@ -309,6 +314,7 @@ pub(crate) async fn get_album_list2(
         from_year: query.get("fromYear"),
         to_year: query.get("toYear"),
         genre: query.get("genre"),
+        library_id,
     };
 
     match service::album_list(state.library(), &request, Some(&user)).await {
@@ -387,10 +393,16 @@ pub(crate) async fn get_songs_by_genre(
         Err(response) => return response,
     };
     let user = principal.user_id.as_uuid();
+    let library_id =
+        match service::music_folder_scope(state.libraries(), &query.all("musicFolderId")).await {
+            Ok(library_id) => library_id,
+            Err(error) => return browse_failure_response(&context, error),
+        };
     let request = service::SongsByGenreRequest {
         genre: query.get("genre"),
         count: query.get("count"),
         offset: query.get("offset"),
+        library_id,
     };
 
     match service::songs_by_genre(state.library(), Some(&user), &request, state.source_tags()).await
@@ -411,11 +423,17 @@ pub(crate) async fn get_random_songs(
         Err(response) => return response,
     };
     let user = principal.user_id.as_uuid();
+    let library_id =
+        match service::music_folder_scope(state.libraries(), &query.all("musicFolderId")).await {
+            Ok(library_id) => library_id,
+            Err(error) => return browse_failure_response(&context, error),
+        };
     let request = service::RandomSongsRequest {
         size: query.get("size"),
         genre: query.get("genre"),
         from_year: query.get("fromYear"),
         to_year: query.get("toYear"),
+        library_id,
     };
     let seed =
         RandomSeed::for_request(Some(user), Resource::Track, chrono::Utc::now().date_naive());
@@ -499,6 +517,18 @@ fn browse_failure_response(context: &RequestContext, error: service::BrowseError
                 error = %error,
                 request_id = context.request_id().as_str(),
                 "catalogue read failed"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                models::error::Code::Variant0,
+                "Internal error.",
+            )
+        }
+        service::BrowseError::Registry(error) => {
+            tracing::error!(
+                error = %error,
+                request_id = context.request_id().as_str(),
+                "library registry read failed"
             );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,

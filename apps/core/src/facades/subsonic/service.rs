@@ -14,7 +14,9 @@ use crate::{
         ArtistSort, IdSet, RandomSeed, Range, RoleSelector, RoleSet, SelectorText, SortDirection,
         StateTarget, TrackId, ValidationError,
     },
-    features::music_library::library::ScanService,
+    features::music_library::library::{
+        LibraryId, LibraryRegistrationError, LibraryRegistry, ScanService,
+    },
     features::music_library::library_state::{LibraryStateError, LibraryStateService},
     platform::request::RequestContext,
 };
@@ -194,6 +196,9 @@ pub(crate) enum BrowseError {
     #[error("artist not found")]
     ArtistNotFound,
 
+    #[error("library registry read failed")]
+    Registry(#[source] LibraryRegistrationError),
+
     #[error("catalogue read failed")]
     Catalogue(#[source] CatalogueError),
 }
@@ -220,6 +225,7 @@ pub(crate) struct AlbumListRequest<'a> {
     pub(crate) from_year: Option<&'a str>,
     pub(crate) to_year: Option<&'a str>,
     pub(crate) genre: Option<&'a str>,
+    pub(crate) library_id: Option<IdSet<LibraryId>>,
 }
 
 pub(crate) struct StarredResult {
@@ -249,6 +255,7 @@ pub(crate) async fn album_list(
             .map_err(|_| BrowseError::InvalidRequest)?,
     };
     let (order, filter) = album_list_order(request)?;
+    let filter = filter.with_library_id(request.library_id.clone());
 
     library
         .album_list(offset, size, order, filter, user)
@@ -326,6 +333,31 @@ fn album_list_order(
             ))
         }
         _ => Err(BrowseError::UnsupportedType),
+    }
+}
+
+pub(crate) async fn music_folder_scope(
+    libraries: &LibraryRegistry,
+    requested: &[&str],
+) -> Result<Option<IdSet<LibraryId>>, BrowseError> {
+    if requested.is_empty() {
+        return Ok(None);
+    }
+
+    let mut numeric_ids = Vec::with_capacity(requested.len());
+
+    for raw in requested {
+        numeric_ids.push(
+            raw.trim()
+                .parse::<i32>()
+                .map_err(|_| BrowseError::InvalidRequest)?,
+        );
+    }
+
+    match libraries.ids_for_numeric(&numeric_ids).await {
+        Ok(Some(ids)) => Ok(Some(ids)),
+        Ok(None) | Err(LibraryRegistrationError::Disabled) => Err(BrowseError::InvalidRequest),
+        Err(error) => Err(BrowseError::Registry(error)),
     }
 }
 
@@ -530,6 +562,7 @@ pub(crate) struct SongsByGenreRequest<'a> {
     pub(crate) genre: Option<&'a str>,
     pub(crate) count: Option<&'a str>,
     pub(crate) offset: Option<&'a str>,
+    pub(crate) library_id: Option<IdSet<LibraryId>>,
 }
 
 pub(crate) struct RandomSongsRequest<'a> {
@@ -537,6 +570,7 @@ pub(crate) struct RandomSongsRequest<'a> {
     pub(crate) genre: Option<&'a str>,
     pub(crate) from_year: Option<&'a str>,
     pub(crate) to_year: Option<&'a str>,
+    pub(crate) library_id: Option<IdSet<LibraryId>>,
 }
 
 const DEFAULT_GENRE_SIZE: u32 = 10;
@@ -570,7 +604,9 @@ pub(crate) async fn songs_by_genre(
 
     let limit = PageLimit::new(count).map_err(|_| BrowseError::InvalidRequest)?;
     let set = IdSet::new([genre]).map_err(|_| BrowseError::InvalidRequest)?;
-    let filter = TrackListFilter::new().with_genre(Some(set));
+    let filter = TrackListFilter::new()
+        .with_genre(Some(set))
+        .with_library_id(request.library_id.clone());
 
     library
         .track_page(offset, limit, TrackOrder::Title, &filter, user)
@@ -613,6 +649,8 @@ pub(crate) async fn random_songs(
 
         filter = filter.with_year(Some(year));
     }
+
+    filter = filter.with_library_id(request.library_id.clone());
 
     if size == 0 {
         return Ok(Vec::new());

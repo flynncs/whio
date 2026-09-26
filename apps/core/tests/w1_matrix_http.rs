@@ -449,10 +449,47 @@ async fn a_library_scoped_read_is_the_same_everywhere(pool: PgPool) {
     assert_eq!(
         album_ids(&unscoped),
         both,
-        "getAlbumList2 has no library selector at this revision, so it lists both libraries"
+        "an unscoped getAlbumList2 lists both libraries"
     );
 
-    let (_, _, ignored) = rest(
+    let (status, _, music_scoped) = rest(
+        &fixture.app,
+        &fixture.alice.auth,
+        "/getAlbumList2.view",
+        &format!(
+            "type=alphabeticalByName&musicFolderId={}",
+            fixture.music.numeric_id()
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "subsonic music: {music_scoped}");
+    assert_eq!(
+        album_ids(&music_scoped),
+        HashSet::from([fixture.kept.to_string()]),
+        "musicFolderId scopes getAlbumList2 to the named library"
+    );
+
+    let (status, _, elsewhere_scoped) = rest(
+        &fixture.app,
+        &fixture.alice.auth,
+        "/getAlbumList2.view",
+        &format!(
+            "type=alphabeticalByName&musicFolderId={}",
+            fixture.elsewhere.numeric_id()
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "subsonic elsewhere: {elsewhere_scoped}"
+    );
+    assert_eq!(
+        album_ids(&elsewhere_scoped),
+        HashSet::from([fixture.other.to_string()])
+    );
+
+    let (status, _, unknown) = rest(
         &fixture.app,
         &fixture.alice.auth,
         "/getAlbumList2.view",
@@ -460,9 +497,13 @@ async fn a_library_scoped_read_is_the_same_everywhere(pool: PgPool) {
     )
     .await;
     assert_eq!(
-        album_ids(&ignored),
-        both,
-        "getAlbumList2 ignores musicFolderId at this revision"
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a folder id naming no library is a client error"
+    );
+    assert_eq!(
+        unknown["subsonic-response"]["error"]["message"],
+        json!("Invalid browse parameters.")
     );
 
     for body in [

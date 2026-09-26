@@ -7,6 +7,7 @@ use std::{
 
 use uuid::Uuid;
 
+use crate::features::music_library::domain::IdSet;
 use crate::features::music_library::storage::contracts::{LibraryStore, TrackRepositoryError};
 
 pub const DEFAULT_LABEL: &str = "default";
@@ -185,6 +186,30 @@ impl LibraryRegistry {
             .map_err(LibraryRegistrationError::Store)
     }
 
+    pub(crate) async fn ids_for_numeric(
+        &self,
+        numeric_ids: &[i32],
+    ) -> Result<Option<IdSet<LibraryId>>, LibraryRegistrationError> {
+        let store = self.store()?;
+        let known = store
+            .list_libraries()
+            .await
+            .map_err(LibraryRegistrationError::Store)?;
+        let mut selected = Vec::with_capacity(numeric_ids.len());
+
+        for numeric_id in numeric_ids {
+            match known
+                .iter()
+                .find(|library| library.numeric_id() == *numeric_id)
+            {
+                Some(library) => selected.push(library.id().clone()),
+                None => return Ok(None),
+            }
+        }
+
+        Ok(IdSet::new(selected).ok())
+    }
+
     #[allow(dead_code)]
     pub(crate) async fn scopes_for(
         &self,
@@ -210,17 +235,14 @@ impl LibraryRegistry {
         &self,
         numeric_id: i32,
     ) -> Result<Vec<String>, LibraryRegistrationError> {
-        let store = self.store()?;
-        let library = store
-            .list_libraries()
-            .await
-            .map_err(LibraryRegistrationError::Store)?
-            .into_iter()
-            .find(|library| library.numeric_id() == numeric_id)
+        let ids = self
+            .ids_for_numeric(std::slice::from_ref(&numeric_id))
+            .await?
             .ok_or(LibraryRegistrationError::UnknownNumericId { numeric_id })?;
+        let ids = ids.iter().cloned().collect::<Vec<_>>();
 
-        store
-            .scopes_for_ids(std::slice::from_ref(library.id()))
+        self.store()?
+            .scopes_for_ids(&ids)
             .await
             .map_err(LibraryRegistrationError::Store)
     }

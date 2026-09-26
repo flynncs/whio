@@ -464,22 +464,11 @@ pub(crate) async fn canonical_libraries(
     libraries: &LibraryRegistry,
     requested: &[i32],
 ) -> Result<IdSet<LibraryId>, SongError> {
-    let known = match libraries.libraries().await {
-        Ok(known) => known,
-        Err(LibraryRegistrationError::Disabled) => return Err(SongError::InvalidSearch),
-        Err(error) => return Err(SongError::Registry(error)),
-    };
-    let mut canonical = Vec::with_capacity(requested.len());
-
-    for numeric_id in requested {
-        let library = known
-            .iter()
-            .find(|library| library.numeric_id() == *numeric_id)
-            .ok_or(SongError::InvalidSearch)?;
-        canonical.push(library.id().clone());
+    match libraries.ids_for_numeric(requested).await {
+        Ok(Some(ids)) => Ok(ids),
+        Ok(None) | Err(LibraryRegistrationError::Disabled) => Err(SongError::InvalidSearch),
+        Err(error) => Err(SongError::Registry(error)),
     }
-
-    IdSet::new(canonical).map_err(|_| SongError::InvalidSearch)
 }
 
 pub(crate) async fn genre_list(

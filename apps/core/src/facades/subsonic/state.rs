@@ -7,7 +7,7 @@ use crate::{
         music_library::{
             artwork::ArtworkService,
             catalogue::{CompletionService, LibraryService, SearchService},
-            library::ScanService,
+            library::{LibraryRegistry, ScanService},
             library_state::LibraryStateService,
             playlists::PlaylistService,
         },
@@ -21,6 +21,7 @@ pub(crate) struct SubsonicState {
     pub(crate) credential: Arc<CredentialService>,
     pub(crate) search: Arc<SearchService>,
     pub(crate) library: Arc<LibraryService>,
+    pub(crate) libraries: Arc<LibraryRegistry>,
     pub(crate) completion: Arc<CompletionService>,
     pub(crate) playlists: Arc<PlaylistService>,
     pub(crate) artwork: Arc<ArtworkService>,
@@ -39,6 +40,9 @@ impl SubsonicState {
     }
     pub(crate) fn library(&self) -> &LibraryService {
         &self.library
+    }
+    pub(crate) fn libraries(&self) -> &LibraryRegistry {
+        &self.libraries
     }
     pub(crate) fn completion(&self) -> &CompletionService {
         &self.completion
