@@ -6,7 +6,7 @@ use crate::features::music_library::{
     domain::{
         Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, CreditRole,
         ProviderEntityState, ProviderId, SourceIdentity, SourceScope, Track, TrackId,
-        TrackMetadata, normalize_for_matching,
+        TrackMetadata,
     },
     storage::contracts::{ReconcileReport, SourceFileFacts, TrackRepositoryError},
 };
@@ -19,7 +19,7 @@ use super::decode::{
     encode_duration_ms, encode_facts_version, encode_integer, encode_smallint, encode_source_scope,
     repository_error,
 };
-use super::schema::{ALBUM_COLUMNS, ARTIST_COLUMNS, AlbumRow, ArtistRow};
+use super::schema::{ALBUM_COLUMNS, ARTIST_COLUMNS, AlbumRow, ArtistRow, folded};
 
 type ResolvedCredit = (String, ArtistId, Option<CreditRole>);
 
@@ -338,17 +338,16 @@ async fn find_artist_by_name(
     pool: &PgPool,
     name: &str,
 ) -> Result<Option<Artist>, TrackRepositoryError> {
-    let key = normalize_for_matching(name);
-
     let row = sqlx::query_as::<_, ArtistRow>(&format!(
         r#"
         SELECT {ARTIST_COLUMNS}
         FROM artists
         WHERE musicbrainz_artist_id IS NULL
-          AND name_normalized = $1
-        "#
+          AND name_normalized = {key}
+        "#,
+        key = folded("$1"),
     ))
-    .bind(key)
+    .bind(name)
     .fetch_optional(pool)
     .await
     .map_err(repository_error)?;
@@ -513,20 +512,19 @@ async fn find_album_by_text(
     title: &str,
     album_artist_id: Option<&ArtistId>,
 ) -> Result<Option<Album>, TrackRepositoryError> {
-    let key = normalize_for_matching(title);
-
     let row = sqlx::query_as::<_, AlbumRow>(&format!(
         r#"
         SELECT {ALBUM_COLUMNS}
         FROM albums
         WHERE album_artist_id IS NOT DISTINCT FROM $1
-          AND title_normalized = $2
+          AND title_normalized = {key}
         ORDER BY (musicbrainz_release_group_id IS NULL), created_at
         LIMIT 1
-        "#
+        "#,
+        key = folded("$2"),
     ))
     .bind(album_artist_id.map(|id| *id.as_uuid()))
-    .bind(key)
+    .bind(title)
     .fetch_optional(pool)
     .await
     .map_err(repository_error)?;

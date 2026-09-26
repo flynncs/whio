@@ -107,6 +107,13 @@ pub(crate) const CREDIT_NORMALIZED: &str = "translate(lower(regexp_replace(norma
      '\\s+', ' ', 'g')), U&'\\2019\\2018\\02BC\\2013\\2014\\2011', \
      U&'\\0027\\0027\\0027\\002D\\002D\\002D')";
 
+pub(crate) fn folded(value: &str) -> String {
+    format!(
+        "translate(lower(regexp_replace(normalize({value}, NFC), '\\s+', ' ', 'g')), \
+         U&'\\2019\\2018\\02BC\\2013\\2014\\2011', U&'\\0027\\0027\\0027\\002D\\002D\\002D')"
+    )
+}
+
 // the browse scope. a provider entity is browsable when it is engaged: owned,
 // or starred, rated or played by the viewer. each query inlines the clause with
 // its own parameter positions, so the numbers here match that query's binds.

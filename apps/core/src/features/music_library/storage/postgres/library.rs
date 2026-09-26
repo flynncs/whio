@@ -31,7 +31,7 @@ use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS,
     AlbumBrowseRow, AlbumEntryRow, AlbumRow, ArtistRow, CREDIT_NORMALIZED, TRACK_COLUMNS,
     TRACK_ENGAGED, TRACK_OWNED, TrackPageRow, TrackRecord, TrackSearchRow, album_scope,
-    artist_membership, artist_scope,
+    artist_membership, artist_scope, folded,
 };
 use crate::features::music_library::domain::{
     album_quality, normalize_for_matching, track_quality,
@@ -763,13 +763,7 @@ impl LibraryRead for PgStore {
         titles: &[String],
         limit: u32,
     ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
-        let keys = titles
-            .iter()
-            .map(|title| normalize_for_matching(title))
-            .filter(|key| !key.is_empty())
-            .collect::<Vec<_>>();
-
-        if keys.is_empty() {
+        if titles.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -780,12 +774,15 @@ impl LibraryRead for PgStore {
             FROM tracks AS t
             LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
             LEFT JOIN albums AS a ON a.id = mt.album_id
-            WHERE t.title_normalized = ANY($1)
+            WHERE t.title_normalized = ANY(
+                SELECT {key} FROM unnest($1::TEXT[]) AS raw(value)
+            )
             ORDER BY t.title_normalized, t.id
             LIMIT $2
-            "#
+            "#,
+            key = folded("raw.value"),
         ))
-        .bind(keys.as_slice())
+        .bind(titles)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -799,12 +796,6 @@ impl LibraryRead for PgStore {
         keys: &[String],
         limit: u32,
     ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
-        let keys = keys
-            .iter()
-            .map(|key| normalize_for_matching(key))
-            .filter(|key| !key.is_empty())
-            .collect::<Vec<_>>();
-
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -819,9 +810,9 @@ impl LibraryRead for PgStore {
             WHERE t.id IN (
                 SELECT DISTINCT matched.id
                 FROM tracks AS matched
-                JOIN unnest($1::text[]) AS k(value)
-                  ON matched.title_normalized = k.value
-                  OR matched.title_normalized % k.value
+                JOIN unnest($1::TEXT[]) AS k(value)
+                  ON matched.title_normalized = {key}
+                  OR matched.title_normalized % {key}
                 WHERE EXISTS (
                     SELECT 1 FROM track_sources AS sources
                     WHERE sources.track_id = matched.id AND sources.provider_id = $2
@@ -829,9 +820,10 @@ impl LibraryRead for PgStore {
             )
             ORDER BY t.title_normalized, t.id
             LIMIT $3
-            "#
+            "#,
+            key = folded("k.value"),
         ))
-        .bind(keys.as_slice())
+        .bind(keys)
         .bind(LOCAL_PROVIDER_ID)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
@@ -914,13 +906,6 @@ fn source_precedence(alias: &str) -> String {
     format!(
         "(CASE {alias}.provider_id WHEN '{LOCAL_PROVIDER_ID}' THEN 0 \
          WHEN '{YOUTUBE_MUSIC_PROVIDER_ID}' THEN 1 ELSE 255 END)"
-    )
-}
-
-fn folded(column: &str) -> String {
-    format!(
-        "translate(lower(regexp_replace(normalize({column}, NFC), '\\s+', ' ', 'g')), \
-         U&'\\2019\\2018\\02BC\\2013\\2014\\2011', U&'\\0027\\0027\\0027\\002D\\002D\\002D')"
     )
 }
 
