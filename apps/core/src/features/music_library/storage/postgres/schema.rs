@@ -160,80 +160,6 @@ pub(crate) fn album_scope(scope: AlbumListScope, user_bind: u8, libraries_bind: 
     }
 }
 
-// list_artists: $3 is the library provider id list, $4 the viewer.
-pub(crate) const ARTIST_ENGAGED: &str = "(EXISTS (
-        SELECT 1 FROM track_artist_credits AS engaged_credit
-        JOIN tracks AS t ON t.id = engaged_credit.track_id
-        WHERE engaged_credit.artist_id = ar.id
-          AND engaged_credit.role IS NULL
-          AND (EXISTS (
-                  SELECT 1 FROM track_sources AS owned
-                  WHERE owned.track_id = t.id AND owned.provider_id = ANY($3::TEXT[])
-              )
-              OR EXISTS (
-                  SELECT 1 FROM track_favorites AS fav
-                  WHERE fav.track_id = t.id AND fav.user_id = $4
-              )
-              OR EXISTS (
-                  SELECT 1 FROM track_ratings AS rating
-                  WHERE rating.track_id = t.id AND rating.user_id = $4
-              )
-              OR EXISTS (
-                  SELECT 1 FROM track_play_stats AS play
-                  WHERE play.track_id = t.id AND play.user_id = $4 AND play.play_count > 0
-              )
-              OR EXISTS (
-                  SELECT 1 FROM playlist_entries AS entry
-                  JOIN playlists AS list ON list.id = entry.playlist_id
-                  WHERE entry.track_id = t.id AND list.user_id = $4
-              ))
-    )
-    OR EXISTS (
-        SELECT 1 FROM artist_favorites AS fav
-        WHERE fav.artist_id = ar.id AND fav.user_id = $4
-    )
-    OR EXISTS (
-        SELECT 1 FROM artist_ratings AS rating
-        WHERE rating.artist_id = ar.id AND rating.user_id = $4
-    ))";
-
-// count_artists: $1 and $2 as above.
-pub(crate) const COUNT_ARTIST_ENGAGED: &str = "(EXISTS (
-        SELECT 1 FROM track_artist_credits AS engaged_credit
-        JOIN tracks AS t ON t.id = engaged_credit.track_id
-        WHERE engaged_credit.artist_id = ar.id
-          AND engaged_credit.role IS NULL
-          AND (EXISTS (
-                  SELECT 1 FROM track_sources AS owned
-                  WHERE owned.track_id = t.id AND owned.provider_id = ANY($1::TEXT[])
-              )
-              OR EXISTS (
-                  SELECT 1 FROM track_favorites AS fav
-                  WHERE fav.track_id = t.id AND fav.user_id = $2
-              )
-              OR EXISTS (
-                  SELECT 1 FROM track_ratings AS rating
-                  WHERE rating.track_id = t.id AND rating.user_id = $2
-              )
-              OR EXISTS (
-                  SELECT 1 FROM track_play_stats AS play
-                  WHERE play.track_id = t.id AND play.user_id = $2 AND play.play_count > 0
-              )
-              OR EXISTS (
-                  SELECT 1 FROM playlist_entries AS entry
-                  JOIN playlists AS list ON list.id = entry.playlist_id
-                  WHERE entry.track_id = t.id AND list.user_id = $2
-              ))
-    )
-    OR EXISTS (
-        SELECT 1 FROM artist_favorites AS fav
-        WHERE fav.artist_id = ar.id AND fav.user_id = $2
-    )
-    OR EXISTS (
-        SELECT 1 FROM artist_ratings AS rating
-        WHERE rating.artist_id = ar.id AND rating.user_id = $2
-    ))";
-
 pub(crate) const TRACK_ENGAGED: &str = "(EXISTS (
         SELECT 1 FROM track_sources AS owned
         WHERE owned.track_id = t.id AND owned.provider_id = ANY($2::TEXT[])
@@ -268,3 +194,59 @@ pub(crate) type StateRow = (
     i64,
     Option<chrono::DateTime<chrono::Utc>>,
 );
+
+fn artist_engaged_track(user_bind: u8, libraries_bind: u8) -> String {
+    format!(
+        "(EXISTS (
+        SELECT 1 FROM track_sources AS engaged_source
+        WHERE engaged_source.track_id = t.id
+          AND engaged_source.provider_id = ANY(${libraries_bind}::TEXT[])
+    )
+    OR EXISTS (
+        SELECT 1 FROM track_favorites AS engaged_favorite
+        WHERE engaged_favorite.track_id = t.id AND engaged_favorite.user_id = ${user_bind}
+    )
+    OR EXISTS (
+        SELECT 1 FROM track_ratings AS engaged_rating
+        WHERE engaged_rating.track_id = t.id AND engaged_rating.user_id = ${user_bind}
+    )
+    OR EXISTS (
+        SELECT 1 FROM track_play_stats AS engaged_play
+        WHERE engaged_play.track_id = t.id AND engaged_play.user_id = ${user_bind}
+          AND engaged_play.play_count > 0
+    )
+    OR EXISTS (
+        SELECT 1 FROM playlist_entries AS engaged_entry
+        JOIN playlists AS engaged_list ON engaged_list.id = engaged_entry.playlist_id
+        WHERE engaged_entry.track_id = t.id AND engaged_list.user_id = ${user_bind}
+    ))"
+    )
+}
+
+pub(crate) fn artist_scope(user_bind: u8, libraries_bind: u8) -> String {
+    let engaged_track = artist_engaged_track(user_bind, libraries_bind);
+    let engaged_album = album_scope(AlbumListScope::Engaged, user_bind, libraries_bind);
+
+    format!(
+        "(EXISTS (
+        SELECT 1 FROM track_artist_credits AS engaged_credit
+        JOIN tracks AS t ON t.id = engaged_credit.track_id
+        WHERE engaged_credit.artist_id = ar.id
+          AND {engaged_track}
+    )
+    OR EXISTS (
+        SELECT 1 FROM albums AS a
+        WHERE a.album_artist_id = ar.id AND {engaged_album}
+    )
+    OR EXISTS (
+        SELECT 1 FROM artist_favorites AS engaged_artist_favorite
+        WHERE engaged_artist_favorite.artist_id = ar.id
+          AND engaged_artist_favorite.user_id = ${user_bind}
+    )
+    OR EXISTS (
+        SELECT 1 FROM artist_ratings AS engaged_artist_rating
+        WHERE engaged_artist_rating.artist_id = ar.id
+          AND engaged_artist_rating.user_id = ${user_bind}
+    ))"
+    )
+}

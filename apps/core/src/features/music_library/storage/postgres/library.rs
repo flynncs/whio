@@ -8,9 +8,10 @@ use uuid::Uuid;
 use crate::features::music_library::{
     domain::{
         Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, Artist, ArtistId,
-        ArtistSummary, GenreSummary, LOCAL_PROVIDER_ID, RandomSeed, Range, Resource, RoleSelector,
-        SearchTerms, SortDirection, Track, TrackHit, TrackId, TrackListFilter, TrackListScope,
-        TrackOrder, TrackPage, TrackView, YOUTUBE_MUSIC_PROVIDER_ID,
+        ArtistListFilter, ArtistSort, ArtistSummary, GenreSummary, LOCAL_PROVIDER_ID, RandomSeed,
+        Range, Resource, RoleSelector, RoleSet, SearchTerms, SortDirection, Track, TrackHit,
+        TrackId, TrackListFilter, TrackListScope, TrackOrder, TrackPage, TrackView,
+        YOUTUBE_MUSIC_PROVIDER_ID,
     },
     library::LibraryRegistry,
     storage::contracts::TrackRepositoryError,
@@ -21,16 +22,16 @@ use crate::features::music_library::storage::contracts::LibraryRead;
 use super::PgStore;
 use super::PostgresLibraryStore;
 use super::decode::{
-    album_states, albums_for_tracks, attach_album_state, attach_album_states, attach_artist_states,
-    credits_for_tracks, decode_album, decode_album_summary, decode_artist, decode_artist_summary,
-    decode_membership, decode_track, genres_for_tracks, hits_from_rows, repository_error,
-    sources_for_tracks, track_states,
+    album_states, albums_for_tracks, artist_count_expressions, attach_album_state,
+    attach_album_states, attach_artist_states, credits_for_tracks, decode_album,
+    decode_album_summary, decode_artist, decode_artist_summary, decode_membership, decode_track,
+    genres_for_tracks, hits_from_rows, repository_error, sources_for_tracks, track_states,
 };
 use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS,
-    ARTIST_ENGAGED, AlbumBrowseRow, AlbumEntryRow, AlbumRow, ArtistRow, COUNT_ARTIST_ENGAGED,
-    CREDIT_NORMALIZED, TRACK_COLUMNS, TRACK_ENGAGED, TRACK_OWNED, TrackPageRow, TrackRecord,
-    TrackSearchRow, album_scope,
+    AlbumBrowseRow, AlbumEntryRow, AlbumRow, ArtistRow, CREDIT_NORMALIZED, TRACK_COLUMNS,
+    TRACK_ENGAGED, TRACK_OWNED, TrackPageRow, TrackRecord, TrackSearchRow, album_scope,
+    artist_scope,
 };
 use crate::features::music_library::domain::{
     album_quality, normalize_for_matching, track_quality,
@@ -288,24 +289,44 @@ impl LibraryRead for PgStore {
         &self,
         offset: u32,
         limit: u32,
+        sort: ArtistSort,
+        filter: &ArtistListFilter,
         user: Option<Uuid>,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         let library_ids = self.library_provider_ids();
-        let rows =
-            sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64)>(&format!(
-                r#"
+        let direction = filter.resolved_direction(sort);
+        let mut predicates = TrackPredicates::new(5);
+        let selectors = artist_selector_clauses(&self.pool, filter, &mut predicates).await?;
+        let order_clause = artist_order_clause(sort, direction, &selectors);
+        let scope = artist_scope(1, 2);
+        let where_clause = predicates.where_clause();
+        let statement = format!(
+            r#"
             SELECT ar.id, ar.name, ar.sort_name, ar.musicbrainz_artist_id,
-                   (SELECT COUNT(*) FROM albums WHERE album_artist_id = ar.id)::BIGINT
+                   {album_count} AS album_count, {song_count} AS song_count
             FROM artists AS ar
-            WHERE {ARTIST_ENGAGED}
-            ORDER BY ar.name_normalized, ar.id
-            LIMIT $1 OFFSET $2
-            "#
-            ))
-            .bind(i64::from(limit))
-            .bind(i64::from(offset))
-            .bind(&library_ids)
+            WHERE {scope}
+              {where_clause}
+            ORDER BY {order_clause}
+            LIMIT $3 OFFSET $4
+            "#,
+            album_count = selectors.album_count,
+            song_count = selectors.song_count,
+        );
+        let mut query =
+            sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(
+                &statement,
+            )
             .bind(user)
+            .bind(&library_ids)
+            .bind(i64::from(limit))
+            .bind(i64::from(offset));
+
+        for value in predicates.values() {
+            query = value.bind(query);
+        }
+
+        let rows = query
             .fetch_all(&self.pool)
             .await
             .map_err(repository_error)?;
@@ -347,16 +368,30 @@ impl LibraryRead for PgStore {
         u32::try_from(count).map_err(|_| TrackRepositoryError::InvalidData)
     }
 
-    async fn count_artists(&self, user: Option<Uuid>) -> Result<u32, TrackRepositoryError> {
+    async fn count_artists(
+        &self,
+        user: Option<Uuid>,
+        filter: &ArtistListFilter,
+    ) -> Result<u32, TrackRepositoryError> {
         let library_ids = self.library_provider_ids();
-        let count = sqlx::query_scalar::<_, i64>(&format!(
-            "SELECT COUNT(*)::BIGINT FROM artists AS ar WHERE {COUNT_ARTIST_ENGAGED}"
-        ))
-        .bind(&library_ids)
-        .bind(user)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(repository_error)?;
+        let mut predicates = TrackPredicates::new(3);
+        artist_selector_clauses(&self.pool, filter, &mut predicates).await?;
+        let scope = artist_scope(1, 2);
+        let where_clause = predicates.where_clause();
+        let statement =
+            format!("SELECT COUNT(*)::BIGINT FROM artists AS ar WHERE {scope} {where_clause}");
+        let mut query = sqlx::query_as::<_, (i64,)>(&statement)
+            .bind(user)
+            .bind(&library_ids);
+
+        for value in predicates.values() {
+            query = value.bind(query);
+        }
+
+        let (count,) = query
+            .fetch_one(&self.pool)
+            .await
+            .map_err(repository_error)?;
 
         u32::try_from(count).map_err(|_| TrackRepositoryError::InvalidData)
     }
@@ -651,10 +686,10 @@ impl LibraryRead for PgStore {
         let tokens = terms.tokens().to_vec();
         let prefix = format!("{}%", escape_like(&needle));
         let contains = format!("%{}%", escape_like(&needle));
-        let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64)>(
+        let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(
             r#"
             SELECT picked.id, picked.name, picked.sort_name, picked.musicbrainz_artist_id,
-                   picked.album_count
+                   picked.album_count, 0::BIGINT
             FROM (
                 SELECT DISTINCT ON (ar.name_normalized)
                        ar.id, ar.name, ar.sort_name, ar.musicbrainz_artist_id,
@@ -1766,5 +1801,205 @@ fn album_order_clause(
             format!("hashtextextended(a.id::text, {placeholder}) {dir}, a.id")
         }
         AlbumOrder::RecentlyAdded => format!("a.created_at {dir}, a.id"),
+    }
+}
+
+struct ArtistSelectors {
+    membership: String,
+    album_count: String,
+    song_count: String,
+}
+
+fn artist_role_membership(role: Option<&RoleSet>, predicates: &mut TrackPredicates) -> String {
+    let mut stored_roles = Vec::new();
+    let mut primary = role.is_none();
+    let mut album_artist = role.is_none();
+
+    for selector in role.into_iter().flat_map(|roles| roles.iter()) {
+        if let Some(stored) = selector.stored_role() {
+            stored_roles.push(stored.as_str().to_owned());
+        } else if *selector == RoleSelector::Artist {
+            primary = true;
+        } else {
+            album_artist = true;
+        }
+    }
+
+    let mut parts = Vec::new();
+    let credit_condition = if role.is_none() {
+        Some(String::new())
+    } else if stored_roles.is_empty() {
+        if primary {
+            Some(" AND membership_credit.role IS NULL".to_owned())
+        } else {
+            None
+        }
+    } else if primary {
+        let placeholder = predicates.texts(stored_roles);
+
+        Some(format!(
+            " AND (membership_credit.role = ANY({placeholder}) \
+             OR membership_credit.role IS NULL)"
+        ))
+    } else {
+        let placeholder = predicates.texts(stored_roles);
+
+        Some(format!(" AND membership_credit.role = ANY({placeholder})"))
+    };
+
+    if let Some(condition) = credit_condition {
+        parts.push(format!(
+            "SELECT membership_album.id AS album_id, membership_track.id AS track_id \
+             FROM track_artist_credits AS membership_credit \
+             JOIN tracks AS membership_track ON membership_track.id = membership_credit.track_id \
+             LEFT JOIN album_tracks AS membership_member \
+               ON membership_member.track_id = membership_track.id \
+             LEFT JOIN albums AS membership_album \
+               ON membership_album.id = membership_member.album_id \
+             WHERE membership_credit.artist_id = ar.id{condition}"
+        ));
+    }
+
+    if album_artist {
+        parts.push(
+            "SELECT album_artist_album.id AS album_id, album_artist_member.track_id AS track_id \
+             FROM albums AS album_artist_album \
+             LEFT JOIN album_tracks AS album_artist_member \
+               ON album_artist_member.album_id = album_artist_album.id \
+             WHERE album_artist_album.album_artist_id = ar.id"
+                .to_owned(),
+        );
+    }
+
+    parts.join(" UNION ALL ")
+}
+
+async fn artist_selector_clauses(
+    pool: &PgPool,
+    filter: &ArtistListFilter,
+    predicates: &mut TrackPredicates,
+) -> Result<ArtistSelectors, TrackRepositoryError> {
+    if let Some(name) = filter.name() {
+        let pattern = predicates.text(format!("%{}%", escape_like(name.as_str())));
+
+        predicates.push(format!("ar.name_normalized LIKE {pattern}"));
+    }
+
+    let membership = artist_role_membership(filter.role(), predicates);
+    let (album_count, song_count) = artist_count_expressions(&membership);
+
+    if filter.role().is_some() {
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM ({membership}) AS artist_membership)"
+        ));
+    }
+
+    if let Some(starred) = filter.starred() {
+        let clause = "EXISTS (SELECT 1 FROM artist_favorites AS sel_artist_favorite \
+                      WHERE sel_artist_favorite.artist_id = ar.id \
+                        AND sel_artist_favorite.user_id = $1)";
+
+        predicates.push(if starred {
+            clause.to_owned()
+        } else {
+            format!("NOT {clause}")
+        });
+    }
+
+    if let Some(has_rating) = filter.has_rating() {
+        let clause = "EXISTS (SELECT 1 FROM artist_ratings AS sel_artist_rating \
+                      WHERE sel_artist_rating.artist_id = ar.id \
+                        AND sel_artist_rating.user_id = $1)";
+
+        predicates.push(if has_rating {
+            clause.to_owned()
+        } else {
+            format!("NOT {clause}")
+        });
+    }
+
+    if let Some(rating) = filter.rating() {
+        let range = predicates.u8_range("sel_artist_rating.rating", rating);
+
+        predicates.push(format!(
+            "EXISTS (SELECT 1 FROM artist_ratings AS sel_artist_rating \
+             WHERE sel_artist_rating.artist_id = ar.id \
+               AND sel_artist_rating.user_id = $1 AND {range})"
+        ));
+    }
+
+    if let Some(library_id) = filter.library_id() {
+        let ids = library_id.iter().cloned().collect::<Vec<_>>();
+        let registry = LibraryRegistry::new(Arc::new(PostgresLibraryStore::new(pool.clone())));
+        let scopes = registry
+            .scopes_for_ids(&ids)
+            .await
+            .map_err(|_| TrackRepositoryError::InvalidData)?;
+        let placeholder = predicates.texts(scopes);
+
+        predicates.push(format!(
+            "(EXISTS (SELECT 1 FROM artist_sources AS sel_artist_library \
+             WHERE sel_artist_library.artist_id = ar.id \
+               AND sel_artist_library.source_scope = ANY({placeholder})) \
+             OR EXISTS (SELECT 1 FROM track_artist_credits AS sel_artist_library_credit \
+             JOIN track_sources AS sel_artist_library_source \
+               ON sel_artist_library_source.track_id = sel_artist_library_credit.track_id \
+             WHERE sel_artist_library_credit.artist_id = ar.id \
+               AND sel_artist_library_source.source_scope = ANY({placeholder})))"
+        ));
+    }
+
+    if let Some(missing) = filter.missing() {
+        let clause = "EXISTS (SELECT 1 FROM track_artist_credits AS sel_missing_credit \
+                      JOIN track_sources AS sel_missing \
+                        ON sel_missing.track_id = sel_missing_credit.track_id \
+                      WHERE sel_missing_credit.artist_id = ar.id \
+                        AND sel_missing.provider_id = ANY($2::TEXT[]) \
+                        AND sel_missing.missing_at IS NOT NULL)";
+
+        predicates.push(if missing {
+            clause.to_owned()
+        } else {
+            format!("NOT {clause}")
+        });
+    }
+
+    Ok(ArtistSelectors {
+        membership,
+        album_count,
+        song_count,
+    })
+}
+
+fn artist_order_clause(
+    sort: ArtistSort,
+    direction: SortDirection,
+    selectors: &ArtistSelectors,
+) -> String {
+    let dir = direction.sql();
+
+    match sort {
+        ArtistSort::Name => format!("ar.name_normalized {dir}, ar.id"),
+        ArtistSort::AlbumCount => format!("{} {dir}, ar.id", selectors.album_count),
+        ArtistSort::SongCount => format!("{} {dir}, ar.id", selectors.song_count),
+        ArtistSort::StarredAt => format!(
+            "(SELECT favorite.starred_at FROM artist_favorites AS favorite \
+              WHERE favorite.artist_id = ar.id AND favorite.user_id = $1) \
+             {dir} NULLS LAST, ar.id"
+        ),
+        ArtistSort::Rating => format!(
+            "(SELECT rating.rating FROM artist_ratings AS rating \
+              WHERE rating.artist_id = ar.id AND rating.user_id = $1) \
+             {dir} NULLS LAST, ar.id"
+        ),
+        ArtistSort::PlayCount => format!(
+            "COALESCE((SELECT SUM(plays.play_count) \
+              FROM (SELECT DISTINCT credited.track_id FROM ({membership}) AS credited \
+                    WHERE credited.track_id IS NOT NULL) AS distinct_credited \
+              JOIN track_play_stats AS plays \
+                ON plays.track_id = distinct_credited.track_id AND plays.user_id = $1), 0) \
+             {dir}, ar.id",
+            membership = selectors.membership,
+        ),
     }
 }

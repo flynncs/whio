@@ -1,10 +1,10 @@
 use super::PostgresTrackRepository;
 use crate::features::music_library::{
     domain::{
-        AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef,
-        CreditRole, IdSet, ProviderId, Range, SelectorText, SourceIdentity, SourceScope,
-        StateTarget, TrackId, TrackListFilter, TrackListScope, TrackMetadata, TrackOrder,
-        TrackPage,
+        AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtistListFilter,
+        ArtistSort, ArtworkRef, CreditRole, IdSet, ProviderId, Range, RoleSelector, RoleSet,
+        SelectorText, SourceIdentity, SourceScope, StateTarget, TrackId, TrackListFilter,
+        TrackListScope, TrackMetadata, TrackOrder, TrackPage,
     },
     storage::contracts::{
         CatalogueWrite, LibraryRead, PlaylistStore, ReconcileReport, SourceFileFacts, SourceLookup,
@@ -430,7 +430,10 @@ async fn album_entries_are_ordered_and_totalled(pool: sqlx::PgPool) {
     assert_eq!(albums.len(), 1);
     assert_eq!(albums[0].album().id(), album.id());
 
-    let artists = repository.list_artists(0, 10, None).await.unwrap();
+    let artists = repository
+        .list_artists(0, 10, ArtistSort::Name, &ArtistListFilter::default(), None)
+        .await
+        .unwrap();
     let album_artist = artists
         .iter()
         .find(|item| item.artist().id() == artist.id())
@@ -1427,7 +1430,7 @@ async fn page_items_carry_album_membership_state_and_sources(pool: sqlx::PgPool)
 }
 
 #[sqlx::test]
-async fn the_artist_list_keeps_primary_credits_only(pool: sqlx::PgPool) {
+async fn role_credits_are_browsable_artists(pool: sqlx::PgPool) {
     let repository = PostgresTrackRepository::new(pool.clone());
     let credits = vec![
         ArtistCredit::new("Clara Schumann".to_owned(), None)
@@ -1445,13 +1448,46 @@ async fn the_artist_list_keeps_primary_credits_only(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    let artists = repository.list_artists(0, 10, None).await.unwrap();
+    let artists = repository
+        .list_artists(0, 10, ArtistSort::Name, &ArtistListFilter::default(), None)
+        .await
+        .unwrap();
     let names = artists
         .iter()
         .map(|artist| artist.artist().name().to_owned())
         .collect::<Vec<_>>();
-    assert_eq!(names, ["Artist"], "a role credit is not a browsable artist");
-    assert_eq!(repository.count_artists(None).await.unwrap(), 1);
+    assert_eq!(
+        names,
+        ["Artist", "Bill Evans", "Clara Schumann"],
+        "a credit in any role is a browsable artist"
+    );
+    assert_eq!(
+        repository
+            .count_artists(None, &ArtistListFilter::default())
+            .await
+            .unwrap(),
+        3
+    );
+
+    let composers = repository
+        .list_artists(
+            0,
+            10,
+            ArtistSort::Name,
+            &ArtistListFilter::default()
+                .with_role(Some(RoleSet::new([RoleSelector::Composer]).unwrap())),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        composers
+            .iter()
+            .map(|artist| artist.artist().name().to_owned())
+            .collect::<Vec<_>>(),
+        ["Clara Schumann"],
+        "a role selector keeps only that role's membership"
+    );
 
     let stored = repository
         .find_track(track.id())

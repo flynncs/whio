@@ -6,9 +6,11 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    LibraryState, MatchQuality, SourceIdentity, ValidationError,
+    IdSet, LibraryState, MatchQuality, Range, RoleSet, SelectorText, SortDirection, SourceIdentity,
+    ValidationError,
     text::{optional, required},
 };
+use crate::features::music_library::library::LibraryId;
 
 const MAX_NAME: usize = 500;
 const MAX_IDENTIFIER: usize = 64;
@@ -98,6 +100,7 @@ impl Artist {
 pub struct ArtistSummary {
     artist: Artist,
     album_count: u32,
+    song_count: u32,
     state: LibraryState,
     match_quality: Option<MatchQuality>,
 }
@@ -107,9 +110,15 @@ impl ArtistSummary {
         Self {
             artist,
             album_count,
+            song_count: 0,
             state: LibraryState::default(),
             match_quality: None,
         }
+    }
+
+    pub fn with_song_count(mut self, song_count: u32) -> Self {
+        self.song_count = song_count;
+        self
     }
 
     pub fn with_state(mut self, state: LibraryState) -> Self {
@@ -134,8 +143,155 @@ impl ArtistSummary {
         self.album_count
     }
 
+    pub fn song_count(&self) -> u32 {
+        self.song_count
+    }
+
     pub fn state(&self) -> LibraryState {
         self.state
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArtistSort {
+    #[default]
+    Name,
+    AlbumCount,
+    SongCount,
+    StarredAt,
+    Rating,
+    PlayCount,
+}
+
+impl ArtistSort {
+    pub const ALL: [ArtistSort; 6] = [
+        ArtistSort::Name,
+        ArtistSort::AlbumCount,
+        ArtistSort::SongCount,
+        ArtistSort::StarredAt,
+        ArtistSort::Rating,
+        ArtistSort::PlayCount,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::AlbumCount => "album_count",
+            Self::SongCount => "song_count",
+            Self::StarredAt => "starred_at",
+            Self::Rating => "rating",
+            Self::PlayCount => "play_count",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|sort| sort.as_str() == value)
+    }
+
+    pub fn default_direction(self) -> SortDirection {
+        match self {
+            Self::Name => SortDirection::Ascending,
+            Self::AlbumCount
+            | Self::SongCount
+            | Self::StarredAt
+            | Self::Rating
+            | Self::PlayCount => SortDirection::Descending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArtistListFilter {
+    name: Option<SelectorText>,
+    role: Option<RoleSet>,
+    starred: Option<bool>,
+    has_rating: Option<bool>,
+    rating: Option<Range<u8>>,
+    library_id: Option<IdSet<LibraryId>>,
+    missing: Option<bool>,
+    sort_direction: Option<SortDirection>,
+}
+
+impl ArtistListFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_name(mut self, name: Option<SelectorText>) -> Self {
+        self.name = name;
+        self
+    }
+
+    pub fn with_role(mut self, role: Option<RoleSet>) -> Self {
+        self.role = role;
+        self
+    }
+
+    pub fn with_starred(mut self, starred: Option<bool>) -> Self {
+        self.starred = starred;
+        self
+    }
+
+    pub fn with_has_rating(mut self, has_rating: Option<bool>) -> Self {
+        self.has_rating = has_rating;
+        self
+    }
+
+    pub fn with_rating(mut self, rating: Option<Range<u8>>) -> Self {
+        self.rating = rating;
+        self
+    }
+
+    pub fn with_library_id(mut self, library_id: Option<IdSet<LibraryId>>) -> Self {
+        self.library_id = library_id;
+        self
+    }
+
+    pub fn with_missing(mut self, missing: Option<bool>) -> Self {
+        self.missing = missing;
+        self
+    }
+
+    pub fn with_sort_direction(mut self, sort_direction: Option<SortDirection>) -> Self {
+        self.sort_direction = sort_direction;
+        self
+    }
+
+    pub fn name(&self) -> Option<&SelectorText> {
+        self.name.as_ref()
+    }
+
+    pub fn role(&self) -> Option<&RoleSet> {
+        self.role.as_ref()
+    }
+
+    pub fn starred(&self) -> Option<bool> {
+        self.starred
+    }
+
+    pub fn has_rating(&self) -> Option<bool> {
+        self.has_rating
+    }
+
+    pub fn rating(&self) -> Option<Range<u8>> {
+        self.rating
+    }
+
+    pub fn library_id(&self) -> Option<&IdSet<LibraryId>> {
+        self.library_id.as_ref()
+    }
+
+    pub fn missing(&self) -> Option<bool> {
+        self.missing
+    }
+
+    pub fn sort_direction(&self) -> Option<SortDirection> {
+        self.sort_direction
+    }
+
+    pub fn resolved_direction(&self, sort: ArtistSort) -> SortDirection {
+        self.sort_direction
+            .unwrap_or_else(|| sort.default_direction())
     }
 }
 
@@ -311,5 +467,70 @@ mod tests {
         assert_eq!(CreditRole::parse("djmixer"), Some(CreditRole::Djmixer));
         assert_eq!(CreditRole::parse("other"), None);
         assert_eq!(CreditRole::parse(""), None);
+    }
+
+    #[test]
+    fn artist_sorts_round_trip_through_their_native_names() {
+        for sort in ArtistSort::ALL {
+            assert_eq!(ArtistSort::parse(sort.as_str()), Some(sort));
+        }
+
+        assert_eq!(ArtistSort::parse("albumCount"), None);
+        assert_eq!(ArtistSort::parse("songCount"), None);
+        assert_eq!(ArtistSort::parse("playCount"), None);
+        assert_eq!(ArtistSort::parse("Name"), None);
+        assert_eq!(ArtistSort::parse("random"), None);
+        assert_eq!(ArtistSort::parse("updatedAt"), None);
+        assert_eq!(ArtistSort::parse(""), None);
+    }
+
+    #[test]
+    fn artist_sorts_carry_their_natural_direction() {
+        assert_eq!(
+            ArtistSort::Name.default_direction(),
+            SortDirection::Ascending
+        );
+
+        for sort in [
+            ArtistSort::AlbumCount,
+            ArtistSort::SongCount,
+            ArtistSort::StarredAt,
+            ArtistSort::Rating,
+            ArtistSort::PlayCount,
+        ] {
+            assert_eq!(
+                sort.default_direction(),
+                SortDirection::Descending,
+                "{sort:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn artist_filters_default_to_an_absent_filter() {
+        let filter = ArtistListFilter::new();
+
+        assert!(filter.name().is_none());
+        assert!(filter.role().is_none());
+        assert!(filter.starred().is_none());
+        assert!(filter.has_rating().is_none());
+        assert!(filter.rating().is_none());
+        assert!(filter.library_id().is_none());
+        assert!(filter.missing().is_none());
+        assert!(filter.sort_direction().is_none());
+        assert_eq!(
+            filter.resolved_direction(ArtistSort::Name),
+            SortDirection::Ascending
+        );
+        assert_eq!(
+            filter.resolved_direction(ArtistSort::PlayCount),
+            SortDirection::Descending
+        );
+        assert_eq!(
+            filter
+                .with_sort_direction(Some(SortDirection::Ascending))
+                .resolved_direction(ArtistSort::PlayCount),
+            SortDirection::Ascending
+        );
     }
 }

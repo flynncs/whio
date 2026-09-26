@@ -96,14 +96,28 @@ pub(crate) fn decode_album_summary(
 }
 
 pub(crate) fn decode_artist_summary(
-    row: (Uuid, String, Option<String>, Option<String>, i64),
+    row: (Uuid, String, Option<String>, Option<String>, i64, i64),
 ) -> Result<ArtistSummary, TrackRepositoryError> {
-    let (id, name, sort_name, identifier, album_count) = row;
+    let (id, name, sort_name, identifier, album_count, song_count) = row;
     let artist = Artist::new(ArtistId::from_uuid(id), name, sort_name, identifier)
         .map_err(|_| TrackRepositoryError::InvalidData)?;
     let album_count = u32::try_from(album_count).map_err(|_| TrackRepositoryError::InvalidData)?;
+    let song_count = u32::try_from(song_count).map_err(|_| TrackRepositoryError::InvalidData)?;
 
-    Ok(ArtistSummary::new(artist, album_count))
+    Ok(ArtistSummary::new(artist, album_count).with_song_count(song_count))
+}
+
+pub(crate) fn artist_count_expressions(membership: &str) -> (String, String) {
+    let album_count = format!(
+        "(SELECT COUNT(DISTINCT artist_membership.album_id) \
+         FROM ({membership}) AS artist_membership)"
+    );
+    let song_count = format!(
+        "(SELECT COUNT(DISTINCT artist_membership.track_id) \
+         FROM ({membership}) AS artist_membership)"
+    );
+
+    (album_count, song_count)
 }
 pub(crate) fn decode_track(
     record: TrackRecord,
@@ -626,10 +640,11 @@ pub(crate) async fn artist_summaries_by_ids(
         return Ok(Vec::new());
     }
 
-    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64)>(
+    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(
         r#"
         SELECT ar.id, ar.name, ar.sort_name, ar.musicbrainz_artist_id,
-               (SELECT COUNT(*) FROM albums WHERE album_artist_id = ar.id)::BIGINT
+               (SELECT COUNT(*) FROM albums WHERE album_artist_id = ar.id)::BIGINT,
+               0::BIGINT
         FROM artists AS ar
         WHERE ar.id = ANY($1)
         "#,

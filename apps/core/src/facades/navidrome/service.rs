@@ -9,9 +9,9 @@ use crate::{
         CatalogueError, CompletionService, LibraryService, SearchHit,
     },
     features::music_library::domain::{
-        AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistSummary,
-        GenreSummary, MAX_PAGE_LIMIT, PageLimit, PlaylistId, SelectorText, TrackId,
-        TrackListFilter, TrackOrder, TrackView,
+        AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistListFilter,
+        ArtistSort, ArtistSummary, GenreSummary, MAX_PAGE_LIMIT, PageLimit, PlaylistId,
+        SelectorText, TrackId, TrackListFilter, TrackOrder, TrackView,
     },
     features::music_library::playlists::{PlaylistDetail, PlaylistError, PlaylistService},
 };
@@ -425,11 +425,17 @@ pub(crate) async fn artist_list(
     let user = authorize(credential, token).await?;
     let (offset, limit) = page(start, end);
     let total = library
-        .artist_count(Some(&user))
+        .artist_count(Some(&user), &ArtistListFilter::default())
         .await
         .map_err(SongError::Catalogue)?;
     let artists = library
-        .artist_list(offset, limit, Some(&user))
+        .artist_list(
+            offset,
+            limit,
+            ArtistSort::Name,
+            &ArtistListFilter::default(),
+            Some(&user),
+        )
         .await
         .map_err(SongError::Catalogue)?;
 

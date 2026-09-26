@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::features::music_library::domain::{
     AlbumListFilter, AlbumListScope, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit,
-    ArtworkRef, IdSet, KeepReason, MatchQuality, ProviderId, Range, SelectorText, SourceIdentity,
-    SourceScope, StateTarget, TrackId, TrackMetadata,
+    ArtistListFilter, ArtistSort, ArtworkRef, IdSet, KeepReason, MatchQuality, ProviderId, Range,
+    SelectorText, SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
 };
 use crate::features::music_library::sources::SourceQueries;
 use crate::features::music_library::storage::contracts::{
@@ -911,7 +911,10 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
         2
     );
 
-    let artists = repository.list_artists(0, 10, None).await.unwrap();
+    let artists = repository
+        .list_artists(0, 10, ArtistSort::Name, &ArtistListFilter::default(), None)
+        .await
+        .unwrap();
     assert_eq!(artists.len(), 1);
     assert_eq!(artists[0].artist().id(), artist.id());
     assert_eq!(artists[0].album_count(), 2);
@@ -1039,7 +1042,13 @@ async fn browse_shows_only_engaged_albums_and_artists(pool: PgPool) {
     );
 
     let artists = repository
-        .list_artists(0, 25, Some(user))
+        .list_artists(
+            0,
+            25,
+            ArtistSort::Name,
+            &ArtistListFilter::default(),
+            Some(user),
+        )
         .await
         .unwrap()
         .into_iter()
@@ -1730,7 +1739,13 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
             .unwrap(),
         1
     );
-    assert!(repository.count_artists(None).await.unwrap() >= 1);
+    assert!(
+        repository
+            .count_artists(None, &ArtistListFilter::default())
+            .await
+            .unwrap()
+            >= 1
+    );
 }
 
 #[sqlx::test]

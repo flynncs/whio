@@ -1,7 +1,7 @@
 use super::PostgresTrackRepository;
 use crate::features::music_library::domain::{
-    AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, PlaylistId, ProviderId, SourceIdentity,
-    SourceScope, TrackId, TrackMetadata,
+    AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistListFilter, ArtistSort,
+    PlaylistId, ProviderId, SourceIdentity, SourceScope, TrackId, TrackMetadata,
 };
 use crate::features::music_library::storage::contracts::{
     CatalogueWrite, LibraryRead, PlaylistStore, SourceLookup, StateStore,
@@ -238,11 +238,23 @@ async fn a_playlisted_provider_track_becomes_browsable_for_its_owner(pool: PgPoo
         "the count agrees with the list"
     );
 
-    let artists = repository.list_artists(0, 50, Some(owner)).await.unwrap();
+    let artists = repository
+        .list_artists(
+            0,
+            50,
+            ArtistSort::Name,
+            &ArtistListFilter::default(),
+            Some(owner),
+        )
+        .await
+        .unwrap();
     assert_eq!(artists.len(), 1);
     assert_eq!(artists[0].artist().name(), "Artist");
     assert_eq!(
-        repository.count_artists(Some(owner)).await.unwrap(),
+        repository
+            .count_artists(Some(owner), &ArtistListFilter::default())
+            .await
+            .unwrap(),
         1,
         "the credited artist is browsable too"
     );

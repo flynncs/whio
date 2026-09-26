@@ -3,8 +3,8 @@ use uuid::Uuid;
 
 use crate::features::music_library::domain::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, Artist, ArtistId,
-    ArtistSummary, GenreSummary, ProviderEntityState, SourceIdentity, Track, TrackHit, TrackId,
-    TrackListFilter, TrackOrder, TrackPage,
+    ArtistListFilter, ArtistSort, ArtistSummary, GenreSummary, ProviderEntityState, SourceIdentity,
+    Track, TrackHit, TrackId, TrackListFilter, TrackOrder, TrackPage,
 };
 
 use super::TrackRepositoryError;
@@ -71,6 +71,8 @@ pub trait LibraryRead: Send + Sync {
         &self,
         _offset: u32,
         _limit: u32,
+        _sort: ArtistSort,
+        _filter: &ArtistListFilter,
         _user: Option<Uuid>,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         Ok(Vec::new())
@@ -84,7 +86,11 @@ pub trait LibraryRead: Send + Sync {
         Ok(0)
     }
 
-    async fn count_artists(&self, _user: Option<Uuid>) -> Result<u32, TrackRepositoryError> {
+    async fn count_artists(
+        &self,
+        _user: Option<Uuid>,
+        _filter: &ArtistListFilter,
+    ) -> Result<u32, TrackRepositoryError> {
         Ok(0)
     }
 

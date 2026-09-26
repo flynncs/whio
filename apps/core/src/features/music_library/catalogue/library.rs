@@ -7,8 +7,8 @@ use crate::features::music_library::{
     {
         domain::{
             AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId,
-            ArtistSummary, Availability, GenreSummary, LibraryState, PageLimit, SourceIdentity,
-            Track, TrackId, TrackListFilter, TrackOrder, TrackPage,
+            ArtistListFilter, ArtistSort, ArtistSummary, Availability, GenreSummary, LibraryState,
+            PageLimit, SourceIdentity, Track, TrackId, TrackListFilter, TrackOrder, TrackPage,
         },
         storage::contracts::{LibraryRead, SourceLookup, StateStore},
     },
@@ -123,9 +123,13 @@ impl LibraryService {
             .map_err(CatalogueError::Repository)
     }
 
-    pub async fn artist_count(&self, user: Option<&Uuid>) -> Result<u32, CatalogueError> {
+    pub async fn artist_count(
+        &self,
+        user: Option<&Uuid>,
+        filter: &ArtistListFilter,
+    ) -> Result<u32, CatalogueError> {
         self.library
-            .count_artists(user.copied())
+            .count_artists(user.copied(), filter)
             .await
             .map_err(CatalogueError::Repository)
     }
@@ -157,10 +161,12 @@ impl LibraryService {
         &self,
         offset: u32,
         limit: u32,
+        sort: ArtistSort,
+        filter: &ArtistListFilter,
         user: Option<&Uuid>,
     ) -> Result<Vec<ArtistSummary>, CatalogueError> {
         self.library
-            .list_artists(offset, limit, user.copied())
+            .list_artists(offset, limit, sort, filter, user.copied())
             .await
             .map_err(CatalogueError::Repository)
     }

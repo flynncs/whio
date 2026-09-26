@@ -336,12 +336,16 @@ impl LibraryRead for CountingLibrary {
         &self,
         offset: u32,
         limit: u32,
+        sort: ArtistSort,
+        filter: &ArtistListFilter,
         user: Option<Uuid>,
     ) -> Result<Vec<crate::features::music_library::domain::ArtistSummary>, TrackRepositoryError>
     {
         self.artist_calls.fetch_add(1, Ordering::SeqCst);
 
-        self.inner.list_artists(offset, limit, user).await
+        self.inner
+            .list_artists(offset, limit, sort, filter, user)
+            .await
     }
 
     async fn page_tracks(

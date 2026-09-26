@@ -11,8 +11,8 @@ use crate::{
         TrackOrder,
     },
     features::music_library::domain::{
-        AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, IdSet, Range, SelectorText,
-        SortDirection, StateTarget, TrackId,
+        AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, ArtistListFilter,
+        ArtistSort, IdSet, Range, SelectorText, SortDirection, StateTarget, TrackId,
     },
     features::music_library::library_state::{LibraryStateError, LibraryStateService},
     platform::request::RequestContext,
@@ -173,7 +173,13 @@ pub(crate) async fn enumerate(
         Vec::new()
     } else {
         library
-            .artist_list(request.artists.offset, request.artists.count, user)
+            .artist_list(
+                request.artists.offset,
+                request.artists.count,
+                ArtistSort::Name,
+                &ArtistListFilter::default(),
+                user,
+            )
             .await
             .map_err(SearchError::Catalogue)?
             .iter()
@@ -501,7 +507,13 @@ pub(crate) async fn artists(
     user: Option<&Uuid>,
 ) -> Result<Vec<models::ArtistId3>, BrowseError> {
     library
-        .artist_list(0, u32::MAX, user)
+        .artist_list(
+            0,
+            u32::MAX,
+            ArtistSort::Name,
+            &ArtistListFilter::default(),
+            user,
+        )
         .await
         .map(|artists| artists.iter().map(mapping::artist_from_summary).collect())
         .map_err(BrowseError::Catalogue)
