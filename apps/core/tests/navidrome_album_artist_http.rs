@@ -237,6 +237,21 @@ fn local_source(root: &str, external_id: &str) -> SourceIdentity {
     .expect("valid source")
 }
 
+async fn store_track(
+    fixture: &Fixture,
+    root: &str,
+    external_id: &str,
+    metadata: TrackMetadata,
+) -> TrackId {
+    fixture
+        .store
+        .get_or_create(local_source(root, external_id), metadata)
+        .await
+        .expect("a stored track")
+        .id()
+        .clone()
+}
+
 async fn add_track(
     fixture: &Fixture,
     root: &str,
@@ -245,18 +260,15 @@ async fn add_track(
     artist: &str,
     genres: &[&str],
 ) -> TrackId {
-    fixture
-        .store
-        .get_or_create(
-            local_source(root, external_id),
-            TrackMetadata::from_names(title.to_owned(), vec![artist.to_owned()], Some(1_000))
-                .expect("valid metadata")
-                .with_genres(genres.iter().map(|genre| (*genre).to_owned()).collect()),
-        )
-        .await
-        .expect("a stored track")
-        .id()
-        .clone()
+    store_track(
+        fixture,
+        root,
+        external_id,
+        TrackMetadata::from_names(title.to_owned(), vec![artist.to_owned()], Some(1_000))
+            .expect("valid metadata")
+            .with_genres(genres.iter().map(|genre| (*genre).to_owned()).collect()),
+    )
+    .await
 }
 
 async fn add_album(
@@ -1048,4 +1060,110 @@ async fn navidrome_album_without_an_album_artist(pool: PgPool) {
         body[0]["albumArtistId"],
         json!(credited.daft_punk.to_string())
     );
+}
+
+#[sqlx::test]
+async fn navidrome_serves_no_invented_update_time(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let seed = contrast(&fixture).await;
+
+    let (status, _, body) = get(&fixture, "/album?name=kept").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body[0]["createdAt"].as_str().is_some_and(|v| !v.is_empty()));
+    absent(&body[0], "updatedAt");
+
+    let (status, _, body) = get(&fixture, &format!("/album/{}", seed.kept)).await;
+    assert_eq!(status, StatusCode::OK);
+    absent(&body, "updatedAt");
+
+    let (status, _, body) = get(&fixture, "/artist?name=daft").await;
+    assert_eq!(status, StatusCode::OK);
+    absent(&body[0], "updatedAt");
+
+    let (status, _, body) = get(&fixture, &format!("/artist/{}", seed.daft_punk)).await;
+    assert_eq!(status, StatusCode::OK);
+    absent(&body, "updatedAt");
+}
+
+#[sqlx::test]
+async fn navidrome_omits_an_unknown_song_duration(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let unknown = store_track(
+        &fixture,
+        MUSIC_ROOT,
+        "unknown-duration.flac",
+        TrackMetadata::from_names(
+            "Unknown Duration".to_owned(),
+            vec!["Guest".to_owned()],
+            None,
+        )
+        .expect("valid metadata"),
+    )
+    .await;
+    let known = add_track(
+        &fixture,
+        MUSIC_ROOT,
+        "known-duration.flac",
+        "Known Duration",
+        "Guest",
+        &[],
+    )
+    .await;
+
+    let (status, _, body) = get(&fixture, "/song?title=unknown%20duration").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["id"], json!(unknown.to_string()));
+    absent(&body[0], "duration");
+
+    let (status, _, body) = get(&fixture, "/song?title=known%20duration").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["id"], json!(known.to_string()));
+    assert_eq!(body[0]["duration"], json!(1.0));
+
+    let (status, _, body) = get(&fixture, &format!("/song/{unknown}")).await;
+    assert_eq!(status, StatusCode::OK);
+    absent(&body, "duration");
+}
+
+#[sqlx::test]
+async fn navidrome_omits_an_absent_album_year_and_artist_mbid(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    contrast(&fixture).await;
+    let undated = add_album(
+        &fixture,
+        "Undated",
+        None,
+        None,
+        None,
+        MUSIC_ROOT,
+        "undated.flac",
+    )
+    .await;
+    let undated_track = add_track(
+        &fixture,
+        MUSIC_ROOT,
+        "undated-track.flac",
+        "Undated Track",
+        "Guest",
+        &[],
+    )
+    .await;
+    place(&fixture, &undated, &undated_track, 1).await;
+
+    let (status, _, body) = get(&fixture, "/album?name=undated").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["id"], json!(undated.to_string()));
+    absent(&body[0], "year");
+
+    let (status, _, body) = get(&fixture, "/album?name=kept").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["year"], json!(1994));
+
+    let (status, _, body) = get(&fixture, "/artist?name=guest%20one").await;
+    assert_eq!(status, StatusCode::OK);
+    absent(&body[0], "mbzArtistId");
+
+    let (status, _, body) = get(&fixture, "/artist?name=daft").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["mbzArtistId"], json!("mbz-daft-punk"));
 }

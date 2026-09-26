@@ -55,7 +55,8 @@ pub(crate) struct Song {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) disc_number: Option<i32>,
     pub(crate) cover_art: Option<String>,
-    pub(crate) duration: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) duration: Option<f32>,
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) starred: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,9 +82,9 @@ pub(crate) struct Album {
     pub(crate) duration: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cover_art: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) year: Option<i32>,
     pub(crate) created_at: String,
-    pub(crate) updated_at: String,
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) starred: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +119,7 @@ pub(crate) struct Artist {
     pub(crate) cover_art: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sort_artist_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mbz_artist_id: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) starred: bool,

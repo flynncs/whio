@@ -346,7 +346,7 @@ async fn song_list_maps_stored_tracks_into_songs(pool: sqlx::PgPool) {
     assert_eq!(songs[0].album_artist.as_deref(), Some("Daft Punk"));
     assert_eq!(songs[0].track_number, Some(2));
     assert_eq!(songs[0].disc_number, Some(1));
-    assert_eq!(songs[0].duration, 1.0);
+    assert_eq!(songs[0].duration, Some(1.0));
     assert_eq!(
         songs[0].cover_art.as_deref(),
         Some(placed.to_string().as_str())
@@ -374,7 +374,7 @@ async fn detail_returns_songs_and_rejects_unknown_ids(pool: sqlx::PgPool) {
     assert_eq!(song.id, stored.to_string());
     assert_eq!(song.title, "Song One");
     assert_eq!(song.artist, "Artist");
-    assert_eq!(song.duration, 1.0);
+    assert_eq!(song.duration, Some(1.0));
 
     let result = song_detail(
         &library,
@@ -430,7 +430,7 @@ fn track_maps_to_song() {
     assert_eq!(song.artist, "a, b");
     assert_eq!(song.album.as_deref(), Some("album"));
     assert_eq!(song.cover_art.as_deref(), Some(id.as_str()));
-    assert_eq!(song.duration, 180.0);
+    assert_eq!(song.duration, Some(180.0));
     assert!(!song.id.is_empty());
 }
 

@@ -61,10 +61,7 @@ fn song_from(hit: &SearchHit, tags: SourceTags) -> Song {
         track_number: None,
         disc_number: None,
         cover_art: Some(CoverArtTarget::song(track.id()).encode()),
-        duration: track
-            .duration_ms()
-            .map(|ms| ms as f32 / 1000.0)
-            .unwrap_or(0.0),
+        duration: track.duration_ms().map(|ms| ms as f32 / 1000.0),
         starred: state.is_starred(),
         starred_at: state.starred_at().map(|at| at.to_rfc3339()),
         rating: state.rating().unwrap_or(0),
@@ -93,10 +90,7 @@ fn song_from_view(view: &TrackView, tags: SourceTags) -> Song {
             .and_then(|membership| membership.disc_number())
             .map(i32::from),
         cover_art: Some(CoverArtTarget::song(track.id()).encode()),
-        duration: track
-            .duration_ms()
-            .map(|ms| ms as f32 / 1000.0)
-            .unwrap_or(0.0),
+        duration: track.duration_ms().map(|ms| ms as f32 / 1000.0),
         starred: state.is_starred(),
         starred_at: state.starred_at().map(|at| at.to_rfc3339()),
         rating: state.rating().unwrap_or(0),
@@ -120,10 +114,7 @@ fn song_from_entry(entry: &AlbumEntry, album: &AlbumSummary, tags: SourceTags) -
         track_number: membership.track_number().map(i32::from),
         disc_number: membership.disc_number().map(i32::from),
         cover_art: Some(track.id().to_string()),
-        duration: track
-            .duration_ms()
-            .map(|ms| ms as f32 / 1000.0)
-            .unwrap_or(0.0),
+        duration: track.duration_ms().map(|ms| ms as f32 / 1000.0),
         starred: state.is_starred(),
         starred_at: state.starred_at().map(|at| at.to_rfc3339()),
         rating: state.rating().unwrap_or(0),
@@ -135,7 +126,6 @@ fn song_from_entry(entry: &AlbumEntry, album: &AlbumSummary, tags: SourceTags) -
 fn album_from_summary(summary: &AlbumSummary) -> Album {
     let album = summary.album();
     let artist = summary.album_artist();
-    let created_at = summary.created_at().to_rfc3339();
     let state = summary.state();
 
     Album {
@@ -147,8 +137,7 @@ fn album_from_summary(summary: &AlbumSummary) -> Album {
         duration: summary.duration_ms() as f32 / 1000.0,
         cover_art: Some(CoverArtTarget::album(album.id()).encode()),
         year: album.year(),
-        created_at: created_at.clone(),
-        updated_at: created_at,
+        created_at: summary.created_at().to_rfc3339(),
         starred: state.is_starred(),
         starred_at: state.starred_at().map(|at| at.to_rfc3339()),
         rating: state.rating().unwrap_or(0),
