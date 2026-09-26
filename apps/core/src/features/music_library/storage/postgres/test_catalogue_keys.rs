@@ -2,7 +2,8 @@ use sqlx::PgPool;
 
 use super::PostgresTrackRepository;
 use crate::features::music_library::domain::{
-    AlbumMetadata, ArtistCredit, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+    AlbumMetadata, ArtistCredit, ArtistListFilter, CreditRole, ProviderId, RoleSelector, RoleSet,
+    SourceIdentity, SourceScope, TrackMetadata,
 };
 use crate::features::music_library::storage::contracts::{CatalogueWrite, LibraryRead};
 
@@ -320,4 +321,118 @@ async fn a_dotted_capital_title_is_a_candidate(pool: PgPool) {
     assert_eq!(deduped[0].track().id(), stored.id());
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].track().id(), stored.id());
+}
+
+#[sqlx::test]
+
+async fn a_partial_nbsp_query_finds_the_stored_title(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let stored = repository
+        .get_or_create(source("partial-nbsp"), metadata("Song\u{a0}One\u{a0}Two"))
+        .await
+        .unwrap();
+
+    let hits = repository
+        .search_tracks("Song\u{a0}One", 25, None)
+        .await
+        .unwrap();
+    let repeated = repository
+        .search_tracks("Song\u{a0}One", 25, None)
+        .await
+        .unwrap();
+
+    assert_eq!(track_count(&pool).await, 1);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].track().id(), stored.id());
+    assert_eq!(repeated.len(), 1);
+    assert_eq!(repeated[0].track().id(), stored.id());
+}
+
+#[sqlx::test]
+
+async fn a_space_query_does_not_reach_an_nbsp_title(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    repository
+        .get_or_create(source("space-query"), metadata("Song\u{a0}One Two"))
+        .await
+        .unwrap();
+
+    let hits = repository
+        .search_tracks("Song One", 25, None)
+        .await
+        .unwrap();
+
+    assert_eq!(track_count(&pool).await, 1);
+    assert_eq!(hits.len(), 0);
+}
+
+#[sqlx::test]
+
+async fn an_nbsp_query_does_not_reach_a_space_title(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    repository
+        .get_or_create(source("nbsp-query"), metadata("Song One Two"))
+        .await
+        .unwrap();
+
+    let hits = repository
+        .search_tracks("Song\u{a0}One", 25, None)
+        .await
+        .unwrap();
+
+    assert_eq!(track_count(&pool).await, 1);
+    assert_eq!(hits.len(), 0);
+}
+
+#[sqlx::test]
+
+async fn a_partial_nbsp_query_finds_the_stored_album(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let stored = repository
+        .resolve_or_create_album(
+            &album("Song\u{a0}One\u{a0}Two").with_album_artist(credit("Cage the Elephant")),
+        )
+        .await
+        .unwrap();
+
+    let hits = repository
+        .search_albums("Song\u{a0}One", 25, None)
+        .await
+        .unwrap();
+
+    assert_eq!(album_count(&pool).await, 1);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].album().id(), stored.id());
+}
+
+#[sqlx::test]
+
+async fn a_partial_nbsp_query_finds_a_role_filtered_artist(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let name = "Cage\u{a0}the\u{a0}Elephant";
+    let credit = ArtistCredit::new(name.to_owned(), None)
+        .unwrap()
+        .with_role(CreditRole::Composer);
+    let metadata = TrackMetadata::from_names(
+        "Composed\u{a0}Song".to_owned(),
+        vec![name.to_owned()],
+        Some(240_000),
+    )
+    .unwrap()
+    .with_credits(vec![credit]);
+    repository
+        .get_or_create(source("partial-nbsp-artist"), metadata)
+        .await
+        .unwrap();
+
+    let filter = ArtistListFilter::new()
+        .with_role(Some(RoleSet::new(vec![RoleSelector::Composer]).unwrap()));
+    let hits = repository
+        .search_artists("Cage\u{a0}the", 25, None, &filter)
+        .await
+        .unwrap();
+
+    assert_eq!(artist_count(&pool).await, 1);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].artist().name(), name);
 }

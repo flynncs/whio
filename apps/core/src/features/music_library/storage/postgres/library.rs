@@ -533,10 +533,8 @@ impl LibraryRead for PgStore {
             return Ok(Vec::new());
         }
 
-        let needle = terms.normalized().to_owned();
-        let tokens = terms.tokens().to_vec();
-        let prefix = format!("{}%", escape_like(&needle));
-        let contains = format!("%{}%", escape_like(&needle));
+        let title = SearchMatch::new("t.title_normalized", "$1");
+        let credit = SearchMatch::new(CREDIT_NORMALIZED, "$1");
         let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
             r#"
             SELECT {TRACK_COLUMNS},
@@ -544,42 +542,28 @@ impl LibraryRead for PgStore {
             FROM tracks AS t
             LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
             LEFT JOIN albums AS a ON a.id = mt.album_id
-            WHERE t.title_normalized = $1
-               OR t.title_normalized LIKE $2
-               OR string_to_array(t.title_normalized, ' ') @> $3
-               OR (array_length($3, 1) > 1 AND t.title_normalized LIKE $4)
+            WHERE {title_matches}
                OR EXISTS (
                    SELECT 1
                    FROM track_artist_credits AS credits
                    WHERE credits.track_id = t.id
-                     AND (
-                         {CREDIT_NORMALIZED} = $1
-                         OR {CREDIT_NORMALIZED} LIKE $2
-                         OR string_to_array({CREDIT_NORMALIZED}, ' ') @> $3
-                         OR (array_length($3, 1) > 1 AND {CREDIT_NORMALIZED} LIKE $4)
-                     )
+                     AND {credit_matches}
                )
             ORDER BY
-                CASE
-                    WHEN t.title_normalized = $1 THEN 0
-                    WHEN t.title_normalized LIKE $2 THEN 1
-                    WHEN string_to_array(t.title_normalized, ' ') @> $3 THEN 2
-                    WHEN array_length($3, 1) > 1 AND t.title_normalized LIKE $4 THEN 3
-                    ELSE 4
-                END,
+                {title_rank},
                 EXISTS (
                     SELECT 1
                     FROM track_sources AS sources
-                    WHERE sources.track_id = t.id AND sources.provider_id = $5
+                    WHERE sources.track_id = t.id AND sources.provider_id = $2
                 ) DESC,
                 t.title_normalized, t.id
-            LIMIT $6
-            "#
+            LIMIT $3
+            "#,
+            title_matches = title.any(),
+            credit_matches = credit.any(),
+            title_rank = title.rank(),
         ))
-        .bind(&needle)
-        .bind(&prefix)
-        .bind(tokens.as_slice())
-        .bind(&contains)
+        .bind(query)
         .bind(LOCAL_PROVIDER_ID)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
@@ -607,46 +591,30 @@ impl LibraryRead for PgStore {
             return Ok(Vec::new());
         }
 
-        let needle = terms.normalized().to_owned();
-        let tokens = terms.tokens().to_vec();
-        let prefix = format!("{}%", escape_like(&needle));
-        let contains = format!("%{}%", escape_like(&needle));
+        let title = SearchMatch::new("a.title_normalized", "$1");
+        let artist = SearchMatch::new("album_artists.name_normalized", "$1");
         let rows = sqlx::query_as::<_, AlbumBrowseRow>(&format!(
             r#"
             SELECT {ALBUM_BROWSE_COLUMNS}
             {ALBUM_BROWSE_FROM}
-            WHERE a.title_normalized = $1
-               OR a.title_normalized LIKE $2
-               OR string_to_array(a.title_normalized, ' ') @> $3
-               OR (array_length($3, 1) > 1 AND a.title_normalized LIKE $4)
+            WHERE {title_matches}
                OR EXISTS (
                    SELECT 1
                    FROM artists AS album_artists
                    WHERE album_artists.id = a.album_artist_id
-                     AND (
-                         album_artists.name_normalized = $1
-                         OR album_artists.name_normalized LIKE $2
-                         OR string_to_array(album_artists.name_normalized, ' ') @> $3
-                         OR (array_length($3, 1) > 1 AND album_artists.name_normalized LIKE $4)
-                     )
+                     AND {artist_matches}
                )
             GROUP BY a.id, ar.id
             ORDER BY
-                CASE
-                    WHEN a.title_normalized = $1 THEN 0
-                    WHEN a.title_normalized LIKE $2 THEN 1
-                    WHEN string_to_array(a.title_normalized, ' ') @> $3 THEN 2
-                    WHEN array_length($3, 1) > 1 AND a.title_normalized LIKE $4 THEN 3
-                    ELSE 4
-                END,
+                {title_rank},
                 a.title_normalized, a.id
-            LIMIT $5
-            "#
+            LIMIT $2
+            "#,
+            title_matches = title.any(),
+            artist_matches = artist.any(),
+            title_rank = title.rank(),
         ))
-        .bind(&needle)
-        .bind(&prefix)
-        .bind(tokens.as_slice())
-        .bind(&contains)
+        .bind(query)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -683,11 +651,9 @@ impl LibraryRead for PgStore {
             return Ok(Vec::new());
         }
 
-        let needle = terms.normalized().to_owned();
-        let tokens = terms.tokens().to_vec();
-        let prefix = format!("{}%", escape_like(&needle));
-        let contains = format!("%{}%", escape_like(&needle));
-        let mut predicates = TrackPredicates::new(6);
+        let name = SearchMatch::new("ar.name_normalized", "$1");
+        let ranked = SearchMatch::new("picked.name_normalized", "$1");
+        let mut predicates = TrackPredicates::new(3);
         let selectors = artist_membership_selectors(filter, &mut predicates);
         let membership = predicates.where_clause();
         let statement = format!(
@@ -701,10 +667,7 @@ impl LibraryRead for PgStore {
                        {album_count} AS album_count,
                        {song_count} AS song_count
                 FROM artists AS ar
-                WHERE (ar.name_normalized = $1
-                   OR ar.name_normalized LIKE $2
-                   OR string_to_array(ar.name_normalized, ' ') @> $3
-                   OR (array_length($3, 1) > 1 AND ar.name_normalized LIKE $4))
+                WHERE {name_matches}
                   {membership}
                 ORDER BY ar.name_normalized,
                          (ar.musicbrainz_artist_id IS NULL),
@@ -712,27 +675,20 @@ impl LibraryRead for PgStore {
                          ar.id
             ) AS picked
             ORDER BY
-                CASE
-                    WHEN picked.name_normalized = $1 THEN 0
-                    WHEN picked.name_normalized LIKE $2 THEN 1
-                    WHEN string_to_array(picked.name_normalized, ' ') @> $3 THEN 2
-                    WHEN array_length($3, 1) > 1 AND picked.name_normalized LIKE $4 THEN 3
-                    ELSE 4
-                END,
+                {ranked_rank},
                 picked.name_normalized, picked.id
-            LIMIT $5
+            LIMIT $2
             "#,
             album_count = selectors.album_count,
             song_count = selectors.song_count,
+            name_matches = name.any(),
+            ranked_rank = ranked.rank(),
         );
         let mut query =
             sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(
                 &statement,
             )
-            .bind(&needle)
-            .bind(&prefix)
-            .bind(tokens.as_slice())
-            .bind(&contains)
+            .bind(query)
             .bind(i64::from(limit));
 
         for value in predicates.values() {
@@ -858,6 +814,45 @@ impl LibraryRead for PgStore {
                 .map_err(|_| TrackRepositoryError::InvalidData)
             })
             .collect()
+    }
+}
+
+struct SearchMatch {
+    exact: String,
+    prefix: String,
+    words: String,
+    contains: String,
+}
+
+impl SearchMatch {
+    fn new(column: &str, query: &str) -> Self {
+        let key = folded(query);
+        let pattern =
+            format!("replace(replace(replace({key}, '\\', '\\\\'), '%', '\\%'), '_', '\\_')");
+        let query_words = format!("string_to_array({key}, ' ')");
+
+        Self {
+            exact: format!("{column} = {key}"),
+            prefix: format!("{column} LIKE {pattern} || '%'"),
+            words: format!("string_to_array({column}, ' ') @> {query_words}"),
+            contains: format!(
+                "array_length({query_words}, 1) > 1 AND {column} LIKE '%' || {pattern} || '%'"
+            ),
+        }
+    }
+
+    fn any(&self) -> String {
+        format!(
+            "({} OR {} OR {} OR {})",
+            self.exact, self.prefix, self.words, self.contains
+        )
+    }
+
+    fn rank(&self) -> String {
+        format!(
+            "CASE WHEN {} THEN 0 WHEN {} THEN 1 WHEN {} THEN 2 WHEN {} THEN 3 ELSE 4 END",
+            self.exact, self.prefix, self.words, self.contains
+        )
     }
 }
 
