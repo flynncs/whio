@@ -15,13 +15,17 @@ use uuid::Uuid;
 
 use whio_core::{
     app::AppState,
+    features::identity::service::CredentialService,
     features::music_library::{
         domain::{
             AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ArtistId, ProviderId, SourceIdentity,
             SourceScope, StateTarget, TrackId, TrackMetadata,
         },
-        library::{Library, LibraryRegistration, LibraryRegistry},
-        test_support::{CatalogueWrite, PostgresLibraryStore, PostgresTrackRepository, StateStore},
+        library::{Library, LibraryId, LibraryRegistration, LibraryRegistry},
+        test_support::{
+            CatalogueWrite, LibraryStore, PostgresLibraryStore, PostgresTrackRepository,
+            StateStore, TrackRepositoryError,
+        },
     },
 };
 
@@ -83,6 +87,56 @@ async fn fixture(pool: PgPool) -> Fixture {
     }
 }
 
+async fn app_with_libraries(
+    pool: PgPool,
+    credential: Arc<CredentialService>,
+    registry: Option<Arc<LibraryRegistry>>,
+) -> axum::Router {
+    let (search, library, playback) = services(pool, Vec::new());
+    let state = AppState::new(credential, search, library, playback);
+
+    whio_core::app::router(match registry {
+        Some(registry) => state.with_library_registry(registry),
+        None => state,
+    })
+}
+
+struct FailingLibraryStore;
+
+#[async_trait::async_trait]
+impl LibraryStore for FailingLibraryStore {
+    async fn find_by_label(&self, _label: &str) -> Result<Option<Library>, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    async fn insert_library(
+        &self,
+        _label: &str,
+        _roots: &[PathBuf],
+    ) -> Result<Library, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    async fn replace_roots(
+        &self,
+        _library_id: &LibraryId,
+        _roots: &[PathBuf],
+    ) -> Result<(), TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    async fn list_libraries(&self) -> Result<Vec<Library>, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    async fn scopes_for_ids(
+        &self,
+        _ids: &[LibraryId],
+    ) -> Result<Vec<String>, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+}
+
 async fn post_login(app: axum::Router, username: &str, password: &str) -> Value {
     let request = Request::builder()
         .method("POST")
@@ -100,15 +154,15 @@ async fn post_login(app: axum::Router, username: &str, password: &str) -> Value 
     serde_json::from_slice(&body).unwrap()
 }
 
-async fn get(fixture: &Fixture, path: &str) -> (StatusCode, HeaderMap, Value) {
+async fn request(app: &axum::Router, token: &str, path: &str) -> (StatusCode, HeaderMap, Value) {
     let request = Request::builder()
         .method("GET")
         .uri(format!("{API}{path}"))
         .header("x-request-id", "request-123")
-        .header("x-nd-authorization", format!("Bearer {}", fixture.token))
+        .header("x-nd-authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
-    let response = fixture.app.clone().oneshot(request).await.unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let headers = response.headers().clone();
     let body = to_bytes(response.into_body(), 8 * 1024 * 1024)
@@ -116,6 +170,10 @@ async fn get(fixture: &Fixture, path: &str) -> (StatusCode, HeaderMap, Value) {
         .unwrap();
 
     (status, headers, serde_json::from_slice(&body).unwrap())
+}
+
+async fn get(fixture: &Fixture, path: &str) -> (StatusCode, HeaderMap, Value) {
+    request(&fixture.app, &fixture.token, path).await
 }
 
 async fn page(fixture: &Fixture, resource: &str, query: &str) -> (u32, Vec<String>) {
@@ -267,6 +325,15 @@ async fn set_missing(fixture: &Fixture, root: &str, external_id: &str) {
     .execute(&fixture.pool)
     .await
     .expect("a missing source");
+}
+
+async fn age_album_source(fixture: &Fixture, album: &AlbumId, days: i64) {
+    sqlx::query("UPDATE album_sources SET created_at = $2 WHERE album_id = $1")
+        .bind(album.as_uuid())
+        .bind(chrono::Utc::now() + chrono::Duration::days(days))
+        .execute(&fixture.pool)
+        .await
+        .expect("an aged album source");
 }
 
 struct Contrast {
@@ -483,7 +550,12 @@ async fn navidrome_album_list_rejects_an_unknown_field(pool: PgPool) {
 #[sqlx::test]
 async fn navidrome_album_order_comes_from_the_request(pool: PgPool) {
     let fixture = fixture(pool).await;
-    for (title, artist, tracks) in [("Alpha", "Alpha Artist", 1), ("Beta", "Beta Artist", 3)] {
+    let mut albums = Vec::new();
+    for (title, artist, tracks) in [
+        ("Alpha", "Alpha Artist", 1),
+        ("Alpha Two", "Alpha Artist", 2),
+        ("Beta", "Beta Artist", 4),
+    ] {
         let album = add_album(
             &fixture,
             title,
@@ -506,24 +578,29 @@ async fn navidrome_album_order_comes_from_the_request(pool: PgPool) {
             .await;
             place(&fixture, &album, &track, position).await;
         }
+        albums.push(album);
     }
-
-    let (total, natural) = album_page(&fixture, "?_sort=songCount").await;
-    listing(total, &natural, 2, &["Beta", "Alpha"]);
-    let (total, explicit) = album_page(&fixture, "?_sort=songCount&_order=asc").await;
-    listing(total, &explicit, 2, &["Alpha", "Beta"]);
-    let (total, client_spelling) = album_page(&fixture, "?_sort=songCount&_order=DESC").await;
-    listing(total, &client_spelling, 2, &["Beta", "Alpha"]);
+    age_album_source(&fixture, &albums[0], -10).await;
+    age_album_source(&fixture, &albums[1], -30).await;
 
     let (total, natural) = album_page(&fixture, "?_sort=name").await;
-    listing(total, &natural, 2, &["Alpha", "Beta"]);
+    listing(total, &natural, 3, &["Alpha", "Alpha Two", "Beta"]);
     let (total, explicit) = album_page(&fixture, "?_sort=name&_order=desc").await;
-    listing(total, &explicit, 2, &["Beta", "Alpha"]);
+    listing(total, &explicit, 3, &["Beta", "Alpha Two", "Alpha"]);
 
-    let (total, added) = album_page(&fixture, "?_sort=recentlyadded").await;
-    assert_eq!((total, added.len()), (2, 2));
-    let (total, added) = album_page(&fixture, "?_sort=createdAt&_order=asc").await;
-    assert_eq!((total, added.len()), (2, 2));
+    let (total, natural) = album_page(&fixture, "?_sort=songCount").await;
+    listing(total, &natural, 3, &["Beta", "Alpha Two", "Alpha"]);
+    let (total, explicit) = album_page(&fixture, "?_sort=songCount&_order=asc").await;
+    listing(total, &explicit, 3, &["Alpha", "Alpha Two", "Beta"]);
+    let (total, client_spelling) = album_page(&fixture, "?_sort=songCount&_order=DESC").await;
+    listing(total, &client_spelling, 3, &["Beta", "Alpha Two", "Alpha"]);
+
+    let (total, alias) = album_page(&fixture, "?_sort=recentlyadded").await;
+    listing(total, &alias, 3, &["Beta", "Alpha", "Alpha Two"]);
+    let (total, alias) = album_page(&fixture, "?_sort=createdAt").await;
+    listing(total, &alias, 3, &["Beta", "Alpha", "Alpha Two"]);
+    let (total, alias) = album_page(&fixture, "?_sort=createdAt&_order=asc").await;
+    listing(total, &alias, 3, &["Alpha Two", "Alpha", "Beta"]);
 
     rejected(&fixture, "/album?_sort=explicitStatus").await;
     rejected(&fixture, "/album?_sort=song_count").await;
@@ -535,6 +612,10 @@ async fn navidrome_album_order_comes_from_the_request(pool: PgPool) {
     listing(total, &natural, 2, &["Beta Artist", "Alpha Artist"]);
     let (total, explicit) = artist_page(&fixture, "?_sort=songCount&_order=asc").await;
     listing(total, &explicit, 2, &["Alpha Artist", "Beta Artist"]);
+    let (total, natural) = artist_page(&fixture, "?_sort=albumCount").await;
+    listing(total, &natural, 2, &["Alpha Artist", "Beta Artist"]);
+    let (total, explicit) = artist_page(&fixture, "?_sort=albumCount&_order=asc").await;
+    listing(total, &explicit, 2, &["Beta Artist", "Alpha Artist"]);
     rejected(&fixture, "/artist?_sort=song_count").await;
     rejected(&fixture, "/artist?_sort=Beta").await;
 }
@@ -699,9 +780,12 @@ async fn navidrome_album_and_artist_facts_are_sourced(pool: PgPool) {
     )
     .await;
     place(&fixture, &seed.kept, &extra, 2).await;
+    let created = chrono::DateTime::parse_from_rfc3339("2025-01-02T03:04:05.123456Z")
+        .expect("a timestamp")
+        .with_timezone(&chrono::Utc);
     sqlx::query("UPDATE albums SET created_at = $2 WHERE id = $1")
         .bind(seed.kept.as_uuid())
-        .bind(chrono::Utc::now() - chrono::Duration::days(30))
+        .bind(created)
         .execute(&fixture.pool)
         .await
         .unwrap();
@@ -730,10 +814,10 @@ async fn navidrome_album_and_artist_facts_are_sourced(pool: PgPool) {
     assert_eq!(album["albumArtist"], json!("Daft Punk"));
     assert_eq!(album["albumArtistId"], json!(seed.daft_punk.to_string()));
     assert_eq!(album["coverArt"], json!(format!("al-{}", seed.kept)));
-    assert!(
-        album["createdAt"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
+    assert_eq!(
+        album["createdAt"],
+        json!(created.to_rfc3339()),
+        "createdAt is the album's stored creation time"
     );
     absent(album, "size");
     absent(album, "minYear");
@@ -872,4 +956,48 @@ async fn navidrome_song_list_is_unaffected(pool: PgPool) {
             .any(|song| song["albumId"] == json!(kept_album)),
         "the song list still pairs a song with its album"
     );
+}
+
+#[sqlx::test]
+async fn navidrome_library_translation_failures_are_mapped(pool: PgPool) {
+    let (credential, secret) = database_credential_service(pool.clone()).await;
+    let disabled = app_with_libraries(pool.clone(), Arc::clone(&credential), None).await;
+    let failing = Arc::new(LibraryRegistry::new(Arc::new(FailingLibraryStore)));
+    let broken = app_with_libraries(pool, credential, Some(failing)).await;
+    let login = post_login(disabled.clone(), "flynn", &secret).await;
+    let token = login["token"].as_str().expect("token");
+
+    let (status, _, body) = request(&disabled, token, "/album?library_id=1").await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a disabled registry cannot name a library"
+    );
+    assert_eq!(body, json!({"error": "Invalid search parameters."}));
+
+    let (status, _, body) = request(&disabled, token, "/artist?library_id=1").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body, json!({"error": "Invalid search parameters."}));
+
+    let (status, _, _) = request(&disabled, token, "/album").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a list without library_id needs no registry"
+    );
+
+    let (status, _, body) = request(&broken, token, "/album?library_id=1").await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a store failure is not a client error"
+    );
+    assert_eq!(body, json!({"error": "Internal error."}));
+
+    let (status, _, body) = request(&broken, token, "/artist?library_id=1").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, json!({"error": "Internal error."}));
+
+    let (status, _, _) = request(&broken, token, "/album").await;
+    assert_eq!(status, StatusCode::OK, "a broken registry is not blanket");
 }
