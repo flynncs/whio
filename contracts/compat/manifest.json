@@ -1,0 +1,4286 @@
+{
+  "manifest_version": 1,
+  "kind": "compat-conformance-inventory",
+  "sources": {
+    "whio_revision": "db7a4c909e965e3afca9cd9663c742f5c598d9cc",
+    "feishin_revision": "6c5173f1cf3c2b946c6cf7997428a873e2bf3d7a",
+    "navidrome_revision": "672c0af580b182ffb219dc5f64c62b456163fd38",
+    "derived_from": [
+      "docs/full-parity-plan.md#6",
+      "docs/parity-query-contracts.md",
+      "docs/sessions/2026-09-26-full-parity-audit.json",
+      "docs/feishin-client-surface.md"
+    ],
+    "planning_documents_are_local_only": true
+  },
+  "status_values": [
+    "unproved",
+    "registered",
+    "conformant"
+  ],
+  "counts": {
+    "subsonic": 48,
+    "navidrome": 30,
+    "support": 15,
+    "retained_uncalled": 2,
+    "field_mappings": 132,
+    "sort_mappings": 53,
+    "filter_translations": 21,
+    "operators": 5,
+    "navidrome_compatibility_profiles": 8,
+    "opensubsonic_extensions": 6
+  },
+  "rows": [
+    {
+      "id": "subsonic:ping",
+      "surface": "subsonic",
+      "name": "ping",
+      "paths": [
+        "/rest/ping",
+        "/rest/ping.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L01",
+      "plan_owner": "identity/app, P1/P16",
+      "required_behaviour": "profile version and usable abilities",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getUser",
+      "surface": "subsonic",
+      "name": "getUser",
+      "paths": [
+        "/rest/getUser",
+        "/rest/getUser.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L01",
+      "plan_owner": "identity, P1",
+      "required_behaviour": "visible user and truthful roles",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getOpenSubsonicExtensions",
+      "surface": "subsonic",
+      "name": "getOpenSubsonicExtensions",
+      "paths": [
+        "/rest/getOpenSubsonicExtensions",
+        "/rest/getOpenSubsonicExtensions.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V15",
+      "plan_owner": "configured feature capabilities, P16",
+      "required_behaviour": "proved names/versions",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:search3",
+      "surface": "subsonic",
+      "name": "search3",
+      "paths": [
+        "/rest/search3",
+        "/rest/search3.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L04",
+      "plan_owner": "music library, P2/P3/P4",
+      "required_behaviour": "empty enumeration, independent windows, source facts",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getArtists",
+      "surface": "subsonic",
+      "name": "getArtists",
+      "paths": [
+        "/rest/getArtists",
+        "/rest/getArtists.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L10",
+      "plan_owner": "music library, P2/P4",
+      "required_behaviour": "scoped index and counts",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getArtist",
+      "surface": "subsonic",
+      "name": "getArtist",
+      "paths": [
+        "/rest/getArtist",
+        "/rest/getArtist.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L10",
+      "plan_owner": "music library, P2/P3",
+      "required_behaviour": "real artist/album counts and state",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getAlbumList2",
+      "surface": "subsonic",
+      "name": "getAlbumList2",
+      "paths": [
+        "/rest/getAlbumList2",
+        "/rest/getAlbumList2.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L10",
+      "plan_owner": "music library, P2/P4",
+      "required_behaviour": "all consumed list modes, filters and paging",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getAlbum",
+      "surface": "subsonic",
+      "name": "getAlbum",
+      "paths": [
+        "/rest/getAlbum",
+        "/rest/getAlbum.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L10",
+      "plan_owner": "music library, P2/P3",
+      "required_behaviour": "complete/partial album policy and valid children",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getGenres",
+      "surface": "subsonic",
+      "name": "getGenres",
+      "paths": [
+        "/rest/getGenres",
+        "/rest/getGenres.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L10",
+      "plan_owner": "music library, P3/P6",
+      "required_behaviour": "metadata facets and counts",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getPlaylists",
+      "surface": "subsonic",
+      "name": "getPlaylists",
+      "paths": [
+        "/rest/getPlaylists",
+        "/rest/getPlaylists.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S04",
+      "plan_owner": "music library, P5/P6",
+      "required_behaviour": "visibility, summary, smart result metadata",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getPlaylist",
+      "surface": "subsonic",
+      "name": "getPlaylist",
+      "paths": [
+        "/rest/getPlaylist",
+        "/rest/getPlaylist.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S04",
+      "plan_owner": "music library, P3/P5/P6",
+      "required_behaviour": "ordered projected items, readonly state",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:createPlaylist",
+      "surface": "subsonic",
+      "name": "createPlaylist",
+      "paths": [
+        "/rest/createPlaylist",
+        "/rest/createPlaylist.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S04",
+      "plan_owner": "music library, P5",
+      "required_behaviour": "validated create/replace semantics",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:updatePlaylist",
+      "surface": "subsonic",
+      "name": "updatePlaylist",
+      "paths": [
+        "/rest/updatePlaylist",
+        "/rest/updatePlaylist.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S04",
+      "plan_owner": "music library, P5",
+      "required_behaviour": "atomic patch/entry edit",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:deletePlaylist",
+      "surface": "subsonic",
+      "name": "deletePlaylist",
+      "paths": [
+        "/rest/deletePlaylist",
+        "/rest/deletePlaylist.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S04",
+      "plan_owner": "music library, P5",
+      "required_behaviour": "authorised deletion",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:star",
+      "surface": "subsonic",
+      "name": "star",
+      "paths": [
+        "/rest/star",
+        "/rest/star.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S11",
+      "plan_owner": "music library, P11",
+      "required_behaviour": "user-scoped target/batch validation",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:unstar",
+      "surface": "subsonic",
+      "name": "unstar",
+      "paths": [
+        "/rest/unstar",
+        "/rest/unstar.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S11",
+      "plan_owner": "music library, P11",
+      "required_behaviour": "inverse state mutation",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:setRating",
+      "surface": "subsonic",
+      "name": "setRating",
+      "paths": [
+        "/rest/setRating",
+        "/rest/setRating.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S11",
+      "plan_owner": "music library, P11",
+      "required_behaviour": "rating/clear semantics across entities",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:scrobble",
+      "surface": "subsonic",
+      "name": "scrobble",
+      "paths": [
+        "/rest/scrobble",
+        "/rest/scrobble.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S11",
+      "plan_owner": "library history/playback activity, P11",
+      "required_behaviour": "submitted plays vs now-playing",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getScanStatus",
+      "surface": "subsonic",
+      "name": "getScanStatus",
+      "paths": [
+        "/rest/getScanStatus",
+        "/rest/getScanStatus.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L07",
+      "plan_owner": "music library, P3/P4",
+      "required_behaviour": "truthful runtime/reconciliation status",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:startScan",
+      "surface": "subsonic",
+      "name": "startScan",
+      "paths": [
+        "/rest/startScan",
+        "/rest/startScan.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L06",
+      "plan_owner": "music library, P1/P3/P4",
+      "required_behaviour": "permission, full/target scan and completion status",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:stream",
+      "surface": "subsonic",
+      "name": "stream",
+      "paths": [
+        "/rest/stream",
+        "/rest/stream.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V10",
+      "plan_owner": "playback, P12",
+      "required_behaviour": "range/cancel plus explicit format/bitrate",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getCoverArt",
+      "surface": "subsonic",
+      "name": "getCoverArt",
+      "paths": [
+        "/rest/getCoverArt",
+        "/rest/getCoverArt.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V07",
+      "plan_owner": "music library, P10",
+      "required_behaviour": "entity/playlist/radio targets, cache and overrides",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getSong",
+      "surface": "subsonic",
+      "name": "getSong",
+      "paths": [
+        "/rest/getSong",
+        "/rest/getSong.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "L10",
+      "plan_owner": "music library, P2/P3",
+      "required_behaviour": "canonical track projection",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getStarred",
+      "surface": "subsonic",
+      "name": "getStarred",
+      "paths": [
+        "/rest/getStarred",
+        "/rest/getStarred.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "S11",
+      "plan_owner": "music library, P11/P3",
+      "required_behaviour": "v1 projection of the same state as v2",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getSongsByGenre",
+      "surface": "subsonic",
+      "name": "getSongsByGenre",
+      "paths": [
+        "/rest/getSongsByGenre",
+        "/rest/getSongsByGenre.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "L10",
+      "plan_owner": "music library, P2/P6",
+      "required_behaviour": "genre, offsets/count and library selector",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getRandomSongs",
+      "surface": "subsonic",
+      "name": "getRandomSongs",
+      "paths": [
+        "/rest/getRandomSongs",
+        "/rest/getRandomSongs.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "L10",
+      "plan_owner": "music library, P2",
+      "required_behaviour": "bounded filtered sampling",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getTopSongs",
+      "surface": "subsonic",
+      "name": "getTopSongs",
+      "paths": [
+        "/rest/getTopSongs",
+        "/rest/getTopSongs.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "E09",
+      "plan_owner": "music library, P8",
+      "required_behaviour": "artist-name/ID agent ranking, matched catalogue results and local fallback, count",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getSimilarSongs",
+      "surface": "subsonic",
+      "name": "getSimilarSongs",
+      "paths": [
+        "/rest/getSimilarSongs",
+        "/rest/getSimilarSongs.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "E09",
+      "plan_owner": "music library, P8",
+      "required_behaviour": "seed/type validation and related tracks",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getSimilarSongs2",
+      "surface": "subsonic",
+      "name": "getSimilarSongs2",
+      "paths": [
+        "/rest/getSimilarSongs2",
+        "/rest/getSimilarSongs2.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "E09",
+      "plan_owner": "music library, P8",
+      "required_behaviour": "same operation, ID3 response",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getArtistInfo2",
+      "surface": "subsonic",
+      "name": "getArtistInfo2",
+      "paths": [
+        "/rest/getArtistInfo2",
+        "/rest/getArtistInfo2.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "E09",
+      "plan_owner": "music library, P8/P10",
+      "required_behaviour": "optional info and similar artists",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getAlbumInfo2",
+      "surface": "subsonic",
+      "name": "getAlbumInfo2",
+      "paths": [
+        "/rest/getAlbumInfo2",
+        "/rest/getAlbumInfo2.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "E09",
+      "plan_owner": "music library, P8/P10",
+      "required_behaviour": "optional info and image descriptors",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getMusicFolders",
+      "surface": "subsonic",
+      "name": "getMusicFolders",
+      "paths": [
+        "/rest/getMusicFolders",
+        "/rest/getMusicFolders.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "L10",
+      "plan_owner": "music library, P4",
+      "required_behaviour": "stable library IDs/names",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getIndexes",
+      "surface": "subsonic",
+      "name": "getIndexes",
+      "paths": [
+        "/rest/getIndexes",
+        "/rest/getIndexes.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "L10",
+      "plan_owner": "music library, P2/P4",
+      "required_behaviour": "scoped legacy artist index",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getMusicDirectory",
+      "surface": "subsonic",
+      "name": "getMusicDirectory",
+      "paths": [
+        "/rest/getMusicDirectory",
+        "/rest/getMusicDirectory.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "L10",
+      "plan_owner": "music library, P2/P4",
+      "required_behaviour": "canonical artist/album hierarchy",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getPlayQueue",
+      "surface": "subsonic",
+      "name": "getPlayQueue",
+      "paths": [
+        "/rest/getPlayQueue",
+        "/rest/getPlayQueue.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "S07",
+      "plan_owner": "music library, P7/P3",
+      "required_behaviour": "legacy restore snapshot",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:savePlayQueue",
+      "surface": "subsonic",
+      "name": "savePlayQueue",
+      "paths": [
+        "/rest/savePlayQueue",
+        "/rest/savePlayQueue.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "S07",
+      "plan_owner": "music library, P7",
+      "required_behaviour": "validated legacy save",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getPlayQueueByIndex",
+      "surface": "subsonic",
+      "name": "getPlayQueueByIndex",
+      "paths": [
+        "/rest/getPlayQueueByIndex",
+        "/rest/getPlayQueueByIndex.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": "indexBasedQueue",
+      "baseline": "missing",
+      "owner_task": "S07",
+      "plan_owner": "music library, P7/P3",
+      "required_behaviour": "exact current occurrence",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:savePlayQueueByIndex",
+      "surface": "subsonic",
+      "name": "savePlayQueueByIndex",
+      "paths": [
+        "/rest/savePlayQueueByIndex",
+        "/rest/savePlayQueueByIndex.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": "indexBasedQueue",
+      "baseline": "missing",
+      "owner_task": "S07",
+      "plan_owner": "music library, P7",
+      "required_behaviour": "validated index save",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getInternetRadioStations",
+      "surface": "subsonic",
+      "name": "getInternetRadioStations",
+      "paths": [
+        "/rest/getInternetRadioStations",
+        "/rest/getInternetRadioStations.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V06",
+      "plan_owner": "music library, P9",
+      "required_behaviour": "shared station catalogue",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:createInternetRadioStation",
+      "surface": "subsonic",
+      "name": "createInternetRadioStation",
+      "paths": [
+        "/rest/createInternetRadioStation",
+        "/rest/createInternetRadioStation.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V06",
+      "plan_owner": "music library, P1/P9",
+      "required_behaviour": "admin create",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:updateInternetRadioStation",
+      "surface": "subsonic",
+      "name": "updateInternetRadioStation",
+      "paths": [
+        "/rest/updateInternetRadioStation",
+        "/rest/updateInternetRadioStation.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V06",
+      "plan_owner": "music library, P1/P9",
+      "required_behaviour": "admin update",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:deleteInternetRadioStation",
+      "surface": "subsonic",
+      "name": "deleteInternetRadioStation",
+      "paths": [
+        "/rest/deleteInternetRadioStation",
+        "/rest/deleteInternetRadioStation.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V06",
+      "plan_owner": "music library, P1/P9",
+      "required_behaviour": "admin delete",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:download",
+      "surface": "subsonic",
+      "name": "download",
+      "paths": [
+        "/rest/download",
+        "/rest/download.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V11",
+      "plan_owner": "playback/library snapshots, P13",
+      "required_behaviour": "track bytes and collection ZIPs",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:jukeboxControl",
+      "surface": "subsonic",
+      "name": "jukeboxControl",
+      "paths": [
+        "/rest/jukeboxControl",
+        "/rest/jukeboxControl.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V14",
+      "plan_owner": "playback, P15",
+      "required_behaviour": "actual controls on configured output",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:reportPlayback",
+      "surface": "subsonic",
+      "name": "reportPlayback",
+      "paths": [
+        "/rest/reportPlayback",
+        "/rest/reportPlayback.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": "playbackReport",
+      "baseline": "missing",
+      "owner_task": "S11",
+      "plan_owner": "playback/library history, P11",
+      "required_behaviour": "timeline without double counts",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getLyricsBySongId",
+      "surface": "subsonic",
+      "name": "getLyricsBySongId",
+      "paths": [
+        "/rest/getLyricsBySongId",
+        "/rest/getLyricsBySongId.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": "songLyrics",
+      "baseline": "missing",
+      "owner_task": "V08",
+      "plan_owner": "music library, P10",
+      "required_behaviour": "structured lyrics/empty absence",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getTranscodeDecision",
+      "surface": "subsonic",
+      "name": "getTranscodeDecision",
+      "paths": [
+        "/rest/getTranscodeDecision",
+        "/rest/getTranscodeDecision.view"
+      ],
+      "methods": [
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": "transcoding",
+      "baseline": "missing",
+      "owner_task": "V09",
+      "plan_owner": "playback, P12",
+      "required_behaviour": "JSON POST profiles and bound decision",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "subsonic:getTranscodeStream",
+      "surface": "subsonic",
+      "name": "getTranscodeStream",
+      "paths": [
+        "/rest/getTranscodeStream",
+        "/rest/getTranscodeStream.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": "transcoding",
+      "baseline": "missing",
+      "owner_task": "V10",
+      "plan_owner": "playback, P12",
+      "required_behaviour": "binary output using validated decision",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:POST /auth/login",
+      "surface": "navidrome",
+      "name": "POST /auth/login",
+      "paths": [
+        "/auth/login"
+      ],
+      "methods": [
+        "POST"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L01",
+      "plan_owner": "identity, P1/P16",
+      "required_behaviour": "user, permission and compat session",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/song",
+      "surface": "navidrome",
+      "name": "GET /api/song",
+      "paths": [
+        "/api/song"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L11",
+      "plan_owner": "music library, P2/P3/P4",
+      "required_behaviour": "browse/filter/sort/page/count, not search-only",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/song/{id}",
+      "surface": "navidrome",
+      "name": "GET /api/song/{id}",
+      "paths": [
+        "/api/song/{id}"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L11",
+      "plan_owner": "music library, P3/P10",
+      "required_behaviour": "full truthful projection/lyrics on detail",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/album",
+      "surface": "navidrome",
+      "name": "GET /api/album",
+      "paths": [
+        "/api/album"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L11",
+      "plan_owner": "music library, P2/P3/P4",
+      "required_behaviour": "arrays, ratings, role/genre/year/recent filters",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/album/{id}",
+      "surface": "navidrome",
+      "name": "GET /api/album/{id}",
+      "paths": [
+        "/api/album/{id}"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L11",
+      "plan_owner": "music library, P2/P3",
+      "required_behaviour": "full metadata, completion and artwork refs",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/artist",
+      "surface": "navidrome",
+      "name": "GET /api/artist",
+      "paths": [
+        "/api/artist"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L11",
+      "plan_owner": "music library, P2/P3/P4",
+      "required_behaviour": "role/membership-aware list/count",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/artist/{id}",
+      "surface": "navidrome",
+      "name": "GET /api/artist/{id}",
+      "paths": [
+        "/api/artist/{id}"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "L11",
+      "plan_owner": "music library, P2/P3/P8/P10",
+      "required_behaviour": "metadata, stats and image revision",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/playlist",
+      "surface": "navidrome",
+      "name": "GET /api/playlist",
+      "paths": [
+        "/api/playlist"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S05",
+      "plan_owner": "music library, P5/P6",
+      "required_behaviour": "paged visible/smart/static list and totals",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/playlist/{id}",
+      "surface": "navidrome",
+      "name": "GET /api/playlist/{id}",
+      "paths": [
+        "/api/playlist/{id}"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "S05",
+      "plan_owner": "music library, P5/P6",
+      "required_behaviour": "owner/editability/rules/evaluation",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:POST /api/playlist",
+      "surface": "navidrome",
+      "name": "POST /api/playlist",
+      "paths": [
+        "/api/playlist"
+      ],
+      "methods": [
+        "POST"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "S05",
+      "plan_owner": "music library, P5/P6",
+      "required_behaviour": "create kind/metadata and return real ID",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:PUT /api/playlist/{id}",
+      "surface": "navidrome",
+      "name": "PUT /api/playlist/{id}",
+      "paths": [
+        "/api/playlist/{id}"
+      ],
+      "methods": [
+        "PUT"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "S05",
+      "plan_owner": "music library, P5/P6",
+      "required_behaviour": "patch/clear/evaluate rules",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:DELETE /api/playlist/{id}",
+      "surface": "navidrome",
+      "name": "DELETE /api/playlist/{id}",
+      "paths": [
+        "/api/playlist/{id}"
+      ],
+      "methods": [
+        "DELETE"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "S05",
+      "plan_owner": "music library, P5",
+      "required_behaviour": "authorised deletion",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/playlist/{id}/tracks",
+      "surface": "navidrome",
+      "name": "GET /api/playlist/{id}/tracks",
+      "paths": [
+        "/api/playlist/{id}/tracks"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "S05",
+      "plan_owner": "music library, P3/P5/P6",
+      "required_behaviour": "item IDs/mediaFileId, order, page/count",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:POST /api/playlist/{id}/tracks",
+      "surface": "navidrome",
+      "name": "POST /api/playlist/{id}/tracks",
+      "paths": [
+        "/api/playlist/{id}/tracks"
+      ],
+      "methods": [
+        "POST"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "S05",
+      "plan_owner": "music library, P5",
+      "required_behaviour": "bulk IDs, actual added count",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:DELETE /api/playlist/{id}/tracks",
+      "surface": "navidrome",
+      "name": "DELETE /api/playlist/{id}/tracks",
+      "paths": [
+        "/api/playlist/{id}/tracks"
+      ],
+      "methods": [
+        "DELETE"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "S05",
+      "plan_owner": "music library, P5",
+      "required_behaviour": "repeated item selectors, returned IDs",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:PUT /api/playlist/{playlistId}/tracks/{trackNumber}",
+      "surface": "navidrome",
+      "name": "PUT /api/playlist/{playlistId}/tracks/{trackNumber}",
+      "paths": [
+        "/api/playlist/{playlistId}/tracks/{trackNumber}"
+      ],
+      "methods": [
+        "PUT"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "S05",
+      "plan_owner": "music library, P5",
+      "required_behaviour": "translate one-based move/insert-before",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/queue",
+      "surface": "navidrome",
+      "name": "GET /api/queue",
+      "paths": [
+        "/api/queue"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:0.57.0",
+      "feature_gate": "SERVER_PLAY_QUEUE",
+      "baseline": "missing",
+      "owner_task": "S07",
+      "plan_owner": "music library, P7/P3",
+      "required_behaviour": "index/current/position and items",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:POST /api/queue",
+      "surface": "navidrome",
+      "name": "POST /api/queue",
+      "paths": [
+        "/api/queue"
+      ],
+      "methods": [
+        "POST"
+      ],
+      "profile": "navidrome:0.57.0",
+      "feature_gate": "SERVER_PLAY_QUEUE",
+      "baseline": "missing",
+      "owner_task": "S07",
+      "plan_owner": "music library, P7/P16",
+      "required_behaviour": "atomic save, Feishin-compatible success",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/tag",
+      "surface": "navidrome",
+      "name": "GET /api/tag",
+      "paths": [
+        "/api/tag"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:0.55.0",
+      "feature_gate": "TAGS",
+      "baseline": "missing",
+      "owner_task": "V05",
+      "plan_owner": "music library, P3/P6",
+      "required_behaviour": "all indexed tags, filter/page/count",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/user",
+      "surface": "navidrome",
+      "name": "GET /api/user",
+      "paths": [
+        "/api/user"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "L01",
+      "plan_owner": "identity, P1",
+      "required_behaviour": "scoped owner directory and total",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:GET /api/radio",
+      "surface": "navidrome",
+      "name": "GET /api/radio",
+      "paths": [
+        "/api/radio"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V06",
+      "plan_owner": "music library, P9",
+      "required_behaviour": "station list/sort/count",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:PUT /api/radio/{id}",
+      "surface": "navidrome",
+      "name": "PUT /api/radio/{id}",
+      "paths": [
+        "/api/radio/{id}"
+      ],
+      "methods": [
+        "PUT"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V06",
+      "plan_owner": "music library, P1/P9",
+      "required_behaviour": "authorised update",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:DELETE /api/radio/{id}",
+      "surface": "navidrome",
+      "name": "DELETE /api/radio/{id}",
+      "paths": [
+        "/api/radio/{id}"
+      ],
+      "methods": [
+        "DELETE"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V06",
+      "plan_owner": "music library, P1/P9",
+      "required_behaviour": "authorised deletion",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:POST /api/artist/{id}/image",
+      "surface": "navidrome",
+      "name": "POST /api/artist/{id}/image",
+      "paths": [
+        "/api/artist/{id}/image"
+      ],
+      "methods": [
+        "POST"
+      ],
+      "profile": "navidrome:0.61.0",
+      "feature_gate": "ARTIST_IMAGE_UPLOAD",
+      "baseline": "missing",
+      "owner_task": "V07",
+      "plan_owner": "music library, P1/P10",
+      "required_behaviour": "multipart override",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:DELETE /api/artist/{id}/image",
+      "surface": "navidrome",
+      "name": "DELETE /api/artist/{id}/image",
+      "paths": [
+        "/api/artist/{id}/image"
+      ],
+      "methods": [
+        "DELETE"
+      ],
+      "profile": "navidrome:0.61.0",
+      "feature_gate": "ARTIST_IMAGE_UPLOAD",
+      "baseline": "missing",
+      "owner_task": "V07",
+      "plan_owner": "music library, P1/P10",
+      "required_behaviour": "remove override, restore fallback",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:POST /api/playlist/{id}/image",
+      "surface": "navidrome",
+      "name": "POST /api/playlist/{id}/image",
+      "paths": [
+        "/api/playlist/{id}/image"
+      ],
+      "methods": [
+        "POST"
+      ],
+      "profile": "navidrome:0.61.0",
+      "feature_gate": "PLAYLIST_IMAGE_UPLOAD",
+      "baseline": "missing",
+      "owner_task": "V07",
+      "plan_owner": "music library, P5/P10",
+      "required_behaviour": "owner multipart override",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:DELETE /api/playlist/{id}/image",
+      "surface": "navidrome",
+      "name": "DELETE /api/playlist/{id}/image",
+      "paths": [
+        "/api/playlist/{id}/image"
+      ],
+      "methods": [
+        "DELETE"
+      ],
+      "profile": "navidrome:0.61.0",
+      "feature_gate": "PLAYLIST_IMAGE_UPLOAD",
+      "baseline": "missing",
+      "owner_task": "V07",
+      "plan_owner": "music library, P5/P10",
+      "required_behaviour": "owner remove override",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:POST /api/radio/{id}/image",
+      "surface": "navidrome",
+      "name": "POST /api/radio/{id}/image",
+      "paths": [
+        "/api/radio/{id}/image"
+      ],
+      "methods": [
+        "POST"
+      ],
+      "profile": "navidrome:0.61.0",
+      "feature_gate": "INTERNET_RADIO_IMAGE_UPLOAD",
+      "baseline": "missing",
+      "owner_task": "V07",
+      "plan_owner": "music library, P1/P9/P10",
+      "required_behaviour": "admin multipart override",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:DELETE /api/radio/{id}/image",
+      "surface": "navidrome",
+      "name": "DELETE /api/radio/{id}/image",
+      "paths": [
+        "/api/radio/{id}/image"
+      ],
+      "methods": [
+        "DELETE"
+      ],
+      "profile": "navidrome:0.61.0",
+      "feature_gate": "INTERNET_RADIO_IMAGE_UPLOAD",
+      "baseline": "missing",
+      "owner_task": "V07",
+      "plan_owner": "music library, P1/P9/P10",
+      "required_behaviour": "admin remove override",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "navidrome:POST /api/share",
+      "surface": "navidrome",
+      "name": "POST /api/share",
+      "paths": [
+        "/api/share"
+      ],
+      "methods": [
+        "POST"
+      ],
+      "profile": "navidrome:0.49.3",
+      "feature_gate": "SHARING_ALBUM_SONG",
+      "baseline": "missing",
+      "owner_task": "V13",
+      "plan_owner": "sharing, P14",
+      "required_behaviour": "real accessible grant and browser link",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": true
+    },
+    {
+      "id": "support:rest-mount",
+      "surface": "support",
+      "name": "rest-mount",
+      "paths": [
+        "/rest"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "compat",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V15",
+      "plan_owner": "P16",
+      "required_behaviour": "legacy Subsonic mount without CORS; stays supported during migration and becomes an adapter over the same library/playback operations",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    },
+    {
+      "id": "support:compat-subsonic-rest",
+      "surface": "support",
+      "name": "compat-subsonic-rest",
+      "paths": [
+        "/compat/subsonic/rest"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "compat",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V15",
+      "plan_owner": "P16",
+      "required_behaviour": "Subsonic-router mount under the Subsonic compatibility base with the compatibility CORS layer",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    },
+    {
+      "id": "support:compat-navidrome-rest",
+      "surface": "support",
+      "name": "compat-navidrome-rest",
+      "paths": [
+        "/compat/navidrome/rest"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "compat",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V15",
+      "plan_owner": "P16",
+      "required_behaviour": "Subsonic grammar reached through the Navidrome compatibility base with the compatibility CORS layer",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    },
+    {
+      "id": "support:compat-navidrome",
+      "surface": "support",
+      "name": "compat-navidrome",
+      "paths": [
+        "/compat/navidrome"
+      ],
+      "methods": [
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE"
+      ],
+      "profile": "compat",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V15",
+      "plan_owner": "P16",
+      "required_behaviour": "Navidrome-router mount with the compatibility CORS layer and exposed x-total-count",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    },
+    {
+      "id": "support:catalogue-search",
+      "surface": "support",
+      "name": "catalogue-search",
+      "paths": [
+        "/catalogue/search"
+      ],
+      "methods": [
+        "POST"
+      ],
+      "profile": "native",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V15",
+      "plan_owner": "P2/P16",
+      "required_behaviour": "existing native search route stays supported as an adapter over the shared library/provider operations; no adapter-specific query policy",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    },
+    {
+      "id": "support:playback-stream",
+      "surface": "support",
+      "name": "playback-stream",
+      "paths": [
+        "/playback/tracks/{track_id}/stream"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "native",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V10",
+      "plan_owner": "P12",
+      "required_behaviour": "existing native track stream route: bound delivery handle with range/cancel and explicit format/bitrate",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    },
+    {
+      "id": "support:playback-artwork",
+      "surface": "support",
+      "name": "playback-artwork",
+      "paths": [
+        "/playback/tracks/{track_id}/artwork"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "native",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V07",
+      "plan_owner": "P10",
+      "required_behaviour": "existing native artwork route: resource-scoped reads over the artwork owner with explicit fallback",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    },
+    {
+      "id": "support:health-live",
+      "surface": "support",
+      "name": "health-live",
+      "paths": [
+        "/health/live"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "native",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V90",
+      "plan_owner": null,
+      "required_behaviour": "operational liveness route retained; the release gate verifies it is not counted as a compatibility capability",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    },
+    {
+      "id": "support:health-ready",
+      "surface": "support",
+      "name": "health-ready",
+      "paths": [
+        "/health/ready"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "native",
+      "feature_gate": null,
+      "baseline": "present",
+      "owner_task": "V90",
+      "plan_owner": null,
+      "required_behaviour": "operational readiness route retained; the release gate verifies it is not counted as a compatibility capability",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    },
+    {
+      "id": "support:api-v1-library-tracks",
+      "surface": "support",
+      "name": "api-v1-library-tracks",
+      "paths": [
+        "/api/v1/library/tracks"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "native",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "L03",
+      "plan_owner": "P2/P3 (F03)",
+      "required_behaviour": "first native page route: exact total, deterministic order, principal scope, x-total-count",
+      "required_response_fields": [
+        "items",
+        "total"
+      ],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": false
+    },
+    {
+      "id": "support:api-v1-capabilities",
+      "surface": "support",
+      "name": "api-v1-capabilities",
+      "paths": [
+        "/api/v1/capabilities"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "native",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V15",
+      "plan_owner": "P16",
+      "required_behaviour": "native whio version and typed capabilities with versions, limits and disabled reasons; the plan fixes the family, not the path",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": false
+    },
+    {
+      "id": "support:api-v1-current-user",
+      "surface": "support",
+      "name": "api-v1-current-user",
+      "paths": [
+        "/api/v1/me"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "native",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "L01",
+      "plan_owner": "P1/P16",
+      "required_behaviour": "native caller identity and permissions; the plan fixes the family, not the path",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": false
+    },
+    {
+      "id": "support:share-page",
+      "surface": "support",
+      "name": "share-page",
+      "paths": [
+        "/compat/subsonic/share/{share_id}",
+        "/compat/navidrome/share/{share_id}"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "compat",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V13",
+      "plan_owner": "P14",
+      "required_behaviour": "usable browser share page under the selected compatibility base with shared metadata, artwork and playback; resolves the grant on every access",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": false
+    },
+    {
+      "id": "support:share-media",
+      "surface": "support",
+      "name": "share-media",
+      "paths": [
+        "/compat/subsonic/share/{share_id}/stream/{track_id}",
+        "/compat/navidrome/share/{share_id}/stream/{track_id}"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "compat",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V13",
+      "plan_owner": "P14",
+      "required_behaviour": "grant-scoped media delegation with play/seek/range and the share's download policy; delegates to playback delivery",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": false
+    },
+    {
+      "id": "support:share-artwork",
+      "surface": "support",
+      "name": "share-artwork",
+      "paths": [
+        "/compat/subsonic/share/{share_id}/artwork/{artwork_id}",
+        "/compat/navidrome/share/{share_id}/artwork/{artwork_id}"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "compat",
+      "feature_gate": null,
+      "baseline": "missing",
+      "owner_task": "V13",
+      "plan_owner": "P14",
+      "required_behaviour": "grant-scoped artwork delegation; no arbitrary track access from an otherwise valid token",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "unproved",
+      "in_target": false
+    }
+  ],
+  "retained_uncalled": [
+    {
+      "id": "subsonic:getStarred2",
+      "surface": "subsonic",
+      "name": "getStarred2",
+      "paths": [
+        "/rest/getStarred2",
+        "/rest/getStarred2.view"
+      ],
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "profile": "opensubsonic",
+      "feature_gate": null,
+      "baseline": "present-uncalled",
+      "owner_task": "L10",
+      "plan_owner": "P3/P11",
+      "required_behaviour": "retained registered Subsonic path outside the pinned client's called set; must expose the same principal-scoped starred state as getStarred",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    },
+    {
+      "id": "navidrome:GET /api/genre",
+      "surface": "navidrome",
+      "name": "GET /api/genre",
+      "paths": [
+        "/api/genre"
+      ],
+      "methods": [
+        "GET"
+      ],
+      "profile": "navidrome:baseline",
+      "feature_gate": null,
+      "baseline": "present-uncalled",
+      "owner_task": "L11",
+      "plan_owner": "P3/P6",
+      "required_behaviour": "retained registered Navidrome genre read outside the pinned client's called set; must serve indexed genre facets rather than a stub",
+      "required_response_fields": [],
+      "test_cases": [],
+      "status": "registered",
+      "in_target": false
+    }
+  ],
+  "field_mappings": [
+    {
+      "name": "album",
+      "client_type": "string",
+      "fact_owner": "canonical",
+      "proposed_value": "album.title",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumartist",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "album artists: display names",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumartists",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "album artists: individual names",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumcomment",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "album.comment",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumdateadded",
+      "client_type": "date",
+      "fact_owner": "library",
+      "proposed_value": "album.first_owned_at in selected libraries",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumdatemodified",
+      "client_type": "date",
+      "fact_owner": "metadata",
+      "proposed_value": "album.metadata_updated_at",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumduration",
+      "client_type": "number",
+      "fact_owner": "aggregate",
+      "proposed_value": "album distinct member duration sum",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumsongcount",
+      "client_type": "number",
+      "fact_owner": "aggregate",
+      "proposed_value": "album distinct member track count",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumsize",
+      "client_type": "number",
+      "fact_owner": "aggregate",
+      "proposed_value": "album selected member representation size sum",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumdateloved",
+      "client_type": "date",
+      "fact_owner": "user state",
+      "proposed_value": "album.starred_at",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumlastplayed",
+      "client_type": "date",
+      "fact_owner": "user state",
+      "proposed_value": "album maximum submitted play time",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumdaterated",
+      "client_type": "date",
+      "fact_owner": "user state",
+      "proposed_value": "album.rating_updated_at",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumloved",
+      "client_type": "boolean",
+      "fact_owner": "user state",
+      "proposed_value": "album is starred by principal",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumplaycount",
+      "client_type": "number",
+      "fact_owner": "user state",
+      "proposed_value": "album submitted play aggregate for principal",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumrating",
+      "client_type": "number",
+      "fact_owner": "user state",
+      "proposed_value": "album.rating",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumtype",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "album.release_type",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumversion",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "album.version",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "arranger",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role arranger",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "artist",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "primary credited artist name",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "artistdateloved",
+      "client_type": "date",
+      "fact_owner": "user state",
+      "proposed_value": "artist.starred_at",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "artistlastplayed",
+      "client_type": "date",
+      "fact_owner": "user state",
+      "proposed_value": "artist maximum submitted play time",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "artistdaterated",
+      "client_type": "date",
+      "fact_owner": "user state",
+      "proposed_value": "artist.rating_updated_at",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "artistloved",
+      "client_type": "boolean",
+      "fact_owner": "user state",
+      "proposed_value": "artist is starred by principal",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "artistplaycount",
+      "client_type": "number",
+      "fact_owner": "user state",
+      "proposed_value": "artist distinct credited-track play aggregate",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "artistrating",
+      "client_type": "number",
+      "fact_owner": "user state",
+      "proposed_value": "artist.rating",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "artists",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "all track artist credit names",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "asin",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag asin",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "averagerating",
+      "client_type": "number",
+      "fact_owner": "aggregate",
+      "proposed_value": "mean of submitted nonempty track ratings across users",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "barcode",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag barcode",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "bitdepth",
+      "client_type": "number",
+      "fact_owner": "source facts",
+      "proposed_value": "selected representation.bitdepth",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "bitrate",
+      "client_type": "number",
+      "fact_owner": "source facts",
+      "proposed_value": "selected representation.bitrate_kbps",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "bpm",
+      "client_type": "number",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag bpm",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "catalognumber",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag catalognumber",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "channels",
+      "client_type": "number",
+      "fact_owner": "source facts",
+      "proposed_value": "selected representation.channels",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "comment",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag comment",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "composer",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role composer",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "codec",
+      "client_type": "string",
+      "fact_owner": "source facts",
+      "proposed_value": "selected representation.codec",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "conductor",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role conductor",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "copyright",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag copyright",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "dateadded",
+      "client_type": "date",
+      "fact_owner": "library",
+      "proposed_value": "track.first_owned_at in selected libraries",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "dateloved",
+      "client_type": "date",
+      "fact_owner": "user state",
+      "proposed_value": "track.starred_at",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "lastplayed",
+      "client_type": "date",
+      "fact_owner": "user state",
+      "proposed_value": "track.last_played_at",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "datemodified",
+      "client_type": "date",
+      "fact_owner": "metadata",
+      "proposed_value": "track.metadata_updated_at",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "djmixer",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role djmixer",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "director",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role director",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "discnumber",
+      "client_type": "number",
+      "fact_owner": "membership",
+      "proposed_value": "album membership disc number",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "discsubtitle",
+      "client_type": "string",
+      "fact_owner": "membership",
+      "proposed_value": "album disc subtitle",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "disctotal",
+      "client_type": "number",
+      "fact_owner": "membership",
+      "proposed_value": "album disc total",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "duration",
+      "client_type": "number",
+      "fact_owner": "canonical",
+      "proposed_value": "track.duration_ms, translated to rule seconds",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "encodedby",
+      "client_type": "string",
+      "fact_owner": "source facts",
+      "proposed_value": "selected representation.encodedby",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "encodersettings",
+      "client_type": "string",
+      "fact_owner": "source facts",
+      "proposed_value": "selected representation.encodersettings",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "engineer",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role engineer",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "explicitstatus",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag explicitstatus",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "filepath",
+      "client_type": "string",
+      "fact_owner": "source facts",
+      "proposed_value": "selected representation.library_relative_path",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "filetype",
+      "client_type": "string",
+      "fact_owner": "source facts",
+      "proposed_value": "selected representation.container",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "genre",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "track.genres[]",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "grouping",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag grouping",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "hascoverart",
+      "client_type": "boolean",
+      "fact_owner": "artwork",
+      "proposed_value": "effective artwork presence from override/embedded/remote facts",
+      "owner_task": "V07",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "compilation",
+      "client_type": "boolean",
+      "fact_owner": "metadata",
+      "proposed_value": "album.compilation",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "loved",
+      "client_type": "boolean",
+      "fact_owner": "user state",
+      "proposed_value": "track is starred by principal",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "isrc",
+      "client_type": "string",
+      "fact_owner": "canonical",
+      "proposed_value": "track.isrc",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "key",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag key",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "language",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag language",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "license",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag license",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "library_id",
+      "client_type": "string",
+      "fact_owner": "library",
+      "proposed_value": "track belongs to selected library/source scope",
+      "owner_task": "L06",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "lyricist",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role lyricist",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "lyrics",
+      "client_type": "string",
+      "fact_owner": "lyrics",
+      "proposed_value": "selected source lyrics document plain text",
+      "owner_task": "V08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "media",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag media",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "missing",
+      "client_type": "boolean",
+      "fact_owner": "source facts",
+      "proposed_value": "no present local source in selected library scope",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "mixer",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role mixer",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "mood",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag mood",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "movement",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag movement",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "movementname",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag movementname",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "movementtotal",
+      "client_type": "number",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag movementtotal",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "mbz_album_artist_id",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "album artist MusicBrainz IDs",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "mbz_album_id",
+      "client_type": "string",
+      "fact_owner": "canonical",
+      "proposed_value": "album.musicbrainz_release_id",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "mbz_artist_id",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "track artist MusicBrainz IDs",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_arrangerid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_arrangerid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_composerid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_composerid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_conductorid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_conductorid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_directorid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_directorid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_discid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_discid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_djmixerid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_djmixerid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_engineerid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_engineerid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_lyricistid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_lyricistid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_mixerid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_mixerid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_performerid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_performerid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_producerid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_producerid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "mbz_recording_id",
+      "client_type": "string",
+      "fact_owner": "canonical",
+      "proposed_value": "track.musicbrainz_recording_id",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "mbz_release_group_id",
+      "client_type": "string",
+      "fact_owner": "canonical",
+      "proposed_value": "album.musicbrainz_release_group_id",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "mbz_release_track_id",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag mbz_release_track_id",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_remixerid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_remixerid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_trackid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_trackid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "musicbrainz_workid",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag musicbrainz_workid",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "title",
+      "client_type": "string",
+      "fact_owner": "canonical",
+      "proposed_value": "track.title",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "originaldate",
+      "client_type": "date",
+      "fact_owner": "metadata",
+      "proposed_value": "track.original_date with precision",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "originalyear",
+      "client_type": "number",
+      "fact_owner": "metadata",
+      "proposed_value": "track.original_year",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "performer",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role performer",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "playcount",
+      "client_type": "number",
+      "fact_owner": "user state",
+      "proposed_value": "track.play_count",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "id",
+      "client_type": "playlist",
+      "fact_owner": "playlist membership",
+      "proposed_value": "track occurrence in an authorised playlist",
+      "owner_task": "S02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "producer",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role producer",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "r128_album_gain",
+      "client_type": "number",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag r128_album_gain",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "r128_track_gain",
+      "client_type": "number",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag r128_track_gain",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "rating",
+      "client_type": "number",
+      "fact_owner": "user state",
+      "proposed_value": "track.rating",
+      "owner_task": "S08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "recordlabel",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "album.labels[]",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "recordingdate",
+      "client_type": "date",
+      "fact_owner": "metadata",
+      "proposed_value": "track.recording_date with precision",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "releasecountry",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "album.release_country",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "releasedate",
+      "client_type": "date",
+      "fact_owner": "metadata",
+      "proposed_value": "release date with precision",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "releasestatus",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "album.release_status",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "releasetype",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "album.release_type",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "replaygain_album_gain",
+      "client_type": "number",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag replaygain_album_gain",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "replaygain_album_peak",
+      "client_type": "number",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag replaygain_album_peak",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "replaygain_track_gain",
+      "client_type": "number",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag replaygain_track_gain",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "replaygain_track_peak",
+      "client_type": "number",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag replaygain_track_peak",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "remixer",
+      "client_type": "string",
+      "fact_owner": "credits",
+      "proposed_value": "credit names for role remixer",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "script",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag script",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "samplerate",
+      "client_type": "number",
+      "fact_owner": "source facts",
+      "proposed_value": "selected representation.sample_rate_hz",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "size",
+      "client_type": "number",
+      "fact_owner": "source facts",
+      "proposed_value": "selected representation.size_bytes",
+      "owner_task": "L05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "sortalbum",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag sortalbum",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "sortalbumartist",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag sortalbumartist",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "albumartistssort",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag albumartistssort",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "sortartist",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag sortartist",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "artistssort",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag artistssort",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "composersort",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag composersort",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "lyricistsort",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag lyricistsort",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "sorttitle",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag sorttitle",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "subtitle",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag subtitle",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "tracknumber",
+      "client_type": "number",
+      "fact_owner": "membership",
+      "proposed_value": "album membership track number",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "tracktotal",
+      "client_type": "number",
+      "fact_owner": "membership",
+      "proposed_value": "album/disc track total",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "website",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag website",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "work",
+      "client_type": "string",
+      "fact_owner": "metadata",
+      "proposed_value": "typed indexed metadata tag work",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "name": "year",
+      "client_type": "number",
+      "fact_owner": "metadata",
+      "proposed_value": "track/album release-context year",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    }
+  ],
+  "sort_mappings": [
+    {
+      "resource": "NDAlbumArtistListSort",
+      "name": "albumCount",
+      "order_fact": "distinct albums in selected credit role/scope",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumArtistListSort",
+      "name": "starred_at",
+      "order_fact": "principal artist starred timestamp",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumArtistListSort",
+      "name": "name",
+      "order_fact": "artist sort/display name",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumArtistListSort",
+      "name": "playCount",
+      "order_fact": "principal distinct-track play aggregate",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumArtistListSort",
+      "name": "rating",
+      "order_fact": "principal artist rating",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumArtistListSort",
+      "name": "songCount",
+      "order_fact": "distinct tracks in selected credit role/scope",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "album_artist",
+      "order_fact": "album artist sort/display names",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "artist",
+      "order_fact": "credited artist sort/display names",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "duration",
+      "order_fact": "album duration",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "explicitStatus",
+      "order_fact": "observed explicit classification",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "name",
+      "order_fact": "album sort/display title",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "play_count",
+      "order_fact": "principal album play aggregate",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "play_date",
+      "order_fact": "principal last album play",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "random",
+      "order_fact": "stable random seed",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "rating",
+      "order_fact": "principal album rating",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "recently_added",
+      "order_fact": "first owned timestamp in selected libraries",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "songCount",
+      "order_fact": "distinct member track count",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "starred_at",
+      "order_fact": "principal album starred timestamp",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDAlbumListSort",
+      "name": "max_year",
+      "order_fact": "release-context year",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDGenreListSort",
+      "name": "albumCount",
+      "order_fact": "distinct matching albums in scope",
+      "owner_task": "L09",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDGenreListSort",
+      "name": "name",
+      "order_fact": "normalised genre value",
+      "owner_task": "L09",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDGenreListSort",
+      "name": "songCount",
+      "order_fact": "distinct matching tracks in scope",
+      "owner_task": "L09",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDPlaylistListSort",
+      "name": "duration",
+      "order_fact": "evaluated/static item duration",
+      "owner_task": "S02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDPlaylistListSort",
+      "name": "name",
+      "order_fact": "playlist name",
+      "owner_task": "S02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDPlaylistListSort",
+      "name": "owner_name",
+      "order_fact": "owner display name",
+      "owner_task": "S02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDPlaylistListSort",
+      "name": "public",
+      "order_fact": "public visibility flag",
+      "owner_task": "S02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDPlaylistListSort",
+      "name": "songCount",
+      "order_fact": "evaluated/static item count",
+      "owner_task": "S02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDPlaylistListSort",
+      "name": "updatedAt",
+      "order_fact": "playlist revision timestamp",
+      "owner_task": "S02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "album",
+      "order_fact": "album context then disc/track/member position",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "order_album_artist_name",
+      "order_fact": "album artist sort/display names",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "artist",
+      "order_fact": "track artist sort/display names",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "bpm",
+      "order_fact": "observed BPM",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "channels",
+      "order_fact": "selected representation channel count",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "comment",
+      "order_fact": "observed comment",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "duration",
+      "order_fact": "track duration",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "explicitStatus",
+      "order_fact": "observed explicit classification",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "starred_at",
+      "order_fact": "principal track starred timestamp",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "genre",
+      "order_fact": "normalised genre values with stable primary key",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "id",
+      "order_fact": "canonical track ID",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "playCount",
+      "order_fact": "principal track play count",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "playDate",
+      "order_fact": "principal last submitted play",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "random",
+      "order_fact": "stable random seed",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "rating",
+      "order_fact": "principal track rating",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "createdAt",
+      "order_fact": "first owned timestamp for library ordering",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "releaseYear",
+      "order_fact": "observed release year",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "title",
+      "order_fact": "track sort/display title",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "track",
+      "order_fact": "album context disc/track number",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDSongListSort",
+      "name": "year",
+      "order_fact": "observed track/context year",
+      "owner_task": "L08",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDUserListSort",
+      "name": "name",
+      "order_fact": "visible user display name",
+      "owner_task": "L01",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDTagListSort",
+      "name": "albumCount",
+      "order_fact": "distinct matching albums in scope",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDTagListSort",
+      "name": "songCount",
+      "order_fact": "distinct matching tracks in scope",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDTagListSort",
+      "name": "tagValue",
+      "order_fact": "normalised facet value",
+      "owner_task": "V02",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "resource": "NDRadioListSort",
+      "name": "name",
+      "order_fact": "station name",
+      "owner_task": "V06",
+      "facade_owner": "V05",
+      "status": "unproved"
+    }
+  ],
+  "filter_translations": [
+    {
+      "names": [
+        "_start",
+        "_end"
+      ],
+      "foreign_input": "`_start`, `_end`",
+      "native_selector": "offset and exclusive end; zero-end collection convention handled explicitly",
+      "owner_task": "L02",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "_sort",
+        "_order"
+      ],
+      "foreign_input": "`_sort`, `_order`",
+      "native_selector": "typed resource sort and direction",
+      "owner_task": "V05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "title",
+        "name",
+        "q",
+        "tag_value"
+      ],
+      "foreign_input": "`title`, `name`, playlist `q`, `tag_value`",
+      "native_selector": "bounded normalised text selector for that resource",
+      "owner_task": "L11",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "album_id"
+      ],
+      "foreign_input": "`album_id`",
+      "native_selector": "album membership, including repeated IDs",
+      "owner_task": "L11",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "artist_id"
+      ],
+      "foreign_input": "`artist_id`",
+      "native_selector": "credit context specified by endpoint; preserve reference album-list meaning",
+      "owner_task": "L11",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "album_artist_id"
+      ],
+      "foreign_input": "`album_artist_id`",
+      "native_selector": "album-artist membership, separate from track credits",
+      "owner_task": "L11",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "artists_id"
+      ],
+      "foreign_input": "`artists_id`",
+      "native_selector": "track/participant membership per consumed BFR contract; not an unconditional album-artist alias",
+      "owner_task": "L11",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "role"
+      ],
+      "foreign_input": "`role`",
+      "native_selector": "all roles or named credit role; include albumartist plus the 12 role names exposed by the controller",
+      "owner_task": "L11",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "genre_id",
+        "genre"
+      ],
+      "foreign_input": "`genre_id`, Subsonic `genre`",
+      "native_selector": "stable facet IDs vs names, translated to the same genre predicate",
+      "owner_task": "V05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "library_id",
+        "musicFolderId"
+      ],
+      "foreign_input": "`library_id`, `musicFolderId`",
+      "native_selector": "stable library registration selectors, not filesystem paths",
+      "owner_task": "L06",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "starred"
+      ],
+      "foreign_input": "`starred`",
+      "native_selector": "caller favourite yes/no; distinguish omitted from false",
+      "owner_task": "S08",
+      "facade_owner": "S08",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "has_rating"
+      ],
+      "foreign_input": "`has_rating`",
+      "native_selector": "caller rating presence/absence, not numeric rating truthiness",
+      "owner_task": "S08",
+      "facade_owner": "S08",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "year",
+        "fromYear",
+        "toYear"
+      ],
+      "foreign_input": "`year`, `fromYear`, `toYear`",
+      "native_selector": "observed context year or explicit range, with validated endpoints",
+      "owner_task": "L08",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "compilation"
+      ],
+      "foreign_input": "`compilation`",
+      "native_selector": "observed album compilation classification",
+      "owner_task": "V02",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "recently_played"
+      ],
+      "foreign_input": "`recently_played`",
+      "native_selector": "principal's submitted play presence/order; no live-report increments",
+      "owner_task": "S08",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "recently_added"
+      ],
+      "foreign_input": "`recently_added`",
+      "native_selector": "owned addition scope/order, not provider materialisation time",
+      "owner_task": "L08",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "missing"
+      ],
+      "foreign_input": "`missing`",
+      "native_selector": "source absence in selected local-library scope, with unknown offline roots distinct",
+      "owner_task": "L07",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "path"
+      ],
+      "foreign_input": "`path`",
+      "native_selector": "library-relative source path selector",
+      "owner_task": "L05",
+      "facade_owner": "L11",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "owner_id"
+      ],
+      "foreign_input": "`owner_id`",
+      "native_selector": "visible playlist owner selector",
+      "owner_task": "S05",
+      "facade_owner": "S05",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "smart"
+      ],
+      "foreign_input": "`smart`",
+      "native_selector": "static/smart playlist kind; omitted means either visible kind",
+      "owner_task": "S05",
+      "facade_owner": "S05",
+      "status": "unproved"
+    },
+    {
+      "names": [
+        "tag_name"
+      ],
+      "foreign_input": "`tag_name`",
+      "native_selector": "indexed metadata facet kind",
+      "owner_task": "V05",
+      "facade_owner": "V05",
+      "status": "unproved"
+    }
+  ],
+  "operators": [
+    {
+      "client_type": "playlist",
+      "accepted_operators": [
+        "inPlaylist",
+        "notInPlaylist"
+      ],
+      "operation_family": "authorised membership / inverse membership",
+      "owner_task": "V03",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "client_type": "date",
+      "accepted_operators": [
+        "is",
+        "isNot",
+        "before",
+        "after",
+        "inTheLast",
+        "notInTheLast",
+        "inTheRange",
+        "beforeDate",
+        "afterDate",
+        "inTheRangeDate",
+        "isMissing",
+        "isPresent"
+      ],
+      "operation_family": "equality, presence, before/after and absolute/relative ranges",
+      "owner_task": "V03",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "client_type": "string",
+      "accepted_operators": [
+        "is",
+        "isNot",
+        "contains",
+        "notContains",
+        "startsWith",
+        "endsWith",
+        "isMissing",
+        "isPresent"
+      ],
+      "operation_family": "equality, presence and bounded text patterns",
+      "owner_task": "V03",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "client_type": "boolean",
+      "accepted_operators": [
+        "is",
+        "isNot",
+        "isMissing",
+        "isPresent"
+      ],
+      "operation_family": "equality and presence",
+      "owner_task": "V03",
+      "facade_owner": "V05",
+      "status": "unproved"
+    },
+    {
+      "client_type": "number",
+      "accepted_operators": [
+        "is",
+        "isNot",
+        "contains",
+        "notContains",
+        "gt",
+        "lt",
+        "inTheRange",
+        "isMissing",
+        "isPresent"
+      ],
+      "operation_family": "equality, presence, comparison/range and reference numeric text-pattern semantics",
+      "owner_task": "V03",
+      "facade_owner": "V05",
+      "status": "unproved"
+    }
+  ],
+  "profiles": {
+    "navidrome_compatibility": [
+      {
+        "id": "navidrome:baseline",
+        "threshold": "baseline",
+        "plan_packages": null,
+        "cumulative_obligation": "public playlists, album rating-presence filter, folder selection and jukebox handling (hardcoded by client)",
+        "owner_tasks": [
+          "S02",
+          "S05",
+          "S08",
+          "L06",
+          "L11",
+          "V14"
+        ],
+        "endpoint_ids": [
+          "navidrome:GET /api/playlist",
+          "navidrome:GET /api/playlist/{id}",
+          "navidrome:GET /api/album",
+          "navidrome:GET /api/song",
+          "subsonic:getMusicFolders",
+          "subsonic:jukeboxControl",
+          "navidrome:POST /auth/login"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "navidrome:0.48.0",
+        "threshold": "0.48.0",
+        "plan_packages": "P6",
+        "cumulative_obligation": "real smart-rule persistence, validation and evaluation (P6)",
+        "owner_tasks": [
+          "V02",
+          "V03",
+          "V04",
+          "V05"
+        ],
+        "endpoint_ids": [
+          "navidrome:POST /api/playlist",
+          "navidrome:PUT /api/playlist/{id}",
+          "navidrome:GET /api/playlist/{id}",
+          "subsonic:getPlaylists",
+          "subsonic:getPlaylist"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "navidrome:0.49.3",
+        "threshold": "0.49.3",
+        "plan_packages": "P14",
+        "cumulative_obligation": "working share creation and public use (P14)",
+        "owner_tasks": [
+          "V12",
+          "V13"
+        ],
+        "endpoint_ids": [
+          "navidrome:POST /api/share",
+          "support:share-page",
+          "support:share-media",
+          "support:share-artwork"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "navidrome:0.55.0",
+        "threshold": "0.55.0",
+        "plan_packages": "P2–P6",
+        "cumulative_obligation": "multi-valued tags, BFR role/filter/missing semantics (P2-P6)",
+        "owner_tasks": [
+          "L05",
+          "L07",
+          "L08",
+          "V02",
+          "V05"
+        ],
+        "endpoint_ids": [
+          "navidrome:GET /api/tag",
+          "subsonic:getGenres"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "navidrome:0.56.0",
+        "threshold": "0.56.0",
+        "plan_packages": "P2–P3",
+        "cumulative_obligation": "distinct track-credit/album-artist filtering (P2-P3)",
+        "owner_tasks": [
+          "L05",
+          "L08",
+          "L11"
+        ],
+        "endpoint_ids": [
+          "navidrome:GET /api/song"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "navidrome:0.57.0",
+        "threshold": "0.57.0",
+        "plan_packages": "P7",
+        "cumulative_obligation": "native queue behaviour (P7)",
+        "owner_tasks": [
+          "S06",
+          "S07"
+        ],
+        "endpoint_ids": [
+          "navidrome:GET /api/queue",
+          "navidrome:POST /api/queue",
+          "subsonic:getPlayQueue",
+          "subsonic:savePlayQueue"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "navidrome:0.60.4",
+        "threshold": "0.60.4",
+        "plan_packages": "P2",
+        "cumulative_obligation": "track rating-presence filter (P2)",
+        "owner_tasks": [
+          "S08",
+          "L11"
+        ],
+        "endpoint_ids": [
+          "navidrome:GET /api/song"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "navidrome:0.61.0",
+        "threshold": "0.61.0",
+        "plan_packages": "P10",
+        "cumulative_obligation": "all six image mutation routes and their read/cache effects (P10)",
+        "owner_tasks": [
+          "V07"
+        ],
+        "endpoint_ids": [
+          "navidrome:POST /api/artist/{id}/image",
+          "navidrome:DELETE /api/artist/{id}/image",
+          "navidrome:POST /api/playlist/{id}/image",
+          "navidrome:DELETE /api/playlist/{id}/image",
+          "navidrome:POST /api/radio/{id}/image",
+          "navidrome:DELETE /api/radio/{id}/image"
+        ],
+        "status": "unproved"
+      }
+    ],
+    "opensubsonic_extensions": [
+      {
+        "id": "opensubsonic:formPost",
+        "name": "formPost",
+        "obligation": "GET/query and form POST parameter extraction with one documented precedence rule",
+        "owner_tasks": [
+          "V15"
+        ],
+        "endpoint_ids": [],
+        "status": "unproved"
+      },
+      {
+        "id": "opensubsonic:indexBasedQueue",
+        "name": "indexBasedQueue",
+        "obligation": "exact current queue occurrence and validated index save",
+        "owner_tasks": [
+          "S06",
+          "S07"
+        ],
+        "endpoint_ids": [
+          "subsonic:getPlayQueueByIndex",
+          "subsonic:savePlayQueueByIndex"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "opensubsonic:playbackReport",
+        "name": "playbackReport",
+        "obligation": "playback timeline reporting without double counts",
+        "owner_tasks": [
+          "S09",
+          "S11"
+        ],
+        "endpoint_ids": [
+          "subsonic:reportPlayback"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "opensubsonic:songLyrics",
+        "name": "songLyrics",
+        "obligation": "structured lyrics or an honest empty absence",
+        "owner_tasks": [
+          "V08",
+          "L10"
+        ],
+        "endpoint_ids": [
+          "subsonic:getLyricsBySongId"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "opensubsonic:topSongsByArtistId",
+        "name": "topSongsByArtistId",
+        "obligation": "top songs by artist ID with matched catalogue results and local fallback",
+        "owner_tasks": [
+          "E06",
+          "E09"
+        ],
+        "endpoint_ids": [
+          "subsonic:getTopSongs"
+        ],
+        "status": "unproved"
+      },
+      {
+        "id": "opensubsonic:transcoding",
+        "name": "transcoding",
+        "obligation": "bound transcode decision and binary output over validated decisions",
+        "owner_tasks": [
+          "V09",
+          "V10"
+        ],
+        "endpoint_ids": [
+          "subsonic:getTranscodeDecision",
+          "subsonic:getTranscodeStream"
+        ],
+        "status": "unproved"
+      }
+    ]
+  }
+}

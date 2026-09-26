@@ -1,0 +1,643 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "compatibility and native conformance inventory",
+  "description": "machine-checkable inventory of every compatibility path, support route, retained registered route, smart-rule field, sort mapping, filter translation, operator family and advertised profile at the recorded whio revision. it records obligations, not evidence: a registered route is not a conformant capability, so no entry may claim conformant and no entry carries a percentage, a completion date or a done flag. counts mirror array lengths; subsonic 48 and navidrome 30 are the pinned target counts and exclude retained_uncalled, which are registered grammar routes outside the pinned client's called set. validate with tools/check-compat-manifest.sh, which resolves every owner_task against the task ledger when one is supplied or found under <root>/docs, and otherwise against its embedded ledger ID set with an explicit skipped-validation warning. the planning documents this derives from are local-only and are never required for validation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "kind",
+    "sources",
+    "status_values",
+    "counts",
+    "rows",
+    "retained_uncalled",
+    "field_mappings",
+    "sort_mappings",
+    "filter_translations",
+    "operators",
+    "profiles"
+  ],
+  "properties": {
+    "manifest_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "kind": {
+      "const": "compat-conformance-inventory",
+      "type": "string"
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "whio_revision",
+        "feishin_revision",
+        "navidrome_revision",
+        "derived_from",
+        "planning_documents_are_local_only"
+      ],
+      "description": "revisions and derived sources. the planning documents are gitignored and are never required for validation.",
+      "properties": {
+        "whio_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "feishin_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "navidrome_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "derived_from": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "planning_documents_are_local_only": {
+          "const": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "status_values": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "string"
+      },
+      "description": "the closed status enum, repeated so a consumer does not have to read the schema file."
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subsonic",
+        "navidrome",
+        "support",
+        "retained_uncalled",
+        "field_mappings",
+        "sort_mappings",
+        "filter_translations",
+        "operators",
+        "navidrome_compatibility_profiles",
+        "opensubsonic_extensions"
+      ],
+      "description": "every value equals the referenced array length. subsonic 48 and navidrome 30 are the pinned target counts: they count only rows[] entries with in_target true, so the Subsonic-grammar and Navidrome-grammar routes that are registered outside the pinned client's called set live in retained_uncalled (2) and are deliberately not part of the 48/30 targets. the field, sort, filter, operator and profile figures are the other pinned P0 targets and may not drift.",
+      "properties": {
+        "subsonic": {
+          "const": 48,
+          "type": "integer"
+        },
+        "navidrome": {
+          "const": 30,
+          "type": "integer"
+        },
+        "support": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retained_uncalled": {
+          "const": 2,
+          "type": "integer"
+        },
+        "field_mappings": {
+          "const": 132,
+          "type": "integer"
+        },
+        "sort_mappings": {
+          "const": 53,
+          "type": "integer"
+        },
+        "filter_translations": {
+          "const": 21,
+          "type": "integer"
+        },
+        "operators": {
+          "const": 5,
+          "type": "integer"
+        },
+        "navidrome_compatibility_profiles": {
+          "const": 8,
+          "type": "integer"
+        },
+        "opensubsonic_extensions": {
+          "const": 6,
+          "type": "integer"
+        }
+      }
+    },
+    "rows": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/endpoint_row"
+      },
+      "description": "Subsonic paths, called Navidrome method/path pairs and support routes: the 48 and 30 targets (in_target true) plus the support mounts, media, share, health and native routes (in_target false)."
+    },
+    "retained_uncalled": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/retained_row"
+      },
+      "description": "registered Subsonic-grammar and Navidrome-grammar routes at this revision that are outside the pinned client's called set (getStarred2, GET /api/genre). they are kept because they are registered, and kept out of the 48/30 target counts and out of rows[] because they are not targets. status is registered, never conformant."
+    },
+    "field_mappings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/field_mapping"
+      },
+      "description": "all 132 smart-rule field names with their client type, proposed whio fact owner and value. foreign names are verbatim."
+    },
+    "sort_mappings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sort_mapping"
+      },
+      "description": "all 53 resource/sort values with the proposed whio order fact."
+    },
+    "filter_translations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/filter_translation"
+      },
+      "description": "all 21 foreign filter inputs and the native selector they must translate to."
+    },
+    "operators": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/operator"
+      },
+      "description": "the five client operator families with accepted foreign operator names and the whio operation family."
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "navidrome_compatibility",
+        "opensubsonic_extensions"
+      ],
+      "properties": {
+        "navidrome_compatibility": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/navidrome_profile"
+          }
+        },
+        "opensubsonic_extensions": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": {
+            "$ref": "#/$defs/opensubsonic_extension"
+          }
+        }
+      },
+      "description": "advertised profiles. a cumulative Navidrome threshold never skips an earlier obligation; an extension is advertised only from complete behaviour proof."
+    }
+  },
+  "$defs": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "unproved",
+        "registered",
+        "conformant"
+      ],
+      "description": "unproved: no evidence yet. registered: a router entry exists at the recorded whio revision. conformant: reserved value; F04 must not emit it because route registration is not behaviour."
+    },
+    "owner_task": {
+      "type": "string",
+      "pattern": "^[FLSJEAVN][0-9]{2}$",
+      "description": "task-ledger ID from docs/implementation-tasks.md. the check script resolves it against the task-ID set extracted from a ledger file passed with --tasks (or a plain path argument) or found at <root>/docs/implementation-tasks.md|.json, and against its embedded ledger ID set when no ledger file exists. the docs tree is gitignored, so a checkout without it still validates."
+    },
+    "profile": {
+      "type": "string",
+      "enum": [
+        "opensubsonic",
+        "navidrome:baseline",
+        "navidrome:0.48.0",
+        "navidrome:0.49.3",
+        "navidrome:0.55.0",
+        "navidrome:0.56.0",
+        "navidrome:0.57.0",
+        "navidrome:0.60.4",
+        "navidrome:0.61.0",
+        "native",
+        "compat"
+      ],
+      "description": "wire profile a row is served under: the OpenSubsonic extension set, a cumulative Navidrome compatibility threshold, or a native/compat support surface."
+    },
+    "endpoint_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "surface",
+        "name",
+        "paths",
+        "methods",
+        "profile",
+        "feature_gate",
+        "baseline",
+        "owner_task",
+        "plan_owner",
+        "required_behaviour",
+        "required_response_fields",
+        "test_cases",
+        "status",
+        "in_target"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^(subsonic|navidrome|support):.+$"
+        },
+        "surface": {
+          "type": "string",
+          "enum": [
+            "subsonic",
+            "navidrome",
+            "support"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "methods": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "DELETE"
+            ]
+          }
+        },
+        "profile": {
+          "$ref": "#/$defs/profile"
+        },
+        "feature_gate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseline": {
+          "type": "string",
+          "enum": [
+            "present",
+            "missing",
+            "present-uncalled"
+          ]
+        },
+        "owner_task": {
+          "$ref": "#/$defs/owner_task"
+        },
+        "plan_owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required_behaviour": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required_response_fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "description": "response fields the owning task must guarantee. an empty array is an obligation of that task, not a completed field: it means the contract is not fixed yet."
+        },
+        "test_cases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "description": "named conformance cases for the row. an empty array is an obligation of the owning task, not a completed field: registration alone is not evidence."
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "in_target": {
+          "type": "boolean",
+          "description": "true exactly for the 48 Subsonic and 30 Navidrome target rows; false for support rows and for every retained_uncalled entry. it makes target membership explicit instead of inferring it from the array a row sits in."
+        }
+      },
+      "description": "one compatibility path or support route. baseline and status come from the whio route inventory at the recorded revision: present-uncalled means registered outside the pinned client's called set, and those routes live in retained_uncalled, not here. Subsonic paths are relative to the compatibility base and include the suffixless and .view forms. required_response_fields and test_cases are empty until the owning task fixes the contract."
+    },
+    "retained_row": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/endpoint_row"
+        },
+        {
+          "required": [
+            "surface",
+            "in_target",
+            "baseline",
+            "status"
+          ],
+          "properties": {
+            "surface": {
+              "type": "string",
+              "enum": [
+                "subsonic",
+                "navidrome"
+              ]
+            },
+            "in_target": {
+              "const": false
+            },
+            "baseline": {
+              "const": "present-uncalled"
+            },
+            "status": {
+              "const": "registered"
+            }
+          }
+        }
+      ],
+      "description": "a registered Subsonic-grammar or Navidrome-grammar route outside the pinned client's called set. it is not a target, so in_target is false, baseline is present-uncalled and status is registered; conformant is never assignable."
+    },
+    "field_mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "client_type",
+        "fact_owner",
+        "proposed_value",
+        "owner_task",
+        "facade_owner",
+        "status"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "client_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fact_owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "proposed_value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_task": {
+          "$ref": "#/$defs/owner_task"
+        },
+        "facade_owner": {
+          "$ref": "#/$defs/owner_task"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        }
+      },
+      "description": "one foreign smart-rule field. facade_owner is the protocol task that translates the foreign name; owner_task holds the fact. proposed_value is the proposed whio fact and is not improved here."
+    },
+    "sort_mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resource",
+        "name",
+        "order_fact",
+        "owner_task",
+        "facade_owner",
+        "status"
+      ],
+      "properties": {
+        "resource": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "order_fact": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_task": {
+          "$ref": "#/$defs/owner_task"
+        },
+        "facade_owner": {
+          "$ref": "#/$defs/owner_task"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        }
+      },
+      "description": "one foreign sort value and the whio order fact it must map to. an unsupported sort may not silently fall back to a title sort."
+    },
+    "filter_translation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "names",
+        "foreign_input",
+        "native_selector",
+        "owner_task",
+        "facade_owner",
+        "status"
+      ],
+      "properties": {
+        "names": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "foreign_input": {
+          "type": "string",
+          "minLength": 1
+        },
+        "native_selector": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_task": {
+          "$ref": "#/$defs/owner_task"
+        },
+        "facade_owner": {
+          "$ref": "#/$defs/owner_task"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        }
+      },
+      "description": "one foreign filter input group. names lists the foreign keys verbatim; foreign_input keeps the source cell. native documents selector meanings directly and does not accept arbitrary foreign keys."
+    },
+    "operator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "client_type",
+        "accepted_operators",
+        "operation_family",
+        "owner_task",
+        "facade_owner",
+        "status"
+      ],
+      "properties": {
+        "client_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accepted_operators": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "operation_family": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_task": {
+          "$ref": "#/$defs/owner_task"
+        },
+        "facade_owner": {
+          "$ref": "#/$defs/owner_task"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        }
+      },
+      "description": "one client operator family. reference numeric contains/notContains and relative-date encodings need explicit cases; they are not rejected because whio prefers another operator set."
+    },
+    "navidrome_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "threshold",
+        "plan_packages",
+        "cumulative_obligation",
+        "owner_tasks",
+        "endpoint_ids",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^navidrome:.*$"
+        },
+        "threshold": {
+          "type": "string",
+          "minLength": 1
+        },
+        "plan_packages": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cumulative_obligation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_tasks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/owner_task"
+          }
+        },
+        "endpoint_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        }
+      },
+      "description": "one cumulative Navidrome compatibility threshold. the obligation is cumulative, so a later threshold may not be advertised while an earlier one is unproved."
+    },
+    "opensubsonic_extension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "obligation",
+        "owner_tasks",
+        "endpoint_ids",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^opensubsonic:.*$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "obligation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_tasks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/owner_task"
+          }
+        },
+        "endpoint_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        }
+      },
+      "description": "one OpenSubsonic extension. advertisement is a subset of implemented, tested and configured behaviour; an implemented route may stay unadvertised while staged."
+    }
+  }
+}
