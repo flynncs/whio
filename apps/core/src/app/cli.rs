@@ -93,6 +93,11 @@ pub async fn run() -> Result<(), CliError> {
             let id = raw_id.parse().map_err(|_| CliError::InvalidCredentialId)?;
             Operation::Revoke { id }
         }
+        "assign-admin" => {
+            let username = required_arg(&mut args, "assign-admin requires a username")?;
+            ensure_no_extra_args(&mut args)?;
+            Operation::AssignAdmin { username }
+        }
         "duplicates" => {
             let limit = match args.next() {
                 Some(raw) => raw.parse().map_err(|_| {
@@ -157,6 +162,13 @@ pub async fn run() -> Result<(), CliError> {
                 )));
             }
         }
+        Operation::AssignAdmin { username } => {
+            identity_cli::assign_admin(
+                &crate::features::identity::provision(database.pool()),
+                &username,
+            )
+            .await?;
+        }
         Operation::Duplicates { limit } => {
             music_cli::duplicates(
                 &crate::features::music_library::maintenance(database.pool()),
@@ -187,6 +199,9 @@ enum Operation {
     },
     Revoke {
         id: Uuid,
+    },
+    AssignAdmin {
+        username: String,
     },
     Duplicates {
         limit: u32,
@@ -268,6 +283,7 @@ fn print_help() {
          \\twhio-cli [--database-url <url>] [--credential-key <key>] create-user <username> [display-name]\n\
          \\twhio-cli [--database-url <url>] [--credential-key <key>] mint-app-password <username> [label]\n\
          \\twhio-cli [--database-url <url>] revoke <credential-id>\n\
+         \\twhio-cli [--database-url <url>] assign-admin <username>\n\
          \\twhio-cli [--database-url <url>] duplicates [limit]\n\
          \\twhio-cli [--database-url <url>] retention [--evict]\n\n\
          Configuration (first match wins):\n\

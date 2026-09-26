@@ -132,6 +132,14 @@ mod tests {
             Err(CredentialStoreError::Unavailable)
         }
 
+        async fn list_users(&self) -> Result<Vec<User>, CredentialStoreError> {
+            Err(CredentialStoreError::Unavailable)
+        }
+
+        async fn find_user_by_id(&self, _id: UserId) -> Result<Option<User>, CredentialStoreError> {
+            Err(CredentialStoreError::Unavailable)
+        }
+
         async fn list_active_app_passwords(
             &self,
             _user_id: UserId,

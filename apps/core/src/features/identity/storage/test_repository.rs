@@ -1,6 +1,10 @@
 use super::PostgresCredentialRepository;
-use super::repository::CredentialRepository;
-use crate::features::identity::domain::UserId;
+use super::provisioning::PostgresProvisioningStore;
+use super::repository::{CredentialRepository, CredentialStoreError};
+use crate::features::identity::domain::{UserId, UserRole};
+use crate::features::identity::provisioning::{
+    ProvisioningError, ProvisioningService, ProvisioningStore,
+};
 use crate::features::identity::secrets::{
     self, CredentialKey, decrypt_secret, encrypt_secret, generate_app_secret,
 };
@@ -8,6 +12,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
+use std::sync::Arc;
 use uuid::Uuid;
 
 fn test_key() -> CredentialKey {
@@ -216,4 +221,122 @@ async fn app_password_listing_is_active_only_ordered_and_round_trips(pool: PgPoo
                 .expect("round trip through storage preserves decryptability");
         assert_eq!(recovered, expected.as_bytes());
     }
+}
+
+#[sqlx::test]
+async fn migration_backfills_existing_users_as_members(pool: PgPool) {
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO users (id, username, display_name) VALUES ($1, 'legacy', 'Legacy')")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let stored: String = sqlx::query_scalar("SELECT role FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, "member");
+
+    let repository = PostgresCredentialRepository::new(pool);
+    let user = repository
+        .find_user_by_username("legacy")
+        .await
+        .unwrap()
+        .expect("row inserted before the role column existed");
+    assert_eq!(user.role, UserRole::Member);
+}
+
+#[sqlx::test]
+async fn role_round_trips_through_storage(pool: PgPool) {
+    let id = Uuid::now_v7();
+    insert_user(&pool, id, "flynn").await;
+
+    let store = PostgresProvisioningStore::new(pool.clone());
+    store
+        .set_role(UserId::from_uuid(id), UserRole::Admin)
+        .await
+        .unwrap();
+
+    let repository = PostgresCredentialRepository::new(pool.clone());
+    let user = repository
+        .find_user_by_username("flynn")
+        .await
+        .unwrap()
+        .expect("user exists");
+    assert_eq!(user.role, UserRole::Admin);
+
+    let fresh_connection = PostgresCredentialRepository::new(pool);
+    let listed = fresh_connection.list_users().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, UserId::from_uuid(id));
+    assert_eq!(listed[0].role, UserRole::Admin);
+}
+
+#[sqlx::test]
+async fn assign_admin_is_idempotent_and_reports_the_role(pool: PgPool) {
+    let service = ProvisioningService::new(Arc::new(PostgresProvisioningStore::new(pool.clone())));
+    service.create_user("flynn", "Flynn").await.unwrap();
+
+    assert_eq!(
+        service.assign_admin("flynn").await.unwrap(),
+        UserRole::Admin
+    );
+    assert_eq!(
+        service.assign_admin("fLyNn").await.unwrap(),
+        UserRole::Admin
+    );
+    assert!(matches!(
+        service.assign_admin("nobody").await,
+        Err(ProvisioningError::UserNotFound)
+    ));
+
+    let repository = PostgresCredentialRepository::new(pool);
+    let listed = repository.list_users().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].role, UserRole::Admin);
+}
+
+#[sqlx::test]
+async fn unknown_stored_role_is_invalid_data(pool: PgPool) {
+    let rejected = sqlx::query(
+        "INSERT INTO users (id, username, display_name, role) VALUES ($1, 'root-user', 'Root', 'root')",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await;
+    assert!(
+        rejected.is_err(),
+        "the CHECK constraint must reject roles outside the allowlist"
+    );
+
+    assert_eq!(UserRole::parse("root"), None);
+    assert_eq!(UserRole::parse("Admin"), None);
+
+    sqlx::query("ALTER TABLE users DROP CONSTRAINT users_role_check")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users (id, username, display_name, role) VALUES ($1, 'legacy-root', 'Root', 'root')",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let repository = PostgresCredentialRepository::new(pool);
+    assert_eq!(
+        repository
+            .find_user_by_username("legacy-root")
+            .await
+            .unwrap_err(),
+        CredentialStoreError::InvalidData
+    );
+    assert_eq!(
+        repository.list_users().await.unwrap_err(),
+        CredentialStoreError::InvalidData
+    );
 }

@@ -25,6 +25,11 @@ pub struct ScanStatus {
     pub last_report: Option<ScanReport>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRequestError {
+    Forbidden,
+}
+
 struct LastScan {
     at: chrono::DateTime<chrono::Utc>,
     report: ScanReport,
@@ -94,6 +99,19 @@ impl ScanService {
         };
         self.request.fetch_max(request, Ordering::SeqCst);
         self.wake.notify_one();
+    }
+
+    pub fn request(
+        &self,
+        principal: &crate::features::identity::domain::Principal,
+        mode: ScanMode,
+    ) -> Result<ScanStatus, ScanRequestError> {
+        if !principal.is_admin() {
+            return Err(ScanRequestError::Forbidden);
+        }
+
+        self.trigger(mode);
+        Ok(self.status())
     }
 
     pub fn start(self: &Arc<Self>) {

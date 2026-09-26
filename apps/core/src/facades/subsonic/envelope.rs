@@ -61,7 +61,9 @@ pub(crate) fn extensions_envelope() -> models::GetOpenSubsonicExtensionsResponse
     }
 }
 
-pub(crate) fn user_envelope(username: &str) -> models::GetUserResponse {
+pub(crate) fn user_envelope(
+    user: &crate::features::identity::service::DirectoryUser,
+) -> models::GetUserResponse {
     models::GetUserResponse {
         subsonic_response: Some(Box::new(
             models::GetUserResponseSubsonicResponse::GetUserSuccessResponse(Box::new(
@@ -72,15 +74,15 @@ pub(crate) fn user_envelope(username: &str) -> models::GetUserResponse {
                     open_subsonic: true,
                     status: models::get_user_success_response::Status::Ok,
                     user: Box::new(models::User {
-                        username: username.to_owned(),
+                        username: user.username.clone(),
                         scrobbling_enabled: false,
                         max_bit_rate: None,
-                        admin_role: false,
+                        admin_role: user.role.is_admin(),
                         settings_role: false,
                         download_role: false,
                         upload_role: false,
-                        playlist_role: false,
-                        cover_art_role: false,
+                        playlist_role: true,
+                        cover_art_role: true,
                         comment_role: false,
                         podcast_role: false,
                         stream_role: true,

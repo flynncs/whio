@@ -2,8 +2,12 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::super::domain::{ApiKeyCredential, AppPasswordCredential, User, UserId};
+use super::super::domain::{ApiKeyCredential, AppPasswordCredential, User, UserId, UserRole};
 use super::repository::{CredentialRepository, CredentialStoreError};
+
+fn parse_role(role: &str) -> Result<UserRole, CredentialStoreError> {
+    UserRole::parse(role).ok_or(CredentialStoreError::InvalidData)
+}
 
 pub struct PostgresCredentialRepository {
     pool: PgPool,
@@ -21,9 +25,9 @@ impl CredentialRepository for PostgresCredentialRepository {
         &self,
         username: &str,
     ) -> Result<Option<User>, CredentialStoreError> {
-        let row = sqlx::query_as::<_, (Uuid, String, String)>(
+        let row = sqlx::query_as::<_, (Uuid, String, String, String)>(
             r#"
-            SELECT id, username, display_name
+            SELECT id, username, display_name, role
             FROM users
             WHERE lower(username) = lower($1)
             "#,
@@ -33,11 +37,63 @@ impl CredentialRepository for PostgresCredentialRepository {
         .await
         .map_err(|_| CredentialStoreError::Unavailable)?;
 
-        Ok(row.map(|(id, username, display_name)| User {
-            id: UserId::from_uuid(id),
-            username,
-            display_name,
-        }))
+        row.map(|(id, username, display_name, role)| {
+            Ok(User {
+                id: UserId::from_uuid(id),
+                username,
+                display_name,
+                role: parse_role(&role)?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn list_users(&self) -> Result<Vec<User>, CredentialStoreError> {
+        let rows = sqlx::query_as::<_, (Uuid, String, String, String)>(
+            r#"
+            SELECT id, username, display_name, role
+            FROM users
+            ORDER BY lower(username), id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| CredentialStoreError::Unavailable)?;
+
+        rows.into_iter()
+            .map(|(id, username, display_name, role)| {
+                Ok(User {
+                    id: UserId::from_uuid(id),
+                    username,
+                    display_name,
+                    role: parse_role(&role)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn find_user_by_id(&self, id: UserId) -> Result<Option<User>, CredentialStoreError> {
+        let row = sqlx::query_as::<_, (Uuid, String, String, String)>(
+            r#"
+            SELECT id, username, display_name, role
+            FROM users
+            WHERE id = $1
+            "#,
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| CredentialStoreError::Unavailable)?;
+
+        row.map(|(id, username, display_name, role)| {
+            Ok(User {
+                id: UserId::from_uuid(id),
+                username,
+                display_name,
+                role: parse_role(&role)?,
+            })
+        })
+        .transpose()
     }
 
     async fn find_active_api_key_by_digest(

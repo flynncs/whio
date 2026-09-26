@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::features::identity::domain::{UserId, UserRole};
 use crate::features::identity::provisioning::{ProvisioningStore, ProvisioningStoreError};
 
 pub(super) struct PostgresProvisioningStore {
@@ -83,6 +84,20 @@ impl ProvisioningStore for PostgresProvisioningStore {
         .await
         .map_err(unavailable)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn set_role(
+        &self,
+        user_id: UserId,
+        role: UserRole,
+    ) -> Result<(), ProvisioningStoreError> {
+        sqlx::query("UPDATE users SET role = $1 WHERE id = $2")
+            .bind(role.as_str())
+            .bind(user_id.as_uuid())
+            .execute(&self.pool)
+            .await
+            .map_err(unavailable)?;
+        Ok(())
     }
 }
 

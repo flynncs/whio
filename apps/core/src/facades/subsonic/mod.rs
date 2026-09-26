@@ -17,7 +17,7 @@ use whio_subsonic_api::models;
 use crate::{
     features::identity::{domain::Principal, service::AuthError},
     features::music_library::domain::TrackId,
-    features::music_library::library::ScanMode,
+    features::music_library::library::{ScanMode, ScanRequestError},
     features::music_library::playlists::{PlaylistEdit, PlaylistError},
     features::playback::{DeliveryError, PlaybackError},
     platform::http::FetchError,
@@ -113,7 +113,7 @@ pub(crate) async fn get_user(
         return SubsonicError::MissingParameter.into_response();
     };
     match state.credential().visible_user(&principal, name).await {
-        Ok(Some(user)) => Json(user_envelope(&user.username)).into_response(),
+        Ok(Some(user)) => Json(user_envelope(&user)).into_response(),
         Ok(None) => Json(failed_envelope(
             models::error::Code::Variant70,
             "User not found.",
@@ -783,25 +783,37 @@ pub(crate) async fn start_scan(
     auth: SubsonicAuth,
     query: RawQuery,
 ) -> Response {
-    if let Err(response) = authenticate(&state, &context, auth).await {
-        return response;
-    }
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
 
     let full = query
         .get("fullScan")
         .is_some_and(|raw| matches!(raw.trim().to_ascii_lowercase().as_str(), "true" | "1"));
-    state.scanner().trigger(if full {
+    let mode = if full {
         ScanMode::Full
     } else {
         ScanMode::Incremental
-    });
+    };
 
-    let mut status = state.scanner().status();
-    if state.scanner().is_configured() {
-        status.scanning = true;
+    match state.scanner().request(&principal, mode) {
+        Ok(mut status) => {
+            if state.scanner().is_configured() {
+                status.scanning = true;
+            }
+            Json(start_scan_envelope(&status)).into_response()
+        }
+        Err(ScanRequestError::Forbidden) => {
+            let mut response = Json(failed_envelope(
+                models::error::Code::Variant50,
+                "Not authorized.",
+            ))
+            .into_response();
+            *response.status_mut() = StatusCode::FORBIDDEN;
+            response
+        }
     }
-
-    Json(start_scan_envelope(&status)).into_response()
 }
 
 pub(crate) async fn star(

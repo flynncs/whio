@@ -306,6 +306,10 @@ async fn subsonic_star_rating_play_and_genre_routes(pool: PgPool) {
 #[sqlx::test]
 async fn subsonic_scan_status_reports_and_starts(pool: PgPool) {
     let seeded = seeded_app(pool.clone()).await;
+    whio_core::features::identity::provision(pool.clone())
+        .assign_admin("flynn")
+        .await
+        .unwrap();
     let auth = format!("u=flynn&v=1.16.1&c=test-client&p={}", seeded.secret);
 
     let body = get(

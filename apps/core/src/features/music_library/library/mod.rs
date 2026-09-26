@@ -3,7 +3,7 @@ mod scanner;
 mod tags;
 mod watcher;
 
-pub use scan_service::{ScanService, ScanStatus};
+pub use scan_service::{ScanRequestError, ScanService, ScanStatus};
 pub use scanner::{LOCAL_PROVIDER, ScanError, ScanMode, ScanReport, scan, scan_with};
 pub use tags::{EmbeddedPicture, TagError, TrackTags, read_cover_art, read_tags};
 

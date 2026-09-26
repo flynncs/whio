@@ -39,3 +39,12 @@ pub(crate) async fn revoke(
     }
     Ok(revoked)
 }
+
+pub(crate) async fn assign_admin(
+    service: &ProvisioningService,
+    username: &str,
+) -> Result<(), ProvisioningError> {
+    let role = service.assign_admin(username).await?;
+    println!("{username}: {}", role.as_str());
+    Ok(())
+}

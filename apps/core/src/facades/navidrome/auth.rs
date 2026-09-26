@@ -74,7 +74,7 @@ pub(crate) async fn login(
                 id: user.id.to_string(),
                 name: user.display_name,
                 username: user.username,
-                is_admin: false,
+                is_admin: principal.is_admin(),
                 token: session::mint(principal.user_id, credential_id, state.credential().key()),
                 subsonic_salt: salt,
                 subsonic_token: token,

@@ -11,7 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use uuid::Uuid;
 use whio_core::features::identity::{
-    domain::{ApiKeyCredential, AppPasswordCredential, User, UserId},
+    domain::{ApiKeyCredential, AppPasswordCredential, User, UserId, UserRole},
     secrets::{CredentialKey, encrypt_secret, generate_app_secret, lookup_digest},
     service::CredentialService,
     test_support::{CredentialRepository, CredentialStoreError},
@@ -30,6 +30,7 @@ pub fn credential_service() -> Arc<CredentialService> {
         id: user_id,
         username: TEST_USERNAME.to_owned(),
         display_name: "Integration Test".to_owned(),
+        role: UserRole::Member,
     });
     store.insert_app_password(&key, TEST_PASSWORD, user_id);
     Arc::new(CredentialService::new(store, key))
@@ -52,6 +53,14 @@ impl CredentialRepository for UnavailableCredentialStore {
         &self,
         _username: &str,
     ) -> Result<Option<User>, CredentialStoreError> {
+        Err(CredentialStoreError::Unavailable)
+    }
+
+    async fn list_users(&self) -> Result<Vec<User>, CredentialStoreError> {
+        Err(CredentialStoreError::Unavailable)
+    }
+
+    async fn find_user_by_id(&self, _id: UserId) -> Result<Option<User>, CredentialStoreError> {
         Err(CredentialStoreError::Unavailable)
     }
 
@@ -155,6 +164,33 @@ impl CredentialRepository for MemoryCredentialStore {
             .map(|(_, credential)| credential.clone()))
     }
 
+    async fn list_users(&self) -> Result<Vec<User>, CredentialStoreError> {
+        let mut users: Vec<User> = self
+            .users
+            .lock()
+            .expect("users lock")
+            .values()
+            .cloned()
+            .collect();
+        users.sort_by(|a, b| {
+            a.username
+                .to_lowercase()
+                .cmp(&b.username.to_lowercase())
+                .then_with(|| a.id.as_uuid().cmp(&b.id.as_uuid()))
+        });
+        Ok(users)
+    }
+
+    async fn find_user_by_id(&self, id: UserId) -> Result<Option<User>, CredentialStoreError> {
+        Ok(self
+            .users
+            .lock()
+            .expect("users lock")
+            .values()
+            .find(|user| user.id == id)
+            .cloned())
+    }
+
     async fn list_active_app_passwords(
         &self,
         user_id: UserId,
@@ -196,6 +232,7 @@ pub fn credential_service_with_known_api_key() -> (Arc<CredentialService>, Strin
         id: user_id,
         username: "flynn".to_owned(),
         display_name: "Flynn".to_owned(),
+        role: UserRole::Member,
     });
 
     let secret = generate_app_secret();
@@ -219,12 +256,62 @@ pub fn credential_service_with_known_app_password() -> (Arc<CredentialService>, 
         id: user_id,
         username: "flynn".to_owned(),
         display_name: "Flynn".to_owned(),
+        role: UserRole::Member,
     });
 
     let secret = generate_app_secret();
     store.insert_app_password(&key, &secret, user_id);
 
     (Arc::new(CredentialService::new(store, key)), secret)
+}
+
+pub struct RoleFixture {
+    pub service: Arc<CredentialService>,
+    pub member: &'static str,
+    pub member_secret: String,
+    pub admin: &'static str,
+    pub admin_secret: String,
+    pub second_admin: &'static str,
+}
+
+pub fn credential_service_with_roles() -> RoleFixture {
+    let key = test_credential_key();
+    let store = Arc::new(MemoryCredentialStore::new());
+    let member_id = UserId::from_uuid(Uuid::now_v7());
+    let admin_id = UserId::from_uuid(Uuid::now_v7());
+    let second_admin_id = UserId::from_uuid(Uuid::now_v7());
+    store.insert_user(User {
+        id: member_id,
+        username: "flynn".to_owned(),
+        display_name: "Flynn".to_owned(),
+        role: UserRole::Member,
+    });
+    store.insert_user(User {
+        id: admin_id,
+        username: "admin".to_owned(),
+        display_name: "Admin".to_owned(),
+        role: UserRole::Admin,
+    });
+    store.insert_user(User {
+        id: second_admin_id,
+        username: "ops".to_owned(),
+        display_name: "Ops".to_owned(),
+        role: UserRole::Admin,
+    });
+
+    let member_secret = generate_app_secret();
+    let admin_secret = generate_app_secret();
+    store.insert_app_password(&key, &member_secret, member_id);
+    store.insert_app_password(&key, &admin_secret, admin_id);
+
+    RoleFixture {
+        service: Arc::new(CredentialService::new(store, key)),
+        member: "flynn",
+        member_secret,
+        admin: "admin",
+        admin_secret,
+        second_admin: "ops",
+    }
 }
 
 #[cfg(feature = "postgres-integration")]

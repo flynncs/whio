@@ -8,7 +8,9 @@ use md5::{Digest, Md5};
 use uuid::Uuid;
 
 use super::*;
-use crate::features::identity::domain::{ApiKeyCredential, AppPasswordCredential, User, UserId};
+use crate::features::identity::domain::{
+    ApiKeyCredential, AppPasswordCredential, User, UserId, UserRole,
+};
 use crate::features::identity::secrets::{encrypt_secret, generate_app_secret, lookup_digest};
 
 // test-local fixture standing in for postgres; lives and dies with this
@@ -82,6 +84,33 @@ impl CredentialRepository for StubRepository {
             .map(|(_, credential)| credential.clone()))
     }
 
+    async fn list_users(&self) -> Result<Vec<User>, CredentialStoreError> {
+        let mut users: Vec<User> = self
+            .users
+            .lock()
+            .expect("users lock")
+            .values()
+            .cloned()
+            .collect();
+        users.sort_by(|a, b| {
+            a.username
+                .to_lowercase()
+                .cmp(&b.username.to_lowercase())
+                .then_with(|| a.id.as_uuid().cmp(&b.id.as_uuid()))
+        });
+        Ok(users)
+    }
+
+    async fn find_user_by_id(&self, id: UserId) -> Result<Option<User>, CredentialStoreError> {
+        Ok(self
+            .users
+            .lock()
+            .expect("users lock")
+            .values()
+            .find(|user| user.id == id)
+            .cloned())
+    }
+
     async fn list_active_app_passwords(
         &self,
         user_id: UserId,
@@ -129,6 +158,7 @@ fn fixture() -> Fixture {
         id: user_id,
         username: "flynn".to_string(),
         display_name: "Flynn".to_string(),
+        role: UserRole::Member,
     });
 
     let service = CredentialService::new(repository.clone(), key.clone());
@@ -181,7 +211,43 @@ async fn api_key_authenticates_to_principal() {
     assert_eq!(
         result,
         Ok(Principal {
-            user_id: fixture.user_id
+            user_id: fixture.user_id,
+            role: UserRole::Member
+        })
+    );
+}
+
+#[tokio::test]
+async fn api_key_principal_carries_the_stored_role() {
+    let fixture = fixture();
+    let admin_id = UserId::from_uuid(Uuid::now_v7());
+    fixture.repository.insert_user(User {
+        id: admin_id,
+        username: "root".to_string(),
+        display_name: "Root".to_string(),
+        role: UserRole::Admin,
+    });
+    let secret = generate_app_secret();
+    fixture.repository.insert_api_key(
+        ApiKeyCredential {
+            id: Uuid::now_v7(),
+            user_id: admin_id,
+        },
+        &secret,
+    );
+
+    let result = fixture
+        .service
+        .authenticate(&PresentedAuth::ApiKey {
+            secret: secret.clone(),
+        })
+        .await;
+
+    assert_eq!(
+        result,
+        Ok(Principal {
+            user_id: admin_id,
+            role: UserRole::Admin
         })
     );
 }
@@ -218,7 +284,8 @@ async fn token_authenticates_with_minted_password() {
     assert_eq!(
         result,
         Ok(Principal {
-            user_id: fixture.user_id
+            user_id: fixture.user_id,
+            role: UserRole::Member
         })
     );
 }
@@ -284,7 +351,8 @@ async fn plaintext_password_authenticates() {
     assert_eq!(
         result,
         Ok(Principal {
-            user_id: fixture.user_id
+            user_id: fixture.user_id,
+            role: UserRole::Member
         })
     );
 }
@@ -309,6 +377,7 @@ async fn visible_user_returns_the_viewer() {
     let fixture = fixture();
     let viewer = Principal {
         user_id: fixture.user_id,
+        role: UserRole::Member,
     };
 
     let user = fixture
@@ -326,9 +395,11 @@ async fn visible_user_hides_other_and_unknown_users() {
         id: UserId::from_uuid(Uuid::now_v7()),
         username: "other".to_string(),
         display_name: "Other".to_string(),
+        role: UserRole::Member,
     });
     let viewer = Principal {
         user_id: fixture.user_id,
+        role: UserRole::Member,
     };
 
     for username in ["other", "nobody"] {
@@ -339,4 +410,57 @@ async fn visible_user_hides_other_and_unknown_users() {
             .expect("storage succeeds");
         assert!(user.is_none(), "username: {username}");
     }
+}
+
+#[tokio::test]
+async fn directory_is_scoped_by_role() {
+    let fixture = fixture();
+    let admin_id = UserId::from_uuid(Uuid::now_v7());
+    fixture.repository.insert_user(User {
+        id: admin_id,
+        username: "root".to_string(),
+        display_name: "Root".to_string(),
+        role: UserRole::Admin,
+    });
+    let secret = mint(&fixture);
+    let credential_id = fixture
+        .repository
+        .app_passwords
+        .lock()
+        .expect("app passwords lock")[0]
+        .id;
+
+    let member = Principal {
+        user_id: fixture.user_id,
+        role: UserRole::Member,
+    };
+    let listed = fixture
+        .service
+        .directory(&member)
+        .await
+        .expect("storage succeeds");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].username, "flynn");
+    assert_eq!(listed[0].role, UserRole::Member);
+
+    let admin = Principal {
+        user_id: admin_id,
+        role: UserRole::Admin,
+    };
+    let listed = fixture
+        .service
+        .directory(&admin)
+        .await
+        .expect("storage succeeds");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|user| user.username.as_str())
+            .collect::<Vec<_>>(),
+        vec!["flynn", "root"]
+    );
+
+    let rendered = format!("{listed:?}");
+    assert!(!rendered.contains(&secret));
+    assert!(!rendered.contains(&credential_id.to_string()));
 }

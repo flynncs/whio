@@ -242,3 +242,34 @@ async fn unknown_rest_endpoints_answer_with_a_subsonic_envelope_not_product_json
 
     assert_eq!(response, failure(0));
 }
+
+#[sqlx::test]
+async fn revoked_credentials_still_fail_authentication(pool: PgPool) {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
+
+    let key = whio_core::features::identity::secrets::CredentialKey::from_base64(
+        &STANDARD_NO_PAD.encode([11u8; 32]),
+    )
+    .expect("valid key");
+    let provisioning = whio_core::features::identity::provision(pool.clone());
+    provisioning.create_user("flynn", "Flynn").await.unwrap();
+    let (credential_id, secret) = provisioning
+        .mint_app_password(&key, "flynn", "integration")
+        .await
+        .unwrap();
+    let service = Arc::new(whio_core::features::identity::credentials(
+        pool.clone(),
+        key,
+    ));
+    let app = app(pool, service);
+    let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
+
+    let response = get(app.clone(), &format!("/rest/ping.view?{auth}")).await;
+    assert_eq!(response["subsonic-response"]["status"], json!("ok"));
+
+    assert!(provisioning.revoke_credential(credential_id).await.unwrap());
+
+    let response = get(app, &format!("/rest/ping.view?{auth}")).await;
+    assert_eq!(response, failure(40));
+}

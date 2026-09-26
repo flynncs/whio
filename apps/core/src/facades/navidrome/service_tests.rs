@@ -70,6 +70,25 @@ impl crate::features::identity::test_support::CredentialRepository for StubCrede
         Ok(None)
     }
 
+    async fn list_users(
+        &self,
+    ) -> Result<
+        Vec<crate::features::identity::domain::User>,
+        crate::features::identity::test_support::CredentialStoreError,
+    > {
+        Err(crate::features::identity::test_support::CredentialStoreError::Unavailable)
+    }
+
+    async fn find_user_by_id(
+        &self,
+        _id: UserId,
+    ) -> Result<
+        Option<crate::features::identity::domain::User>,
+        crate::features::identity::test_support::CredentialStoreError,
+    > {
+        Ok(None)
+    }
+
     async fn list_active_app_passwords(
         &self,
         _user_id: UserId,

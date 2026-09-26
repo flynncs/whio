@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::domain::{UserId, UserRole};
 use super::secrets::{CredentialKey, SecretError, encrypt_secret, generate_app_secret};
 
 #[derive(Debug, Error)]
@@ -47,6 +48,8 @@ pub(crate) trait ProvisioningStore: Send + Sync {
         encrypted_secret: Vec<u8>,
     ) -> Result<(), ProvisioningStoreError>;
     async fn revoke(&self, id: Uuid) -> Result<bool, ProvisioningStoreError>;
+    async fn set_role(&self, user_id: UserId, role: UserRole)
+    -> Result<(), ProvisioningStoreError>;
 }
 
 pub struct ProvisioningService {
@@ -95,6 +98,20 @@ impl ProvisioningService {
 
     pub async fn revoke_credential(&self, id: Uuid) -> Result<bool, ProvisioningError> {
         self.store.revoke(id).await.map_err(map_storage_error)
+    }
+
+    pub async fn assign_admin(&self, username: &str) -> Result<UserRole, ProvisioningError> {
+        let user_id = self
+            .store
+            .user_id(username)
+            .await
+            .map_err(map_storage_error)?
+            .ok_or(ProvisioningError::UserNotFound)?;
+        self.store
+            .set_role(UserId::from_uuid(user_id), UserRole::Admin)
+            .await
+            .map_err(map_storage_error)?;
+        Ok(UserRole::Admin)
     }
 }
 

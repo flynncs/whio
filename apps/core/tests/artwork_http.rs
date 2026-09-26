@@ -19,7 +19,7 @@ use support::credentials::{MemoryCredentialStore, TEST_PASSWORD};
 use support::{NATIVE_AUTH_QUERY, StorePorts, router_with_artwork};
 use whio_core::{
     features::identity::{
-        domain::{User, UserId},
+        domain::{User, UserId, UserRole},
         secrets::CredentialKey,
         service::CredentialService,
     },
@@ -42,6 +42,7 @@ fn credentials() -> (Arc<CredentialService>, Uuid, CredentialKey) {
         id: user_id,
         username: "test-user".to_owned(),
         display_name: "Integration Test".to_owned(),
+        role: UserRole::Member,
     });
     store.insert_app_password(&key, TEST_PASSWORD, user_id);
 

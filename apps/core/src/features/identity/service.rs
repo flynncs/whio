@@ -7,7 +7,7 @@ use tracing::warn;
 use crate::features::identity::domain::User;
 use crate::features::identity::secrets::{decrypt_secret, lookup_digest};
 
-use super::domain::Principal;
+use super::domain::{Principal, UserId, UserRole};
 use super::secrets::CredentialKey;
 use super::storage::repository::{CredentialRepository, CredentialStoreError};
 
@@ -39,6 +39,23 @@ pub enum AuthError {
 pub struct CredentialService {
     repository: Arc<dyn CredentialRepository>,
     key: Arc<CredentialKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryUser {
+    pub id: UserId,
+    pub username: String,
+    pub display_name: String,
+    pub role: UserRole,
+}
+
+fn directory_user(user: User) -> DirectoryUser {
+    DirectoryUser {
+        id: user.id,
+        username: user.username,
+        display_name: user.display_name,
+        role: user.role,
+    }
 }
 
 impl CredentialService {
@@ -77,9 +94,17 @@ impl CredentialService {
             .await?;
 
         match credential {
-            Some(cred) => Ok(Principal {
-                user_id: cred.user_id,
-            }),
+            Some(cred) => {
+                let user = self
+                    .repository
+                    .find_user_by_id(cred.user_id)
+                    .await?
+                    .ok_or(AuthError::InvalidCredentials)?;
+                Ok(Principal {
+                    user_id: user.id,
+                    role: user.role,
+                })
+            }
             None => Err(AuthError::InvalidCredentials),
         }
     }
@@ -133,7 +158,13 @@ impl CredentialService {
             };
 
             if matches(&candidate) {
-                return Ok((Principal { user_id: user.id }, credential.id));
+                return Ok((
+                    Principal {
+                        user_id: user.id,
+                        role: user.role,
+                    },
+                    credential.id,
+                ));
             }
         }
 
@@ -151,13 +182,30 @@ impl CredentialService {
             .map_err(AuthError::Storage)
     }
 
-    pub(crate) async fn visible_user(
+    pub async fn directory(
+        &self,
+        viewer: &Principal,
+    ) -> Result<Vec<DirectoryUser>, CredentialStoreError> {
+        let users = self.repository.list_users().await?;
+        if viewer.is_admin() {
+            return Ok(users.into_iter().map(directory_user).collect());
+        }
+        Ok(users
+            .into_iter()
+            .filter(|user| user.id == viewer.user_id)
+            .map(directory_user)
+            .collect())
+    }
+
+    pub async fn visible_user(
         &self,
         viewer: &Principal,
         username: &str,
-    ) -> Result<Option<User>, CredentialStoreError> {
+    ) -> Result<Option<DirectoryUser>, CredentialStoreError> {
         let user = self.repository.find_user_by_username(username).await?;
-        Ok(user.filter(|user| user.id == viewer.user_id))
+        Ok(user
+            .filter(|user| user.id == viewer.user_id || viewer.is_admin())
+            .map(directory_user))
     }
 }
 

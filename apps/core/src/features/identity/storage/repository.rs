@@ -18,6 +18,10 @@ pub trait CredentialRepository: Send + Sync {
         username: &str,
     ) -> Result<Option<User>, CredentialStoreError>;
 
+    async fn list_users(&self) -> Result<Vec<User>, CredentialStoreError>;
+
+    async fn find_user_by_id(&self, id: UserId) -> Result<Option<User>, CredentialStoreError>;
+
     async fn find_active_api_key_by_digest(
         &self,
         digest: [u8; 32],
