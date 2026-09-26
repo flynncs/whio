@@ -21,7 +21,9 @@ pub use album::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumListScope, AlbumMetadata, AlbumOrder,
     AlbumSummary, AlbumTrack, DatePrecision, PartialDate,
 };
-pub use artist::{Artist, ArtistCredit, ArtistId, ArtistSummary, CreditRole};
+pub use artist::{
+    Artist, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort, ArtistSummary, CreditRole,
+};
 pub use artwork::ArtworkRef;
 pub use dedup::{
     MATCHER_VERSION, MatchDecision, MatchRecord, MatchStatus, ParsedTitle, RecordingIndex,
