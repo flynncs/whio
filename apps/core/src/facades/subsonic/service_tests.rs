@@ -1,6 +1,6 @@
 use super::*;
 use crate::features::music_library::test_support::{
-    CatalogueWrite, LibraryRead, SourceLookup, StateStore,
+    CatalogueWrite, LibraryRead, SourceLookup, StateStore, TrackRepositoryError,
 };
 use crate::{
     features::music_library::catalogue::ProviderError,
@@ -17,7 +17,10 @@ use crate::{
 use async_trait::async_trait;
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 use uuid::Uuid;
 
@@ -242,9 +245,7 @@ async fn paging_caps_slices_and_rejects(pool: sqlx::PgPool) {
     assert_eq!(songs.len(), 25);
 }
 
-async fn album_catalogue(pool: sqlx::PgPool, albums: &[&str]) -> LibraryService {
-    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
-
+async fn seed_albums(repository: &PostgresTrackRepository, albums: &[&str]) {
     for title in albums {
         let metadata = AlbumMetadata::new((*title).to_owned())
             .unwrap()
@@ -272,12 +273,113 @@ async fn album_catalogue(pool: sqlx::PgPool, albums: &[&str]) -> LibraryService 
             .await
             .unwrap();
     }
+}
+
+async fn album_catalogue(pool: sqlx::PgPool, albums: &[&str]) -> LibraryService {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    seed_albums(&repository, albums).await;
 
     LibraryService::new(
         Arc::clone(&repository) as Arc<dyn LibraryRead>,
         Arc::clone(&repository) as Arc<dyn SourceLookup>,
         Arc::clone(&repository) as Arc<dyn StateStore>,
     )
+}
+
+struct CountingLibrary {
+    inner: Arc<dyn LibraryRead>,
+    track_calls: AtomicU32,
+    album_calls: AtomicU32,
+    artist_calls: AtomicU32,
+}
+
+impl CountingLibrary {
+    fn tracks(&self) -> u32 {
+        self.track_calls.load(Ordering::SeqCst)
+    }
+
+    fn albums(&self) -> u32 {
+        self.album_calls.load(Ordering::SeqCst)
+    }
+
+    fn artists(&self) -> u32 {
+        self.artist_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LibraryRead for CountingLibrary {
+    async fn find_track(
+        &self,
+        track_id: &crate::features::music_library::domain::TrackId,
+    ) -> Result<Option<crate::features::music_library::domain::Track>, TrackRepositoryError> {
+        self.inner.find_track(track_id).await
+    }
+
+    async fn list_albums(
+        &self,
+        offset: u32,
+        limit: u32,
+        order: AlbumOrder,
+        filter: AlbumListFilter,
+        user: Option<Uuid>,
+    ) -> Result<Vec<crate::features::music_library::domain::AlbumSummary>, TrackRepositoryError>
+    {
+        self.album_calls.fetch_add(1, Ordering::SeqCst);
+
+        self.inner
+            .list_albums(offset, limit, order, filter, user)
+            .await
+    }
+
+    async fn list_artists(
+        &self,
+        offset: u32,
+        limit: u32,
+        user: Option<Uuid>,
+    ) -> Result<Vec<crate::features::music_library::domain::ArtistSummary>, TrackRepositoryError>
+    {
+        self.artist_calls.fetch_add(1, Ordering::SeqCst);
+
+        self.inner.list_artists(offset, limit, user).await
+    }
+
+    async fn page_tracks(
+        &self,
+        offset: u32,
+        limit: u32,
+        order: TrackOrder,
+        filter: &TrackListFilter,
+        user: Option<Uuid>,
+    ) -> Result<crate::features::music_library::domain::TrackPage, TrackRepositoryError> {
+        self.track_calls.fetch_add(1, Ordering::SeqCst);
+
+        self.inner
+            .page_tracks(offset, limit, order, filter, user)
+            .await
+    }
+}
+
+async fn counting_catalogue(
+    pool: sqlx::PgPool,
+    albums: &[&str],
+) -> (LibraryService, Arc<CountingLibrary>) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    seed_albums(&repository, albums).await;
+    let counting = Arc::new(CountingLibrary {
+        inner: Arc::clone(&repository) as Arc<dyn LibraryRead>,
+        track_calls: AtomicU32::new(0),
+        album_calls: AtomicU32::new(0),
+        artist_calls: AtomicU32::new(0),
+    });
+
+    let library = LibraryService::new(
+        Arc::clone(&counting) as Arc<dyn LibraryRead>,
+        Arc::clone(&repository) as Arc<dyn SourceLookup>,
+        Arc::clone(&repository) as Arc<dyn StateStore>,
+    );
+
+    (library, counting)
 }
 
 #[sqlx::test]
@@ -523,6 +625,48 @@ async fn enumerate_pages_each_kind_independently(pool: sqlx::PgPool) {
     assert_eq!(result.albums[0].name, "Random Access Memories");
     assert_eq!(result.artists.len(), 1);
     assert_eq!(result.artists[0].name, "Daft Punk");
+}
+
+#[sqlx::test]
+async fn enumerate_zero_count_performs_no_work_for_that_kind(pool: sqlx::PgPool) {
+    let (library, calls) = counting_catalogue(pool.clone(), &["Discovery", "Homework"]).await;
+    let zeroed = EnumerationRequest {
+        songs: EnumerationWindow::new(0, 0).expect("valid window"),
+        albums: EnumerationWindow::new(0, 0).expect("valid window"),
+        artists: EnumerationWindow::new(0, 0).expect("valid window"),
+    };
+
+    let result = enumerate(&library, None, &zeroed, SourceTags::Off)
+        .await
+        .expect("the enumeration succeeds");
+
+    assert!(result.songs.is_empty());
+    assert!(result.albums.is_empty());
+    assert!(result.artists.is_empty());
+    assert_eq!(
+        (calls.tracks(), calls.albums(), calls.artists()),
+        (0, 0, 0),
+        "a zero window must not reach the library"
+    );
+
+    let served = EnumerationRequest {
+        songs: EnumerationWindow::new(1, 0).expect("valid window"),
+        albums: EnumerationWindow::new(1, 0).expect("valid window"),
+        artists: EnumerationWindow::new(1, 0).expect("valid window"),
+    };
+
+    let result = enumerate(&library, None, &served, SourceTags::Off)
+        .await
+        .expect("the enumeration succeeds");
+
+    assert_eq!(result.songs.len(), 1);
+    assert_eq!(result.albums.len(), 1);
+    assert_eq!(result.artists.len(), 1);
+    assert_eq!(
+        (calls.tracks(), calls.albums(), calls.artists()),
+        (1, 1, 1),
+        "a non-zero window must reach the library exactly once per kind"
+    );
 }
 
 #[sqlx::test]

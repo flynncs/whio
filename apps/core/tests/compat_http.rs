@@ -75,6 +75,10 @@ async fn get(app: axum::Router, uri: &str) -> Value {
 }
 
 async fn get_status(app: axum::Router, uri: &str) -> (StatusCode, Value) {
+    get_status_bounded(app, uri, 8192).await
+}
+
+async fn get_status_bounded(app: axum::Router, uri: &str, limit: usize) -> (StatusCode, Value) {
     let request = Request::builder()
         .method("GET")
         .uri(uri)
@@ -84,7 +88,7 @@ async fn get_status(app: axum::Router, uri: &str) -> (StatusCode, Value) {
 
     let response = app.oneshot(request).await.unwrap();
     let status = response.status();
-    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let body = to_bytes(response.into_body(), limit).await.unwrap();
     (status, serde_json::from_slice(&body).unwrap())
 }
 
@@ -1457,7 +1461,13 @@ async fn song_count_above_25_is_honoured(pool: PgPool) {
     seed_tracks(&pool, 200).await;
     let (app, secret) = enumeration_client(pool, vec![]);
     let auth = auth_query("flynn", &secret);
-    let body = get(app, &subsonic_search3("query=&songCount=100", &auth)).await;
+    let (status, body) = get_status_bounded(
+        app,
+        &subsonic_search3("query=&songCount=100", &auth),
+        1 << 20,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 
     let result = &body["subsonic-response"]["searchResult3"];
     let songs = result["song"].as_array().unwrap();
