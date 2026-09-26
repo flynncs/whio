@@ -30,6 +30,7 @@ pub struct SearchService {
     providers: Vec<Arc<dyn CatalogueProvider>>,
     dedup_mode: DedupMode,
     dedup_budget: Duration,
+    search_budget: Duration,
 }
 
 pub struct SearchOutcome {
@@ -152,6 +153,7 @@ impl SearchService {
             providers: Vec::new(),
             dedup_mode: DedupMode::Suppress,
             dedup_budget: super::dedup::DEFAULT_DEDUP_BUDGET,
+            search_budget: DEFAULT_SEARCH_BUDGET,
         }
     }
 
@@ -170,6 +172,7 @@ impl SearchService {
             providers,
             dedup_mode: DedupMode::Suppress,
             dedup_budget: super::dedup::DEFAULT_DEDUP_BUDGET,
+            search_budget: DEFAULT_SEARCH_BUDGET,
         }
     }
 
@@ -180,6 +183,11 @@ impl SearchService {
 
     pub fn with_dedup_budget(mut self, budget: Duration) -> Self {
         self.dedup_budget = budget;
+        self
+    }
+
+    pub fn with_search_budget(mut self, budget: Duration) -> Self {
+        self.search_budget = budget;
         self
     }
 
@@ -197,8 +205,7 @@ impl SearchService {
             .search_tracks(&query, windows.tracks().target(), user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
-        let (fresh, first_error, any_success) =
-            self.fan_out(request, user, context, PROVIDER_BUDGET).await;
+        let (fresh, first_error, any_success) = self.fan_out(request, user, context).await;
         let (known, fresh) = super::dedup::apply(
             super::dedup::Ports {
                 library: &self.library,
@@ -245,12 +252,12 @@ impl SearchService {
         request: &SearchRequest,
         user: Option<&Uuid>,
         context: &RequestContext,
-        budget: Duration,
     ) -> (Vec<SearchHit>, Option<CatalogueError>, bool) {
         let mut tasks = JoinSet::new();
         let concurrency = Arc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY));
         let query = request.query().clone();
         let target = request.windows().tracks().target();
+        let budget = self.search_budget;
         for (index, provider) in self.providers.iter().enumerate() {
             let permit = Arc::clone(&concurrency);
             let pending = Self::search_source(
@@ -451,7 +458,7 @@ impl SearchService {
     }
 }
 
-const PROVIDER_BUDGET: Duration = Duration::from_secs(45);
+const DEFAULT_SEARCH_BUDGET: Duration = Duration::from_secs(45);
 const MAX_SOURCE_CONCURRENCY: usize = 4;
 const PROVIDER_PAGE_LIMIT: u32 = 25;
 const PROVIDER_WINDOW_DIVISOR: u32 = 4;

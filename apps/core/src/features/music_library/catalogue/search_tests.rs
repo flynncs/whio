@@ -496,17 +496,19 @@ async fn deep_pages_walk_the_provider_window(pool: sqlx::PgPool) {
     assert_eq!(outcome.tracks[9].track().title(), "P39");
 }
 
+const WITHIN_SEARCH_BUDGET: Duration = Duration::from_secs(2);
+const BEYOND_SEARCH_BUDGET: Duration = Duration::ZERO;
+
 #[sqlx::test]
-async fn slow_sources_are_bounded_by_budget_and_concurrency(pool: sqlx::PgPool) {
+async fn the_within_budget_search_is_complete(pool: sqlx::PgPool) {
     let working = StubProvider::new(vec![Ok(vec![candidate("ytm-1", "YTM Song")])]);
     let catalogue = service(
         pool.clone(),
         vec![provider(HangingProvider), provider(working)],
-    );
+    )
+    .with_search_budget(WITHIN_SEARCH_BUDGET);
     let started = Instant::now();
-    let (hits, _error, _success) = catalogue
-        .fan_out(&search(), None, &context(), Duration::from_millis(250))
-        .await;
+    let (hits, _error, _success) = catalogue.fan_out(&search(), None, &context()).await;
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].track().title(), "YTM Song");
@@ -526,6 +528,29 @@ async fn slow_sources_are_bounded_by_budget_and_concurrency(pool: sqlx::PgPool) 
         .await
         .unwrap();
     assert!(maximum.load(Ordering::SeqCst) <= MAX_SOURCE_CONCURRENCY);
+}
+
+#[sqlx::test]
+async fn the_beyond_budget_search_still_returns(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    repository
+        .get_or_create(local_source(), named_metadata("Zebra"))
+        .await
+        .unwrap();
+    let resolver = StubProvider::new(vec![Ok(vec![candidate("vid-1", "Apple")])]);
+    let catalogue = Fixture {
+        store: Arc::clone(&repository),
+    }
+    .service(vec![provider(resolver)])
+    .with_search_budget(BEYOND_SEARCH_BUDGET);
+
+    let started = Instant::now();
+    let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(outcome.tracks.len(), 1);
+    assert_eq!(outcome.tracks[0].track().title(), "Zebra");
+    assert!(is_owned(outcome.tracks[0].sources()));
 }
 
 #[sqlx::test]
@@ -846,4 +871,24 @@ fn the_default_budget_is_unchanged() {
         Vec::new(),
     );
     assert_eq!(with_providers.dedup_budget, Duration::from_millis(50));
+}
+
+#[test]
+fn the_default_search_budget_is_unchanged() {
+    let store = Arc::new(FailingTrackRepository);
+    let bare = SearchService::new(
+        Arc::clone(&store) as Arc<dyn LibraryRead>,
+        Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&store) as Arc<dyn SourceLookup>,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+    );
+    assert_eq!(bare.search_budget, Duration::from_secs(45));
+    let with_providers = SearchService::with_providers(
+        Arc::clone(&store) as Arc<dyn LibraryRead>,
+        Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&store) as Arc<dyn SourceLookup>,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        Vec::new(),
+    );
+    assert_eq!(with_providers.search_budget, Duration::from_secs(45));
 }
