@@ -652,3 +652,90 @@ async fn one_principals_state_is_invisible_to_another(pool: PgPool) {
             .all(|album| album.get("rating").is_none())
     );
 }
+
+async fn seed_albums(store: &PostgresTrackRepository, count: u32) -> Vec<AlbumId> {
+    let mut albums = Vec::new();
+
+    for index in 0..count {
+        let external_id = format!("deep-{index:04}.flac");
+        let album = add_album(store, &format!("zz{index:04}"), MUSIC_ROOT, &external_id).await;
+        let track = add_track(store, MUSIC_ROOT, &external_id, &format!("Deep {index:04}")).await;
+        store
+            .set_album_track(&album, &track, &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+
+        albums.push(album);
+    }
+
+    albums
+}
+
+#[sqlx::test]
+async fn native_album_page_past_1000_agrees_with_the_count(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let seeded = seed_albums(&fixture.store, 1_000).await;
+    let total_albums = 1_002;
+
+    let (status, headers, deep) = native_page(
+        &fixture.app,
+        &fixture.alice.auth,
+        "albums",
+        "order=name&limit=500&offset=1000",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "native deep albums: {deep}");
+    assert_eq!(
+        total(&headers),
+        total_albums,
+        "the header is the count, not the page length"
+    );
+    assert_eq!(deep["total"], json!(total_albums));
+    assert_eq!(
+        item_ids(&deep),
+        HashSet::from([seeded[998].to_string(), seeded[999].to_string()]),
+        "the deep album page is the ordering's tail"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_album_window_past_1000_agrees_with_the_count(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let seeded = seed_albums(&fixture.store, 1_000).await;
+    let total_albums = 1_002;
+
+    let (status, headers, native_deep) = native_page(
+        &fixture.app,
+        &fixture.alice.auth,
+        "albums",
+        "order=name&limit=500&offset=1000",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "native deep albums: {native_deep}");
+    assert_eq!(total(&headers), total_albums);
+
+    let (status, _, deep) = rest(
+        &fixture.app,
+        &fixture.alice.auth,
+        "/getAlbumList2.view",
+        "type=alphabeticalByName&size=500&offset=1000",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "subsonic deep window: {deep}");
+    let window = album_ids(&deep);
+    assert_eq!(
+        window.len() as u32,
+        total_albums - 1_000,
+        "the window is the remainder the count leaves past the offset"
+    );
+    assert_eq!(
+        window,
+        HashSet::from([seeded[998].to_string(), seeded[999].to_string()]),
+        "the deep window is the ordering's tail"
+    );
+    assert_eq!(
+        window,
+        item_ids(&native_deep),
+        "the subsonic window is the native page's slice"
+    );
+}
