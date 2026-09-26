@@ -6,11 +6,11 @@ mod storage;
 #[cfg(any(test, feature = "postgres-integration"))]
 pub mod test_support {
     pub use super::storage::contracts::{
-        CatalogueWrite, DuplicateReport, LibraryRead, PlaylistStore, Retention, SourceFileFacts,
-        SourceLookup, StateStore, TrackRepositoryError,
+        CatalogueWrite, DuplicateReport, LibraryRead, LibraryStore, PlaylistStore, Retention,
+        SourceFileFacts, SourceLookup, StateStore, TrackRepositoryError,
     };
     #[cfg(feature = "postgres-integration")]
-    pub use super::storage::postgres::PostgresTrackRepository;
+    pub use super::storage::postgres::{PostgresLibraryStore, PostgresTrackRepository};
 }
 
 pub(crate) mod api;

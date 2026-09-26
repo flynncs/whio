@@ -6,12 +6,14 @@ use super::super::{
     artwork::ArtworkService,
     availability::ProviderRegistry,
     catalogue::{CatalogueProvider, CompletionService, DedupMode, LibraryService, SearchService},
-    library::ScanService,
+    library::{LibraryRegistry, ScanService},
     library_state::LibraryStateService,
     playlists::PlaylistService,
     sources::SourceQueries,
-    storage::contracts::{CatalogueWrite, LibraryRead, PlaylistStore, SourceLookup, StateStore},
-    storage::postgres::PostgresTrackRepository,
+    storage::contracts::{
+        CatalogueWrite, LibraryRead, LibraryStore, PlaylistStore, SourceLookup, StateStore,
+    },
+    storage::postgres::{PostgresLibraryStore, PostgresTrackRepository},
 };
 
 pub struct MusicServices {
@@ -23,6 +25,7 @@ pub struct MusicServices {
     pub activity: Arc<LibraryStateService>,
     pub scanner: Arc<ScanService>,
     pub sources: Arc<SourceQueries>,
+    pub library_registry: Arc<LibraryRegistry>,
 }
 
 pub fn construct(
@@ -34,7 +37,10 @@ pub fn construct(
     artwork_host_suffixes: Vec<String>,
 ) -> MusicServices {
     let registry = ProviderRegistry::with_enabled(enabled_providers);
-    let store = Arc::new(PostgresTrackRepository::new(pool).with_registry(registry.clone()));
+    let store =
+        Arc::new(PostgresTrackRepository::new(pool.clone()).with_registry(registry.clone()));
+    let library_store: Arc<dyn LibraryStore> = Arc::new(PostgresLibraryStore::new(pool));
+    let library_registry = Arc::new(LibraryRegistry::new(library_store));
     let library: Arc<dyn LibraryRead> = Arc::clone(&store) as Arc<dyn LibraryRead>;
     let writes: Arc<dyn CatalogueWrite> = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
     let sources: Arc<dyn SourceLookup> = Arc::clone(&store) as Arc<dyn SourceLookup>;
@@ -87,5 +93,6 @@ pub fn construct(
         activity,
         scanner,
         sources: Arc::new(SourceQueries::new(sources)),
+        library_registry,
     }
 }

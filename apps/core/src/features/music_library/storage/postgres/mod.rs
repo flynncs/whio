@@ -6,6 +6,7 @@ use crate::features::music_library::availability::ProviderRegistry;
 
 mod catalogue;
 pub(crate) mod decode;
+mod libraries;
 mod library;
 mod playlists;
 mod reports;
@@ -13,8 +14,13 @@ pub(crate) mod schema;
 mod sources;
 mod state;
 
+pub use libraries::PostgresLibraryStore;
+
 #[cfg(all(test, feature = "postgres-integration"))]
 mod test_contracts;
+#[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_libraries.rs"]
+mod test_libraries;
 #[cfg(all(test, feature = "postgres-integration"))]
 #[path = "test_playlists.rs"]
 mod test_playlists;

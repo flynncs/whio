@@ -16,7 +16,7 @@ use crate::{
     features::identity::service::CredentialService,
     features::music_library::artwork::ArtworkService,
     features::music_library::catalogue::{CompletionService, LibraryService, SearchService},
-    features::music_library::library::ScanService,
+    features::music_library::library::{LibraryRegistry, ScanService},
     features::music_library::library_state::LibraryStateService,
     features::music_library::playlists::PlaylistService,
     features::playback::StreamingService,
@@ -34,6 +34,7 @@ pub struct AppState {
     library_state: Arc<LibraryStateService>,
     streaming: Arc<StreamingService>,
     scanner: Arc<ScanService>,
+    library_registry: Arc<LibraryRegistry>,
     source_tags: SourceTags,
 }
 
@@ -87,6 +88,15 @@ impl AppState {
         self
     }
 
+    pub fn with_library_registry(mut self, library_registry: Arc<LibraryRegistry>) -> Self {
+        self.library_registry = library_registry;
+        self
+    }
+
+    pub(crate) fn library_registry(&self) -> &Arc<LibraryRegistry> {
+        &self.library_registry
+    }
+
     pub fn scanner_handle(&self) -> Arc<ScanService> {
         Arc::clone(&self.scanner)
     }
@@ -112,6 +122,7 @@ impl AppState {
             library_state: Arc::new(LibraryStateService::disabled()),
             streaming,
             scanner: ScanService::disabled(),
+            library_registry: Arc::new(LibraryRegistry::disabled()),
             source_tags: SourceTags::Off,
         }
     }

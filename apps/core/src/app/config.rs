@@ -41,7 +41,7 @@ pub(crate) struct Config {
     pub(crate) artwork_host_suffixes: Vec<String>,
     pub(crate) source_tags: SourceTags,
     pub(crate) dedup_mode: crate::features::music_library::catalogue::DedupMode,
-    pub(crate) media_roots: Vec<std::path::PathBuf>,
+    pub(crate) libraries: Vec<crate::features::music_library::library::LibraryRegistration>,
 }
 
 #[derive(Debug)]
@@ -269,7 +269,7 @@ impl Config {
                 .ok_or_else(|| invalid(SOURCE_TAGS, raw, "must be `off` or `artist`"))?,
         };
 
-        let media_roots = match vars.get(MEDIA_ROOTS) {
+        let libraries = match vars.get(MEDIA_ROOTS) {
             None => Vec::new(),
             Some(raw) => parse_media_roots(raw)?,
         };
@@ -305,8 +305,12 @@ impl Config {
             youtube_media_suffix,
             artwork_host_suffixes,
             source_tags,
-            media_roots,
+            libraries,
         })
+    }
+
+    pub(crate) fn media_roots(&self) -> Vec<std::path::PathBuf> {
+        crate::features::music_library::library::deduplicated_roots(&self.libraries)
     }
 }
 
@@ -340,14 +344,29 @@ fn invalid(name: &'static str, value: &str, reason: &'static str) -> ConfigError
     }
 }
 
-fn parse_media_roots(raw: &str) -> Result<Vec<std::path::PathBuf>, ConfigError> {
-    let roots: Vec<std::path::PathBuf> = raw
-        .split(',')
-        .map(|root| std::path::PathBuf::from(root.trim()))
-        .filter(|root| !root.as_os_str().is_empty())
-        .collect();
+fn parse_media_roots(
+    raw: &str,
+) -> Result<Vec<crate::features::music_library::library::LibraryRegistration>, ConfigError> {
+    use crate::features::music_library::library::{
+        DEFAULT_LABEL, LibraryRegistration, is_label_token,
+    };
 
-    if roots.is_empty() {
+    let mut entries: Vec<(String, std::path::PathBuf)> = Vec::new();
+
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+
+        let (label, path) = match entry.split_once('=') {
+            Some((prefix, rest)) if is_label_token(prefix) => (prefix.to_owned(), rest.trim()),
+            _ => (DEFAULT_LABEL.to_owned(), entry),
+        };
+        entries.push((label, std::path::PathBuf::from(path)));
+    }
+
+    if entries.is_empty() {
         return Err(invalid(
             MEDIA_ROOTS,
             raw,
@@ -355,7 +374,7 @@ fn parse_media_roots(raw: &str) -> Result<Vec<std::path::PathBuf>, ConfigError> 
         ));
     }
 
-    for (index, root) in roots.iter().enumerate() {
+    for (_, root) in &entries {
         if !root.is_absolute() {
             return Err(invalid(
                 MEDIA_ROOTS,
@@ -363,16 +382,30 @@ fn parse_media_roots(raw: &str) -> Result<Vec<std::path::PathBuf>, ConfigError> 
                 "must be an absolute path",
             ));
         }
-        if roots[..index].contains(root) {
-            return Err(invalid(
-                MEDIA_ROOTS,
-                &root.display().to_string(),
-                "must not list the same directory twice",
-            ));
+    }
+
+    let mut grouped: Vec<(String, Vec<std::path::PathBuf>)> = Vec::new();
+
+    for (label, root) in entries {
+        match grouped.iter_mut().find(|(existing, _)| *existing == label) {
+            Some((_, roots)) => {
+                if roots.contains(&root) {
+                    return Err(invalid(
+                        MEDIA_ROOTS,
+                        &root.display().to_string(),
+                        "must not list the same directory twice",
+                    ));
+                }
+                roots.push(root);
+            }
+            None => grouped.push((label, vec![root])),
         }
     }
 
-    Ok(roots)
+    Ok(grouped
+        .into_iter()
+        .map(|(label, roots)| LibraryRegistration::new(label, roots))
+        .collect())
 }
 
 /// host suffixes are matched case-insensitively and must list at least one entry.
@@ -478,19 +511,46 @@ mod tests {
         ));
     }
 
+    fn registered(config: &Config) -> Vec<(String, Vec<std::path::PathBuf>)> {
+        config
+            .libraries
+            .iter()
+            .map(|library| (library.label().to_owned(), library.roots().to_vec()))
+            .collect()
+    }
+
     #[test]
     fn media_roots_default_empty_and_accept_an_absolute_list() {
-        assert!(parse_config(&[]).unwrap().media_roots.is_empty());
+        let config = parse_config(&[]).unwrap();
+        assert!(config.libraries.is_empty());
+        assert!(config.media_roots().is_empty());
 
         let config = parse_config(&[(MEDIA_ROOTS, "/tank/data/media/music")]).unwrap();
         assert_eq!(
-            config.media_roots,
+            registered(&config),
+            vec![(
+                "default".to_owned(),
+                vec![std::path::PathBuf::from("/tank/data/media/music")]
+            )]
+        );
+        assert_eq!(
+            config.media_roots(),
             vec![std::path::PathBuf::from("/tank/data/media/music")]
         );
 
         let config = parse_config(&[(MEDIA_ROOTS, " /a , /b ")]).unwrap();
         assert_eq!(
-            config.media_roots,
+            registered(&config),
+            vec![(
+                "default".to_owned(),
+                vec![
+                    std::path::PathBuf::from("/a"),
+                    std::path::PathBuf::from("/b")
+                ]
+            )]
+        );
+        assert_eq!(
+            config.media_roots(),
             vec![
                 std::path::PathBuf::from("/a"),
                 std::path::PathBuf::from("/b")
@@ -500,7 +560,15 @@ mod tests {
 
     #[test]
     fn media_roots_reject_relative_empty_and_duplicate_entries() {
-        for value in ["", " , ", "relative/path", "/a,/a", "/a, /a"] {
+        for value in [
+            "",
+            " , ",
+            "relative/path",
+            "/a,/a",
+            "/a, /a",
+            "music=/a,music=/a",
+            "music=/a,music=/a,/b",
+        ] {
             assert!(
                 matches!(
                     parse_config(&[(MEDIA_ROOTS, value)]),
@@ -512,6 +580,120 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn labelled_entries_register_one_library_each() {
+        let config = parse_config(&[(MEDIA_ROOTS, "music=/a,books=/b,/c")]).unwrap();
+
+        assert_eq!(
+            registered(&config),
+            vec![
+                ("music".to_owned(), vec![std::path::PathBuf::from("/a")]),
+                ("books".to_owned(), vec![std::path::PathBuf::from("/b")]),
+                ("default".to_owned(), vec![std::path::PathBuf::from("/c")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_root_shared_by_two_labels_is_configurable_and_walked_once() {
+        let config = parse_config(&[(MEDIA_ROOTS, "music=/a,books=/a")]).unwrap();
+
+        assert_eq!(
+            registered(&config),
+            vec![
+                ("music".to_owned(), vec![std::path::PathBuf::from("/a")]),
+                ("books".to_owned(), vec![std::path::PathBuf::from("/a")]),
+            ]
+        );
+        assert_eq!(config.media_roots(), vec![std::path::PathBuf::from("/a")]);
+    }
+
+    #[test]
+    fn an_explicit_default_label_is_the_bare_library() {
+        assert_eq!(
+            registered(&parse_config(&[(MEDIA_ROOTS, "default=/a")]).unwrap()),
+            vec![("default".to_owned(), vec![std::path::PathBuf::from("/a")])]
+        );
+        assert_eq!(
+            registered(&parse_config(&[(MEDIA_ROOTS, "/a,default=/b")]).unwrap()),
+            vec![(
+                "default".to_owned(),
+                vec![
+                    std::path::PathBuf::from("/a"),
+                    std::path::PathBuf::from("/b")
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn label_boundaries_keep_a_path_or_reject_it() {
+        let over_long = "a".repeat(101);
+        for value in [
+            "=/a".to_owned(),
+            format!("{over_long}=/a"),
+            "mu sic=/a".to_owned(),
+            "/a=/b/c".to_owned(),
+        ] {
+            let config = parse_config(&[(MEDIA_ROOTS, &value)]);
+            if value.starts_with('/') {
+                assert_eq!(
+                    registered(&config.unwrap()),
+                    vec![("default".to_owned(), vec![std::path::PathBuf::from(&value)])],
+                    "{value}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        config,
+                        Err(ConfigError::Invalid {
+                            name: MEDIA_ROOTS,
+                            ..
+                        })
+                    ),
+                    "{value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_containing_an_equals_sign_is_a_path() {
+        let config = parse_config(&[(MEDIA_ROOTS, "/tank/my=music")]).unwrap();
+
+        assert_eq!(
+            registered(&config),
+            vec![(
+                "default".to_owned(),
+                vec![std::path::PathBuf::from("/tank/my=music")]
+            )]
+        );
+    }
+
+    #[test]
+    fn nested_roots_register_under_one_library() {
+        let config =
+            parse_config(&[(MEDIA_ROOTS, "music=/tank/music,music=/tank/music/live")]).unwrap();
+
+        assert_eq!(
+            registered(&config),
+            vec![(
+                "music".to_owned(),
+                vec![
+                    std::path::PathBuf::from("/tank/music"),
+                    std::path::PathBuf::from("/tank/music/live")
+                ]
+            )]
+        );
+        assert_eq!(
+            config.media_roots(),
+            vec![
+                std::path::PathBuf::from("/tank/music"),
+                std::path::PathBuf::from("/tank/music/live")
+            ]
+        );
     }
 
     #[test]
