@@ -83,6 +83,13 @@ fn search3(uri: &str, auth: &str) -> String {
 }
 
 async fn get(app: axum::Router, uri: &str) -> Value {
+    let (status, body) = status(app, uri).await;
+    assert_eq!(status, StatusCode::OK);
+
+    body
+}
+
+async fn status(app: axum::Router, uri: &str) -> (StatusCode, Value) {
     let request = Request::builder()
         .method("GET")
         .uri(uri)
@@ -91,9 +98,9 @@ async fn get(app: axum::Router, uri: &str) -> Value {
         .unwrap();
 
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
-    serde_json::from_slice(&body).unwrap()
+    (status, serde_json::from_slice(&body).unwrap())
 }
 
 fn names(body: &Value, kind: &str, field: &str) -> Vec<String> {
@@ -239,6 +246,31 @@ async fn search3_with_one_window_is_unchanged(pool: PgPool) {
         ["Song Artist 1", "Song Artist 2"],
         "the same window pages artists"
     );
+}
+
+#[sqlx::test]
+async fn search3_zero_kind_count_is_invalid(pool: PgPool) {
+    seed_matches(&pool).await;
+    let (app, secret) = client(pool, empty_responses(0));
+    let auth = auth_query(&secret);
+
+    for window in ["songCount=0", "albumCount=0", "artistCount=0"] {
+        let (status, body) = status(
+            app.clone(),
+            &search3(&format!("query=song&{window}"), &auth),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "window: {window}");
+        assert_eq!(
+            body["subsonic-response"]["status"], "failed",
+            "window: {window}"
+        );
+        assert!(
+            body["subsonic-response"]["searchResult3"].is_null(),
+            "window: {window}"
+        );
+    }
 }
 
 #[sqlx::test]
