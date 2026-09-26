@@ -350,6 +350,7 @@ async fn subsonic_state_list_types_filter_their_membership(pool: PgPool) {
         song,
         album,
         artist,
+        composer: _,
         secret,
     } = seeded_app(pool.clone()).await;
     let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
