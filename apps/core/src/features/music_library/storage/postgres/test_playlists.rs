@@ -1124,4 +1124,37 @@ async fn concurrent_edits_serialise(pool: PgPool) {
         initial + 2,
         "the revision reflects both edits"
     );
+
+    let third = track(&store, "Third").await;
+    let fourth = track(&store, "Fourth").await;
+    let expected = initial + 2;
+    let left_additions = [third];
+    let right_additions = [fourth];
+    let left = service.edit_at_revision(
+        owner,
+        playlist.id(),
+        Some(expected),
+        edit(None, &left_additions, Vec::new()),
+    );
+    let right = service.edit_at_revision(
+        owner,
+        playlist.id(),
+        Some(expected),
+        edit(None, &right_additions, Vec::new()),
+    );
+    let (left, right) = tokio::join!(left, right);
+
+    match (left, right) {
+        (Ok(true), Err(PlaylistError::Conflict { current_revision }))
+        | (Err(PlaylistError::Conflict { current_revision }), Ok(true)) => {
+            assert_eq!(current_revision, expected + 1);
+        }
+        other => panic!("exactly one conditional edit reports the conflict, got {other:?}"),
+    }
+
+    let serialised = service.detail(owner, playlist.id()).await.unwrap().unwrap();
+    assert_eq!(serialised.playlist.revision(), expected + 1);
+    let entries = occurrences(&service, owner, playlist.id()).await;
+    assert_eq!(entries.len(), 3, "only the applied conditional edit landed");
+    assert_eq!(positions(&entries), vec![0, 1, 2]);
 }
