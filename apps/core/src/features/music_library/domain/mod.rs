@@ -18,8 +18,8 @@ mod text;
 mod track;
 
 pub use album::{
-    Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumSummary,
-    AlbumTrack, DatePrecision, PartialDate,
+    Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumListScope, AlbumMetadata, AlbumOrder,
+    AlbumSummary, AlbumTrack, DatePrecision, PartialDate,
 };
 pub use artist::{Artist, ArtistCredit, ArtistId, ArtistSummary, CreditRole};
 pub use artwork::ArtworkRef;

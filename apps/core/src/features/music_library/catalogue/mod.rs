@@ -22,7 +22,7 @@ pub use provider_error::ProviderError;
 pub use search::{SearchHit, SearchOutcome, SearchService};
 
 pub use crate::features::music_library::domain::{
-    IdSet, MAX_PAGE_LIMIT, MAX_SELECTOR_IDS, MAX_SELECTOR_TEXT, PageLimit, RandomSeed, Range,
-    Resource, RoleSelector, RoleSet, SelectorText, SortDirection, TrackListFilter, TrackListScope,
-    TrackOrder, TrackPage,
+    AlbumListFilter, AlbumListScope, AlbumOrder, IdSet, MAX_PAGE_LIMIT, MAX_SELECTOR_IDS,
+    MAX_SELECTOR_TEXT, PageLimit, RandomSeed, Range, Resource, RoleSelector, RoleSet, SelectorText,
+    SortDirection, TrackListFilter, TrackListScope, TrackOrder, TrackPage,
 };
