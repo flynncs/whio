@@ -2,8 +2,9 @@ use super::PostgresTrackRepository;
 use crate::features::music_library::{
     domain::{
         AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef,
-        CreditRole, ProviderId, SourceIdentity, SourceScope, StateTarget, TrackId, TrackListFilter,
-        TrackListScope, TrackMetadata, TrackOrder, TrackPage,
+        CreditRole, IdSet, ProviderId, Range, SelectorText, SourceIdentity, SourceScope,
+        StateTarget, TrackId, TrackListFilter, TrackListScope, TrackMetadata, TrackOrder,
+        TrackPage,
     },
     storage::contracts::{
         CatalogueWrite, LibraryRead, PlaylistStore, ReconcileReport, SourceFileFacts, SourceLookup,
@@ -11,6 +12,19 @@ use crate::features::music_library::{
     },
 };
 use uuid::Uuid;
+
+fn genre_set(values: &[&str]) -> IdSet<SelectorText> {
+    IdSet::new(
+        values
+            .iter()
+            .map(|value| SelectorText::new(value).unwrap().unwrap()),
+    )
+    .unwrap()
+}
+
+fn year_range(from: i32, to: i32) -> Range<i32> {
+    Range::new(Some(from), Some(to)).unwrap()
+}
 
 fn source(provider: &str, external_id: &str) -> SourceIdentity {
     SourceIdentity::new(
@@ -400,7 +414,7 @@ async fn album_entries_are_ordered_and_totalled(pool: sqlx::PgPool) {
     );
 
     let summaries = repository
-        .list_albums(0, 10, AlbumOrder::Title, AlbumListFilter::default(), None)
+        .list_albums(0, 10, AlbumOrder::Name, AlbumListFilter::default(), None)
         .await
         .unwrap();
     assert_eq!(summaries.len(), 1);
@@ -614,14 +628,20 @@ async fn albums_order_by_title_artist_and_creation(pool: sqlx::PgPool) {
     }
 
     let by_title = repository
-        .list_albums(0, 10, AlbumOrder::Title, AlbumListFilter::default(), None)
+        .list_albums(0, 10, AlbumOrder::Name, AlbumListFilter::default(), None)
         .await
         .unwrap();
     assert_eq!(by_title[0].album().id(), second.id());
     assert_eq!(by_title[1].album().id(), first.id());
 
     let by_artist = repository
-        .list_albums(0, 10, AlbumOrder::Artist, AlbumListFilter::default(), None)
+        .list_albums(
+            0,
+            10,
+            AlbumOrder::AlbumArtist,
+            AlbumListFilter::default(),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(by_artist[0].album().id(), first.id());
@@ -784,7 +804,7 @@ async fn album_orders_reflect_plays_and_ratings(pool: sqlx::PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::Frequent,
+            AlbumOrder::PlayCount,
             AlbumListFilter::new(),
             Some(user),
         )
@@ -797,7 +817,7 @@ async fn album_orders_reflect_plays_and_ratings(pool: sqlx::PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::HighestRated,
+            AlbumOrder::Rating,
             AlbumListFilter::new(),
             Some(user),
         )
@@ -809,7 +829,7 @@ async fn album_orders_reflect_plays_and_ratings(pool: sqlx::PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::Recent,
+            AlbumOrder::PlayDate,
             AlbumListFilter::new(),
             Some(user),
         )
@@ -860,8 +880,8 @@ async fn genres_aggregate_and_filter_albums(pool: sqlx::PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::Title,
-            AlbumListFilter::new().with_genre(Some("rock".to_owned())),
+            AlbumOrder::Name,
+            AlbumListFilter::new().with_genre(Some(genre_set(&["rock"]))),
             None,
         )
         .await
@@ -873,8 +893,8 @@ async fn genres_aggregate_and_filter_albums(pool: sqlx::PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::YearAscending,
-            AlbumListFilter::new().with_year(Some(2000), Some(2005)),
+            AlbumOrder::MaxYear,
+            AlbumListFilter::new().with_year(Some(year_range(2000, 2005))),
             None,
         )
         .await
@@ -885,8 +905,8 @@ async fn genres_aggregate_and_filter_albums(pool: sqlx::PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::YearAscending,
-            AlbumListFilter::new().with_year(Some(2010), Some(2015)),
+            AlbumOrder::MaxYear,
+            AlbumListFilter::new().with_year(Some(year_range(2010, 2015))),
             None,
         )
         .await
@@ -1497,9 +1517,9 @@ async fn the_genre_facets_use_the_set(pool: sqlx::PgPool) {
     names.sort();
     assert_eq!(names, ["Jazz", "Pop", "Rock"]);
 
-    let filter = AlbumListFilter::new().with_genre(Some("rock".to_owned()));
+    let filter = AlbumListFilter::new().with_genre(Some(genre_set(&["rock"])));
     let rock_albums = repository
-        .list_albums(0, 10, AlbumOrder::Title, filter.clone(), None)
+        .list_albums(0, 10, AlbumOrder::Name, filter.clone(), None)
         .await
         .unwrap();
     assert_eq!(
@@ -1514,10 +1534,10 @@ async fn the_genre_facets_use_the_set(pool: sqlx::PgPool) {
         "the count and the page move together"
     );
 
-    let absent = AlbumListFilter::new().with_genre(Some("Polka".to_owned()));
+    let absent = AlbumListFilter::new().with_genre(Some(genre_set(&["Polka"])));
     assert!(
         repository
-            .list_albums(0, 10, AlbumOrder::Title, absent.clone(), None)
+            .list_albums(0, 10, AlbumOrder::Name, absent.clone(), None)
             .await
             .unwrap()
             .is_empty()

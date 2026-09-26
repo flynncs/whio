@@ -200,13 +200,7 @@ async fn a_playlisted_provider_track_becomes_browsable_for_its_owner(pool: PgPoo
 
     assert!(
         repository
-            .list_albums(
-                0,
-                50,
-                AlbumOrder::Title,
-                AlbumListFilter::new(),
-                Some(owner)
-            )
+            .list_albums(0, 50, AlbumOrder::Name, AlbumListFilter::new(), Some(owner))
             .await
             .unwrap()
             .is_empty(),
@@ -230,13 +224,7 @@ async fn a_playlisted_provider_track_becomes_browsable_for_its_owner(pool: PgPoo
         .unwrap();
 
     let albums = repository
-        .list_albums(
-            0,
-            50,
-            AlbumOrder::Title,
-            AlbumListFilter::new(),
-            Some(owner),
-        )
+        .list_albums(0, 50, AlbumOrder::Name, AlbumListFilter::new(), Some(owner))
         .await
         .unwrap();
     assert_eq!(albums.len(), 1, "the playlist entry engages the album");
@@ -264,7 +252,7 @@ async fn a_playlisted_provider_track_becomes_browsable_for_its_owner(pool: PgPoo
             .list_albums(
                 0,
                 50,
-                AlbumOrder::Title,
+                AlbumOrder::Name,
                 AlbumListFilter::new(),
                 Some(stranger)
             )

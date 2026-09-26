@@ -6,8 +6,10 @@ use axum::{
 };
 
 use crate::{
-    facades::navidrome::state::NavidromeState, features::music_library::domain::AlbumListFilter,
-    platform::raw_query::RawQuery, platform::request::RequestContext,
+    facades::navidrome::state::NavidromeState,
+    features::music_library::domain::{AlbumListFilter, IdSet, Range, SelectorText},
+    platform::raw_query::RawQuery,
+    platform::request::RequestContext,
 };
 
 use super::{
@@ -89,18 +91,32 @@ pub(crate) async fn album_list(
     query: RawQuery,
 ) -> Response {
     let order = service::album_order(query.get("_sort"));
-    let year = query
+    let genre = match query
+        .get("genre")
+        .map(SelectorText::new)
+        .transpose()
+        .and_then(|genre| genre.map(IdSet::new).transpose())
+    {
+        Ok(genre) => genre,
+        Err(_) => return song_error(SongError::InvalidSearch, &context),
+    };
+    let year = match query
         .get("year")
-        .and_then(|raw| raw.trim().parse::<i32>().ok());
-    let mut filter = AlbumListFilter::new()
-        .with_genre(query.get("genre").map(str::to_owned))
-        .with_year(year, year);
-    if query
+        .and_then(|raw| raw.trim().parse::<i32>().ok())
+        .map(|year| Range::new(Some(year), Some(year)))
+        .transpose()
+    {
+        Ok(year) => year,
+        Err(_) => return song_error(SongError::InvalidSearch, &context),
+    };
+    let starred = query
         .get("starred")
         .is_some_and(|raw| matches!(raw.trim().to_ascii_lowercase().as_str(), "true" | "1"))
-    {
-        filter = filter.starred();
-    }
+        .then_some(true);
+    let filter = AlbumListFilter::new()
+        .with_genre(genre)
+        .with_year(year)
+        .with_starred(starred);
 
     match service::album_list(
         state.library(),

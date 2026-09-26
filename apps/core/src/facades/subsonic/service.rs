@@ -11,7 +11,8 @@ use crate::{
         TrackOrder,
     },
     features::music_library::domain::{
-        AlbumId, AlbumListFilter, AlbumOrder, ArtistId, StateTarget, TrackId,
+        AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, IdSet, Range, SelectorText,
+        SortDirection, StateTarget, TrackId,
     },
     features::music_library::library_state::{LibraryStateError, LibraryStateService},
     platform::request::RequestContext,
@@ -157,7 +158,7 @@ pub(crate) async fn enumerate(
             .album_list(
                 request.albums.offset,
                 request.albums.count,
-                AlbumOrder::Title,
+                AlbumOrder::Name,
                 AlbumListFilter::new(),
                 user,
             )
@@ -276,14 +277,17 @@ fn album_list_order(
     let filter = AlbumListFilter::new();
 
     match request.list_type {
-        "alphabeticalByName" => Ok((AlbumOrder::Title, filter)),
-        "alphabeticalByArtist" => Ok((AlbumOrder::Artist, filter)),
-        "newest" => Ok((AlbumOrder::RecentlyAdded, filter)),
+        "alphabeticalByName" => Ok((AlbumOrder::Name, filter)),
+        "alphabeticalByArtist" => Ok((AlbumOrder::AlbumArtist, filter)),
+        "newest" => Ok((
+            AlbumOrder::RecentlyAdded,
+            filter.with_scope(AlbumListScope::Owned),
+        )),
         "random" => Ok((AlbumOrder::Random, filter)),
-        "starred" => Ok((AlbumOrder::Starred, filter)),
-        "frequent" => Ok((AlbumOrder::Frequent, filter)),
-        "recent" => Ok((AlbumOrder::Recent, filter)),
-        "highest" => Ok((AlbumOrder::HighestRated, filter)),
+        "starred" => Ok((AlbumOrder::StarredAt, filter)),
+        "frequent" => Ok((AlbumOrder::PlayCount, filter)),
+        "recent" => Ok((AlbumOrder::PlayDate, filter)),
+        "highest" => Ok((AlbumOrder::Rating, filter)),
         "byYear" => {
             let from = request
                 .from_year
@@ -297,24 +301,35 @@ fn album_list_order(
                 .trim()
                 .parse::<i32>()
                 .map_err(|_| BrowseError::InvalidRequest)?;
-            let (from, to, order) = if from > to {
-                (to, from, AlbumOrder::YearDescending)
+            let (from, to, direction) = if from > to {
+                (to, from, SortDirection::Descending)
             } else {
-                (from, to, AlbumOrder::YearAscending)
+                (from, to, SortDirection::Ascending)
             };
+            let year = Range::new(Some(from), Some(to)).map_err(|_| BrowseError::InvalidRequest)?;
 
-            Ok((order, filter.with_year(Some(from), Some(to))))
+            Ok((
+                AlbumOrder::MaxYear,
+                filter
+                    .with_year(Some(year))
+                    .with_sort_direction(Some(direction)),
+            ))
         }
         "byGenre" => {
             let genre = request
                 .genre
                 .ok_or(BrowseError::MissingParameter)?
                 .to_owned();
-            if genre.trim().is_empty() {
-                return Err(BrowseError::MissingParameter);
-            }
+            let genre = SelectorText::new(&genre)
+                .map_err(|_| BrowseError::InvalidRequest)?
+                .ok_or(BrowseError::MissingParameter)?;
 
-            Ok((AlbumOrder::Title, filter.with_genre(Some(genre))))
+            Ok((
+                AlbumOrder::Name,
+                filter.with_genre(Some(
+                    IdSet::new([genre]).map_err(|_| BrowseError::InvalidRequest)?,
+                )),
+            ))
         }
         _ => Err(BrowseError::UnsupportedType),
     }

@@ -686,3 +686,160 @@ async fn enumerate_skips_kinds_with_a_zero_count(pool: sqlx::PgPool) {
     assert!(result.artists.is_empty());
     assert_eq!(result.albums.len(), 2);
 }
+
+#[test]
+fn newest_carries_the_owned_scope_in_the_filter() {
+    let newest = AlbumListRequest {
+        list_type: "newest",
+        size: None,
+        offset: None,
+        from_year: None,
+        to_year: None,
+        genre: None,
+    };
+    let (order, filter) = album_list_order(&newest).expect("the type is supported");
+
+    assert_eq!(order, AlbumOrder::RecentlyAdded);
+    assert_eq!(
+        filter.scope(),
+        AlbumListScope::Owned,
+        "newest means added to the library, so the scope travels in the filter"
+    );
+    assert_eq!(
+        filter.resolved_direction(order),
+        SortDirection::Descending,
+        "and the order keeps its natural direction"
+    );
+
+    let frequent = AlbumListRequest {
+        list_type: "frequent",
+        size: None,
+        offset: None,
+        from_year: None,
+        to_year: None,
+        genre: None,
+    };
+    let (order, filter) = album_list_order(&frequent).expect("the type is supported");
+
+    assert_eq!(order, AlbumOrder::PlayCount);
+    assert_eq!(
+        filter.scope(),
+        AlbumListScope::Engaged,
+        "another order is engaged, so the scope is not a property of the order value"
+    );
+}
+
+#[test]
+fn by_year_carries_its_range_and_direction() {
+    let ascending = AlbumListRequest {
+        list_type: "byYear",
+        size: None,
+        offset: None,
+        from_year: Some("1990"),
+        to_year: Some("2000"),
+        genre: None,
+    };
+    let (order, filter) = album_list_order(&ascending).expect("the type is supported");
+
+    assert_eq!(order, AlbumOrder::MaxYear);
+    assert_eq!(filter.resolved_direction(order), SortDirection::Ascending);
+
+    let year = filter.year().expect("the year range is present");
+
+    assert_eq!((year.from(), year.to()), (Some(1990), Some(2000)));
+
+    let inverted = AlbumListRequest {
+        list_type: "byYear",
+        size: None,
+        offset: None,
+        from_year: Some("2000"),
+        to_year: Some("1990"),
+        genre: None,
+    };
+    let (order, filter) = album_list_order(&inverted).expect("the type is supported");
+
+    assert_eq!(order, AlbumOrder::MaxYear);
+    assert_eq!(filter.resolved_direction(order), SortDirection::Descending);
+
+    let year = filter.year().expect("the year range is present");
+
+    assert_eq!(
+        (year.from(), year.to()),
+        (Some(1990), Some(2000)),
+        "the inverted pair is normalised into a valid range"
+    );
+
+    let missing = AlbumListRequest {
+        list_type: "byYear",
+        size: None,
+        offset: None,
+        from_year: None,
+        to_year: Some("1990"),
+        genre: None,
+    };
+
+    assert!(album_list_order(&missing).is_err());
+
+    let unparsable = AlbumListRequest {
+        list_type: "byYear",
+        size: None,
+        offset: None,
+        from_year: Some("many"),
+        to_year: Some("1990"),
+        genre: None,
+    };
+
+    assert!(matches!(
+        album_list_order(&unparsable),
+        Err(BrowseError::InvalidRequest)
+    ));
+}
+
+#[test]
+fn by_genre_carries_one_normalised_name() {
+    let rock = AlbumListRequest {
+        list_type: "byGenre",
+        size: None,
+        offset: None,
+        from_year: None,
+        to_year: None,
+        genre: Some("  Rock "),
+    };
+    let (order, filter) = album_list_order(&rock).expect("the type is supported");
+
+    assert_eq!(order, AlbumOrder::Name);
+    assert_eq!(
+        filter.genre().map(|genre| genre.len()),
+        Some(1),
+        "the foreign single name becomes a one-value set"
+    );
+
+    let blank = AlbumListRequest {
+        list_type: "byGenre",
+        size: None,
+        offset: None,
+        from_year: None,
+        to_year: None,
+        genre: Some("   "),
+    };
+
+    assert!(matches!(
+        album_list_order(&blank),
+        Err(BrowseError::MissingParameter)
+    ));
+
+    let long = "a".repeat(501);
+    let over_long = AlbumListRequest {
+        list_type: "byGenre",
+        size: None,
+        offset: None,
+        from_year: None,
+        to_year: None,
+        genre: Some(&long),
+    };
+
+    assert!(matches!(
+        album_list_order(&over_long),
+        Err(BrowseError::InvalidRequest)
+    ));
+}

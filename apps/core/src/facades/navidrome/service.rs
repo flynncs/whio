@@ -458,14 +458,14 @@ pub(crate) fn album_order(sort: Option<&str>) -> AlbumOrder {
     let sort = sort.replace('_', "");
 
     match sort.as_str() {
-        "albumartist" | "artist" => AlbumOrder::Artist,
+        "albumartist" | "artist" => AlbumOrder::AlbumArtist,
         "recentlyadded" | "createdat" => AlbumOrder::RecentlyAdded,
-        "year" => AlbumOrder::YearAscending,
-        "playcount" => AlbumOrder::Frequent,
-        "playdate" | "lastplayed" => AlbumOrder::Recent,
-        "rating" => AlbumOrder::HighestRated,
-        "starredat" | "starred" => AlbumOrder::Starred,
-        _ => AlbumOrder::Title,
+        "year" => AlbumOrder::MaxYear,
+        "playcount" => AlbumOrder::PlayCount,
+        "playdate" | "lastplayed" => AlbumOrder::PlayDate,
+        "rating" => AlbumOrder::Rating,
+        "starredat" | "starred" => AlbumOrder::StarredAt,
+        _ => AlbumOrder::Name,
     }
 }
 

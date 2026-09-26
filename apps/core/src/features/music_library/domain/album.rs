@@ -6,10 +6,11 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    Artist, ArtistCredit, ArtistId, LibraryState, MatchQuality, SourceIdentity, Track,
-    ValidationError,
+    Artist, ArtistCredit, ArtistId, IdSet, LibraryState, MatchQuality, RandomSeed, Range, RoleSet,
+    SelectorText, SortDirection, SourceIdentity, Track, ValidationError,
     text::{optional, required},
 };
+use crate::features::music_library::library::LibraryId;
 
 const MAX_TITLE: usize = 500;
 const MAX_TEXT: usize = 500;
@@ -525,24 +526,119 @@ impl AlbumSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlbumOrder {
     #[default]
-    Title,
+    Name,
+    AlbumArtist,
     Artist,
-    RecentlyAdded,
+    Duration,
+    SongCount,
+    MaxYear,
+    DateAdded,
+    StarredAt,
+    Rating,
+    PlayCount,
+    PlayDate,
     Random,
-    Frequent,
-    Recent,
-    HighestRated,
-    Starred,
-    YearAscending,
-    YearDescending,
+    RecentlyAdded,
+}
+
+impl AlbumOrder {
+    pub const ALL: [AlbumOrder; 13] = [
+        AlbumOrder::Name,
+        AlbumOrder::AlbumArtist,
+        AlbumOrder::Artist,
+        AlbumOrder::Duration,
+        AlbumOrder::SongCount,
+        AlbumOrder::MaxYear,
+        AlbumOrder::DateAdded,
+        AlbumOrder::StarredAt,
+        AlbumOrder::Rating,
+        AlbumOrder::PlayCount,
+        AlbumOrder::PlayDate,
+        AlbumOrder::Random,
+        AlbumOrder::RecentlyAdded,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::AlbumArtist => "album_artist",
+            Self::Artist => "artist",
+            Self::Duration => "duration",
+            Self::SongCount => "song_count",
+            Self::MaxYear => "max_year",
+            Self::DateAdded => "date_added",
+            Self::StarredAt => "starred_at",
+            Self::Rating => "rating",
+            Self::PlayCount => "play_count",
+            Self::PlayDate => "play_date",
+            Self::Random => "random",
+            Self::RecentlyAdded => "recently_added",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|order| order.as_str() == value)
+    }
+
+    pub fn default_direction(self) -> SortDirection {
+        match self {
+            Self::SongCount
+            | Self::MaxYear
+            | Self::DateAdded
+            | Self::StarredAt
+            | Self::Rating
+            | Self::PlayCount
+            | Self::PlayDate
+            | Self::RecentlyAdded => SortDirection::Descending,
+            _ => SortDirection::Ascending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AlbumListScope {
+    #[default]
+    Engaged,
+    Owned,
+}
+
+impl AlbumListScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Engaged => "engaged",
+            Self::Owned => "owned",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "engaged" => Some(Self::Engaged),
+            "owned" => Some(Self::Owned),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AlbumListFilter {
-    starred: bool,
-    genre: Option<String>,
-    year_from: Option<i32>,
-    year_to: Option<i32>,
+    scope: AlbumListScope,
+    name: Option<SelectorText>,
+    artist_id: Option<IdSet<ArtistId>>,
+    album_artist_id: Option<IdSet<ArtistId>>,
+    artists_id: Option<IdSet<ArtistId>>,
+    role: Option<RoleSet>,
+    genre: Option<IdSet<SelectorText>>,
+    year: Option<Range<i32>>,
+    compilation: Option<bool>,
+    starred: Option<bool>,
+    has_rating: Option<bool>,
+    rating: Option<Range<u8>>,
+    recently_played: Option<bool>,
+    date_added: Option<Range<chrono::DateTime<chrono::Utc>>>,
+    missing: Option<bool>,
+    library_id: Option<IdSet<LibraryId>>,
+    sort_direction: Option<SortDirection>,
+    random_seed: Option<RandomSeed>,
 }
 
 impl AlbumListFilter {
@@ -550,38 +646,184 @@ impl AlbumListFilter {
         Self::default()
     }
 
-    pub fn starred(mut self) -> Self {
-        self.starred = true;
+    pub fn with_scope(mut self, scope: AlbumListScope) -> Self {
+        self.scope = scope;
         self
     }
 
-    pub fn with_genre(mut self, genre: Option<String>) -> Self {
-        self.genre = genre
-            .map(|genre| genre.trim().to_owned())
-            .filter(|genre| !genre.is_empty());
+    pub fn with_name(mut self, name: Option<SelectorText>) -> Self {
+        self.name = name;
         self
     }
 
-    pub fn with_year(mut self, from: Option<i32>, to: Option<i32>) -> Self {
-        self.year_from = from;
-        self.year_to = to;
+    pub fn with_artist_id(mut self, artist_id: Option<IdSet<ArtistId>>) -> Self {
+        self.artist_id = artist_id;
         self
     }
 
-    pub fn is_starred(&self) -> bool {
+    pub fn with_album_artist_id(mut self, album_artist_id: Option<IdSet<ArtistId>>) -> Self {
+        self.album_artist_id = album_artist_id;
+        self
+    }
+
+    pub fn with_artists_id(mut self, artists_id: Option<IdSet<ArtistId>>) -> Self {
+        self.artists_id = artists_id;
+        self
+    }
+
+    pub fn with_role(mut self, role: Option<RoleSet>) -> Self {
+        self.role = role;
+        self
+    }
+
+    pub fn with_genre(mut self, genre: Option<IdSet<SelectorText>>) -> Self {
+        self.genre = genre;
+        self
+    }
+
+    pub fn with_year(mut self, year: Option<Range<i32>>) -> Self {
+        self.year = year;
+        self
+    }
+
+    pub fn with_compilation(mut self, compilation: Option<bool>) -> Self {
+        self.compilation = compilation;
+        self
+    }
+
+    pub fn with_starred(mut self, starred: Option<bool>) -> Self {
+        self.starred = starred;
+        self
+    }
+
+    pub fn with_has_rating(mut self, has_rating: Option<bool>) -> Self {
+        self.has_rating = has_rating;
+        self
+    }
+
+    pub fn with_rating(mut self, rating: Option<Range<u8>>) -> Self {
+        self.rating = rating;
+        self
+    }
+
+    pub fn with_recently_played(mut self, recently_played: Option<bool>) -> Self {
+        self.recently_played = recently_played;
+        self
+    }
+
+    pub fn with_date_added(
+        mut self,
+        date_added: Option<Range<chrono::DateTime<chrono::Utc>>>,
+    ) -> Self {
+        self.date_added = date_added;
+        self
+    }
+
+    pub fn with_missing(mut self, missing: Option<bool>) -> Self {
+        self.missing = missing;
+        self
+    }
+
+    pub fn with_library_id(mut self, library_id: Option<IdSet<LibraryId>>) -> Self {
+        self.library_id = library_id;
+        self
+    }
+
+    pub fn with_sort_direction(mut self, sort_direction: Option<SortDirection>) -> Self {
+        self.sort_direction = sort_direction;
+        self
+    }
+
+    pub fn with_random_seed(mut self, random_seed: Option<RandomSeed>) -> Self {
+        self.random_seed = random_seed;
+        self
+    }
+
+    pub fn scope(&self) -> AlbumListScope {
+        self.scope
+    }
+
+    pub fn name(&self) -> Option<&SelectorText> {
+        self.name.as_ref()
+    }
+
+    pub fn artist_id(&self) -> Option<&IdSet<ArtistId>> {
+        self.artist_id.as_ref()
+    }
+
+    pub fn album_artist_id(&self) -> Option<&IdSet<ArtistId>> {
+        self.album_artist_id.as_ref()
+    }
+
+    pub fn artists_id(&self) -> Option<&IdSet<ArtistId>> {
+        self.artists_id.as_ref()
+    }
+
+    pub fn role(&self) -> Option<&RoleSet> {
+        self.role.as_ref()
+    }
+
+    pub fn genre(&self) -> Option<&IdSet<SelectorText>> {
+        self.genre.as_ref()
+    }
+
+    pub fn year(&self) -> Option<Range<i32>> {
+        self.year
+    }
+
+    pub fn compilation(&self) -> Option<bool> {
+        self.compilation
+    }
+
+    pub fn starred(&self) -> Option<bool> {
         self.starred
     }
 
-    pub fn genre(&self) -> Option<&str> {
-        self.genre.as_deref()
+    pub fn has_rating(&self) -> Option<bool> {
+        self.has_rating
     }
 
-    pub fn year_from(&self) -> Option<i32> {
-        self.year_from
+    pub fn rating(&self) -> Option<Range<u8>> {
+        self.rating
     }
 
-    pub fn year_to(&self) -> Option<i32> {
-        self.year_to
+    pub fn recently_played(&self) -> Option<bool> {
+        self.recently_played
+    }
+
+    pub fn date_added(&self) -> Option<Range<chrono::DateTime<chrono::Utc>>> {
+        self.date_added
+    }
+
+    pub fn missing(&self) -> Option<bool> {
+        self.missing
+    }
+
+    pub fn library_id(&self) -> Option<&IdSet<LibraryId>> {
+        self.library_id.as_ref()
+    }
+
+    pub fn sort_direction(&self) -> Option<SortDirection> {
+        self.sort_direction
+    }
+
+    pub fn random_seed(&self) -> Option<RandomSeed> {
+        self.random_seed
+    }
+
+    pub fn resolved_direction(&self, order: AlbumOrder) -> SortDirection {
+        self.sort_direction
+            .unwrap_or_else(|| order.default_direction())
+    }
+
+    pub fn resolved_seed(&self, order: AlbumOrder) -> Result<Option<RandomSeed>, ValidationError> {
+        match (order, self.random_seed) {
+            (AlbumOrder::Random, seed) => Ok(seed),
+            (_, Some(_)) => Err(ValidationError::Invalid {
+                field: "random_seed",
+            }),
+            (_, None) => Ok(None),
+        }
     }
 }
 
@@ -827,5 +1069,94 @@ mod tests {
             .with_totals(Some(0), Some(0));
         assert_eq!(zero.disc_total(), None);
         assert_eq!(zero.track_total(), None);
+    }
+
+    #[test]
+    fn album_orders_round_trip_through_their_native_names() {
+        for order in AlbumOrder::ALL {
+            assert_eq!(AlbumOrder::parse(order.as_str()), Some(order));
+        }
+
+        assert_eq!(AlbumOrder::parse("albumartist"), None);
+        assert_eq!(AlbumOrder::parse("songCount"), None);
+        assert_eq!(AlbumOrder::parse("explicitStatus"), None);
+        assert_eq!(AlbumOrder::parse("Name"), None);
+    }
+
+    #[test]
+    fn album_orders_carry_their_natural_direction() {
+        for order in [
+            AlbumOrder::Name,
+            AlbumOrder::AlbumArtist,
+            AlbumOrder::Artist,
+            AlbumOrder::Duration,
+            AlbumOrder::Random,
+        ] {
+            assert_eq!(
+                order.default_direction(),
+                SortDirection::Ascending,
+                "{order:?}"
+            );
+        }
+
+        for order in [
+            AlbumOrder::SongCount,
+            AlbumOrder::MaxYear,
+            AlbumOrder::DateAdded,
+            AlbumOrder::StarredAt,
+            AlbumOrder::Rating,
+            AlbumOrder::PlayCount,
+            AlbumOrder::PlayDate,
+            AlbumOrder::RecentlyAdded,
+        ] {
+            assert_eq!(
+                order.default_direction(),
+                SortDirection::Descending,
+                "{order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn album_filters_default_to_an_absent_engaged_filter() {
+        let filter = AlbumListFilter::new();
+
+        assert_eq!(filter.scope(), AlbumListScope::Engaged);
+        assert_eq!(
+            filter.resolved_direction(AlbumOrder::Name),
+            SortDirection::Ascending
+        );
+        assert_eq!(
+            filter.resolved_direction(AlbumOrder::Rating),
+            SortDirection::Descending
+        );
+        assert_eq!(filter.resolved_seed(AlbumOrder::Name).unwrap(), None);
+        assert!(matches!(
+            filter
+                .clone()
+                .with_random_seed(Some(RandomSeed::new(7)))
+                .resolved_seed(AlbumOrder::Name),
+            Err(ValidationError::Invalid {
+                field: "random_seed"
+            })
+        ));
+        assert_eq!(
+            filter
+                .with_random_seed(Some(RandomSeed::new(7)))
+                .resolved_seed(AlbumOrder::Random)
+                .unwrap(),
+            Some(RandomSeed::new(7))
+        );
+    }
+
+    #[test]
+    fn album_scopes_round_trip_through_their_native_names() {
+        assert_eq!(
+            AlbumListScope::parse("engaged"),
+            Some(AlbumListScope::Engaged)
+        );
+        assert_eq!(AlbumListScope::parse("owned"), Some(AlbumListScope::Owned));
+        assert_eq!(AlbumListScope::parse("all"), None);
+        assert_eq!(AlbumListScope::default(), AlbumListScope::Engaged);
     }
 }

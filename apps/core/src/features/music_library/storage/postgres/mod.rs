@@ -28,6 +28,9 @@ mod test_playlists;
 #[path = "test_provider_state.rs"]
 mod test_provider_state;
 #[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_query_albums.rs"]
+mod test_query_albums;
+#[cfg(all(test, feature = "postgres-integration"))]
 #[path = "test_query_tracks.rs"]
 mod test_query_tracks;
 #[cfg(all(test, feature = "postgres-integration"))]

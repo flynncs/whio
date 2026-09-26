@@ -2,8 +2,9 @@ use super::PostgresTrackRepository;
 use std::sync::Arc;
 
 use crate::features::music_library::domain::{
-    AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit, ArtworkRef, KeepReason,
-    MatchQuality, ProviderId, SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
+    AlbumListFilter, AlbumListScope, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit,
+    ArtworkRef, IdSet, KeepReason, MatchQuality, ProviderId, Range, SelectorText, SourceIdentity,
+    SourceScope, StateTarget, TrackId, TrackMetadata,
 };
 use crate::features::music_library::sources::SourceQueries;
 use crate::features::music_library::storage::contracts::{
@@ -21,6 +22,19 @@ fn source(external_id: &str) -> SourceIdentity {
         external_id.to_owned(),
     )
     .unwrap()
+}
+
+fn genre_set(values: &[&str]) -> IdSet<SelectorText> {
+    IdSet::new(
+        values
+            .iter()
+            .map(|value| SelectorText::new(value).unwrap().unwrap()),
+    )
+    .unwrap()
+}
+
+fn year_range(from: i32, to: i32) -> Range<i32> {
+    Range::new(Some(from), Some(to)).unwrap()
 }
 
 fn local_source(external_id: &str) -> SourceIdentity {
@@ -868,7 +882,7 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
     );
 
     let summaries = repository
-        .list_albums(0, 10, AlbumOrder::Title, AlbumListFilter::default(), None)
+        .list_albums(0, 10, AlbumOrder::Name, AlbumListFilter::default(), None)
         .await
         .unwrap();
     let names = summaries
@@ -979,15 +993,15 @@ async fn browse_shows_only_engaged_albums_and_artists(pool: PgPool) {
     };
 
     for order in [
-        AlbumOrder::Title,
-        AlbumOrder::Artist,
+        AlbumOrder::Name,
+        AlbumOrder::AlbumArtist,
         AlbumOrder::Random,
-        AlbumOrder::YearAscending,
-        AlbumOrder::YearDescending,
-        AlbumOrder::Starred,
-        AlbumOrder::HighestRated,
-        AlbumOrder::Recent,
-        AlbumOrder::Frequent,
+        AlbumOrder::MaxYear,
+        AlbumOrder::MaxYear,
+        AlbumOrder::StarredAt,
+        AlbumOrder::Rating,
+        AlbumOrder::PlayDate,
+        AlbumOrder::PlayCount,
     ] {
         let names = listed(order).await;
         assert!(
@@ -996,13 +1010,25 @@ async fn browse_shows_only_engaged_albums_and_artists(pool: PgPool) {
         );
     }
 
-    let played = listed(AlbumOrder::Recent).await;
+    let played = listed(AlbumOrder::PlayDate).await;
     assert!(
         played.iter().any(|name| name == "Played"),
         "a played provider album belongs in recently played, got {played:?}"
     );
 
-    let newest = listed(AlbumOrder::RecentlyAdded).await;
+    let newest = repository
+        .list_albums(
+            0,
+            25,
+            AlbumOrder::RecentlyAdded,
+            AlbumListFilter::new().with_scope(AlbumListScope::Owned),
+            Some(user),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.album().title().to_owned())
+        .collect::<Vec<_>>();
     assert!(
         !newest.iter().any(|name| name == "Played"),
         "a played provider album is not recently added, got {newest:?}"
@@ -1801,7 +1827,7 @@ async fn per_user_state_and_genres_round_trip(pool: PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::Frequent,
+            AlbumOrder::PlayCount,
             AlbumListFilter::new(),
             Some(user),
         )
@@ -1814,7 +1840,7 @@ async fn per_user_state_and_genres_round_trip(pool: PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::HighestRated,
+            AlbumOrder::Rating,
             AlbumListFilter::new(),
             Some(user),
         )
@@ -1826,7 +1852,7 @@ async fn per_user_state_and_genres_round_trip(pool: PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::Starred,
+            AlbumOrder::StarredAt,
             AlbumListFilter::new(),
             Some(user),
         )
@@ -1838,8 +1864,8 @@ async fn per_user_state_and_genres_round_trip(pool: PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::Title,
-            AlbumListFilter::new().with_genre(Some("rock".to_owned())),
+            AlbumOrder::Name,
+            AlbumListFilter::new().with_genre(Some(genre_set(&["rock"]))),
             None,
         )
         .await
@@ -1850,8 +1876,8 @@ async fn per_user_state_and_genres_round_trip(pool: PgPool) {
         .list_albums(
             0,
             10,
-            AlbumOrder::YearAscending,
-            AlbumListFilter::new().with_year(Some(1900), Some(2100)),
+            AlbumOrder::MaxYear,
+            AlbumListFilter::new().with_year(Some(year_range(1900, 2100))),
             None,
         )
         .await
