@@ -1049,6 +1049,17 @@ async fn owner_is_reported_and_editability_is_explicit(pool: PgPool) {
     assert_eq!(owned.playlist.owner_id(), owner);
     assert_eq!(owned.playlist.owner_username(), "real-owner");
     assert!(owned.editable);
+
+    let created = service
+        .create(stranger, "reader-owned", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        created.owner_id(),
+        stranger,
+        "create stamps the caller as the owner"
+    );
+    assert_eq!(created.owner_username(), "reader");
     assert!(
         service
             .edit(
