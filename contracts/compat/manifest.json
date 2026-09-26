@@ -2,14 +2,15 @@
   "manifest_version": 1,
   "kind": "compat-conformance-inventory",
   "sources": {
-    "whio_revision": "db7a4c909e965e3afca9cd9663c742f5c598d9cc",
+    "whio_revision": "5fd193c2692d30419c3d07dfaa956b7fedcd25c9",
     "feishin_revision": "6c5173f1cf3c2b946c6cf7997428a873e2bf3d7a",
     "navidrome_revision": "672c0af580b182ffb219dc5f64c62b456163fd38",
     "derived_from": [
       "docs/full-parity-plan.md#6",
       "docs/parity-query-contracts.md",
       "docs/sessions/2026-09-26-full-parity-audit.json",
-      "docs/feishin-client-surface.md"
+      "docs/feishin-client-surface.md",
+      "audited route baseline: whio db7a4c909e965e3afca9cd9663c742f5c598d9cc (the full-parity audit's revision, from which each route row's baseline and status were derived)"
     ],
     "planning_documents_are_local_only": true
   },
@@ -50,7 +51,9 @@
       "plan_owner": "identity/app, P1/P16",
       "required_behaviour": "profile version and usable abilities",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/compat_http.rs ping_answers_under_both_compat_roots"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -73,7 +76,10 @@
       "plan_owner": "identity, P1",
       "required_behaviour": "visible user and truthful roles",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/compat_http.rs subsonic_user_roles_match_the_approved_table",
+        "C:apps/core/tests/compat_http.rs member_cannot_read_another_user"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -119,7 +125,10 @@
       "plan_owner": "music library, P2/P3/P4",
       "required_behaviour": "empty enumeration, independent windows, source facts",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/subsonic_search_windows.rs search3_windows_each_kind_independently",
+        "C:apps/core/tests/compat_http.rs enumerated_song_children_carry_the_membership_facts"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -142,7 +151,11 @@
       "plan_owner": "music library, P2/P4",
       "required_behaviour": "scoped index and counts",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/compat_http.rs subsonic_artist_surfaces_are_album_artist_scoped",
+        "C:apps/core/src/facades/subsonic/service_tests.rs artists_group_into_indexes",
+        "contract: apps/core/src/facades/subsonic/mod.rs registers /getArtists with get() only; the Subsonic wire also permits POST, which this router does not serve"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -165,7 +178,11 @@
       "plan_owner": "music library, P2/P3",
       "required_behaviour": "real artist/album counts and state",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/compat_http.rs subsonic_artist_surfaces_are_album_artist_scoped",
+        "C:apps/core/src/facades/subsonic/service_tests.rs subsonic_album_and_artist_details_use_the_shared_operations",
+        "contract: apps/core/src/facades/subsonic/mod.rs registers /getArtist with get() only; the Subsonic wire also permits POST, which this router does not serve"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -188,7 +205,13 @@
       "plan_owner": "music library, P2/P4",
       "required_behaviour": "all consumed list modes, filters and paging",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/library_state_http.rs subsonic_state_list_types_filter_their_membership",
+        "C:apps/core/tests/rest_http.rs subsonic_music_folder_scopes_the_browse",
+        "C:apps/core/tests/w1_matrix_http.rs subsonic_album_window_past_1000_agrees_with_the_count",
+        "C:apps/core/src/facades/subsonic/service_tests.rs album_list_maps_types_and_rejects_unknown",
+        "contract: apps/core/src/facades/subsonic/mod.rs registers /getAlbumList2 with get() only; the Subsonic wire also permits POST, which this router does not serve"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -211,7 +234,11 @@
       "plan_owner": "music library, P2/P3",
       "required_behaviour": "complete/partial album policy and valid children",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/compat_http.rs opening_a_partial_provider_album_completes_it_over_the_facade",
+        "C:apps/core/src/facades/subsonic/service_tests.rs album_detail_lists_its_tracks_in_order",
+        "contract: apps/core/src/facades/subsonic/mod.rs registers /getAlbum with get() only; the Subsonic wire also permits POST, which this router does not serve"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -234,7 +261,9 @@
       "plan_owner": "music library, P3/P6",
       "required_behaviour": "metadata facets and counts",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/library_state_http.rs subsonic_star_rating_play_and_genre_routes"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -464,7 +493,9 @@
       "plan_owner": "music library, P3/P4",
       "required_behaviour": "truthful runtime/reconciliation status",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/library_state_http.rs subsonic_scan_status_reports_and_starts"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -487,7 +518,10 @@
       "plan_owner": "music library, P1/P3/P4",
       "required_behaviour": "permission, full/target scan and completion status",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/compat_http.rs member_start_scan_is_forbidden",
+        "C:apps/core/tests/compat_http.rs admin_start_scan_succeeds"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -597,13 +631,16 @@
       ],
       "profile": "opensubsonic",
       "feature_gate": null,
-      "baseline": "missing",
+      "baseline": "present",
       "owner_task": "L10",
       "plan_owner": "music library, P2/P6",
       "required_behaviour": "genre, offsets/count and library selector",
       "required_response_fields": [],
-      "test_cases": [],
-      "status": "unproved",
+      "test_cases": [
+        "C:apps/core/src/facades/subsonic/service_tests.rs subsonic_songs_by_genre_uses_the_stored_set",
+        "C:apps/core/tests/rest_http.rs subsonic_music_folder_leaves_other_parameters_alone"
+      ],
+      "status": "registered",
       "in_target": true
     },
     {
@@ -620,13 +657,15 @@
       ],
       "profile": "opensubsonic",
       "feature_gate": null,
-      "baseline": "missing",
+      "baseline": "present",
       "owner_task": "L10",
       "plan_owner": "music library, P2",
       "required_behaviour": "bounded filtered sampling",
       "required_response_fields": [],
-      "test_cases": [],
-      "status": "unproved",
+      "test_cases": [
+        "C:apps/core/src/facades/subsonic/service_tests.rs subsonic_random_songs_is_one_permutation"
+      ],
+      "status": "registered",
       "in_target": true
     },
     {
@@ -781,13 +820,15 @@
       ],
       "profile": "opensubsonic",
       "feature_gate": null,
-      "baseline": "missing",
+      "baseline": "present",
       "owner_task": "L10",
       "plan_owner": "music library, P2/P4",
       "required_behaviour": "scoped legacy artist index",
       "required_response_fields": [],
-      "test_cases": [],
-      "status": "unproved",
+      "test_cases": [
+        "C:apps/core/src/facades/subsonic/service_tests.rs subsonic_indexes_is_the_artist_index"
+      ],
+      "status": "registered",
       "in_target": true
     },
     {
@@ -804,13 +845,15 @@
       ],
       "profile": "opensubsonic",
       "feature_gate": null,
-      "baseline": "missing",
+      "baseline": "present",
       "owner_task": "L10",
       "plan_owner": "music library, P2/P4",
       "required_behaviour": "canonical artist/album hierarchy",
       "required_response_fields": [],
-      "test_cases": [],
-      "status": "unproved",
+      "test_cases": [
+        "C:apps/core/src/facades/subsonic/service_tests.rs subsonic_music_directory_walks_entities"
+      ],
+      "status": "registered",
       "in_target": true
     },
     {
@@ -1151,7 +1194,10 @@
       "plan_owner": "identity, P1/P16",
       "required_behaviour": "user, permission and compat session",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/compat_http.rs login_with_known_app_password_returns_nd_payload",
+        "C:apps/core/tests/compat_http.rs navidrome_login_reports_the_real_admin_flag"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -1172,7 +1218,10 @@
       "plan_owner": "music library, P2/P3/P4",
       "required_behaviour": "browse/filter/sort/page/count, not search-only",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/navidrome_song_http.rs songs_without_a_title_enumerate_the_library",
+        "C:apps/core/tests/navidrome_song_http.rs total_is_the_page_total"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -1193,7 +1242,10 @@
       "plan_owner": "music library, P3/P10",
       "required_behaviour": "full truthful projection/lyrics on detail",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/compat_http.rs song_detail_returns_the_searched_song",
+        "C:apps/core/tests/library_state_http.rs navidrome_native_exposes_state_and_genres"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -1214,7 +1266,11 @@
       "plan_owner": "music library, P2/P3/P4",
       "required_behaviour": "arrays, ratings, role/genre/year/recent filters",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/navidrome_album_artist_http.rs navidrome_album_list_translates_every_client_field",
+        "C:apps/core/tests/navidrome_album_artist_http.rs navidrome_album_order_comes_from_the_request",
+        "C:apps/core/tests/navidrome_album_artist_http.rs navidrome_album_artist_filter_agrees_with_its_total"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -1235,7 +1291,10 @@
       "plan_owner": "music library, P2/P3",
       "required_behaviour": "full metadata, completion and artwork refs",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/navidrome_album_artist_http.rs navidrome_album_detail_and_artist_detail_keep_their_contract",
+        "C:apps/core/tests/navidrome_album_artist_http.rs navidrome_album_and_artist_facts_are_sourced"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -1256,7 +1315,10 @@
       "plan_owner": "music library, P2/P3/P4",
       "required_behaviour": "role/membership-aware list/count",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/navidrome_album_artist_http.rs navidrome_artist_list_is_role_scoped",
+        "C:apps/core/tests/navidrome_album_artist_http.rs navidrome_album_and_artist_facts_are_sourced"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -1277,7 +1339,10 @@
       "plan_owner": "music library, P2/P3/P8/P10",
       "required_behaviour": "metadata, stats and image revision",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/navidrome_album_artist_http.rs navidrome_album_detail_and_artist_detail_keep_their_contract",
+        "C:apps/core/tests/navidrome_album_artist_http.rs navidrome_album_and_artist_facts_are_sourced"
+      ],
       "status": "registered",
       "in_target": true
     },
@@ -1971,7 +2036,7 @@
       ],
       "profile": "native",
       "feature_gate": null,
-      "baseline": "missing",
+      "baseline": "present",
       "owner_task": "L03",
       "plan_owner": "P2/P3 (F03)",
       "required_behaviour": "first native page route: exact total, deterministic order, principal scope, x-total-count",
@@ -1979,8 +2044,13 @@
         "items",
         "total"
       ],
-      "test_cases": [],
-      "status": "unproved",
+      "test_cases": [
+        "C:apps/core/tests/native_library_http.rs native_track_page_returns_items_total_and_matching_header",
+        "C:apps/core/tests/native_library_http.rs native_track_page_exposes_every_selector",
+        "C:apps/core/tests/native_library_http.rs native_deep_page_beyond_1000_tracks_returns_the_remainder",
+        "C:apps/core/tests/w1_matrix_http.rs a_library_scoped_read_is_the_same_everywhere"
+      ],
+      "status": "registered",
       "in_target": false
     },
     {
@@ -2112,7 +2182,9 @@
       "plan_owner": "P3/P11",
       "required_behaviour": "retained registered Subsonic path outside the pinned client's called set; must expose the same principal-scoped starred state as getStarred",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/library_state_http.rs subsonic_star_rating_play_and_genre_routes"
+      ],
       "status": "registered",
       "in_target": false
     },
@@ -2133,7 +2205,9 @@
       "plan_owner": "P3/P6",
       "required_behaviour": "retained registered Navidrome genre read outside the pinned client's called set; must serve indexed genre facets rather than a stub",
       "required_response_fields": [],
-      "test_cases": [],
+      "test_cases": [
+        "C:apps/core/tests/library_state_http.rs navidrome_native_exposes_state_and_genres"
+      ],
       "status": "registered",
       "in_target": false
     }
