@@ -3,12 +3,14 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{
-    features::music_library::catalogue::{CatalogueError, LibraryService, SearchHit},
-    features::music_library::{
-        domain::{Playlist, PlaylistId, TrackId},
-        storage::contracts::{PlaylistStore, TrackRepositoryError},
+use crate::features::music_library::{
+    catalogue::{CatalogueError, LibraryService, SearchHit},
+    domain::{
+        CommentPatch, MoveTarget, OccurrenceSelector, Playlist, PlaylistEntryChange,
+        PlaylistEntryError, PlaylistId, PlaylistMetadataPatch, PlaylistOccurrence, PlaylistWrite,
+        PlaylistWriteOutcome, TrackId,
     },
+    storage::contracts::{PlaylistStore, TrackRepositoryError},
 };
 
 #[derive(Debug, Error)]
@@ -21,11 +23,18 @@ pub enum PlaylistError {
 
     #[error("playlist entries could not be read")]
     Library(#[source] CatalogueError),
+
+    #[error("playlist has revision {current_revision}, not the requested revision")]
+    Conflict { current_revision: i64 },
+
+    #[error("playlist entry was not applied")]
+    Entry(#[source] PlaylistEntryError),
 }
 
 pub struct PlaylistDetail {
     pub playlist: Playlist,
     pub entries: Vec<SearchHit>,
+    pub editable: bool,
 }
 
 pub struct PlaylistEdit<'a> {
@@ -56,36 +65,33 @@ impl PlaylistService {
         }
     }
 
-    pub async fn list(&self, user: Uuid) -> Result<Vec<Playlist>, PlaylistError> {
+    pub async fn list(&self, principal: Uuid) -> Result<Vec<Playlist>, PlaylistError> {
         self.store()?
-            .list_playlists(user)
+            .list_playlists(principal)
             .await
             .map_err(PlaylistError::Repository)
     }
 
     pub async fn detail(
         &self,
-        user: Uuid,
+        principal: Uuid,
         playlist_id: &PlaylistId,
     ) -> Result<Option<PlaylistDetail>, PlaylistError> {
         let store = self.store()?;
-        let Some(playlist) = store
-            .find_playlist(user, playlist_id)
-            .await
-            .map_err(PlaylistError::Repository)?
-        else {
+        let Some(playlist) = self.visible_playlist(principal, playlist_id).await? else {
             return Ok(None);
         };
+        let editable = Self::editable_by(principal, &playlist);
 
-        let track_ids = store
-            .playlist_tracks(playlist_id)
+        let occurrences = store
+            .playlist_occurrences(playlist_id)
             .await
             .map_err(PlaylistError::Repository)?;
-        let mut entries = Vec::with_capacity(track_ids.len());
-        for track_id in track_ids {
+        let mut entries = Vec::with_capacity(occurrences.len());
+        for occurrence in &occurrences {
             if let Some(hit) = self
                 .library
-                .track_detail(&track_id, Some(&user))
+                .track_detail(occurrence.track_id(), Some(&principal))
                 .await
                 .map_err(PlaylistError::Library)?
             {
@@ -93,129 +99,265 @@ impl PlaylistService {
             }
         }
 
-        Ok(Some(PlaylistDetail { playlist, entries }))
+        Ok(Some(PlaylistDetail {
+            playlist,
+            entries,
+            editable,
+        }))
+    }
+
+    pub async fn entries(
+        &self,
+        principal: Uuid,
+        playlist_id: &PlaylistId,
+    ) -> Result<Option<Vec<PlaylistOccurrence>>, PlaylistError> {
+        let store = self.store()?;
+        if self
+            .visible_playlist(principal, playlist_id)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+
+        store
+            .playlist_occurrences(playlist_id)
+            .await
+            .map(Some)
+            .map_err(PlaylistError::Repository)
     }
 
     pub async fn create(
         &self,
-        user: Uuid,
+        principal: Uuid,
         name: &str,
         comment: Option<&str>,
     ) -> Result<Playlist, PlaylistError> {
         self.store()?
-            .create_playlist(user, name, comment)
+            .create_playlist(principal, name, comment)
             .await
             .map_err(PlaylistError::Repository)
     }
 
     pub async fn update(
         &self,
-        user: Uuid,
+        principal: Uuid,
         playlist_id: &PlaylistId,
         name: &str,
         comment: Option<&str>,
         public: bool,
     ) -> Result<Option<Playlist>, PlaylistError> {
-        self.store()?
-            .update_playlist(user, playlist_id, name, comment, public)
-            .await
-            .map_err(PlaylistError::Repository)
+        let write = PlaylistWrite {
+            principal,
+            playlist_id: playlist_id.clone(),
+            expected_revision: None,
+            metadata: PlaylistMetadataPatch {
+                name: Some(name.to_owned()),
+                comment: CommentPatch::Set(comment.map(str::to_owned)),
+                public: Some(public),
+            },
+            entries: PlaylistEntryChange::Unchanged,
+        };
+
+        applied(self.write(write).await?)
     }
 
     pub async fn delete(
         &self,
-        user: Uuid,
+        principal: Uuid,
         playlist_id: &PlaylistId,
     ) -> Result<bool, PlaylistError> {
         self.store()?
-            .delete_playlist(user, playlist_id)
+            .delete_playlist(principal, playlist_id)
             .await
             .map_err(PlaylistError::Repository)
     }
 
     pub async fn add_track(
         &self,
-        user: Uuid,
+        principal: Uuid,
         playlist_id: &PlaylistId,
         track_id: &TrackId,
     ) -> Result<bool, PlaylistError> {
-        self.store()?
-            .add_playlist_track(user, playlist_id, track_id)
-            .await
-            .map_err(PlaylistError::Repository)
-    }
-
-    pub async fn remove_index(
-        &self,
-        user: Uuid,
-        playlist_id: &PlaylistId,
-        index: usize,
-    ) -> Result<bool, PlaylistError> {
-        let store = self.store()?;
-        let tracks = store
-            .playlist_tracks(playlist_id)
-            .await
-            .map_err(PlaylistError::Repository)?;
-        let Some(track_id) = tracks.get(index).cloned() else {
-            return Ok(false);
+        let write = PlaylistWrite {
+            principal,
+            playlist_id: playlist_id.clone(),
+            expected_revision: None,
+            metadata: PlaylistMetadataPatch::default(),
+            entries: PlaylistEntryChange::Apply {
+                removals: Vec::new(),
+                additions: vec![track_id.clone()],
+            },
         };
 
-        store
-            .remove_playlist_track(user, playlist_id, &track_id)
-            .await
-            .map_err(PlaylistError::Repository)
+        Ok(applied(self.write(write).await?)?.is_some())
     }
 
-    /// Preserve the existing incremental edit contract: metadata errors fail the
-    /// request, while invalid/unavailable individual entry edits do not undo it.
     pub async fn edit(
         &self,
-        user: Uuid,
+        principal: Uuid,
         playlist_id: &PlaylistId,
-        mut edit: PlaylistEdit<'_>,
+        edit: PlaylistEdit<'_>,
     ) -> Result<bool, PlaylistError> {
-        let Some(current) = self.detail(user, playlist_id).await? else {
-            return Ok(false);
+        self.edit_at_revision(principal, playlist_id, None, edit)
+            .await
+    }
+
+    pub async fn edit_at_revision(
+        &self,
+        principal: Uuid,
+        playlist_id: &PlaylistId,
+        revision: Option<i64>,
+        edit: PlaylistEdit<'_>,
+    ) -> Result<bool, PlaylistError> {
+        let write = PlaylistWrite {
+            principal,
+            playlist_id: playlist_id.clone(),
+            expected_revision: revision,
+            metadata: PlaylistMetadataPatch {
+                name: edit.name.map(str::to_owned),
+                comment: match edit.comment {
+                    Some(comment) => CommentPatch::Set(Some(comment.to_owned())),
+                    None => CommentPatch::Keep,
+                },
+                public: edit.public,
+            },
+            entries: PlaylistEntryChange::Apply {
+                removals: edit
+                    .removals
+                    .iter()
+                    .map(|index| {
+                        OccurrenceSelector::Index(u32::try_from(*index).unwrap_or(u32::MAX))
+                    })
+                    .collect(),
+                additions: edit.additions.to_vec(),
+            },
         };
-        let name = edit.name.unwrap_or_else(|| current.playlist.name());
-        let comment = edit.comment.or_else(|| current.playlist.comment());
-        let public = edit.public.unwrap_or_else(|| current.playlist.is_public());
-        self.update(user, playlist_id, name, comment, public)
-            .await?;
-        for track in edit.additions {
-            let _ = self.add_track(user, playlist_id, track).await;
-        }
-        edit.removals
-            .sort_unstable_by(|left, right| right.cmp(left));
-        for index in edit.removals {
-            let _ = self.remove_index(user, playlist_id, index).await;
-        }
-        Ok(true)
+
+        Ok(applied(self.write(write).await?)?.is_some())
+    }
+
+    pub async fn move_entry(
+        &self,
+        principal: Uuid,
+        playlist_id: &PlaylistId,
+        selector: OccurrenceSelector,
+        target: MoveTarget,
+        revision: Option<i64>,
+    ) -> Result<bool, PlaylistError> {
+        let write = PlaylistWrite {
+            principal,
+            playlist_id: playlist_id.clone(),
+            expected_revision: revision,
+            metadata: PlaylistMetadataPatch::default(),
+            entries: PlaylistEntryChange::Move { selector, target },
+        };
+
+        Ok(applied(self.write(write).await?)?.is_some())
     }
 
     pub async fn create_or_append(
         &self,
-        user: Uuid,
+        principal: Uuid,
         playlist_id: Option<PlaylistId>,
         name: &str,
         additions: &[TrackId],
     ) -> Result<Option<PlaylistDetail>, PlaylistError> {
         let playlist_id = match playlist_id {
-            Some(id) => {
-                if !name.is_empty() {
-                    self.update(user, &id, name, None, false).await?;
+            Some(playlist_id) => {
+                let write = PlaylistWrite {
+                    principal,
+                    playlist_id: playlist_id.clone(),
+                    expected_revision: None,
+                    metadata: PlaylistMetadataPatch {
+                        name: (!name.is_empty()).then(|| name.to_owned()),
+                        comment: CommentPatch::Keep,
+                        public: None,
+                    },
+                    entries: PlaylistEntryChange::Replace(additions.to_vec()),
+                };
+                if applied(self.write(write).await?)?.is_none() {
+                    return Ok(None);
                 }
-                id
+
+                playlist_id
             }
-            None => self.create(user, name, None).await?.id().clone(),
+            None => {
+                let playlist = self.create(principal, name, None).await?;
+                if !additions.is_empty() {
+                    let write = PlaylistWrite {
+                        principal,
+                        playlist_id: playlist.id().clone(),
+                        expected_revision: None,
+                        metadata: PlaylistMetadataPatch::default(),
+                        entries: PlaylistEntryChange::Apply {
+                            removals: Vec::new(),
+                            additions: additions.to_vec(),
+                        },
+                    };
+                    applied(self.write(write).await?)?;
+                }
+
+                playlist.id().clone()
+            }
         };
-        for track in additions {
-            let _ = self.add_track(user, &playlist_id, track).await;
+
+        self.detail(principal, &playlist_id).await
+    }
+
+    fn visible_to(principal: Uuid, playlist: &Playlist) -> bool {
+        playlist.owner_id() == principal || playlist.is_public()
+    }
+
+    fn editable_by(principal: Uuid, playlist: &Playlist) -> bool {
+        playlist.owner_id() == principal
+    }
+
+    async fn visible_playlist(
+        &self,
+        principal: Uuid,
+        playlist_id: &PlaylistId,
+    ) -> Result<Option<Playlist>, PlaylistError> {
+        let found = self
+            .store()?
+            .find_playlist(playlist_id)
+            .await
+            .map_err(PlaylistError::Repository)?;
+
+        Ok(found.filter(|playlist| Self::visible_to(principal, playlist)))
+    }
+
+    async fn write(&self, write: PlaylistWrite) -> Result<PlaylistWriteOutcome, PlaylistError> {
+        let store = self.store()?;
+        let Some(current) = store
+            .find_playlist(&write.playlist_id)
+            .await
+            .map_err(PlaylistError::Repository)?
+        else {
+            return Ok(PlaylistWriteOutcome::Missing);
+        };
+        if !Self::editable_by(write.principal, &current) {
+            return Ok(PlaylistWriteOutcome::Missing);
         }
-        self.detail(user, &playlist_id).await
+
+        store
+            .write_playlist(write)
+            .await
+            .map_err(PlaylistError::Repository)
     }
 
     fn store(&self) -> Result<&Arc<dyn PlaylistStore>, PlaylistError> {
         self.store.as_ref().ok_or(PlaylistError::Disabled)
+    }
+}
+
+fn applied(outcome: PlaylistWriteOutcome) -> Result<Option<Playlist>, PlaylistError> {
+    match outcome {
+        PlaylistWriteOutcome::Applied(playlist) => Ok(Some(playlist)),
+        PlaylistWriteOutcome::Missing => Ok(None),
+        PlaylistWriteOutcome::RevisionConflict { current_revision } => {
+            Err(PlaylistError::Conflict { current_revision })
+        }
+        PlaylistWriteOutcome::Rejected(error) => Err(PlaylistError::Entry(error)),
     }
 }

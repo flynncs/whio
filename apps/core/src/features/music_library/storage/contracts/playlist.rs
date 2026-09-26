@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::features::music_library::domain::{Playlist, PlaylistId, TrackId};
+use crate::features::music_library::domain::{
+    Playlist, PlaylistId, PlaylistOccurrence, PlaylistWrite, PlaylistWriteOutcome, TrackId,
+};
 
 use super::TrackRepositoryError;
 
@@ -9,66 +11,38 @@ use super::TrackRepositoryError;
 pub trait PlaylistStore: Send + Sync {
     async fn create_playlist(
         &self,
-        _user: Uuid,
-        _name: &str,
-        _comment: Option<&str>,
-    ) -> Result<Playlist, TrackRepositoryError> {
-        Err(TrackRepositoryError::Unavailable)
-    }
-
-    async fn update_playlist(
-        &self,
-        _user: Uuid,
-        _playlist_id: &PlaylistId,
-        _name: &str,
-        _comment: Option<&str>,
-        _public: bool,
-    ) -> Result<Option<Playlist>, TrackRepositoryError> {
-        Ok(None)
-    }
-
-    async fn delete_playlist(
-        &self,
-        _user: Uuid,
-        _playlist_id: &PlaylistId,
-    ) -> Result<bool, TrackRepositoryError> {
-        Ok(false)
-    }
+        owner: Uuid,
+        name: &str,
+        comment: Option<&str>,
+    ) -> Result<Playlist, TrackRepositoryError>;
 
     async fn find_playlist(
         &self,
-        _user: Uuid,
-        _playlist_id: &PlaylistId,
-    ) -> Result<Option<Playlist>, TrackRepositoryError> {
-        Ok(None)
-    }
+        playlist_id: &PlaylistId,
+    ) -> Result<Option<Playlist>, TrackRepositoryError>;
 
-    async fn list_playlists(&self, _user: Uuid) -> Result<Vec<Playlist>, TrackRepositoryError> {
-        Ok(Vec::new())
-    }
+    async fn list_playlists(&self, principal: Uuid) -> Result<Vec<Playlist>, TrackRepositoryError>;
 
-    async fn playlist_tracks(
+    async fn delete_playlist(
         &self,
-        _playlist_id: &PlaylistId,
-    ) -> Result<Vec<TrackId>, TrackRepositoryError> {
-        Ok(Vec::new())
-    }
+        owner: Uuid,
+        playlist_id: &PlaylistId,
+    ) -> Result<bool, TrackRepositoryError>;
+
+    async fn playlist_occurrences(
+        &self,
+        playlist_id: &PlaylistId,
+    ) -> Result<Vec<PlaylistOccurrence>, TrackRepositoryError>;
+
+    async fn write_playlist(
+        &self,
+        write: PlaylistWrite,
+    ) -> Result<PlaylistWriteOutcome, TrackRepositoryError>;
 
     async fn add_playlist_track(
         &self,
-        _user: Uuid,
-        _playlist_id: &PlaylistId,
-        _track_id: &TrackId,
-    ) -> Result<bool, TrackRepositoryError> {
-        Ok(false)
-    }
-
-    async fn remove_playlist_track(
-        &self,
-        _user: Uuid,
-        _playlist_id: &PlaylistId,
-        _track_id: &TrackId,
-    ) -> Result<bool, TrackRepositoryError> {
-        Ok(false)
-    }
+        owner: Uuid,
+        playlist_id: &PlaylistId,
+        track_id: &TrackId,
+    ) -> Result<bool, TrackRepositoryError>;
 }

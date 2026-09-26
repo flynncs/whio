@@ -34,7 +34,11 @@ pub use duplicate_report::{
 pub use error::ValidationError;
 pub use metadata::TrackMetadata;
 pub use page::{MAX_PAGE_LIMIT, PageLimit, TrackListFilter, TrackListScope, TrackOrder, TrackPage};
-pub use playlist::{Playlist, PlaylistId};
+pub use playlist::{
+    CommentPatch, MoveTarget, OccurrenceSelector, Playlist, PlaylistEntryChange,
+    PlaylistEntryError, PlaylistEntryId, PlaylistId, PlaylistMetadataPatch, PlaylistOccurrence,
+    PlaylistWrite, PlaylistWriteOutcome,
+};
 pub use provider_state::ProviderEntityState;
 pub use query::{
     IdSet, MAX_SELECTOR_IDS, MAX_SELECTOR_TEXT, RandomSeed, Range, Resource, RoleSelector, RoleSet,
