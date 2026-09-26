@@ -1315,21 +1315,24 @@ mod native_library {
             .resolve_or_create_album(&album("Provider Only"))
             .await
             .unwrap();
-        let provider_track = catalogue
-            .get_or_create(
-                source("youtube_music", "vid-provider"),
-                metadata_by("provider only", "Soloist"),
-            )
-            .await
-            .unwrap();
-        catalogue
-            .set_album_track(
-                provider_only.id(),
-                provider_track.id(),
-                &AlbumTrack::unplaced(),
-            )
-            .await
-            .unwrap();
+
+        for index in 0..3u32 {
+            let provider_track = catalogue
+                .get_or_create(
+                    source("youtube_music", &format!("vid-provider-{index}")),
+                    metadata_by(&format!("provider only {index}"), "Soloist"),
+                )
+                .await
+                .unwrap();
+            catalogue
+                .set_album_track(
+                    provider_only.id(),
+                    provider_track.id(),
+                    &AlbumTrack::unplaced(),
+                )
+                .await
+                .unwrap();
+        }
         catalogue
             .set_album_source(kept.id(), &source("local", "kept.flac"))
             .await
@@ -1507,6 +1510,65 @@ mod native_library {
             names(&library.page("albums", &format!("library_id={music}")).await),
             ["Kept", "Local Only"]
         );
+
+        let first = library.page("albums", "order=name&limit=1").await;
+        assert_eq!(names(&first), ["Kept"]);
+        assert_eq!(
+            first["items"].as_array().unwrap().len(),
+            1,
+            "the page is one album"
+        );
+        assert_eq!(
+            first["total"],
+            json!(3),
+            "the album total is the count, not the page length"
+        );
+        let deep = library.page("albums", "order=name&limit=1&offset=2").await;
+        assert_eq!(names(&deep), ["Provider Only"]);
+        assert_eq!(deep["total"], json!(3), "a deep album page keeps the total");
+
+        let natural_count = library.page("albums", "order=song_count").await;
+        assert_eq!(
+            names(&natural_count),
+            ["Provider Only", "Kept", "Local Only"],
+            "song_count's natural direction is descending"
+        );
+        let ascending_count = library
+            .page("albums", "order=song_count&direction=asc")
+            .await;
+        assert_eq!(
+            names(&ascending_count),
+            ["Local Only", "Kept", "Provider Only"]
+        );
+        assert_eq!(ascending_count["total"], natural_count["total"]);
+        let declared_count = library
+            .page("albums", "order=song_count&direction=desc")
+            .await;
+        assert_eq!(declared_count["items"], natural_count["items"]);
+
+        let random = library.page("albums", "order=random").await;
+        let seed = random["seed"]
+            .as_u64()
+            .expect("order=random carries the album seed");
+        assert_eq!(random["total"], json!(3));
+        let repeat = library.page("albums", "order=random").await;
+        assert_eq!(
+            repeat["seed"],
+            json!(seed),
+            "the derived album seed is stable"
+        );
+        assert_eq!(names(&repeat), names(&random));
+        let echoed = library
+            .page("albums", &format!("order=random&seed={seed}"))
+            .await;
+        assert_eq!(echoed["seed"], json!(seed));
+        assert_eq!(
+            names(&echoed),
+            names(&random),
+            "the echoed album seed reproduces the page"
+        );
+        let explicit = library.page("albums", "order=random&seed=42").await;
+        assert_eq!(explicit["seed"], json!(42));
     }
 
     #[sqlx::test]
@@ -1519,6 +1581,10 @@ mod native_library {
             .resolve_or_create_album(
                 &album("Fronted Album").with_album_artist(credit("Fronted", None)),
             )
+            .await
+            .unwrap();
+        let other_album = catalogue
+            .resolve_or_create_album(&album("Other Album"))
             .await
             .unwrap();
         let composed_album = catalogue
@@ -1539,10 +1605,22 @@ mod native_library {
             member = Some(track.id().clone());
         }
 
+        let other = catalogue
+            .get_or_create(
+                source("local", "other.flac"),
+                metadata_by("other", "Fronted")
+                    .with_credits(vec![credit("Fronted", Some(CreditRole::Performer))]),
+            )
+            .await
+            .unwrap();
+        catalogue
+            .set_album_track(other_album.id(), other.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
         let composed = catalogue
             .get_or_create(
                 source("local", "composed.flac"),
-                metadata_by("composed", "Soloist")
+                metadata_by("composed", "Composer")
                     .with_credits(vec![credit("Composer", Some(CreditRole::Composer))]),
             )
             .await
@@ -1612,8 +1690,27 @@ mod native_library {
         assert_eq!(count, 1);
 
         let every = library.page("artists", "order=name").await;
-        assert_eq!(names(&every), ["Composer", "Fronted", "Soloist"]);
-        assert_eq!(every["total"], json!(3));
+        assert_eq!(names(&every), ["Composer", "Fronted"]);
+        assert_eq!(every["total"], json!(2));
+        let unscoped = every["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == "Fronted")
+            .unwrap();
+        assert_eq!(
+            (
+                unscoped["album_count"].clone(),
+                unscoped["song_count"].clone()
+            ),
+            (json!(2), json!(3)),
+            "the absent role is the union: the performer credit's album joins the fronted one"
+        );
+
+        let performers = library.page("artists", "role=performer").await;
+        assert_eq!(names(&performers), ["Fronted"]);
+        assert_eq!(performers["items"][0]["album_count"], json!(1));
+        assert_eq!(performers["items"][0]["song_count"], json!(1));
         assert_eq!(
             names(&library.page("artists", "role=composer").await),
             ["Composer"]
@@ -1627,13 +1724,43 @@ mod native_library {
             json!(1)
         );
         assert_eq!(
-            library.page("artists", "has_rating=false").await["total"],
-            json!(2)
+            names(&library.page("artists", "has_rating=false").await),
+            ["Composer"]
         );
         assert_eq!(
             library.page("artists", "rating_from=5&rating_to=5").await["total"],
             json!(1)
         );
+
+        let first = library.page("artists", "order=name&limit=1").await;
+        assert_eq!(names(&first), ["Composer"]);
+        assert_eq!(
+            first["items"].as_array().unwrap().len(),
+            1,
+            "the page is one artist"
+        );
+        assert_eq!(
+            first["total"],
+            json!(2),
+            "the artist total is the count, not the page length"
+        );
+
+        let natural_count = library.page("artists", "order=album_count").await;
+        assert_eq!(
+            names(&natural_count),
+            ["Fronted", "Composer"],
+            "album_count's natural direction is descending"
+        );
+        let ascending_count = library
+            .page("artists", "order=album_count&direction=asc")
+            .await;
+        assert_eq!(names(&ascending_count), ["Composer", "Fronted"]);
+        assert_eq!(ascending_count["total"], natural_count["total"]);
+        let declared_count = library
+            .page("artists", "order=album_count&direction=desc")
+            .await;
+        assert_eq!(declared_count["items"], natural_count["items"]);
+
         library.rejected("artists", "scope=owned").await;
         library.rejected("artists", "seed=7").await;
     }

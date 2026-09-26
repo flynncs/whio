@@ -554,15 +554,17 @@ pub(crate) struct LibraryAlbumsQuery {
     limit: PageLimit,
     order: AlbumOrder,
     filter: AlbumListFilter,
+    seed: Option<RandomSeed>,
 }
 
 impl LibraryAlbumsQuery {
-    fn parse(query: &RawQuery) -> Result<Self, ValidationError> {
+    fn parse(query: &RawQuery, user: Option<Uuid>) -> Result<Self, ValidationError> {
         reject_unknown(query, ALBUM_PARAMETERS)?;
 
         let offset = offset(query)?;
         let limit = page_limit(query)?;
         let order = order(query, AlbumOrder::parse)?;
+        let requested_seed = random_seed(query)?;
         let filter = AlbumListFilter::new()
             .with_scope(album_scope(query)?)
             .with_name(selector_text(query, "name")?)
@@ -581,17 +583,29 @@ impl LibraryAlbumsQuery {
             .with_missing(flag(query, "missing")?)
             .with_library_id(id_set(query, "library_id", value::<LibraryId>)?)
             .with_sort_direction(direction(query)?)
-            .with_random_seed(random_seed(query)?);
+            .with_random_seed(requested_seed);
 
         filter
             .resolved_seed(order)
             .map_err(|error| rejected(error, "seed"))?;
+
+        let seed = match (order, requested_seed) {
+            (AlbumOrder::Random, Some(seed)) => Some(seed),
+            (AlbumOrder::Random, None) => Some(RandomSeed::for_request(
+                user,
+                Resource::Album,
+                Utc::now().date_naive(),
+            )),
+            _ => None,
+        };
+        let filter = filter.with_random_seed(seed);
 
         Ok(Self {
             offset,
             limit,
             order,
             filter,
+            seed,
         })
     }
 }
@@ -834,11 +848,13 @@ pub(crate) async fn library_albums(
     AuthenticatedPrincipal(principal): AuthenticatedPrincipal,
     query: RawQuery,
 ) -> Result<Response, ApiError> {
-    let request = LibraryAlbumsQuery::parse(&query).map_err(|error| ApiError::InvalidRequest {
-        context: context.clone(),
-        error,
-    })?;
     let user_uuid = principal.user_id.as_uuid();
+    let request = LibraryAlbumsQuery::parse(&query, Some(user_uuid)).map_err(|error| {
+        ApiError::InvalidRequest {
+            context: context.clone(),
+            error,
+        }
+    })?;
 
     let summaries = state
         .library
@@ -867,7 +883,11 @@ pub(crate) async fn library_albums(
         .map(AlbumPageItem::from_summary)
         .collect();
 
-    Ok(page_response(items, total, None))
+    Ok(page_response(
+        items,
+        total,
+        request.seed.map(RandomSeed::get),
+    ))
 }
 
 pub(crate) async fn library_artists(
