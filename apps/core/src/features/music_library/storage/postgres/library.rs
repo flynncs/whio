@@ -22,16 +22,17 @@ use crate::features::music_library::storage::contracts::LibraryRead;
 use super::PgStore;
 use super::PostgresLibraryStore;
 use super::decode::{
-    album_states, albums_for_tracks, artist_count_expressions, attach_album_state,
-    attach_album_states, attach_artist_states, credits_for_tracks, decode_album,
-    decode_album_summary, decode_artist, decode_artist_summary, decode_membership, decode_track,
-    genres_for_tracks, hits_from_rows, repository_error, sources_for_tracks, track_states,
+    album_states, albums_for_tracks, artist_all_roles_count_expressions, artist_count_expressions,
+    attach_album_state, attach_album_states, attach_artist_states, credits_for_tracks,
+    decode_album, decode_album_summary, decode_artist, decode_artist_summary, decode_membership,
+    decode_track, genres_for_tracks, hits_from_rows, repository_error, sources_for_tracks,
+    track_states,
 };
 use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS,
     AlbumBrowseRow, AlbumEntryRow, AlbumRow, ArtistRow, CREDIT_NORMALIZED, TRACK_COLUMNS,
     TRACK_ENGAGED, TRACK_OWNED, TrackPageRow, TrackRecord, TrackSearchRow, album_scope,
-    artist_scope,
+    artist_membership, artist_scope,
 };
 use crate::features::music_library::domain::{
     album_quality, normalize_for_matching, track_quality,
@@ -686,16 +687,18 @@ impl LibraryRead for PgStore {
         let tokens = terms.tokens().to_vec();
         let prefix = format!("{}%", escape_like(&needle));
         let contains = format!("%{}%", escape_like(&needle));
+        let (album_count, song_count) = artist_all_roles_count_expressions();
         let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(
-            r#"
+            &format!(
+                r#"
             SELECT picked.id, picked.name, picked.sort_name, picked.musicbrainz_artist_id,
-                   picked.album_count, 0::BIGINT
+                   picked.album_count, picked.song_count
             FROM (
                 SELECT DISTINCT ON (ar.name_normalized)
                        ar.id, ar.name, ar.sort_name, ar.musicbrainz_artist_id,
                        ar.name_normalized,
-                       (SELECT COUNT(*) FROM albums WHERE album_artist_id = ar.id)::BIGINT
-                           AS album_count
+                       {album_count} AS album_count,
+                       {song_count} AS song_count
                 FROM artists AS ar
                 WHERE ar.name_normalized = $1
                    OR ar.name_normalized LIKE $2
@@ -716,7 +719,8 @@ impl LibraryRead for PgStore {
                 END,
                 picked.name_normalized, picked.id
             LIMIT $5
-            "#,
+            "#
+            ),
         )
         .bind(&needle)
         .bind(&prefix)
@@ -1825,7 +1829,6 @@ fn artist_role_membership(role: Option<&RoleSet>, predicates: &mut TrackPredicat
         }
     }
 
-    let mut parts = Vec::new();
     let credit_condition = if role.is_none() {
         Some(String::new())
     } else if stored_roles.is_empty() {
@@ -1847,31 +1850,7 @@ fn artist_role_membership(role: Option<&RoleSet>, predicates: &mut TrackPredicat
         Some(format!(" AND membership_credit.role = ANY({placeholder})"))
     };
 
-    if let Some(condition) = credit_condition {
-        parts.push(format!(
-            "SELECT membership_album.id AS album_id, membership_track.id AS track_id \
-             FROM track_artist_credits AS membership_credit \
-             JOIN tracks AS membership_track ON membership_track.id = membership_credit.track_id \
-             LEFT JOIN album_tracks AS membership_member \
-               ON membership_member.track_id = membership_track.id \
-             LEFT JOIN albums AS membership_album \
-               ON membership_album.id = membership_member.album_id \
-             WHERE membership_credit.artist_id = ar.id{condition}"
-        ));
-    }
-
-    if album_artist {
-        parts.push(
-            "SELECT album_artist_album.id AS album_id, album_artist_member.track_id AS track_id \
-             FROM albums AS album_artist_album \
-             LEFT JOIN album_tracks AS album_artist_member \
-               ON album_artist_member.album_id = album_artist_album.id \
-             WHERE album_artist_album.album_artist_id = ar.id"
-                .to_owned(),
-        );
-    }
-
-    parts.join(" UNION ALL ")
+    artist_membership(credit_condition.as_deref(), album_artist)
 }
 
 async fn artist_selector_clauses(

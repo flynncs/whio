@@ -1,4 +1,7 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -6,13 +9,15 @@ use uuid::Uuid;
 use super::PostgresTrackRepository;
 use crate::features::identity::provision;
 use crate::features::music_library::{
+    catalogue::LibraryService,
     domain::{
         AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort,
-        CreditRole, IdSet, ProviderId, RoleSelector, RoleSet, SelectorText, SortDirection,
-        SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata, ValidationError,
+        ArtistSummary, CreditRole, IdSet, ProviderId, Range, RoleSelector, RoleSet, SelectorText,
+        SortDirection, SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
+        ValidationError,
     },
     library::LibraryId,
-    storage::contracts::{CatalogueWrite, LibraryRead, StateStore},
+    storage::contracts::{CatalogueWrite, LibraryRead, SourceLookup, StateStore},
 };
 
 const LOCAL_ROOT: &str = "/music";
@@ -66,6 +71,10 @@ fn role_set(values: &[RoleSelector]) -> RoleSet {
     RoleSet::new(values.to_vec()).unwrap()
 }
 
+fn range<T: Ord + Copy>(from: Option<T>, to: Option<T>) -> Range<T> {
+    Range::new(from, to).unwrap()
+}
+
 fn artist_set(ids: &[&ArtistId]) -> BTreeSet<Uuid> {
     ids.iter().map(|id| *id.as_uuid()).collect()
 }
@@ -107,7 +116,7 @@ async fn counted(
     sort: ArtistSort,
     filter: &ArtistListFilter,
     user: Option<&Uuid>,
-) -> Vec<(ArtistId, u32, u32)> {
+) -> Vec<(ArtistId, u32, Option<u32>)> {
     repository
         .list_artists(0, 500, sort, filter, user.copied())
         .await
@@ -141,6 +150,80 @@ async fn named(repository: &PostgresTrackRepository, name: &str) -> ArtistId {
         .unwrap()
         .id()
         .clone()
+}
+
+fn summary_of<'a>(summaries: &'a [ArtistSummary], id: &ArtistId) -> &'a ArtistSummary {
+    summaries
+        .iter()
+        .find(|summary| summary.artist().id() == id)
+        .expect("the producer returned the artist")
+}
+
+async fn producer_fixture(repository: &PostgresTrackRepository) -> (ArtistId, ArtistId) {
+    let wide = named(repository, "Wide Artist").await;
+
+    let first = repository
+        .resolve_or_create_album(&album("Wide One").with_album_artist(credit("Wide Artist", None)))
+        .await
+        .unwrap();
+
+    for external in ["wide-one-a.flac", "wide-one-b.flac"] {
+        let track = repository
+            .get_or_create(
+                source("local", external),
+                primary(external, &["Wide Artist"]),
+            )
+            .await
+            .unwrap();
+        place(repository, first.id(), track.id()).await;
+    }
+
+    let second = repository
+        .resolve_or_create_album(&album("Wide Two").with_album_artist(credit("Wide Artist", None)))
+        .await
+        .unwrap();
+    let second_track = repository
+        .get_or_create(
+            source("local", "wide-two.flac"),
+            primary("wide-two", &["Wide Artist"]),
+        )
+        .await
+        .unwrap();
+    place(repository, second.id(), second_track.id()).await;
+
+    let third = repository
+        .resolve_or_create_album(
+            &album("Other Album").with_album_artist(credit("Other Artist", None)),
+        )
+        .await
+        .unwrap();
+    let third_track = repository
+        .get_or_create(
+            source("local", "other-credited.flac"),
+            primary("other-credited", &["Other Artist"])
+                .with_credits(vec![credit("Wide Artist", Some(CreditRole::Composer))]),
+        )
+        .await
+        .unwrap();
+    place(repository, third.id(), third_track.id()).await;
+
+    let narrow = named(repository, "Narrow Artist").await;
+    let fourth = repository
+        .resolve_or_create_album(
+            &album("Narrow One").with_album_artist(credit("Narrow Artist", None)),
+        )
+        .await
+        .unwrap();
+    let fourth_track = repository
+        .get_or_create(
+            source("local", "narrow-one.flac"),
+            primary("narrow-one", &["Narrow Artist"]),
+        )
+        .await
+        .unwrap();
+    place(repository, fourth.id(), fourth_track.id()).await;
+
+    (wide, narrow)
 }
 
 async fn place(repository: &PostgresTrackRepository, album_row: &AlbumId, track: &TrackId) {
@@ -224,7 +307,7 @@ async fn register_library(pool: &PgPool, label: &str, root: &str) -> LibraryId {
     LibraryId::from_uuid(id)
 }
 
-async fn count_distinct_tracks(pool: &PgPool, artist: &ArtistId, role: Option<&str>) -> i64 {
+async fn role_distinct_tracks(pool: &PgPool, artist: &ArtistId, role: Option<&str>) -> i64 {
     sqlx::query_scalar(
         "SELECT COUNT(DISTINCT credit.track_id) FROM track_artist_credits AS credit \
          WHERE credit.artist_id = $1 \
@@ -237,7 +320,7 @@ async fn count_distinct_tracks(pool: &PgPool, artist: &ArtistId, role: Option<&s
     .unwrap()
 }
 
-async fn count_distinct_albums(pool: &PgPool, artist: &ArtistId, role: Option<&str>) -> i64 {
+async fn role_distinct_albums(pool: &PgPool, artist: &ArtistId, role: Option<&str>) -> i64 {
     sqlx::query_scalar(
         "SELECT COUNT(DISTINCT member.album_id) FROM track_artist_credits AS credit \
          JOIN album_tracks AS member ON member.track_id = credit.track_id \
@@ -249,6 +332,36 @@ async fn count_distinct_albums(pool: &PgPool, artist: &ArtistId, role: Option<&s
     .fetch_one(pool)
     .await
     .unwrap()
+}
+
+async fn membership_counts(pool: &PgPool, artist: &ArtistId) -> (i64, i64) {
+    let albums: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT reach.album_id) FROM (\
+           SELECT album.id AS album_id FROM albums AS album WHERE album.album_artist_id = $1 \
+           UNION \
+           SELECT member.album_id FROM track_artist_credits AS credit \
+           JOIN album_tracks AS member ON member.track_id = credit.track_id \
+           WHERE credit.artist_id = $1 AND member.album_id IS NOT NULL) AS reach",
+    )
+    .bind(artist.as_uuid())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let tracks: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT reach.track_id) FROM (\
+           SELECT credit.track_id AS track_id FROM track_artist_credits AS credit \
+           WHERE credit.artist_id = $1 \
+           UNION \
+           SELECT member.track_id FROM album_tracks AS member \
+           JOIN albums AS album ON album.id = member.album_id \
+           WHERE album.album_artist_id = $1) AS reach",
+    )
+    .bind(artist.as_uuid())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    (albums, tracks)
 }
 
 #[sqlx::test]
@@ -293,32 +406,87 @@ async fn count_equals_the_list_for_every_role(pool: PgPool) {
         .unwrap();
     place(&repository, beta_album.id(), beta_track.id()).await;
 
-    let fixtures: Vec<(&str, Option<RoleSet>, Vec<&ArtistId>)> = vec![
-        ("absent", None, vec![&alpha, &composer, &guest, &beta]),
+    let fixtures: Vec<(&str, ArtistListFilter, Vec<&ArtistId>)> = vec![
+        (
+            "absent",
+            ArtistListFilter::new(),
+            vec![&alpha, &composer, &guest, &beta],
+        ),
         (
             "albumartist",
-            Some(role_set(&[RoleSelector::AlbumArtist])),
+            ArtistListFilter::new().with_role(Some(role_set(&[RoleSelector::AlbumArtist]))),
             vec![&alpha, &beta],
         ),
         (
             "artist",
-            Some(role_set(&[RoleSelector::Artist])),
+            ArtistListFilter::new().with_role(Some(role_set(&[RoleSelector::Artist]))),
             vec![&alpha, &beta],
         ),
         (
             "composer",
-            Some(role_set(&[RoleSelector::Composer])),
+            ArtistListFilter::new().with_role(Some(role_set(&[RoleSelector::Composer]))),
             vec![&composer],
         ),
         (
             "composer and performer",
-            Some(role_set(&[RoleSelector::Composer, RoleSelector::Performer])),
+            ArtistListFilter::new().with_role(Some(role_set(&[
+                RoleSelector::Composer,
+                RoleSelector::Performer,
+            ]))),
             vec![&composer, &guest],
+        ),
+        (
+            "starred",
+            ArtistListFilter::new().with_starred(Some(true)),
+            vec![&alpha, &guest],
+        ),
+        (
+            "starred false",
+            ArtistListFilter::new().with_starred(Some(false)),
+            vec![&composer, &beta],
+        ),
+        (
+            "has_rating",
+            ArtistListFilter::new().with_has_rating(Some(true)),
+            vec![&alpha, &beta],
+        ),
+        (
+            "has_rating false",
+            ArtistListFilter::new().with_has_rating(Some(false)),
+            vec![&composer, &guest],
+        ),
+        (
+            "rating",
+            ArtistListFilter::new().with_rating(Some(range(Some(4), Some(5)))),
+            vec![&alpha, &beta],
+        ),
+        (
+            "missing false",
+            ArtistListFilter::new().with_missing(Some(false)),
+            vec![&alpha, &composer, &guest, &beta],
         ),
     ];
 
-    for (name, role, expected) in fixtures {
-        let filter = ArtistListFilter::new().with_role(role);
+    repository
+        .set_starred(user, StateTarget::Artist(&alpha), true)
+        .await
+        .unwrap();
+    repository
+        .set_starred(user, StateTarget::Artist(&guest), true)
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Artist(&alpha), Some(4))
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Artist(&beta), Some(5))
+        .await
+        .unwrap();
+
+    let music = register_library(&pool, "artist selectors", LOCAL_ROOT).await;
+
+    for (name, filter, expected) in fixtures {
         let observed = listed(&repository, ArtistSort::Name, &filter, Some(&user)).await;
         let observed_total = total(&repository, &filter, Some(&user)).await;
 
@@ -328,12 +496,12 @@ async fn count_equals_the_list_for_every_role(pool: PgPool) {
                 .map(|id| *id.as_uuid())
                 .collect::<BTreeSet<_>>(),
             artist_set(&expected),
-            "the {name} role list"
+            "the {name} selector list"
         );
         assert_eq!(
             observed_total,
             u32::try_from(expected.len()).unwrap(),
-            "the {name} role count"
+            "the {name} selector count"
         );
         assert_eq!(
             observed_total,
@@ -341,6 +509,38 @@ async fn count_equals_the_list_for_every_role(pool: PgPool) {
             "the {name} count is the list length at the full page size"
         );
     }
+
+    let composed = ArtistListFilter::new()
+        .with_name(selector("e"))
+        .with_role(Some(role_set(&[
+            RoleSelector::Composer,
+            RoleSelector::Artist,
+        ])))
+        .with_library_id(Some(IdSet::new([music.clone()]).unwrap()));
+
+    assert_eq!(
+        listed(&repository, ArtistSort::Name, &composed, Some(&user)).await,
+        vec![beta.clone(), composer.clone()],
+        "name, a mixed role set and library_id are one AND over the shared membership"
+    );
+    assert_eq!(
+        total(&repository, &composed, Some(&user)).await,
+        2,
+        "and the count binds the same values in the same order"
+    );
+
+    let emptied = composed
+        .clone()
+        .with_name(selector("composer"))
+        .with_starred(Some(true));
+
+    assert!(
+        listed(&repository, ArtistSort::Name, &emptied, Some(&user))
+            .await
+            .is_empty(),
+        "a composed filter with no matching artist is empty, not widened"
+    );
+    assert_eq!(total(&repository, &emptied, Some(&user)).await, 0);
 
     let page = listed_at(
         &repository,
@@ -409,16 +609,16 @@ async fn role_scoped_counts_use_the_list_membership(pool: PgPool) {
 
     assert_eq!(
         composer_facts,
-        BTreeSet::from([(*x.as_uuid(), (1, 1)), (*y.as_uuid(), (1, 1)),]),
+        BTreeSet::from([(*x.as_uuid(), (1, Some(1))), (*y.as_uuid(), (1, Some(1)))]),
         "the composer membership reaches album A only"
     );
     assert_eq!(
-        count_distinct_albums(&pool, &x, Some("composer")).await,
+        role_distinct_albums(&pool, &x, Some("composer")).await,
         1,
         "an independent COUNT(DISTINCT album) agrees"
     );
     assert_eq!(
-        count_distinct_tracks(&pool, &x, Some("composer")).await,
+        role_distinct_tracks(&pool, &x, Some("composer")).await,
         1,
         "an independent COUNT(DISTINCT track) agrees"
     );
@@ -433,7 +633,7 @@ async fn role_scoped_counts_use_the_list_membership(pool: PgPool) {
 
     assert_eq!(
         album_artists,
-        vec![(x.clone(), 1, 2)],
+        vec![(x.clone(), 1, Some(2))],
         "the album-artist membership reaches album B and its two tracks"
     );
     assert!(
@@ -468,21 +668,21 @@ async fn role_scoped_counts_use_the_list_membership(pool: PgPool) {
 
     assert_eq!(
         (absent_x.1, absent_x.2),
-        (2, 3),
+        (2, Some(3)),
         "an absent role is the union of every membership"
     );
     assert_eq!(
         (absent_y.1, absent_y.2),
-        (1, 1),
+        (1, Some(1)),
         "Y's composer membership reaches album A only"
     );
     assert_eq!(
-        count_distinct_albums(&pool, &x, None).await,
+        role_distinct_albums(&pool, &x, None).await,
         1,
         "X's primary membership alone touches one album"
     );
 
-    let composed_albums = count_distinct_albums(&pool, &x, Some("composer")).await;
+    let composed_albums = role_distinct_albums(&pool, &x, Some("composer")).await;
     let fronted_albums: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM albums WHERE album_artist_id = $1")
             .bind(x.as_uuid())
@@ -660,8 +860,8 @@ async fn counts_dedupe_repeated_memberships(pool: PgPool) {
         "the fixture credits the artist twice on one track"
     );
 
-    let distinct_tracks = count_distinct_tracks(&pool, &wanda, None).await;
-    let distinct_albums = count_distinct_albums(&pool, &wanda, None).await;
+    let distinct_tracks = role_distinct_tracks(&pool, &wanda, None).await;
+    let distinct_albums = role_distinct_albums(&pool, &wanda, None).await;
 
     assert_eq!((distinct_tracks, distinct_albums), (2, 1));
 
@@ -675,10 +875,10 @@ async fn counts_dedupe_repeated_memberships(pool: PgPool) {
 
     assert_eq!(
         facts,
-        vec![(wanda.clone(), 1, 2)],
+        vec![(wanda.clone(), 1, Some(2))],
         "the primary membership counts the track once and the album once"
     );
-    assert_eq!(u32::try_from(distinct_tracks).unwrap(), facts[0].2);
+    assert_eq!(Some(u32::try_from(distinct_tracks).unwrap()), facts[0].2);
     assert_eq!(u32::try_from(distinct_albums).unwrap(), facts[0].1);
 
     let album_artist_facts = counted(
@@ -691,7 +891,7 @@ async fn counts_dedupe_repeated_memberships(pool: PgPool) {
 
     assert_eq!(
         album_artist_facts,
-        vec![(wanda.clone(), 1, 2)],
+        vec![(wanda.clone(), 1, Some(2))],
         "the album-artist membership dedupes the same way"
     );
 
@@ -845,8 +1045,8 @@ async fn value_order_for_album_count_and_song_count(pool: PgPool) {
         counts.push(artist);
     }
 
-    let recomputed_albums = count_distinct_albums(&pool, &counts[0], None).await;
-    let recomputed_tracks = count_distinct_tracks(&pool, &counts[0], None).await;
+    let recomputed_albums = role_distinct_albums(&pool, &counts[0], None).await;
+    let recomputed_tracks = role_distinct_tracks(&pool, &counts[0], None).await;
 
     assert_eq!(
         (recomputed_albums, recomputed_tracks),
@@ -881,9 +1081,9 @@ async fn value_order_for_album_count_and_song_count(pool: PgPool) {
             .unwrap()
     };
 
-    assert_eq!(fact_of(&counts[0]), (2, 3));
-    assert_eq!(fact_of(&counts[1]), (1, 1));
-    assert_eq!(fact_of(&counts[2]), (1, 3));
+    assert_eq!(fact_of(&counts[0]), (2, Some(3)));
+    assert_eq!(fact_of(&counts[1]), (1, Some(1)));
+    assert_eq!(fact_of(&counts[2]), (1, Some(3)));
 
     let ordered = |values: &[(ArtistId, u32)], reversed: bool| {
         let mut values = values.to_vec();
@@ -910,7 +1110,10 @@ async fn value_order_for_album_count_and_song_count(pool: PgPool) {
         .cloned()
         .map(|id| {
             let fact = fact_of(&id);
-            (id, fact.1)
+            (
+                id,
+                fact.1.expect("the song count is computed on the list path"),
+            )
         })
         .collect::<Vec<_>>();
 
@@ -1252,7 +1455,7 @@ async fn canonical_id_tie_break_is_load_bearing(pool: PgPool) {
         .iter()
         .map(|(_, albums, songs)| (*albums, *songs))
         .collect::<Vec<_>>(),
-        vec![(1, 1), (1, 1), (1, 1)],
+        vec![(1, Some(1)), (1, Some(1)), (1, Some(1))],
         "the fixture really ties on album count"
     );
 
@@ -1346,6 +1549,161 @@ fn unknown_sort_is_an_explicit_error() {
     assert_eq!(
         ArtistSort::Name.default_direction(),
         SortDirection::Ascending
+    );
+}
+
+#[sqlx::test]
+async fn every_producer_agrees_on_artist_counts(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let (wide, narrow) = producer_fixture(&repository).await;
+
+    let from_list = counted(
+        &repository,
+        ArtistSort::Name,
+        &ArtistListFilter::new(),
+        None,
+    )
+    .await
+    .into_iter()
+    .map(|(id, albums, songs)| (*id.as_uuid(), (albums, songs)))
+    .collect::<BTreeMap<_, _>>();
+    let from_search = repository
+        .search_artists("artist", 25, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| {
+            (
+                *summary.artist().id().as_uuid(),
+                (summary.album_count(), summary.song_count()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let from_ids =
+        super::decode::artist_summaries_by_ids(&pool, &[*wide.as_uuid(), *narrow.as_uuid()], None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|summary| {
+                (
+                    *summary.artist().id().as_uuid(),
+                    (summary.album_count(), summary.song_count()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(
+        from_list.get(wide.as_uuid()).copied(),
+        Some((3, Some(4))),
+        "the list count is the membership reach, not the album-artist reach"
+    );
+    assert_eq!(from_list.get(narrow.as_uuid()).copied(), Some((1, Some(1))));
+
+    for id in [&wide, &narrow] {
+        let expected = from_list.get(id.as_uuid()).copied();
+
+        assert_eq!(
+            from_search.get(id.as_uuid()).copied(),
+            expected,
+            "the search producer reports what the list reports"
+        );
+        assert_eq!(
+            from_ids.get(id.as_uuid()).copied(),
+            expected,
+            "the id-set producer reports what the list reports"
+        );
+    }
+
+    assert_eq!(
+        membership_counts(&pool, &wide).await,
+        (3, 4),
+        "the fixture really reaches three albums and four tracks through the membership"
+    );
+
+    let detail_albums = repository
+        .find_albums_for_artist(&wide, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        detail_albums.len(),
+        2,
+        "the detail path holds the album-artist albums only, so its count is not the membership count"
+    );
+}
+
+#[sqlx::test]
+async fn song_count_is_computed_on_every_producer(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let (wide, narrow) = producer_fixture(&repository).await;
+    let (_, wide_tracks) = membership_counts(&pool, &wide).await;
+    let (_, narrow_tracks) = membership_counts(&pool, &narrow).await;
+
+    assert_eq!(
+        (wide_tracks, narrow_tracks),
+        (4, 1),
+        "the independent COUNT(DISTINCT ...) recomputation over the same membership"
+    );
+
+    let from_list = counted(
+        &repository,
+        ArtistSort::Name,
+        &ArtistListFilter::new(),
+        None,
+    )
+    .await;
+    let fact = |id: &ArtistId| {
+        from_list
+            .iter()
+            .find(|(candidate, _, _)| candidate == id)
+            .map(|(_, albums, songs)| (*albums, *songs))
+            .unwrap()
+    };
+
+    assert_eq!(fact(&wide).1, Some(u32::try_from(wide_tracks).unwrap()));
+    assert_eq!(fact(&narrow).1, Some(u32::try_from(narrow_tracks).unwrap()));
+    assert_ne!(
+        fact(&wide).1,
+        fact(&narrow).1,
+        "a constant song_count cannot satisfy both artists"
+    );
+
+    let search = repository.search_artists("artist", 25, None).await.unwrap();
+
+    assert_eq!(
+        summary_of(&search, &wide).song_count(),
+        Some(u32::try_from(wide_tracks).unwrap())
+    );
+    assert_eq!(
+        summary_of(&search, &narrow).song_count(),
+        Some(u32::try_from(narrow_tracks).unwrap())
+    );
+
+    let by_ids = super::decode::artist_summaries_by_ids(&pool, &[*wide.as_uuid()], None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        by_ids[0].song_count(),
+        Some(u32::try_from(wide_tracks).unwrap())
+    );
+
+    let library = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let service = LibraryService::new(
+        Arc::clone(&library) as Arc<dyn LibraryRead>,
+        Arc::clone(&library) as Arc<dyn SourceLookup>,
+        Arc::clone(&library) as Arc<dyn StateStore>,
+    );
+    let detail = service
+        .artist_detail(&wide, None)
+        .await
+        .unwrap()
+        .expect("the artist exists");
+
+    assert_eq!(
+        detail.artist.song_count(),
+        None,
+        "a path that holds no song membership publishes no count instead of a fabricated zero"
     );
 }
 

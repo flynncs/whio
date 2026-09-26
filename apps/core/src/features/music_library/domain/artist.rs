@@ -100,7 +100,7 @@ impl Artist {
 pub struct ArtistSummary {
     artist: Artist,
     album_count: u32,
-    song_count: u32,
+    song_count: Option<u32>,
     state: LibraryState,
     match_quality: Option<MatchQuality>,
 }
@@ -110,14 +110,14 @@ impl ArtistSummary {
         Self {
             artist,
             album_count,
-            song_count: 0,
+            song_count: None,
             state: LibraryState::default(),
             match_quality: None,
         }
     }
 
     pub fn with_song_count(mut self, song_count: u32) -> Self {
-        self.song_count = song_count;
+        self.song_count = Some(song_count);
         self
     }
 
@@ -143,7 +143,7 @@ impl ArtistSummary {
         self.album_count
     }
 
-    pub fn song_count(&self) -> u32 {
+    pub fn song_count(&self) -> Option<u32> {
         self.song_count
     }
 

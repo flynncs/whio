@@ -14,7 +14,7 @@ use crate::features::music_library::{
 
 use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_SEARCH_COLUMNS, AlbumBrowseRow, AlbumRow,
-    ArtistRow, StateRow, TRACK_COLUMNS, TrackRecord, TrackSearchRow,
+    ArtistRow, StateRow, TRACK_COLUMNS, TrackRecord, TrackSearchRow, artist_membership,
 };
 
 pub(crate) fn decode_artist(row: ArtistRow) -> Result<Artist, TrackRepositoryError> {
@@ -118,6 +118,10 @@ pub(crate) fn artist_count_expressions(membership: &str) -> (String, String) {
     );
 
     (album_count, song_count)
+}
+
+pub(crate) fn artist_all_roles_count_expressions() -> (String, String) {
+    artist_count_expressions(&artist_membership(Some(""), true))
 }
 pub(crate) fn decode_track(
     record: TrackRecord,
@@ -640,19 +644,20 @@ pub(crate) async fn artist_summaries_by_ids(
         return Ok(Vec::new());
     }
 
-    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(
-        r#"
+    let (album_count, song_count) = artist_all_roles_count_expressions();
+    let rows =
+        sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(&format!(
+            r#"
         SELECT ar.id, ar.name, ar.sort_name, ar.musicbrainz_artist_id,
-               (SELECT COUNT(*) FROM albums WHERE album_artist_id = ar.id)::BIGINT,
-               0::BIGINT
+               {album_count} AS album_count, {song_count} AS song_count
         FROM artists AS ar
         WHERE ar.id = ANY($1)
-        "#,
-    )
-    .bind(artist_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(repository_error)?;
+        "#
+        ))
+        .bind(artist_ids)
+        .fetch_all(pool)
+        .await
+        .map_err(repository_error)?;
 
     let states = artist_states(pool, user, artist_ids).await?;
     let mut by_id = rows

@@ -250,3 +250,38 @@ pub(crate) fn artist_scope(user_bind: u8, libraries_bind: u8) -> String {
     ))"
     )
 }
+
+fn artist_membership_credit(condition: &str) -> String {
+    format!(
+        "SELECT membership_album.id AS album_id, membership_track.id AS track_id \
+         FROM track_artist_credits AS membership_credit \
+         JOIN tracks AS membership_track ON membership_track.id = membership_credit.track_id \
+         LEFT JOIN album_tracks AS membership_member \
+           ON membership_member.track_id = membership_track.id \
+         LEFT JOIN albums AS membership_album \
+           ON membership_album.id = membership_member.album_id \
+         WHERE membership_credit.artist_id = ar.id{condition}"
+    )
+}
+
+fn artist_membership_album_artist() -> String {
+    "SELECT album_artist_album.id AS album_id, album_artist_member.track_id AS track_id \
+     FROM albums AS album_artist_album \
+     LEFT JOIN album_tracks AS album_artist_member \
+       ON album_artist_member.album_id = album_artist_album.id \
+     WHERE album_artist_album.album_artist_id = ar.id"
+        .to_owned()
+}
+
+pub(crate) fn artist_membership(credit_condition: Option<&str>, album_artist: bool) -> String {
+    let mut parts = Vec::new();
+
+    if let Some(condition) = credit_condition {
+        parts.push(artist_membership_credit(condition));
+    }
+    if album_artist {
+        parts.push(artist_membership_album_artist());
+    }
+
+    parts.join(" UNION ALL ")
+}
