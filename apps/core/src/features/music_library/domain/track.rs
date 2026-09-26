@@ -165,6 +165,7 @@ pub struct TrackView {
     track: Track,
     album: Option<Album>,
     membership: Option<AlbumTrack>,
+    album_artist: Option<String>,
     state: LibraryState,
     sources: Vec<SourceIdentity>,
 }
@@ -174,6 +175,7 @@ impl TrackView {
         track: Track,
         album: Option<Album>,
         membership: Option<AlbumTrack>,
+        album_artist: Option<String>,
         state: LibraryState,
         sources: Vec<SourceIdentity>,
     ) -> Self {
@@ -181,6 +183,7 @@ impl TrackView {
             track,
             album,
             membership,
+            album_artist,
             state,
             sources,
         }
@@ -196,6 +199,10 @@ impl TrackView {
 
     pub fn membership(&self) -> Option<&AlbumTrack> {
         self.membership.as_ref()
+    }
+
+    pub fn album_artist(&self) -> Option<&str> {
+        self.album_artist.as_deref()
     }
 
     pub fn state(&self) -> &LibraryState {

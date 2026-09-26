@@ -48,17 +48,16 @@ pub(crate) async fn song_list(
         };
     }
 
-    match service::search_songs(
-        state.search(),
+    match service::song_list(
+        state.library(),
         state.credential(),
-        &context,
         &token.0,
         &query,
         state.source_tags(),
     )
     .await
     {
-        Ok(songs) => list_response(&songs, songs.len() as u32),
+        Ok((songs, total)) => list_response(&songs, total),
         Err(error) => song_error(error, &context),
     }
 }

@@ -48,8 +48,11 @@ pub(crate) struct Song {
     pub(crate) artist: String,
     pub(crate) album: Option<String>,
     pub(crate) album_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) album_artist: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) track_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) disc_number: Option<i32>,
     pub(crate) cover_art: Option<String>,
     pub(crate) duration: f32,

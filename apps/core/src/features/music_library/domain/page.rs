@@ -1,4 +1,4 @@
-use super::{TrackView, ValidationError};
+use super::{TrackView, ValidationError, normalize_for_matching};
 
 pub const MAX_PAGE_LIMIT: u32 = 500;
 
@@ -75,9 +75,10 @@ impl TrackListScope {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TrackListFilter {
     scope: TrackListScope,
+    title: Option<String>,
 }
 
 impl TrackListFilter {
@@ -90,8 +91,19 @@ impl TrackListFilter {
         self
     }
 
+    pub fn with_title(mut self, title: Option<String>) -> Self {
+        self.title = title
+            .map(|title| normalize_for_matching(&title))
+            .filter(|title| !title.is_empty());
+        self
+    }
+
     pub fn scope(&self) -> TrackListScope {
         self.scope
+    }
+
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
     }
 }
 

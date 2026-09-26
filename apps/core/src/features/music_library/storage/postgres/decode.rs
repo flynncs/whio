@@ -671,7 +671,7 @@ pub(crate) async fn sources_for_tracks(
 pub(crate) async fn albums_for_tracks(
     pool: &PgPool,
     track_ids: &[Uuid],
-) -> Result<HashMap<Uuid, (Album, AlbumTrack)>, TrackRepositoryError> {
+) -> Result<HashMap<Uuid, (Album, AlbumTrack, Option<String>)>, TrackRepositoryError> {
     if track_ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -691,14 +691,16 @@ pub(crate) async fn albums_for_tracks(
             Option<i16>,
             Option<i16>,
             i32,
+            Option<String>,
         ),
     >(
         r#"
         SELECT mt.track_id, a.id, a.title, a.album_artist_id, a.year, a.release_type, a.label,
                a.musicbrainz_release_group_id, a.musicbrainz_release_id,
-               mt.disc_number, mt.track_number, mt.position
+               mt.disc_number, mt.track_number, mt.position, album_artist.name
         FROM album_tracks AS mt
         JOIN albums AS a ON a.id = mt.album_id
+        LEFT JOIN artists AS album_artist ON album_artist.id = a.album_artist_id
         WHERE mt.track_id = ANY($1)
         ORDER BY mt.track_id, a.title_normalized, a.id
         "#,
@@ -708,7 +710,7 @@ pub(crate) async fn albums_for_tracks(
     .await
     .map_err(repository_error)?;
 
-    let mut by_track: HashMap<Uuid, (Album, AlbumTrack)> = HashMap::new();
+    let mut by_track: HashMap<Uuid, (Album, AlbumTrack, Option<String>)> = HashMap::new();
     for (
         track_id,
         album_id,
@@ -722,6 +724,7 @@ pub(crate) async fn albums_for_tracks(
         disc_number,
         track_number,
         position,
+        album_artist,
     ) in rows
     {
         let album = decode_album((
@@ -738,7 +741,7 @@ pub(crate) async fn albums_for_tracks(
 
         by_track
             .entry(track_id)
-            .or_insert_with(|| (album, membership));
+            .or_insert_with(|| (album, membership, album_artist));
     }
 
     Ok(by_track)

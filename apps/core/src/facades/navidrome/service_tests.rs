@@ -1,47 +1,15 @@
 use super::*;
 use crate::features::identity::{domain::UserId, secrets::CredentialKey};
-use crate::features::music_library::test_support::{
-    CatalogueWrite, LibraryRead, SourceLookup, StateStore,
+use crate::features::music_library::domain::{
+    AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope, Track,
+    TrackMetadata,
 };
-use crate::{
-    features::music_library::catalogue::ProviderError,
-    features::music_library::catalogue::{CatalogueCandidate, CatalogueProvider},
-    features::music_library::{
-        domain::{ProviderId, SourceIdentity, SourceScope, Track, TrackId, TrackMetadata},
-        test_support::PostgresTrackRepository,
-    },
-    platform::request::{RequestContext, RequestId},
+use crate::features::music_library::test_support::{
+    CatalogueWrite, LibraryRead, PostgresTrackRepository, SourceLookup, StateStore,
 };
 use async_trait::async_trait;
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 use uuid::Uuid;
-
-struct StubCatalogue {
-    responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ProviderError>>>,
-}
-
-#[async_trait]
-impl CatalogueProvider for StubCatalogue {
-    async fn search(
-        &self,
-        _search: &CatalogueSearch,
-        _user: Option<&Uuid>,
-        _context: &RequestContext,
-    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
-        self.responses
-            .lock()
-            .expect("responses lock")
-            .pop_front()
-            .expect("unexpected catalogue call")
-    }
-}
-
-fn key() -> CredentialKey {
-    CredentialKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").expect("valid key")
-}
 
 struct StubCredentialStore {
     user: UserId,
@@ -121,6 +89,10 @@ struct TestAuth {
     token: String,
 }
 
+fn key() -> CredentialKey {
+    CredentialKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").expect("valid key")
+}
+
 fn auth() -> TestAuth {
     let key = key();
     let user = UserId::from_uuid(Uuid::now_v7());
@@ -130,72 +102,68 @@ fn auth() -> TestAuth {
         key.clone(),
     ));
     let token = session::mint(user, credential, &key);
+
     TestAuth { service, token }
 }
 
-fn context() -> RequestContext {
-    RequestContext::new(RequestId::generate())
-}
+fn library(pool: sqlx::PgPool) -> LibraryService {
+    let store = Arc::new(PostgresTrackRepository::new(pool));
 
-fn services(
-    pool: sqlx::PgPool,
-    responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>,
-) -> (SearchService, LibraryService) {
-    let stub = Arc::new(StubCatalogue {
-        responses: Mutex::new(responses.into()),
-    });
-    let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
-    let search = SearchService::with_providers(
-        Arc::clone(&store) as Arc<dyn LibraryRead>,
-        Arc::clone(&store) as Arc<dyn CatalogueWrite>,
-        Arc::clone(&store) as Arc<dyn SourceLookup>,
-        Arc::clone(&store) as Arc<dyn StateStore>,
-        vec![stub as Arc<dyn CatalogueProvider>],
-    );
-    let library = LibraryService::new(
+    LibraryService::new(
         Arc::clone(&store) as Arc<dyn LibraryRead>,
         Arc::clone(&store) as Arc<dyn SourceLookup>,
         Arc::clone(&store) as Arc<dyn StateStore>,
-    );
-    (search, library)
+    )
 }
 
-fn catalogue(
-    pool: sqlx::PgPool,
-    responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>,
-) -> SearchService {
-    services(pool.clone(), responses).0
+async fn add_track(store: &PostgresTrackRepository, external_id: &str, title: &str) -> TrackId {
+    let source = SourceIdentity::new(
+        ProviderId::new("local".to_owned()).expect("valid provider"),
+        SourceScope::Named("/music".to_owned()),
+        external_id.to_owned(),
+    )
+    .expect("valid source");
+
+    store
+        .get_or_create(
+            source,
+            TrackMetadata::from_names(title.to_owned(), vec!["Artist".to_owned()], Some(1_000))
+                .expect("valid metadata"),
+        )
+        .await
+        .expect("a stored track")
+        .id()
+        .clone()
 }
 
-struct PagedCatalogue {
-    total: u32,
-}
-
-#[async_trait]
-impl CatalogueProvider for PagedCatalogue {
-    async fn search(
-        &self,
-        search: &CatalogueSearch,
-        _user: Option<&Uuid>,
-        _context: &RequestContext,
-    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
-        let start = search.offset().get();
-        let end = start
-            .saturating_add(u32::from(search.limit().get()))
-            .min(self.total);
-        Ok((start..end).map(candidate_with_index).collect())
+async fn seed(store: &PostgresTrackRepository, count: usize) {
+    for index in 0..count {
+        add_track(
+            store,
+            &format!("path-{index}"),
+            &format!("Track {index:04}"),
+        )
+        .await;
     }
 }
 
-fn paged_catalogue(pool: sqlx::PgPool, total: u32) -> SearchService {
-    let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
-    SearchService::with_providers(
-        Arc::clone(&store) as Arc<dyn LibraryRead>,
-        Arc::clone(&store) as Arc<dyn CatalogueWrite>,
-        Arc::clone(&store) as Arc<dyn SourceLookup>,
-        Arc::clone(&store) as Arc<dyn StateStore>,
-        vec![Arc::new(PagedCatalogue { total }) as Arc<dyn CatalogueProvider>],
-    )
+async fn add_album(
+    store: &PostgresTrackRepository,
+    title: &str,
+    album_artist: Option<&str>,
+) -> AlbumId {
+    let mut metadata = AlbumMetadata::new(title.to_owned()).expect("valid album");
+    if let Some(name) = album_artist {
+        metadata =
+            metadata.with_album_artist(ArtistCredit::new(name.to_owned(), None).expect("valid"));
+    }
+
+    store
+        .resolve_or_create_album(&metadata)
+        .await
+        .expect("a stored album")
+        .id()
+        .clone()
 }
 
 fn query(title: Option<&str>, start: Option<u32>, end: Option<i64>) -> SongListQuery {
@@ -207,48 +175,24 @@ fn query(title: Option<&str>, start: Option<u32>, end: Option<i64>) -> SongListQ
     }
 }
 
-fn candidate() -> CatalogueCandidate {
-    CatalogueCandidate::new(
-        SourceIdentity::new(
-            ProviderId::new("youtube".to_owned()).expect("valid provider"),
-            SourceScope::Global,
-            "vid-1".to_owned(),
-        )
-        .expect("valid source"),
-        TrackMetadata::from_names(
-            "song".to_owned(),
-            vec!["a".to_owned(), "b".to_owned()],
-            Some(180_000),
-        )
-        .expect("valid metadata"),
-    )
-}
-
-fn candidate_with_index(index: u32) -> CatalogueCandidate {
-    CatalogueCandidate::new(
-        SourceIdentity::new(
-            ProviderId::new("youtube".to_owned()).expect("valid provider"),
-            SourceScope::Global,
-            format!("vid-{index}"),
-        )
-        .expect("valid source"),
-        TrackMetadata::from_names(
-            format!("song-{index}"),
-            vec!["artist".to_owned()],
-            Some(180_000),
-        )
-        .expect("valid metadata"),
-    )
+async fn song_page(
+    library: &LibraryService,
+    auth: &TestAuth,
+    query: &SongListQuery,
+) -> (Vec<Song>, u32) {
+    song_list(library, &auth.service, &auth.token, query, SourceTags::Off)
+        .await
+        .expect("song list succeeds")
 }
 
 #[sqlx::test]
-async fn auth_gates_search_and_detail(pool: sqlx::PgPool) {
-    let (catalogue, library) = services(pool.clone(), vec![]);
+async fn auth_gates_the_song_list_and_detail(pool: sqlx::PgPool) {
+    let library = library(pool.clone());
     let auth = auth();
-    let result = search_songs(
-        &catalogue,
+
+    let result = song_list(
+        &library,
         &auth.service,
-        &context(),
         "forged",
         &query(None, None, None),
         SourceTags::Off,
@@ -267,10 +211,9 @@ async fn auth_gates_search_and_detail(pool: sqlx::PgPool) {
     assert!(matches!(result, Err(SongError::Unauthorized)));
 
     let dead = session::mint(UserId::from_uuid(Uuid::now_v7()), Uuid::now_v7(), &key());
-    let result = search_songs(
-        &catalogue,
+    let result = song_list(
+        &library,
         &auth.service,
-        &context(),
         &dead,
         &query(Some("song"), None, None),
         SourceTags::Off,
@@ -280,131 +223,145 @@ async fn auth_gates_search_and_detail(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test]
-async fn search_maps_tracks_short_circuits_empty_and_clamps_ranges(pool: sqlx::PgPool) {
+async fn song_list_enumerates_the_library_in_title_order(pool: sqlx::PgPool) {
     let auth = auth();
-    let result = search_songs(
-        &catalogue(pool.clone(), vec![]),
-        &auth.service,
-        &context(),
-        &auth.token,
-        &query(None, None, None),
-        SourceTags::Off,
+    let library = library(pool.clone());
+    let store = Arc::new(PostgresTrackRepository::new(pool));
+    for (index, title) in ["Zebra", "Apple", "Mango"].iter().enumerate() {
+        add_track(&store, &format!("path-{index}"), title).await;
+    }
+
+    let (songs, total) = song_page(&library, &auth, &query(None, None, None)).await;
+
+    assert_eq!(total, 3);
+    assert_eq!(
+        songs
+            .iter()
+            .map(|song| song.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Apple", "Mango", "Zebra"]
+    );
+}
+
+#[sqlx::test]
+async fn song_list_matches_a_normalised_title_and_treats_blank_as_absent(pool: sqlx::PgPool) {
+    let auth = auth();
+    let library = library(pool.clone());
+    let store = Arc::new(PostgresTrackRepository::new(pool));
+    add_track(&store, "path-a", "Instant Crush").await;
+    add_track(&store, "path-b", "One More Time").await;
+
+    let (songs, total) = song_page(
+        &library,
+        &auth,
+        &query(Some("  INSTANT   crush  "), None, None),
     )
     .await;
-    assert!(matches!(result, Ok(songs) if songs.is_empty()));
-
-    let songs = search_songs(
-        &catalogue(pool.clone(), vec![Ok(vec![candidate()])]),
-        &auth.service,
-        &context(),
-        &auth.token,
-        &query(Some("song"), Some(0), Some(9)),
-        SourceTags::Off,
-    )
-    .await
-    .expect("search succeeds");
+    assert_eq!(total, 1);
     assert_eq!(songs.len(), 1);
-    assert_eq!(songs[0].title, "song");
-    assert_eq!(songs[0].artist, "a, b");
-    assert_eq!(songs[0].duration, 180.0);
-    assert!(!songs[0].id.is_empty());
+    assert_eq!(songs[0].title, "Instant Crush");
 
-    let songs = search_songs(
-        &catalogue(pool.clone(), vec![Ok(vec![candidate()])]),
-        &auth.service,
-        &context(),
-        &auth.token,
-        &query(Some("song"), Some(0), Some(100)),
-        SourceTags::Off,
-    )
-    .await
-    .expect("search succeeds");
-    assert_eq!(songs.len(), 1);
+    let (songs, total) = song_page(&library, &auth, &query(Some("missing"), None, None)).await;
+    assert!(songs.is_empty());
+    assert_eq!(total, 0);
+
+    let (songs, total) = song_page(&library, &auth, &query(Some("   "), None, None)).await;
+    assert_eq!(songs.len(), 2);
+    assert_eq!(total, 2);
 }
 
 #[sqlx::test]
-async fn an_unbounded_end_is_not_a_search_error(pool: sqlx::PgPool) {
+async fn song_list_window_is_inclusive_and_honours_deep_offsets(pool: sqlx::PgPool) {
     let auth = auth();
-    let songs = search_songs(
-        &catalogue(pool.clone(), vec![Ok(vec![candidate()])]),
-        &auth.service,
-        &context(),
-        &auth.token,
-        &query(Some("song"), Some(0), Some(-1)),
-        SourceTags::Off,
-    )
-    .await
-    .expect("an unbounded end is accepted");
-    assert_eq!(songs.len(), 1);
-}
+    let library = library(pool.clone());
+    let store = Arc::new(PostgresTrackRepository::new(pool));
+    seed(&store, 30).await;
 
-#[sqlx::test]
-async fn bounded_search_window_pages_offsets_and_rejects_beyond(pool: sqlx::PgPool) {
-    let auth = auth();
-    let result = search_songs(
-        &catalogue(pool.clone(), vec![]),
+    let (songs, total) = song_page(&library, &auth, &query(None, Some(0), Some(9))).await;
+    assert_eq!(total, 30);
+    assert_eq!(songs.len(), 10);
+    assert_eq!(songs[0].title, "Track 0000");
+    assert_eq!(songs[9].title, "Track 0009");
+
+    let (songs, _) = song_page(&library, &auth, &query(None, Some(10), Some(19))).await;
+    assert_eq!(songs.len(), 10);
+    assert_eq!(songs[0].title, "Track 0010");
+
+    let (songs, _) = song_page(&library, &auth, &query(None, Some(0), Some(99))).await;
+    assert_eq!(songs.len(), 30);
+
+    let (songs, _) = song_page(&library, &auth, &query(None, None, None)).await;
+    assert_eq!(songs.len(), 25);
+
+    let (songs, _) = song_page(&library, &auth, &query(None, Some(0), Some(-1))).await;
+    assert_eq!(songs.len(), 25);
+
+    let (songs, total) = song_page(
+        &library,
+        &auth,
+        &query(Some("track"), Some(1_001), Some(1_010)),
+    )
+    .await;
+    assert!(songs.is_empty());
+    assert_eq!(total, 30);
+
+    let result = song_list(
+        &library,
         &auth.service,
-        &context(),
         &auth.token,
-        &query(Some("song"), Some(1_001), Some(1_010)),
+        &query(None, Some(10), Some(9)),
         SourceTags::Off,
     )
     .await;
     assert!(matches!(result, Err(SongError::InvalidSearch)));
+}
 
-    let catalogue = paged_catalogue(pool.clone(), 25);
-    async fn songs(
-        catalogue: &SearchService,
-        auth: &TestAuth,
-        context: &RequestContext,
-        start: u32,
-        end: i64,
-    ) -> Vec<Song> {
-        search_songs(
-            catalogue,
-            &auth.service,
-            context,
-            &auth.token,
-            &query(Some("song"), Some(start), Some(end)),
-            SourceTags::Off,
+#[sqlx::test]
+async fn song_list_maps_stored_tracks_into_songs(pool: sqlx::PgPool) {
+    let auth = auth();
+    let library = library(pool.clone());
+    let store = Arc::new(PostgresTrackRepository::new(pool));
+    let album = add_album(&store, "Discovery", Some("Daft Punk")).await;
+    let placed = add_track(&store, "path-a", "Song One").await;
+    store
+        .set_album_track(
+            &album,
+            &placed,
+            &AlbumTrack::new(Some(1), Some(2), 1).expect("valid membership"),
         )
         .await
-        .expect("page succeeds")
-    }
-    let context = context();
-    let first = songs(&catalogue, &auth, &context, 0, 9).await;
-    let second = songs(&catalogue, &auth, &context, 10, 19).await;
-    let third = songs(&catalogue, &auth, &context, 20, 29).await;
-    let bounded = songs(&catalogue, &auth, &context, 25, 34).await;
-    let first_titles = first
-        .iter()
-        .map(|song| song.title.clone())
-        .collect::<Vec<_>>();
-    let expected_titles = (0..10)
-        .map(|index| format!("song-{index}"))
-        .collect::<Vec<_>>();
-    assert_eq!(first_titles, expected_titles);
-    assert_eq!(second[0].title, "song-10");
-    assert_eq!(second.len(), 10);
-    assert_eq!(third[0].title, "song-20");
-    assert_eq!(third.len(), 5);
-    assert!(bounded.is_empty());
+        .expect("membership stored");
+
+    let (songs, total) = song_page(&library, &auth, &query(Some("song one"), None, None)).await;
+
+    assert_eq!(total, 1);
+    assert_eq!(songs.len(), 1);
+    assert_eq!(songs[0].title, "Song One");
+    assert_eq!(songs[0].artist, "Artist");
+    assert_eq!(songs[0].album.as_deref(), Some("Discovery"));
+    assert_eq!(
+        songs[0].album_id.as_deref(),
+        Some(album.to_string().as_str())
+    );
+    assert_eq!(songs[0].album_artist.as_deref(), Some("Daft Punk"));
+    assert_eq!(songs[0].track_number, Some(2));
+    assert_eq!(songs[0].disc_number, Some(1));
+    assert_eq!(songs[0].duration, 1.0);
+    assert_eq!(
+        songs[0].cover_art.as_deref(),
+        Some(placed.to_string().as_str())
+    );
+    assert!(!songs[0].id.is_empty());
 }
 
 #[sqlx::test]
 async fn detail_returns_songs_and_rejects_unknown_ids(pool: sqlx::PgPool) {
-    let (catalogue, library) = services(pool.clone(), vec![Ok(vec![candidate()])]);
     let auth = auth();
-    let songs = search_songs(
-        &catalogue,
-        &auth.service,
-        &context(),
-        &auth.token,
-        &query(Some("song"), Some(0), Some(9)),
-        SourceTags::Off,
-    )
-    .await
-    .expect("search succeeds");
+    let library = library(pool.clone());
+    let store = Arc::new(PostgresTrackRepository::new(pool));
+    let stored = add_track(&store, "path-a", "Song One").await;
+
+    let (songs, _) = song_page(&library, &auth, &query(Some("song one"), None, None)).await;
     let song = song_detail(
         &library,
         &auth.service,
@@ -414,10 +371,10 @@ async fn detail_returns_songs_and_rejects_unknown_ids(pool: sqlx::PgPool) {
     )
     .await
     .expect("detail succeeds");
-    assert_eq!(song.id, songs[0].id);
-    assert_eq!(song.title, "song");
-    assert_eq!(song.artist, "a, b");
-    assert_eq!(song.duration, 180.0);
+    assert_eq!(song.id, stored.to_string());
+    assert_eq!(song.title, "Song One");
+    assert_eq!(song.artist, "Artist");
+    assert_eq!(song.duration, 1.0);
 
     let result = song_detail(
         &library,

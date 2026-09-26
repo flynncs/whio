@@ -6,15 +6,14 @@ use crate::{
     features::identity::service::{AuthError, CredentialService},
     features::music_library::artwork::CoverArtTarget,
     features::music_library::catalogue::{
-        CatalogueError, CatalogueSearch, CompletionService, LibraryService, SearchHit, SearchLimit,
-        SearchOffset, SearchQuery, SearchService,
+        CatalogueError, CompletionService, LibraryService, SearchHit,
     },
     features::music_library::domain::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistSummary,
-        GenreSummary, PlaylistId, TrackId,
+        GenreSummary, MAX_PAGE_LIMIT, PageLimit, PlaylistId, TrackId, TrackListFilter, TrackOrder,
+        TrackView,
     },
     features::music_library::playlists::{PlaylistDetail, PlaylistError, PlaylistService},
-    platform::request::RequestContext,
 };
 
 use super::{
@@ -57,6 +56,38 @@ fn song_from(hit: &SearchHit, tags: SourceTags) -> Song {
         album_artist: None,
         track_number: None,
         disc_number: None,
+        cover_art: Some(CoverArtTarget::song(track.id()).encode()),
+        duration: track
+            .duration_ms()
+            .map(|ms| ms as f32 / 1000.0)
+            .unwrap_or(0.0),
+        starred: state.is_starred(),
+        starred_at: state.starred_at().map(|at| at.to_rfc3339()),
+        rating: state.rating().unwrap_or(0),
+        play_count: u64::from(state.play_count()),
+        play_date: state.last_played_at().map(|at| at.to_rfc3339()),
+    }
+}
+
+fn song_from_view(view: &TrackView, tags: SourceTags) -> Song {
+    let track = view.track();
+    let album = view.album();
+    let membership = view.membership();
+    let state = view.state();
+
+    Song {
+        id: track.id().to_string(),
+        title: track.title().to_owned(),
+        artist: tags.artist(track.artists(), view.sources()),
+        album: album.map(|album| album.title().to_owned()),
+        album_id: album.map(|album| album.id().to_string()),
+        album_artist: view.album_artist().map(str::to_owned),
+        track_number: membership
+            .and_then(|membership| membership.track_number())
+            .map(i32::from),
+        disc_number: membership
+            .and_then(|membership| membership.disc_number())
+            .map(i32::from),
         cover_art: Some(CoverArtTarget::song(track.id()).encode()),
         duration: track
             .duration_ms()
@@ -168,56 +199,48 @@ fn genre_from_summary(summary: &GenreSummary) -> Genre {
     }
 }
 
-pub(crate) async fn search_songs(
-    search_service: &SearchService,
+pub(crate) async fn song_list(
+    library: &LibraryService,
     credential: &CredentialService,
-    context: &RequestContext,
     token: &str,
     query: &SongListQuery,
     tags: SourceTags,
-) -> Result<Vec<Song>, SongError> {
-    let user_id = match session::authorize(credential, token).await {
-        Ok(Some(user_id)) => user_id,
-        Ok(None) => return Err(SongError::Unauthorized),
-        Err(error) => return Err(SongError::Authentication(error)),
-    };
-    let user_uuid = user_id.as_uuid();
+) -> Result<(Vec<Song>, u32), SongError> {
+    let user = authorize(credential, token).await?;
+    let (offset, limit) = song_window(query)?;
+    let filter = TrackListFilter::new().with_title(query.title.clone());
+    let page = library
+        .track_page(offset, limit, TrackOrder::Title, &filter, Some(&user))
+        .await
+        .map_err(SongError::Catalogue)?;
+    let (views, total) = page.into_parts();
 
-    let q = query.title.as_deref().unwrap_or("").trim();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
+    Ok((
+        views
+            .iter()
+            .map(|view| song_from_view(view, tags))
+            .collect(),
+        total,
+    ))
+}
 
-    let start = query.start.unwrap_or(0);
+fn song_window(query: &SongListQuery) -> Result<(u32, PageLimit), SongError> {
+    let start = u64::from(query.start.unwrap_or(0));
     let end = match query.end {
-        Some(end) if end >= 0 => end as u32,
+        Some(end) if end >= 0 => end as u64,
         _ => start.saturating_add(24),
     };
     if end < start {
         return Err(SongError::InvalidSearch);
     }
-    let limit = end.saturating_sub(start).saturating_add(1).clamp(1, 25);
-    let search = match (
-        SearchQuery::new(q.to_owned()),
-        SearchLimit::new(limit),
-        SearchOffset::new(start),
-    ) {
-        (Ok(query), Ok(limit), Ok(offset)) => {
-            CatalogueSearch::new_with_offset(query, limit, offset)
-        }
-        _ => return Err(SongError::InvalidSearch),
-    };
 
-    let outcome = search_service
-        .search(&search, Some(&user_uuid), context)
-        .await
-        .map_err(SongError::Catalogue)?;
+    let window = (end - start)
+        .saturating_add(1)
+        .min(u64::from(MAX_PAGE_LIMIT));
+    let limit = u32::try_from(window).map_err(|_| SongError::InvalidSearch)?;
+    let limit = PageLimit::new(limit).map_err(|_| SongError::InvalidSearch)?;
 
-    Ok(outcome
-        .tracks
-        .iter()
-        .map(|hit| song_from(hit, tags))
-        .collect())
+    Ok((query.start.unwrap_or(0), limit))
 }
 
 pub(crate) async fn song_detail(

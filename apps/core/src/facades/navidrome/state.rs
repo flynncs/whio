@@ -5,7 +5,7 @@ use crate::{
     features::{
         identity::service::CredentialService,
         music_library::{
-            catalogue::{CompletionService, LibraryService, SearchService},
+            catalogue::{CompletionService, LibraryService},
             playlists::PlaylistService,
         },
     },
@@ -14,7 +14,6 @@ use crate::{
 #[derive(Clone)]
 pub(crate) struct NavidromeState {
     pub(crate) credential: Arc<CredentialService>,
-    pub(crate) search: Arc<SearchService>,
     pub(crate) library: Arc<LibraryService>,
     pub(crate) completion: Arc<CompletionService>,
     pub(crate) playlists: Arc<PlaylistService>,
@@ -24,9 +23,6 @@ pub(crate) struct NavidromeState {
 impl NavidromeState {
     pub(crate) fn credential(&self) -> &CredentialService {
         &self.credential
-    }
-    pub(crate) fn search(&self) -> &SearchService {
-        &self.search
     }
     pub(crate) fn library(&self) -> &LibraryService {
         &self.library

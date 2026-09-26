@@ -164,7 +164,6 @@ impl FromRef<AppState> for crate::facades::navidrome::state::NavidromeState {
     fn from_ref(state: &AppState) -> Self {
         Self {
             credential: Arc::clone(&state.credential),
-            search: Arc::clone(&state.search),
             library: Arc::clone(&state.library),
             completion: Arc::clone(&state.completion),
             playlists: Arc::clone(&state.playlists),

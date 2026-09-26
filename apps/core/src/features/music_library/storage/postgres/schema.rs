@@ -46,15 +46,16 @@ pub(crate) type TrackSearchRow = (
     Option<String>,
 );
 
-pub(crate) type TrackPageRow = (
-    Option<Uuid>,
-    Option<String>,
-    Option<i64>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    i64,
-);
+#[derive(sqlx::FromRow)]
+pub(crate) struct TrackPageRow {
+    pub(crate) id: Option<Uuid>,
+    pub(crate) title: Option<String>,
+    pub(crate) duration_ms: Option<i64>,
+    pub(crate) musicbrainz_recording_id: Option<String>,
+    pub(crate) isrc: Option<String>,
+    pub(crate) genre: Option<String>,
+    pub(crate) total: i64,
+}
 
 pub(crate) const ARTIST_COLUMNS: &str = "id, name, sort_name, musicbrainz_artist_id";
 pub(crate) const ALBUM_COLUMNS: &str = "id, title, album_artist_id, year, release_type, label, \

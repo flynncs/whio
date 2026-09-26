@@ -446,11 +446,13 @@ impl LibraryRead for PgStore {
                 SELECT COUNT(*)::BIGINT AS n
                 FROM tracks AS t
                 WHERE {scope}
+                  AND ($5::TEXT IS NULL OR t.title_normalized LIKE $5)
             ) AS totals
             LEFT JOIN LATERAL (
                 SELECT t.id, t.title, t.duration_ms, t.musicbrainz_recording_id, t.isrc, t.genre
                 FROM tracks AS t
                 WHERE {scope}
+                  AND ($5::TEXT IS NULL OR t.title_normalized LIKE $5)
                 ORDER BY {}
                 LIMIT $3 OFFSET $4
             ) AS page ON TRUE
@@ -461,6 +463,11 @@ impl LibraryRead for PgStore {
         .bind(&library_ids)
         .bind(i64::from(limit))
         .bind(i64::from(offset))
+        .bind(
+            filter
+                .title()
+                .map(|title| format!("%{}%", escape_like(title))),
+        )
         .fetch_all(&self.pool)
         .await
         .map_err(repository_error)?;
@@ -468,40 +475,49 @@ impl LibraryRead for PgStore {
         let Some(first) = rows.first() else {
             return Err(TrackRepositoryError::InvalidData);
         };
-        let total = u32::try_from(first.6).map_err(|_| TrackRepositoryError::InvalidData)?;
+        let total = u32::try_from(first.total).map_err(|_| TrackRepositoryError::InvalidData)?;
 
-        if rows.len() == 1 && first.0.is_none() {
+        if rows.len() == 1 && first.id.is_none() {
             return Ok(TrackPage::new(Vec::new(), total));
         }
 
-        let ids = rows.iter().filter_map(|row| row.0).collect::<Vec<_>>();
+        let ids = rows.iter().filter_map(|row| row.id).collect::<Vec<_>>();
         let mut credits = credits_for_tracks(&self.pool, &ids).await?;
         let mut sources = sources_for_tracks(&self.pool, &ids).await?;
         let states = track_states(&self.pool, user, &ids).await?;
         let mut albums = albums_for_tracks(&self.pool, &ids).await?;
         let mut items = Vec::with_capacity(ids.len());
 
-        for (id, title, duration_ms, recording_id, isrc, genre, _) in rows {
-            let (Some(id), Some(title)) = (id, title) else {
+        for row in rows {
+            let (Some(id), Some(title)) = (row.id, row.title) else {
                 return Err(TrackRepositoryError::InvalidData);
             };
             let track = decode_track(
                 id,
                 title,
-                duration_ms,
-                recording_id,
-                isrc,
-                genre,
+                row.duration_ms,
+                row.musicbrainz_recording_id,
+                row.isrc,
+                row.genre,
                 credits.remove(&id).unwrap_or_default(),
             )?;
-            let (album, membership) = match albums.remove(&id) {
-                Some((album, membership)) => (Some(album), Some(membership)),
-                None => (None, None),
+            let (album, membership, album_artist) = match albums.remove(&id) {
+                Some((album, membership, album_artist)) => {
+                    (Some(album), Some(membership), album_artist)
+                }
+                None => (None, None, None),
             };
             let state = states.get(&id).copied().unwrap_or_default();
             let sources = sources.remove(&id).unwrap_or_default();
 
-            items.push(TrackView::new(track, album, membership, state, sources));
+            items.push(TrackView::new(
+                track,
+                album,
+                membership,
+                album_artist,
+                state,
+                sources,
+            ));
         }
 
         Ok(TrackPage::new(items, total))
