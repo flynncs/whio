@@ -2,11 +2,11 @@
 
 use sqlx::PgPool;
 use whio_core::features::music_library::domain::{
-    AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope, StateTarget,
-    TrackMetadata,
+    AlbumMetadata, AlbumTrack, ArtistCredit, ArtistListFilter, ArtistSort, ProviderId,
+    SourceIdentity, SourceScope, StateTarget, TrackMetadata,
 };
 use whio_core::features::music_library::test_support::{
-    CatalogueWrite, PostgresTrackRepository, StateStore,
+    CatalogueWrite, LibraryRead, PostgresTrackRepository, StateStore,
 };
 mod support;
 
@@ -242,6 +242,157 @@ async fn subsonic_browse_lists_albums_artists_and_songs(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["subsonic-response"]["status"], json!("failed"));
+}
+
+async fn artist_scope_app(
+    pool: PgPool,
+    credential: Arc<whio_core::features::identity::service::CredentialService>,
+) -> (axum::Router, Arc<PostgresTrackRepository>) {
+    use whio_core::features::music_library::domain::{
+        AlbumMetadata, AlbumTrack, ArtistCredit, CreditRole, ProviderId, SourceIdentity,
+        SourceScope, TrackMetadata,
+    };
+    use whio_core::features::music_library::test_support::CatalogueWrite;
+
+    let local_source = |external_id: &str| {
+        SourceIdentity::new(
+            ProviderId::new("local".to_owned()).unwrap(),
+            SourceScope::Named("/music".to_owned()),
+            external_id.to_owned(),
+        )
+        .unwrap()
+    };
+    let credit = |name: &str| ArtistCredit::new(name.to_owned(), None).unwrap();
+
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+
+    for (album_title, external, tracks) in [
+        ("Discovery", "scope-a", 2usize),
+        ("Homework", "scope-b", 1usize),
+    ] {
+        let album = repository
+            .resolve_or_create_album(
+                &AlbumMetadata::new(album_title.to_owned())
+                    .unwrap()
+                    .with_album_artist(credit("Daft Punk")),
+            )
+            .await
+            .unwrap();
+
+        for index in 0..tracks {
+            let mut metadata = TrackMetadata::from_names(
+                format!("{album_title} {index}"),
+                vec!["Daft Punk".to_owned()],
+                Some(1_000),
+            )
+            .unwrap();
+
+            if album_title == "Discovery" && index == 0 {
+                metadata = metadata.with_credits(vec![
+                    ArtistCredit::new("Guy-Manuel".to_owned(), None)
+                        .unwrap()
+                        .with_role(CreditRole::Composer),
+                ]);
+            }
+
+            let track = repository
+                .get_or_create(local_source(&format!("{external}-{index}")), metadata)
+                .await
+                .unwrap();
+            repository
+                .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+                .await
+                .unwrap();
+        }
+    }
+
+    let ports = StorePorts {
+        store: Arc::clone(&repository),
+    };
+    let (search, library) = ports.bare_catalogue();
+    let playback = ports.streaming(vec![
+        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+    ]);
+
+    (router(credential, search, library, playback), repository)
+}
+
+#[sqlx::test]
+async fn subsonic_artist_surfaces_are_album_artist_scoped(pool: PgPool) {
+    let (service, secret) = credential_service_with_known_app_password();
+    let (app, repository) = artist_scope_app(pool.clone(), service).await;
+    let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
+
+    let all_roles = repository
+        .list_artists(0, 50, ArtistSort::Name, &ArtistListFilter::new(), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.artist().name().to_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        all_roles,
+        vec!["Daft Punk".to_owned(), "Guy-Manuel".to_owned()],
+        "the all-roles list keeps the composer-only artist, which is where the role selector belongs"
+    );
+
+    let body = get(
+        app.clone(),
+        &format!("/compat/subsonic/rest/getArtists.view?{auth}"),
+    )
+    .await;
+    let index = &body["subsonic-response"]["artists"]["index"];
+    let rows = index
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|entry| entry["artist"].as_array().unwrap())
+        .map(|artist| artist["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rows,
+        vec!["Daft Punk".to_owned()],
+        "the index is the album-artist index, so a composer-only credit is not a folder"
+    );
+
+    let album_count = index[0]["artist"][0]["albumCount"].clone();
+
+    assert_eq!(
+        album_count,
+        json!(2),
+        "the index reports the album-artist membership count"
+    );
+
+    let body = get(
+        app.clone(),
+        &format!(
+            "/compat/subsonic/rest/getArtist.view?{auth}&id={}",
+            index[0]["artist"][0]["id"].as_str().unwrap()
+        ),
+    )
+    .await;
+    let detail = &body["subsonic-response"]["artist"];
+    let albums = detail["album"].as_array().unwrap();
+    let mut names = albums
+        .iter()
+        .map(|album| album["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+
+    assert_eq!(
+        detail["albumCount"], album_count,
+        "getArtist reports the count getArtists reports for the same artist"
+    );
+    assert_eq!(
+        Some(albums.len()),
+        detail["albumCount"]
+            .as_u64()
+            .map(|count| usize::try_from(count).unwrap()),
+        "and it is the album list the detail returns"
+    );
+    assert_eq!(names, vec!["Discovery".to_owned(), "Homework".to_owned()]);
 }
 
 #[sqlx::test]

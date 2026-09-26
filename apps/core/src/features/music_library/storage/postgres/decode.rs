@@ -123,6 +123,10 @@ pub(crate) fn artist_count_expressions(membership: &str) -> (String, String) {
 pub(crate) fn artist_all_roles_count_expressions() -> (String, String) {
     artist_count_expressions(&artist_membership(Some(""), true))
 }
+
+pub(crate) fn artist_album_artist_membership() -> String {
+    artist_membership(None, true)
+}
 pub(crate) fn decode_track(
     record: TrackRecord,
     genres: Vec<String>,
@@ -644,7 +648,8 @@ pub(crate) async fn artist_summaries_by_ids(
         return Ok(Vec::new());
     }
 
-    let (album_count, song_count) = artist_all_roles_count_expressions();
+    let membership = artist_album_artist_membership();
+    let (album_count, song_count) = artist_count_expressions(&membership);
     let rows =
         sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(&format!(
             r#"
@@ -652,6 +657,7 @@ pub(crate) async fn artist_summaries_by_ids(
                {album_count} AS album_count, {song_count} AS song_count
         FROM artists AS ar
         WHERE ar.id = ANY($1)
+          AND EXISTS (SELECT 1 FROM ({membership}) AS starred_membership)
         "#
         ))
         .bind(artist_ids)

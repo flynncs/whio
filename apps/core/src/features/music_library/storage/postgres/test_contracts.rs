@@ -674,7 +674,9 @@ async fn per_user_state_round_trips_for_every_entity(pool: sqlx::PgPool) {
         .await
         .unwrap();
     let album = repository
-        .resolve_or_create_album(&album_metadata("Discovery"))
+        .resolve_or_create_album(
+            &album_metadata("Discovery").with_album_artist(credit("Daft Punk", None)),
+        )
         .await
         .unwrap();
     let artist = repository
@@ -743,6 +745,12 @@ async fn per_user_state_round_trips_for_every_entity(pool: sqlx::PgPool) {
     assert_eq!(starred.tracks().len(), 1);
     assert_eq!(starred.albums().len(), 1);
     assert_eq!(starred.artists().len(), 1);
+    assert_eq!(starred.artists()[0].artist().id(), artist.id());
+    assert_eq!(
+        starred.artists()[0].album_count(),
+        1,
+        "the starred artist carries the album-artist membership count"
+    );
 
     repository
         .set_rating(user, StateTarget::Track(track.id()), Some(0))

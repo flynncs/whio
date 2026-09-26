@@ -7,8 +7,8 @@ use crate::{
     features::music_library::catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch},
     features::music_library::{
         domain::{
-            AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, Resource, SourceIdentity,
-            SourceScope, TrackMetadata,
+            AlbumMetadata, AlbumTrack, ArtistCredit, CreditRole, ProviderId, Resource,
+            SourceIdentity, SourceScope, TrackMetadata,
         },
         library::ScanService,
         test_support::PostgresTrackRepository,
@@ -538,7 +538,19 @@ async fn album_detail_lists_its_tracks_in_order(pool: sqlx::PgPool) {
 async fn artists_group_into_indexes(pool: sqlx::PgPool) {
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     for name in ["Daft Punk", "99 Posse"] {
-        repository
+        let from_names = |title: &str, artist: &str| {
+            TrackMetadata::from_names(title.to_owned(), vec![artist.to_owned()], Some(1_000))
+                .unwrap()
+        };
+        let album = repository
+            .resolve_or_create_album(
+                &AlbumMetadata::new(format!("{name} album"))
+                    .unwrap()
+                    .with_album_artist(ArtistCredit::new(name.to_owned(), None).unwrap()),
+            )
+            .await
+            .unwrap();
+        let track = repository
             .get_or_create(
                 SourceIdentity::new(
                     ProviderId::new("local".to_owned()).unwrap(),
@@ -546,16 +558,37 @@ async fn artists_group_into_indexes(pool: sqlx::PgPool) {
                     format!("{name}.flac"),
                 )
                 .unwrap(),
-                TrackMetadata::from_names(
-                    format!("{name} song"),
-                    vec![name.to_owned()],
-                    Some(1_000),
-                )
-                .unwrap(),
+                from_names(&format!("{name} song"), name),
             )
             .await
             .unwrap();
+        repository
+            .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
     }
+    repository
+        .get_or_create(
+            SourceIdentity::new(
+                ProviderId::new("local".to_owned()).unwrap(),
+                SourceScope::Named("/music".to_owned()),
+                "session.flac".to_owned(),
+            )
+            .unwrap(),
+            TrackMetadata::from_names(
+                "session song".to_owned(),
+                vec!["Soloist".to_owned()],
+                Some(1_000),
+            )
+            .unwrap()
+            .with_credits(vec![
+                ArtistCredit::new("Session Composer".to_owned(), None)
+                    .unwrap()
+                    .with_role(CreditRole::Composer),
+            ]),
+        )
+        .await
+        .unwrap();
     let catalogue = LibraryService::new(
         Arc::clone(&repository) as Arc<dyn LibraryRead>,
         Arc::clone(&repository) as Arc<dyn SourceLookup>,
@@ -571,6 +604,20 @@ async fn artists_group_into_indexes(pool: sqlx::PgPool) {
 
     assert_eq!(names, ["#", "D"]);
     assert_eq!(indexes[1].artist.as_ref().unwrap()[0].name, "Daft Punk");
+
+    let all_roles = catalogue
+        .artist_list(0, 50, ArtistSort::Name, &ArtistListFilter::new(), None)
+        .await
+        .expect("the unfiltered list succeeds")
+        .into_iter()
+        .map(|summary| summary.artist().name().to_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        all_roles,
+        ["99 Posse", "Daft Punk", "Session Composer", "Soloist"],
+        "the scoped index drops the credit-only artists the unfiltered list keeps"
+    );
 }
 
 #[test]

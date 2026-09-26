@@ -200,8 +200,10 @@ async fn producer_fixture(repository: &PostgresTrackRepository) -> (ArtistId, Ar
     let third_track = repository
         .get_or_create(
             source("local", "other-credited.flac"),
-            primary("other-credited", &["Other Artist"])
-                .with_credits(vec![credit("Wide Artist", Some(CreditRole::Composer))]),
+            primary("other-credited", &["Other Artist"]).with_credits(vec![
+                credit("Wide Artist", Some(CreditRole::Composer)),
+                credit("Session Composer", Some(CreditRole::Composer)),
+            ]),
         )
         .await
         .unwrap();
@@ -362,6 +364,21 @@ async fn membership_counts(pool: &PgPool, artist: &ArtistId) -> (i64, i64) {
     .unwrap();
 
     (albums, tracks)
+}
+
+async fn album_artist_counts(pool: &PgPool, artist: &ArtistId) -> (i64, i64) {
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM albums WHERE album_artist_id = $1), \
+                (SELECT COUNT(DISTINCT member.track_id) FROM album_tracks AS member \
+                 JOIN albums AS album ON album.id = member.album_id \
+                 WHERE album.album_artist_id = $1)",
+    )
+    .bind(artist.as_uuid())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    counts
 }
 
 #[sqlx::test]
@@ -1607,12 +1624,38 @@ async fn every_producer_agrees_on_artist_counts(pool: PgPool) {
             expected,
             "the search producer reports what the list reports"
         );
+    }
+
+    let album_artists = counted(
+        &repository,
+        ArtistSort::Name,
+        &ArtistListFilter::new().with_role(Some(role_set(&[RoleSelector::AlbumArtist]))),
+        None,
+    )
+    .await
+    .into_iter()
+    .map(|(id, albums, songs)| (*id.as_uuid(), (albums, songs)))
+    .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(
+        from_ids.get(wide.as_uuid()).copied(),
+        Some((2, Some(3))),
+        "the id-set producer is the starred read, so it reports the album-artist scope"
+    );
+
+    for id in [&wide, &narrow] {
         assert_eq!(
             from_ids.get(id.as_uuid()).copied(),
-            expected,
-            "the id-set producer reports what the list reports"
+            album_artists.get(id.as_uuid()).copied(),
+            "and it agrees with the album-artist role list for the same artist"
         );
     }
+
+    assert_eq!(
+        album_artist_counts(&pool, &wide).await,
+        (2, 3),
+        "the independent album-artist recomputation"
+    );
 
     assert_eq!(
         membership_counts(&pool, &wide).await,
@@ -1629,6 +1672,50 @@ async fn every_producer_agrees_on_artist_counts(pool: PgPool) {
         detail_albums.len(),
         2,
         "the detail path holds the album-artist albums only, so its count is not the membership count"
+    );
+
+    let user = provision(pool.clone())
+        .create_user("artist-starred", "Artist Starred")
+        .await
+        .unwrap();
+    let composer_only = named(&repository, "Session Composer").await;
+
+    for id in [&wide, &composer_only] {
+        repository
+            .set_starred(user, StateTarget::Artist(id), true)
+            .await
+            .unwrap();
+    }
+
+    let favourites: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artist_favorites")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        favourites, 2,
+        "both artists are favourited, so the album-artist scope is what removes one"
+    );
+
+    let starred = repository.starred(user).await.unwrap();
+    let starred_names = starred
+        .artists()
+        .iter()
+        .map(|summary| summary.artist().name().to_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        starred_names,
+        vec!["Wide Artist".to_owned()],
+        "the starred read is album-artist scoped, so a composer-only favourite is not listed"
+    );
+    assert_eq!(
+        (
+            starred.artists()[0].album_count(),
+            starred.artists()[0].song_count(),
+        ),
+        (2, Some(3)),
+        "and it reports the album-artist counts rather than the all-roles ones"
     );
 }
 
@@ -1685,10 +1772,13 @@ async fn song_count_is_computed_on_every_producer(pool: PgPool) {
     let by_ids = super::decode::artist_summaries_by_ids(&pool, &[*wide.as_uuid()], None)
         .await
         .unwrap();
+    let (_, album_artist_tracks) = album_artist_counts(&pool, &wide).await;
 
+    assert_eq!((wide_tracks, album_artist_tracks), (4, 3));
     assert_eq!(
         by_ids[0].song_count(),
-        Some(u32::try_from(wide_tracks).unwrap())
+        Some(u32::try_from(album_artist_tracks).unwrap()),
+        "the id-set producer counts the album-artist membership, not the all-roles one"
     );
 
     let library = Arc::new(PostgresTrackRepository::new(pool.clone()));

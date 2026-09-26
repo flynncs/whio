@@ -12,7 +12,7 @@ use crate::{
     features::music_library::domain::{
         AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, ArtistListFilter,
         ArtistSort, IdSet, RandomSeed, Range, RoleSelector, RoleSet, SelectorText, SortDirection,
-        StateTarget, TrackId,
+        StateTarget, TrackId, ValidationError,
     },
     features::music_library::library::ScanService,
     features::music_library::library_state::{LibraryStateError, LibraryStateService},
@@ -152,12 +152,14 @@ pub(crate) async fn enumerate(
     let artists = if request.artists.count == 0 {
         Vec::new()
     } else {
+        let filter = album_artist_filter().map_err(|_| SearchError::InvalidSearch)?;
+
         library
             .artist_list(
                 request.artists.offset,
                 request.artists.count,
                 ArtistSort::Name,
-                &ArtistListFilter::default(),
+                &filter,
                 user,
             )
             .await
@@ -482,18 +484,20 @@ pub(crate) async fn album_detail(
     Ok(mapping::album_detail_with_songs(&detail, tags))
 }
 
+fn album_artist_filter() -> Result<ArtistListFilter, ValidationError> {
+    let role = RoleSet::new([RoleSelector::AlbumArtist])?;
+
+    Ok(ArtistListFilter::new().with_role(Some(role)))
+}
+
 pub(crate) async fn artists(
     library: &LibraryService,
     user: Option<&Uuid>,
 ) -> Result<Vec<models::ArtistId3>, BrowseError> {
+    let filter = album_artist_filter().map_err(|_| BrowseError::InvalidRequest)?;
+
     library
-        .artist_list(
-            0,
-            u32::MAX,
-            ArtistSort::Name,
-            &ArtistListFilter::default(),
-            user,
-        )
+        .artist_list(0, u32::MAX, ArtistSort::Name, &filter, user)
         .await
         .map(|artists| artists.iter().map(mapping::artist_from_summary).collect())
         .map_err(BrowseError::Catalogue)

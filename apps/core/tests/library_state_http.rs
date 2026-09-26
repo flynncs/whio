@@ -15,8 +15,8 @@ use tower::ServiceExt;
 use whio_core::{
     app::AppState,
     features::music_library::domain::{
-        AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
-        TrackMetadata,
+        AlbumMetadata, AlbumTrack, ArtistCredit, CreditRole, ProviderId, SourceIdentity,
+        SourceScope, TrackMetadata,
     },
     features::music_library::library::ScanService,
     features::music_library::test_support::CatalogueWrite,
@@ -31,6 +31,7 @@ struct Seeded {
     song: String,
     album: String,
     artist: String,
+    composer: String,
     secret: String,
 }
 
@@ -63,6 +64,12 @@ async fn seeded_app(pool: PgPool) -> Seeded {
         )
         .await
         .unwrap();
+    let composer = repository
+        .resolve_or_create_artist(&ArtistCredit::new("Guy-Manuel".to_owned(), None).unwrap())
+        .await
+        .unwrap()
+        .id()
+        .clone();
     let first = repository
         .get_or_create(
             local("path-a"),
@@ -72,7 +79,12 @@ async fn seeded_app(pool: PgPool) -> Seeded {
                 Some(1_000),
             )
             .unwrap()
-            .with_genres(vec!["Rock".to_owned()]),
+            .with_genres(vec!["Rock".to_owned()])
+            .with_credits(vec![
+                ArtistCredit::new("Guy-Manuel".to_owned(), None)
+                    .unwrap()
+                    .with_role(CreditRole::Composer),
+            ]),
         )
         .await
         .unwrap();
@@ -129,6 +141,7 @@ async fn seeded_app(pool: PgPool) -> Seeded {
         song: first.id().to_string(),
         album: album.id().to_string(),
         artist: artist.id().to_string(),
+        composer: composer.to_string(),
         secret,
     }
 }
@@ -193,6 +206,7 @@ async fn subsonic_star_rating_play_and_genre_routes(pool: PgPool) {
         song,
         album,
         artist,
+        composer,
         secret,
     } = seeded_app(pool.clone()).await;
     let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
@@ -235,11 +249,38 @@ async fn subsonic_star_rating_play_and_genre_routes(pool: PgPool) {
     )
     .await;
 
+    let body = get(
+        app.clone(),
+        &format!("/rest/star.view?{auth}&artistId={composer}"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let favourites: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artist_favorites")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        favourites, 2,
+        "the album artist and the composer-only credit are both favourited"
+    );
+
     let body = get(app.clone(), &format!("/rest/getStarred2.view?{auth}")).await;
     let starred = &body["subsonic-response"]["starred2"];
     assert_eq!(starred["song"][0]["title"], json!("First"));
     assert_eq!(starred["album"][0]["name"], json!("Discovery"));
+    assert_eq!(
+        starred["artist"].as_array().unwrap().len(),
+        1,
+        "the starred artist surface is album-artist scoped"
+    );
     assert_eq!(starred["artist"][0]["name"], json!("Daft Punk"));
+    assert_eq!(
+        starred["artist"][0]["albumCount"],
+        json!(1),
+        "and it reports the album-artist membership count"
+    );
 
     let body = get(
         app.clone(),
