@@ -3857,10 +3857,10 @@
         "musicFolderId"
       ],
       "foreign_input": "`library_id`, `musicFolderId`",
-      "native_selector": "stable library registration selectors, not filesystem paths",
+      "native_selector": "stable library registration selectors, not filesystem paths; a numeric Subsonic music folder id is translated through the library registry to the canonical library id set on getAlbumList2, getSongsByGenre and getRandomSongs, and Navidrome's library_id filter feeds the same selector; getStarred2 documents musicFolderId but its state read carries no library selector, so that site is not translated",
       "owner_task": "L06",
       "facade_owner": "L11",
-      "status": "unproved"
+      "status": "registered"
     },
     {
       "names": [
