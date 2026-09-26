@@ -13,7 +13,7 @@ use crate::features::music_library::{
         TrackId, TrackListFilter, TrackListScope, TrackOrder, TrackPage, TrackView,
         YOUTUBE_MUSIC_PROVIDER_ID,
     },
-    library::LibraryRegistry,
+    library::{LibraryRegistrationError, LibraryRegistry},
     storage::contracts::TrackRepositoryError,
 };
 
@@ -1007,6 +1007,18 @@ fn role_clause(
     }
 }
 
+fn library_selector_error(error: LibraryRegistrationError) -> TrackRepositoryError {
+    match error {
+        LibraryRegistrationError::UnknownLibrary { id } => {
+            TrackRepositoryError::UnknownLibraryId { id }
+        }
+        LibraryRegistrationError::Store(_)
+        | LibraryRegistrationError::Disabled
+        | LibraryRegistrationError::UnknownLabel { .. }
+        | LibraryRegistrationError::UnknownNumericId { .. } => TrackRepositoryError::InvalidData,
+    }
+}
+
 async fn track_selector_clauses(
     pool: &PgPool,
     filter: &TrackListFilter,
@@ -1248,7 +1260,7 @@ async fn track_selector_clauses(
         let scopes = registry
             .scopes_for_ids(&ids)
             .await
-            .map_err(|_| TrackRepositoryError::InvalidData)?;
+            .map_err(library_selector_error)?;
         let placeholder = predicates.texts(scopes);
 
         predicates.push(format!(
@@ -1755,7 +1767,7 @@ async fn album_selector_clauses(
         let scopes = registry
             .scopes_for_ids(&ids)
             .await
-            .map_err(|_| TrackRepositoryError::InvalidData)?;
+            .map_err(library_selector_error)?;
         let placeholder = predicates.texts(scopes);
 
         predicates.push(format!(
@@ -1939,7 +1951,7 @@ async fn artist_selector_clauses(
         let scopes = registry
             .scopes_for_ids(&ids)
             .await
-            .map_err(|_| TrackRepositoryError::InvalidData)?;
+            .map_err(library_selector_error)?;
         let placeholder = predicates.texts(scopes);
 
         predicates.push(format!(

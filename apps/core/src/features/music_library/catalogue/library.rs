@@ -9,8 +9,9 @@ use crate::features::music_library::{
             AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId,
             ArtistListFilter, ArtistSort, ArtistSummary, Availability, GenreSummary, LibraryState,
             PageLimit, SourceIdentity, Track, TrackId, TrackListFilter, TrackOrder, TrackPage,
+            ValidationError,
         },
-        storage::contracts::{LibraryRead, SourceLookup, StateStore},
+        storage::contracts::{LibraryRead, SourceLookup, StateStore, TrackRepositoryError},
     },
 };
 
@@ -31,6 +32,19 @@ pub struct AlbumDetail {
 pub struct ArtistDetail {
     pub artist: ArtistSummary,
     pub albums: Vec<AlbumSummary>,
+}
+
+fn catalogue_error(error: TrackRepositoryError) -> CatalogueError {
+    match error {
+        TrackRepositoryError::UnknownLibraryId { id } => {
+            tracing::debug!(library_id = %id, "rejected an unregistered library id");
+
+            CatalogueError::Invalid(ValidationError::Invalid {
+                field: "library_id",
+            })
+        }
+        error => CatalogueError::Repository(error),
+    }
 }
 
 impl LibraryService {
@@ -102,7 +116,7 @@ impl LibraryService {
         self.library
             .list_albums(offset, limit, order, filter, user.copied())
             .await
-            .map_err(CatalogueError::Repository)
+            .map_err(catalogue_error)
     }
 
     pub async fn genres(&self) -> Result<Vec<GenreSummary>, CatalogueError> {
@@ -120,7 +134,7 @@ impl LibraryService {
         self.library
             .count_albums(user.copied(), filter)
             .await
-            .map_err(CatalogueError::Repository)
+            .map_err(catalogue_error)
     }
 
     pub async fn artist_count(
@@ -131,7 +145,7 @@ impl LibraryService {
         self.library
             .count_artists(user.copied(), filter)
             .await
-            .map_err(CatalogueError::Repository)
+            .map_err(catalogue_error)
     }
 
     pub async fn album_detail(
@@ -168,7 +182,7 @@ impl LibraryService {
         self.library
             .list_artists(offset, limit, sort, filter, user.copied())
             .await
-            .map_err(CatalogueError::Repository)
+            .map_err(catalogue_error)
     }
 
     pub async fn artist_detail(
@@ -214,7 +228,7 @@ impl LibraryService {
         self.library
             .page_tracks(offset, limit.get(), order, filter, user.copied())
             .await
-            .map_err(CatalogueError::Repository)
+            .map_err(catalogue_error)
     }
 
     pub async fn sources(&self, track_id: &TrackId) -> Result<Vec<SourceIdentity>, CatalogueError> {

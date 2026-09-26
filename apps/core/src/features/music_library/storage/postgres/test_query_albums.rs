@@ -13,7 +13,7 @@ use crate::features::music_library::{
         TrackMetadata, ValidationError,
     },
     library::LibraryId,
-    storage::contracts::{CatalogueWrite, LibraryRead, StateStore},
+    storage::contracts::{CatalogueWrite, LibraryRead, StateStore, TrackRepositoryError},
 };
 
 const LOCAL_ROOT: &str = "/music";
@@ -545,18 +545,23 @@ async fn count_equals_the_list_for_every_selector(pool: PgPool) {
     );
     assert_eq!(total(&repository, &all, Some(&user)).await, 1);
 
-    let unknown = AlbumListFilter::new().with_library_id(Some(
-        IdSet::new([LibraryId::from_uuid(Uuid::now_v7())]).unwrap(),
-    ));
+    let missing = LibraryId::from_uuid(Uuid::now_v7());
+    let unknown =
+        AlbumListFilter::new().with_library_id(Some(IdSet::new([missing.clone()]).unwrap()));
     assert!(
-        repository
-            .list_albums(0, 500, AlbumOrder::Name, unknown.clone(), Some(user))
-            .await
-            .is_err(),
+        matches!(
+            repository
+                .list_albums(0, 500, AlbumOrder::Name, unknown.clone(), Some(user))
+                .await,
+            Err(TrackRepositoryError::UnknownLibraryId { id }) if id == missing.to_string()
+        ),
         "an unregistered library id is rejected, not ignored"
     );
     assert!(
-        repository.count_albums(Some(user), unknown).await.is_err(),
+        matches!(
+            repository.count_albums(Some(user), unknown).await,
+            Err(TrackRepositoryError::UnknownLibraryId { id }) if id == missing.to_string()
+        ),
         "and the count rejects it too"
     );
 }

@@ -17,7 +17,9 @@ impl From<TrackRepositoryError> for SourceQueryError {
     fn from(error: TrackRepositoryError) -> Self {
         match error {
             TrackRepositoryError::Unavailable => Self::Unavailable,
-            TrackRepositoryError::InvalidData => Self::InvalidData,
+            TrackRepositoryError::InvalidData | TrackRepositoryError::UnknownLibraryId { .. } => {
+                Self::InvalidData
+            }
         }
     }
 }

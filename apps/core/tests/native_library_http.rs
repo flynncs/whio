@@ -1766,6 +1766,97 @@ mod native_library {
     }
 
     #[sqlx::test]
+    async fn native_library_selector_rejects_an_unregistered_library(pool: PgPool) {
+        let library = Library::new(pool.clone()).await;
+        let unregistered = Uuid::now_v7();
+
+        for resource in ["tracks", "albums", "artists"] {
+            library
+                .rejected(resource, &format!("library_id={unregistered}"))
+                .await;
+        }
+    }
+
+    #[sqlx::test]
+    async fn native_library_selector_keeps_a_registered_library(pool: PgPool) {
+        let library = Library::new(pool.clone()).await;
+        let fixture = selector_fixture(&pool).await;
+        let music = fixture.music.to_string();
+        let elsewhere = fixture.elsewhere.to_string();
+
+        let ports = StorePorts::new(pool.clone());
+        let catalogue = ports.catalogue();
+        catalogue
+            .set_album_source(&fixture.kept, &source("local", "kept.flac"))
+            .await
+            .unwrap();
+        catalogue
+            .set_album_source(
+                &fixture.other,
+                &source_in("local", OTHER_ROOT, "other.flac"),
+            )
+            .await
+            .unwrap();
+
+        let tracks = library.page("tracks", &format!("library_id={music}")).await;
+        assert_eq!(
+            tracks["total"],
+            json!(3),
+            "the main library holds three tracks"
+        );
+
+        let albums = library.page("albums", &format!("library_id={music}")).await;
+        assert_eq!(names(&albums), ["Kept"]);
+        assert_eq!(albums["total"], json!(1));
+        let other_albums = library
+            .page("albums", &format!("library_id={elsewhere}"))
+            .await;
+        assert_eq!(names(&other_albums), ["Other"]);
+        assert_eq!(other_albums["total"], json!(1));
+
+        let artists = library
+            .page("artists", &format!("library_id={music}&order=name"))
+            .await;
+        assert_eq!(names(&artists), ["Artist", "Composer One"]);
+        assert_eq!(artists["total"], json!(2));
+
+        let other = library
+            .page("artists", &format!("library_id={elsewhere}&order=name"))
+            .await;
+        assert_eq!(names(&other), ["Narrator"]);
+        assert_eq!(other["total"], json!(1));
+    }
+
+    #[sqlx::test]
+    async fn native_library_store_failure_is_not_a_client_error(pool: PgPool) {
+        let library = Library::new(pool.clone()).await;
+        let fixture = selector_fixture(&pool).await;
+        let music = fixture.music.to_string();
+
+        sqlx::query("ALTER TABLE libraries RENAME TO libraries_unavailable")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        for resource in ["tracks", "albums", "artists"] {
+            let response = library.get(resource, &format!("library_id={music}")).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the status for {resource} while the library store fails"
+            );
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "internal_error", "the code for {resource}");
+            assert_eq!(
+                body["message"],
+                json!("An unexpected error occurred"),
+                "the message for {resource}"
+            );
+        }
+    }
+
+    #[sqlx::test]
     async fn native_direction_overrides_the_natural_order(pool: PgPool) {
         let library = Library::new(pool.clone()).await;
         let user = user_id(&pool).await;

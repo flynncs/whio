@@ -13,7 +13,9 @@ use crate::features::music_library::{
         TrackOrder, ValidationError,
     },
     library::LibraryId,
-    storage::contracts::{CatalogueWrite, LibraryRead, SourceFileFacts, StateStore},
+    storage::contracts::{
+        CatalogueWrite, LibraryRead, SourceFileFacts, StateStore, TrackRepositoryError,
+    },
 };
 
 const LOCAL_ROOT: &str = "/music";
@@ -652,14 +654,16 @@ async fn total_agrees_with_the_list_for_every_selector(pool: PgPool) {
     );
     assert_eq!(total(&repository, &all, Some(&user)).await, 1);
 
-    let unknown = TrackListFilter::new().with_library_id(Some(
-        IdSet::new([LibraryId::from_uuid(Uuid::now_v7())]).unwrap(),
-    ));
+    let missing = LibraryId::from_uuid(Uuid::now_v7());
+    let unknown =
+        TrackListFilter::new().with_library_id(Some(IdSet::new([missing.clone()]).unwrap()));
     assert!(
-        repository
-            .page_tracks(0, 500, TrackOrder::Id, &unknown, Some(user))
-            .await
-            .is_err(),
+        matches!(
+            repository
+                .page_tracks(0, 500, TrackOrder::Id, &unknown, Some(user))
+                .await,
+            Err(TrackRepositoryError::UnknownLibraryId { id }) if id == missing.to_string()
+        ),
         "an unregistered library id is rejected, not ignored"
     );
 }

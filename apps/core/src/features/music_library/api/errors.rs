@@ -58,6 +58,16 @@ impl IntoResponse for ApiError {
             }
             ApiError::Catalogue { context, error } => {
                 let (status, code, message) = match &error {
+                    CatalogueError::Invalid(invalid) => {
+                        tracing::debug!(
+                            error = %invalid,
+                            request_id = context.request_id().as_str(),
+                            "invalid catalogue request"
+                        );
+
+                        return invalid_request_response(context);
+                    }
+
                     CatalogueError::Provider(
                         CatalogueProviderError::Disabled
                         | CatalogueProviderError::ProviderUnavailable

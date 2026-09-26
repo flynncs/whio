@@ -4,6 +4,8 @@ pub enum TrackRepositoryError {
     Unavailable,
     #[error("track repository contained invalid data")]
     InvalidData,
+    #[error("library {id} is not registered")]
+    UnknownLibraryId { id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::{
     features::music_library::catalogue::ProviderError,
+    features::music_library::domain::ValidationError,
     features::music_library::storage::contracts::TrackRepositoryError,
 };
 
@@ -12,4 +13,7 @@ pub enum CatalogueError {
 
     #[error("track repository failed")]
     Repository(#[source] TrackRepositoryError),
+
+    #[error("catalogue request was invalid")]
+    Invalid(#[source] ValidationError),
 }

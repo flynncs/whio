@@ -17,7 +17,9 @@ use crate::features::music_library::{
         ValidationError,
     },
     library::LibraryId,
-    storage::contracts::{CatalogueWrite, LibraryRead, SourceLookup, StateStore},
+    storage::contracts::{
+        CatalogueWrite, LibraryRead, SourceLookup, StateStore, TrackRepositoryError,
+    },
 };
 
 const LOCAL_ROOT: &str = "/music";
@@ -1902,22 +1904,24 @@ async fn artist_selectors_are_scoped(pool: PgPool) {
     );
     assert_eq!(total(&repository, &elsewhere_filter, Some(&user)).await, 1);
 
-    let unknown = ArtistListFilter::new().with_library_id(Some(
-        IdSet::new([LibraryId::from_uuid(Uuid::now_v7())]).unwrap(),
-    ));
+    let missing = LibraryId::from_uuid(Uuid::now_v7());
+    let unknown =
+        ArtistListFilter::new().with_library_id(Some(IdSet::new([missing.clone()]).unwrap()));
 
     assert!(
-        repository
-            .list_artists(0, 500, ArtistSort::Name, &unknown, Some(user))
-            .await
-            .is_err(),
+        matches!(
+            repository
+                .list_artists(0, 500, ArtistSort::Name, &unknown, Some(user))
+                .await,
+            Err(TrackRepositoryError::UnknownLibraryId { id }) if id == missing.to_string()
+        ),
         "an unregistered library id is rejected, not ignored"
     );
     assert!(
-        repository
-            .count_artists(Some(user), &unknown)
-            .await
-            .is_err(),
+        matches!(
+            repository.count_artists(Some(user), &unknown).await,
+            Err(TrackRepositoryError::UnknownLibraryId { id }) if id == missing.to_string()
+        ),
         "and the count rejects it too"
     );
 }
