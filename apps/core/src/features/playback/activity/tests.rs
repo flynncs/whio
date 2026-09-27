@@ -90,6 +90,7 @@ impl StateStore for NoState {}
 #[derive(Default)]
 struct Ledger {
     accepted: Mutex<Vec<ListenSubmission>>,
+    failures: Mutex<usize>,
 }
 
 impl Ledger {
@@ -120,6 +121,16 @@ impl ListenStore for Ledger {
         &self,
         submission: &ListenSubmission,
     ) -> Result<ListenOutcome, TrackRepositoryError> {
+        let mut failures = self.failures.lock();
+
+        if *failures > 0 {
+            *failures -= 1;
+
+            return Err(TrackRepositoryError::Unavailable);
+        }
+
+        drop(failures);
+
         let mut accepted = self.accepted.lock();
 
         if accepted
@@ -161,8 +172,15 @@ struct Harness {
 }
 
 fn harness(tracks: &[Track]) -> Harness {
+    harness_failing(tracks, 0)
+}
+
+fn harness_failing(tracks: &[Track], failures: usize) -> Harness {
     let library = Arc::new(FakeLibrary::new(tracks));
-    let ledger = Arc::new(Ledger::default());
+    let ledger = Arc::new(Ledger {
+        failures: Mutex::new(failures),
+        ..Ledger::default()
+    });
     let listens = Arc::new(ListenService::new(
         Arc::clone(&ledger) as Arc<dyn ListenStore>,
         Arc::clone(&library) as Arc<dyn LibraryRead>,
@@ -704,6 +722,126 @@ async fn a_report_for_an_unknown_track_is_refused() {
     assert!(matches!(refused, ActivityError::UnknownTrack));
     assert!(harness.service.now_playing(PRINCIPAL, at(0)).is_empty());
     assert!(harness.ledger.rows().is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_stopped_submission_retries_and_closes() {
+    let harness = harness_failing(&[track(1, Some(240_000))], 1);
+    let phone = client("phone");
+
+    harness
+        .service
+        .report(&report(&phone, PlaybackState::Playing, 0, 0))
+        .await
+        .unwrap();
+
+    let failed = harness
+        .service
+        .report(&report(&phone, PlaybackState::Stopped, 240_000, 240_000))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(failed, ActivityError::Submission(_)));
+    assert!(harness.ledger.rows().is_empty());
+    assert!(
+        harness
+            .service
+            .now_playing(PRINCIPAL, at(240_000))
+            .is_empty()
+    );
+
+    let retried = harness
+        .service
+        .report(&report(&phone, PlaybackState::Stopped, 240_000, 241_000))
+        .await
+        .unwrap();
+
+    let rows = harness.ledger.rows();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].listen_at(), at(241_000));
+    assert_eq!(
+        rows[0].extent().map(|extent| extent.listened_ms()),
+        Some(240_000)
+    );
+    assert_eq!(
+        rows[0].extent().map(|extent| extent.qualified()),
+        Some(true)
+    );
+    assert_eq!(retried.state(), PlaybackState::Stopped);
+    assert!(
+        harness
+            .service
+            .now_playing(PRINCIPAL, at(241_000))
+            .is_empty()
+    );
+    assert_eq!(
+        harness
+            .service
+            .expire_idle(at(241_000 + SESSION_IDLE_TTL_MS as i64)),
+        0
+    );
+}
+
+#[tokio::test]
+async fn eviction_keeps_a_play_that_is_close_to_qualifying() {
+    let harness = harness(&[track(1, Some(300_000))]);
+    let keeping = client("keeping");
+
+    harness
+        .service
+        .report(&report(&keeping, PlaybackState::Playing, 0, 0))
+        .await
+        .unwrap();
+    harness
+        .service
+        .report(&report(&keeping, PlaybackState::Playing, 149_000, 149_000))
+        .await
+        .unwrap();
+
+    for index in 0..MAX_LIVE_SESSIONS_PER_PRINCIPAL {
+        let other = client(&format!("client-{index:02}"));
+
+        harness
+            .service
+            .report(&report(
+                &other,
+                PlaybackState::Playing,
+                0,
+                150_000 + index as i64 * 1_000,
+            ))
+            .await
+            .unwrap();
+    }
+
+    let live = harness.service.now_playing(PRINCIPAL, at(165_000));
+
+    assert_eq!(live.len(), MAX_LIVE_SESSIONS_PER_PRINCIPAL);
+    assert!(
+        live.iter()
+            .any(|session| session.client().as_str() == "keeping")
+    );
+    assert!(
+        !live
+            .iter()
+            .any(|session| session.client().as_str() == "client-00")
+    );
+
+    let session = harness
+        .service
+        .report(&report(&keeping, PlaybackState::Playing, 151_000, 151_000))
+        .await
+        .unwrap();
+
+    assert_eq!(session.listened_ms(), 151_000);
+
+    let rows = harness.ledger.rows();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].extent().map(|extent| extent.listened_ms()),
+        Some(151_000)
+    );
 }
 
 #[tokio::test]

@@ -91,14 +91,12 @@ impl PlaybackActivityService {
 
             let snapshot = session.clone();
 
-            if report.state() == PlaybackState::Stopped {
-                sessions.close(&key);
-            }
-
             (snapshot, submission)
         };
 
         let Some(submission) = submission else {
+            self.sessions.lock().close_stopped(&key);
+
             return Ok(snapshot);
         };
 
@@ -107,6 +105,10 @@ impl PlaybackActivityService {
 
             return Err(ActivityError::Submission(error));
         }
+
+        let mut sessions = self.sessions.lock();
+        sessions.finish(&key, &submission);
+        sessions.close_stopped(&key);
 
         Ok(snapshot)
     }
@@ -203,7 +205,7 @@ impl LiveSessions {
             .entries
             .iter()
             .filter(|(key, _)| key.0 == principal)
-            .min_by_key(|(_, session)| session.last_event_at())
+            .min_by_key(|(_, session)| (session.keeps_progress(), session.last_event_at()))
             .map(|(key, _)| key.clone());
 
         if let Some(oldest) = oldest {
@@ -220,8 +222,24 @@ impl LiveSessions {
         before - self.entries.len()
     }
 
-    fn close(&mut self, key: &(Uuid, PlaybackClient)) {
-        self.entries.remove(key);
+    fn close_stopped(&mut self, key: &(Uuid, PlaybackClient)) {
+        let settled = self.entries.get(key).is_some_and(|session| {
+            session.state() == PlaybackState::Stopped && !session.submitting()
+        });
+
+        if settled {
+            self.entries.remove(key);
+        }
+    }
+
+    fn finish(&mut self, key: &(Uuid, PlaybackClient), submission: &ListenSubmission) {
+        let Some(session) = self.entries.get_mut(key) else {
+            return;
+        };
+
+        if Some(session.session_id()) == submission.session_id() {
+            session.finish_submission();
+        }
     }
 
     fn release(&mut self, key: &(Uuid, PlaybackClient), submission: &ListenSubmission) {
@@ -235,9 +253,9 @@ impl LiveSessions {
     }
 
     fn live_for(&self, principal: Uuid) -> impl Iterator<Item = &ActivitySession> {
-        self.entries
-            .values()
-            .filter(move |session| session.principal() == principal)
+        self.entries.values().filter(move |session| {
+            session.principal() == principal && session.state() != PlaybackState::Stopped
+        })
     }
 }
 

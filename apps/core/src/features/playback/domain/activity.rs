@@ -155,6 +155,7 @@ pub struct ActivitySession {
     started_at: DateTime<Utc>,
     last_event_at: DateTime<Utc>,
     submitted: bool,
+    submitting: bool,
 }
 
 impl ActivitySession {
@@ -172,6 +173,7 @@ impl ActivitySession {
             started_at: report.listen_at(),
             last_event_at: report.listen_at(),
             submitted: false,
+            submitting: false,
         }
     }
 
@@ -223,6 +225,14 @@ impl ActivitySession {
         self.submitted
     }
 
+    pub(crate) fn submitting(&self) -> bool {
+        self.submitting
+    }
+
+    pub(crate) fn keeps_progress(&self) -> bool {
+        self.submitting || (!self.submitted && self.listened_ms > 0)
+    }
+
     pub fn idle_ms(&self, at: DateTime<Utc>) -> u64 {
         elapsed_ms(self.last_event_at, at)
     }
@@ -269,10 +279,16 @@ impl ActivitySession {
 
     pub(crate) fn mark_submitted(&mut self) {
         self.submitted = true;
+        self.submitting = true;
+    }
+
+    pub(crate) fn finish_submission(&mut self) {
+        self.submitting = false;
     }
 
     pub(crate) fn clear_submitted(&mut self) {
         self.submitted = false;
+        self.submitting = false;
     }
 }
 
