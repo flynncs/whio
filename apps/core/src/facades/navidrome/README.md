@@ -81,6 +81,69 @@ different occurrence, and this wire cannot detect that. the limitation is
 documented here rather than claimed away; a stale positional id is still refused
 (404) instead of silently editing a different entry.
 
+## the play queue
+
+`GET`/`POST /api/queue` map onto `RestoreQueueService`; the facade holds no
+queue state, ordering or membership of its own.
+
+- the read answers with exactly the five fields the pinned client's parser
+  destructures (`navidrome-controller.ts:765`): `changedBy`, `current`, `items`,
+  `position`, `updatedAt`. `items` are the same song objects `/api/song` returns,
+  projected in the stored entry order, so `current` keeps naming an entry. `id`,
+  `userId` and `createdAt` are declared in the client's schema
+  (`navidrome-types.ts:837-846`) but read by nothing, and no operation sources a
+  queue row id or a creation time, so they are absent rather than defaulted.
+- an absent queue and a saved-but-empty one are the same body
+  (`changedBy: ""`, `current: 0`, `items: []`, `position: 0`, `updatedAt: ""`),
+  which is the shape the wire has and cannot distinguish.
+- the save body is the client's own three fields
+  (`navidrome-controller.ts:1208-1212`): `{current?, ids?, position?}`. absent
+  `ids` is a full replacement with an empty queue. every save is a whole
+  replacement; there is no partial update.
+- **repeats are occurrences, not tracks.** `restore_queue_entries` is keyed on
+  `(queue_user_id, position)` and each entry resolves its own view, so
+  `[alpha, bravo, alpha]` reads back as three items and `current: 2` still names
+  the third. resolving entries through a consuming map lookup drops every repeat
+  after the first while still reporting the stored index.
+- an entry whose track the catalogue cannot resolve is an error (404), not a
+  dropped item: dropping one would move every later `current` by one. the
+  cascade on `restore_queue_entries.track_id`
+  (`migrations/0027_restore_queue.sql:16`) makes the case unreachable except
+  under a delete racing the read.
+- **the position is bounded at the store's width.** a `position` above `i64::MAX`
+  is refused (422) before the operation is called, as the native and Subsonic
+  adapters refuse theirs; the operation stores `position_ms` as `BIGINT`, so a
+  wider value would otherwise be a 500 with nothing written.
+- errors: `401` unauthenticated, `404` an unresolvable track, `422` a malformed
+  body, an unknown track, an out-of-range or missing index, or an
+  unrepresentable position, `500` a repository failure. `409` cannot arise from
+  this wire because no request carries a revision, so every save is
+  last-write-wins.
+
+### the queue is deliberately not advertised
+
+the client reaches this surface only when it believes `serverPlayQueue >= 2`,
+which for a navidrome-typed server is derived from the **Subsonic ping's
+`serverVersion`** through `VERSION_INFO` (`navidrome-controller.ts:41-58,758`).
+this facade reports `serverVersion` `0.1.0` (`facades/subsonic/envelope.rs:13`),
+so `getFeatures` matches no row, `serverPlayQueue` stays absent, and the client
+falls back to Subsonic `getPlayQueue.view`/`savePlayQueue.view`
+(`navidrome-controller.ts:779,1221`) — the correct outcome, not a gap.
+
+claiming `0.57.0` would not be a local claim: the table latches at the first
+matched row, so it would also grant `TRACK_ALBUM_ARTIST_SEARCH`, `BFR`, `TAGS`,
+`SHARING_ALBUM_SONG` and `PLAYLISTS_SMART` (the `0.60.4`/`0.61.0` rows sort above
+it and stay unmatched). `TAGS` alone settles it: its `getTagList` calls
+`GET /api/tag`, which this facade does not serve.
+
+| verb | reference | this facade | why |
+| --- | --- | --- | --- |
+| `POST /api/queue` status | `204 No Content` (`server/nativeapi/queue.go`) | `200` with a null body | the client throws unless the status is 200 (`navidrome-controller.ts:1215-1217`) and the ts-rest route declares only 200 (`navidrome-api.ts:236-244`) |
+| `POST /api/queue` unknown ids | stored as bare `MediaFile{ID}` stubs, unvalidated | `422`, previous snapshot intact | the operation validates the queue it is asked to store |
+| `POST /api/queue` absent `current` | `0`, validated only when `ids` is non-empty | `422` for a non-empty queue without an index | the operation requires an index that names an entry; the client sends one exactly when it sends items (`use-queue-restore.ts:174`) |
+| `changedBy` | the request's client name, e.g. `Feishin` | the username of the principal that saved | the snapshot carries the username, the operation takes no client name, and the client does not act on the field |
+| `items` when empty | omitted (`json:"items,omitempty"`) | always an array | the client's parser defaults an absent `items` to `[]` |
+
 ## deliberate divergences from the reference
 
 | verb | reference | this facade | why |

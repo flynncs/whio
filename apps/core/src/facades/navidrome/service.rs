@@ -768,16 +768,20 @@ pub(crate) async fn queue_read(
         .track_views(&track_ids, Some(&user))
         .await
         .map_err(SongError::Catalogue)?;
-    let mut by_track: HashMap<TrackId, TrackView> = views
+    let by_track: HashMap<TrackId, TrackView> = views
         .into_iter()
         .map(|view| (view.track().id().clone(), view))
         .collect();
     let items = snapshot
         .entries()
         .iter()
-        .filter_map(|entry| by_track.remove(entry.track_id()))
-        .map(|view| song_from_view(&view, tags))
-        .collect();
+        .map(|entry| {
+            by_track
+                .get(entry.track_id())
+                .map(|view| song_from_view(view, tags))
+                .ok_or(SongError::NotFound)
+        })
+        .collect::<Result<Vec<Song>, SongError>>()?;
 
     Ok(queue_from(&snapshot, items))
 }
@@ -789,6 +793,10 @@ pub(crate) async fn queue_save(
     body: QueueSaveBody,
 ) -> Result<(), SongError> {
     let user = authorize(credential, token).await?;
+    let position_ms = body.position.unwrap_or(0);
+    if i64::try_from(position_ms).is_err() {
+        return Err(SongError::InvalidRequest);
+    }
     let entries = body
         .ids
         .unwrap_or_default()
@@ -798,7 +806,7 @@ pub(crate) async fn queue_save(
     let save = RestoreQueueSave {
         entries,
         current_index: body.current,
-        position_ms: body.position.unwrap_or(0),
+        position_ms,
     };
 
     queue.save(user, save).await.map_err(SongError::Queue)?;

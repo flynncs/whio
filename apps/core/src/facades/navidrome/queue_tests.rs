@@ -3,7 +3,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::{
-    dto::{Queue, QueueSaveBody, Song},
+    dto::{Queue, Song},
     service,
 };
 use crate::features::music_library::domain::{
@@ -110,28 +110,6 @@ fn no_queue_and_an_empty_queue_share_one_body() {
     );
 }
 
-#[test]
-fn the_save_body_parses_the_clients_three_fields() {
-    let body: QueueSaveBody = serde_json::from_value(json!({
-        "current": 2,
-        "ids": ["first", "second"],
-        "position": 4_200,
-    }))
-    .expect("the client's body");
-
-    assert_eq!(body.current, Some(2));
-    assert_eq!(
-        body.ids,
-        Some(vec!["first".to_owned(), "second".to_owned()])
-    );
-    assert_eq!(body.position, Some(4_200));
-
-    let empty: QueueSaveBody = serde_json::from_value(json!({})).expect("an absent body");
-    assert_eq!(empty.current, None);
-    assert_eq!(empty.ids, None);
-    assert_eq!(empty.position, None);
-}
-
 #[cfg(feature = "postgres-integration")]
 mod persistence {
     use super::*;
@@ -148,9 +126,7 @@ mod persistence {
     use crate::{
         facades::SourceTags,
         facades::navidrome::{
-            queue_router,
-            service::SongError,
-            session,
+            queue_router, session,
             state::{NavidromeQueueState, NavidromeState},
         },
         features::{
@@ -163,11 +139,7 @@ mod persistence {
             music_library::{
                 catalogue::DedupMode,
                 construct,
-                domain::{
-                    ProviderId, RestoreQueueValidationError, SourceIdentity, SourceScope,
-                    TrackMetadata,
-                },
-                queue::{RestoreQueueError, RestoreQueueService},
+                domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
                 test_support::{CatalogueWrite, PostgresTrackRepository},
             },
         },
@@ -228,8 +200,6 @@ mod persistence {
     struct Fixture {
         app: Router,
         tokens: Vec<String>,
-        credential: Arc<CredentialService>,
-        queue: Arc<RestoreQueueService>,
         store: Arc<PostgresTrackRepository>,
     }
 
@@ -288,13 +258,7 @@ mod persistence {
             .layer(axum::Extension(RequestContext::new(RequestId::generate())))
             .with_state(state);
 
-        Fixture {
-            app,
-            tokens,
-            credential,
-            queue: music.queue,
-            store,
-        }
+        Fixture { app, tokens, store }
     }
 
     async fn track(store: &PostgresTrackRepository, title: &str) -> TrackId {
@@ -436,6 +400,87 @@ mod persistence {
     }
 
     #[sqlx::test]
+    async fn a_repeated_track_keeps_every_occurrence(pool: PgPool) {
+        let (user, credential) = principal(&pool, "flynn").await;
+        let fixture = fixture(pool, vec![(user, credential)]);
+        let alpha = track(&fixture.store, "alpha").await;
+        let bravo = track(&fixture.store, "bravo").await;
+
+        let (status, _) = save(
+            &fixture.app,
+            &fixture.tokens[0],
+            json!({
+                "current": 2,
+                "ids": [alpha.to_string(), bravo.to_string(), alpha.to_string()],
+                "position": 1_000,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = read(&fixture.app, &fixture.tokens[0]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            ids(&body),
+            vec![alpha.to_string(), bravo.to_string(), alpha.to_string()]
+        );
+        assert_eq!(
+            body["items"].as_array().expect("an item list").len(),
+            3,
+            "every occurrence is a separate item"
+        );
+        assert_eq!(
+            body["current"], 2,
+            "the index still names the third occurrence"
+        );
+        assert_eq!(body["items"][2]["id"], alpha.to_string());
+        assert_eq!(body["position"], 1_000);
+    }
+
+    #[sqlx::test]
+    async fn a_position_the_store_cannot_carry_is_rejected(pool: PgPool) {
+        let (user, credential) = principal(&pool, "flynn").await;
+        let fixture = fixture(pool, vec![(user, credential)]);
+        let only = track(&fixture.store, "only").await;
+
+        let too_large = i64::MAX as u64 + 1;
+        let (status, body) = save(
+            &fixture.app,
+            &fixture.tokens[0],
+            json!({
+                "current": 0,
+                "ids": [only.to_string()],
+                "position": too_large,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "Invalid request.");
+
+        let (status, body) = read(&fixture.app, &fixture.tokens[0]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, no_queue(), "the refused save wrote nothing");
+
+        let boundary = i64::MAX as u64;
+        let (status, _) = save(
+            &fixture.app,
+            &fixture.tokens[0],
+            json!({
+                "current": 0,
+                "ids": [only.to_string()],
+                "position": boundary,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = read(&fixture.app, &fixture.tokens[0]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ids(&body), vec![only.to_string()]);
+        assert_eq!(body["position"], boundary);
+    }
+
+    #[sqlx::test]
     async fn an_unknown_track_id_is_rejected_without_writing(pool: PgPool) {
         let (user, credential) = principal(&pool, "flynn").await;
         let fixture = fixture(pool, vec![(user, credential)]);
@@ -467,32 +512,6 @@ mod persistence {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(ids(&body), vec![known.to_string()]);
         assert_eq!(body["position"], 500);
-    }
-
-    #[sqlx::test]
-    async fn an_unknown_track_id_is_a_typed_operation_error(pool: PgPool) {
-        let (user, credential) = principal(&pool, "flynn").await;
-        let fixture = fixture(pool, vec![(user, credential)]);
-        let unknown = TrackId::new();
-
-        let result = service::queue_save(
-            &fixture.credential,
-            &fixture.tokens[0],
-            &fixture.queue,
-            QueueSaveBody {
-                current: Some(0),
-                ids: Some(vec![unknown.to_string()]),
-                position: Some(0),
-            },
-        )
-        .await;
-
-        assert!(matches!(
-            result,
-            Err(SongError::Queue(RestoreQueueError::Invalid(
-                RestoreQueueValidationError::UnknownTrack { .. }
-            )))
-        ));
     }
 
     #[sqlx::test]
