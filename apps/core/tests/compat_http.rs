@@ -1284,12 +1284,17 @@ async fn subsonic_update_applies_only_present_fields(pool: PgPool) {
     let body = edit_playlist(
         fixture.app.clone(),
         &fixture.owner,
-        &format!("playlistId={id}&comment=hello"),
+        &format!("playlistId={id}&comment=hello&public=true"),
     )
     .await;
     assert_eq!(body["subsonic-response"]["status"], json!("ok"));
     let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
     assert_eq!(playlist_of(&body)["comment"], json!("hello"));
+    assert_eq!(
+        playlist_of(&body)["public"],
+        json!(true),
+        "the fixture is public, so an omitted public flag is observable"
+    );
 
     let body = edit_playlist(
         fixture.app.clone(),
@@ -1307,7 +1312,7 @@ async fn subsonic_update_applies_only_present_fields(pool: PgPool) {
     );
     assert_eq!(
         playlist_of(&body)["public"],
-        json!(false),
+        json!(true),
         "an omitted public flag is left alone"
     );
 
@@ -1329,17 +1334,11 @@ async fn subsonic_update_applies_only_present_fields(pool: PgPool) {
         json!("Tripped"),
         "clearing the comment leaves the name"
     );
-
-    let body = edit_playlist(
-        fixture.app.clone(),
-        &fixture.owner,
-        &format!("playlistId={id}&public=true"),
-    )
-    .await;
-    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
-    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
-    assert_eq!(playlist_of(&body)["public"], json!(true));
-    assert_eq!(playlist_of(&body)["name"], json!("Tripped"));
+    assert_eq!(
+        playlist_of(&body)["public"],
+        json!(true),
+        "clearing the comment leaves the visibility"
+    );
 
     let (status, body) = get_status(
         fixture.app.clone(),
@@ -1363,6 +1362,22 @@ async fn subsonic_update_applies_only_present_fields(pool: PgPool) {
         "the rejected edit changed nothing"
     );
     assert_eq!(playlist_of(&body)["public"], json!(true));
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&public=false"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app, &fixture.owner, &id).await;
+    assert_eq!(
+        playlist_of(&body)["public"],
+        json!(false),
+        "a present public flag is applied"
+    );
+    assert_eq!(playlist_of(&body)["name"], json!("Tripped"));
+    assert_eq!(playlist_of(&body)["comment"], Value::Null);
 }
 
 #[sqlx::test]
@@ -1489,14 +1504,16 @@ async fn subsonic_add_and_remove_in_one_call_keeps_the_added_occurrence(pool: Pg
         &playlist_route(
             "updatePlaylist",
             &fixture.owner,
-            &format!("playlistId={id}&songIndexToRemove=9&songIdToAdd={third}"),
+            &format!("playlistId={id}&songIndexToRemove=2&songIdToAdd={third}"),
         ),
     )
     .await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "a failing edit reports the error"
+        "index 2 is the position the addition would occupy, and the removal is resolved against the \
+         snapshot without it: a snapshot extended with the pending addition would resolve it to the \
+         freshly added occurrence and answer ok"
     );
     assert_eq!(body["subsonic-response"]["error"]["code"], json!(0));
     let body = read_playlist(fixture.app, &fixture.owner, &id).await;
