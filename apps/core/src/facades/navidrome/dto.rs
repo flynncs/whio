@@ -139,13 +139,93 @@ pub(crate) struct Playlist {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) comment: Option<String>,
-    pub(crate) owner: String,
+    pub(crate) owner_id: String,
+    pub(crate) owner_name: String,
     pub(crate) public: bool,
     pub(crate) song_count: u32,
     pub(crate) duration: f32,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
-    pub(crate) songs: Vec<Song>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) songs: Option<Vec<PlaylistSong>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlaylistSong {
+    #[serde(flatten)]
+    pub(crate) song: Song,
+    pub(crate) media_file_id: String,
+    pub(crate) playlist_id: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PlaylistCreated {
+    pub(crate) id: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PlaylistAdded {
+    pub(crate) added: u32,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PlaylistRemoved {
+    pub(crate) ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PlaylistMoved {
+    pub(crate) id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlaylistCreateBody {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) comment: Option<String>,
+    #[serde(default)]
+    pub(crate) owner_id: Option<String>,
+    #[serde(default)]
+    pub(crate) public: Option<bool>,
+    #[serde(default)]
+    pub(crate) rules: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) sync: Option<bool>,
+    #[serde(default)]
+    pub(crate) ids: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlaylistUpdateBody {
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) comment: Option<String>,
+    #[serde(default)]
+    pub(crate) owner_id: Option<String>,
+    #[serde(default)]
+    pub(crate) public: Option<bool>,
+    #[serde(default)]
+    pub(crate) rules: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) sync: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlaylistTracksBody {
+    #[serde(default)]
+    pub(crate) ids: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlaylistMoveBody {
+    pub(crate) insert_before: String,
 }
 
 #[derive(Serialize)]

@@ -10,8 +10,10 @@ use crate::{
     },
     features::music_library::domain::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistListFilter,
-        ArtistSort, ArtistSummary, GenreSummary, IdSet, MAX_PAGE_LIMIT, PageLimit, PlaylistId,
-        SelectorText, SortDirection, TrackId, TrackListFilter, TrackOrder, TrackView,
+        ArtistSort, ArtistSummary, CommentPatch, GenreSummary, IdSet, MAX_PAGE_LIMIT, MoveTarget,
+        OccurrenceSelector, PageLimit, Playlist as PlaylistRecord, PlaylistEntryChange, PlaylistId,
+        PlaylistMetadataPatch, SelectorText, SortDirection, TrackId, TrackListFilter, TrackOrder,
+        TrackView,
     },
     features::music_library::library::{LibraryId, LibraryRegistrationError, LibraryRegistry},
     features::music_library::playlists::{
@@ -20,7 +22,7 @@ use crate::{
 };
 
 use super::{
-    dto::{Album, Artist, Genre, Playlist, Song, SongListQuery},
+    dto::{Album, Artist, Genre, Playlist, PlaylistSong, Song, SongListQuery},
     session,
 };
 
@@ -43,6 +45,12 @@ pub(crate) enum SongError {
 
     #[error("playlist request failed")]
     Playlist(#[source] PlaylistError),
+
+    #[error("forbidden")]
+    Forbidden,
+
+    #[error("invalid request")]
+    InvalidRequest,
 
     #[error("library registry read failed")]
     Registry(#[source] LibraryRegistrationError),
@@ -101,8 +109,9 @@ fn song_from_view(view: &TrackView, tags: SourceTags) -> Song {
     }
 }
 
-fn song_from_playlist_entry(entry: &PlaylistEntry, tags: SourceTags) -> Song {
+fn song_from_playlist_entry(entry: &PlaylistEntry, item_id: u32, tags: SourceTags) -> Song {
     let mut song = song_from_view(entry.track(), tags);
+    song.id = item_id.to_string();
     song.album_artist = None;
     song.track_number = None;
     song.disc_number = None;
@@ -315,24 +324,117 @@ pub(crate) async fn album_detail(
     Ok(album_from_summary(&detail.album))
 }
 
-fn playlist_from(detail: &PlaylistDetail, owner: Uuid, tags: SourceTags) -> Playlist {
-    let playlist = &detail.playlist;
+pub(crate) fn item_id(position: u32) -> u32 {
+    position.saturating_add(1)
+}
 
+pub(crate) fn item_index(item_id: u32) -> Option<u32> {
+    item_id.checked_sub(1)
+}
+
+pub(crate) fn move_target(from: u32, insert_before: i64) -> MoveTarget {
+    let insert_before = if insert_before <= 0 {
+        0
+    } else {
+        u32::try_from(insert_before).unwrap_or(u32::MAX)
+    };
+    let destination = insert_before.saturating_sub(1);
+
+    if destination > from {
+        MoveTarget::Before(destination.saturating_add(1))
+    } else {
+        MoveTarget::Before(destination)
+    }
+}
+
+pub(crate) fn entry_additions(track_ids: &[TrackId]) -> PlaylistEntryChange {
+    if track_ids.is_empty() {
+        PlaylistEntryChange::Unchanged
+    } else {
+        PlaylistEntryChange::Apply {
+            removals: Vec::new(),
+            additions: track_ids.to_vec(),
+        }
+    }
+}
+
+pub(crate) struct PlaylistCreate {
+    pub(crate) playlist_id: Option<PlaylistId>,
+    pub(crate) owner_id: Option<Uuid>,
+    pub(crate) name: Option<String>,
+    pub(crate) comment: Option<String>,
+    pub(crate) public: Option<bool>,
+    pub(crate) additions: Vec<TrackId>,
+}
+
+fn playlist_song(playlist: &PlaylistId, entry: &PlaylistEntry, tags: SourceTags) -> PlaylistSong {
+    PlaylistSong {
+        song: song_from_playlist_entry(entry, item_id(entry.position()), tags),
+        media_file_id: entry.track().track().id().to_string(),
+        playlist_id: playlist.to_string(),
+    }
+}
+
+fn playlist_from(playlist: &PlaylistRecord) -> Playlist {
     Playlist {
         id: playlist.id().to_string(),
         name: playlist.name().to_owned(),
         comment: playlist.comment().map(str::to_owned),
-        owner: owner.to_string(),
+        owner_id: playlist.owner_id().to_string(),
+        owner_name: playlist.owner_username().to_owned(),
         public: playlist.is_public(),
         song_count: playlist.track_count(),
         duration: playlist.duration_ms() as f32 / 1000.0,
         created_at: playlist.created_at().to_rfc3339(),
         updated_at: playlist.updated_at().to_rfc3339(),
-        songs: detail
+        songs: None,
+    }
+}
+
+fn playlist_with_songs(detail: &PlaylistDetail, tags: SourceTags) -> Playlist {
+    let mut playlist = playlist_from(&detail.playlist);
+    playlist.songs = Some(
+        detail
             .entries
             .iter()
-            .map(|entry| song_from_playlist_entry(entry, tags))
+            .map(|entry| playlist_song(detail.playlist.id(), entry, tags))
             .collect(),
+    );
+
+    playlist
+}
+
+fn playlist_id(raw_id: &str) -> Result<PlaylistId, SongError> {
+    raw_id.parse().map_err(|_| SongError::NotFound)
+}
+
+async fn visible_detail(
+    playlists: &PlaylistService,
+    user: Uuid,
+    raw_id: &str,
+) -> Result<PlaylistDetail, SongError> {
+    let playlist_id = playlist_id(raw_id)?;
+
+    playlists
+        .detail(user, &playlist_id)
+        .await
+        .map_err(SongError::Playlist)?
+        .ok_or(SongError::NotFound)
+}
+
+async fn refuse(playlists: &PlaylistService, user: Uuid, playlist_id: &PlaylistId) -> SongError {
+    match playlists.detail(user, playlist_id).await {
+        Ok(Some(detail)) if !detail.editable => SongError::Forbidden,
+        Ok(Some(_)) | Ok(None) => SongError::NotFound,
+        Err(error) => SongError::Playlist(error),
+    }
+}
+
+fn owner_claim(user: Uuid, owner_id: Option<Uuid>) -> Result<(), SongError> {
+    match owner_id {
+        None => Ok(()),
+        Some(owner) if owner == user => Ok(()),
+        Some(_) => Err(SongError::Forbidden),
     }
 }
 
@@ -340,23 +442,27 @@ pub(crate) async fn playlist_list(
     playlists: &PlaylistService,
     credential: &CredentialService,
     token: &str,
+    start: u32,
+    end: u32,
     tags: SourceTags,
-) -> Result<Vec<Playlist>, SongError> {
+) -> Result<(Vec<Playlist>, u32), SongError> {
     let user = authorize(credential, token).await?;
     let summaries = playlists.list(user).await.map_err(SongError::Playlist)?;
-    let mut result = Vec::with_capacity(summaries.len());
+    let total = u32::try_from(summaries.len()).unwrap_or(u32::MAX);
+    let (offset, limit) = page(start, end)?;
+    let mut result = Vec::new();
 
-    for summary in summaries {
+    for summary in summaries.iter().skip(offset as usize).take(limit as usize) {
         if let Some(detail) = playlists
             .detail(user, summary.id())
             .await
             .map_err(SongError::Playlist)?
         {
-            result.push(playlist_from(&detail, user, tags));
+            result.push(playlist_with_songs(&detail, tags));
         }
     }
 
-    Ok(result)
+    Ok((result, total))
 }
 
 pub(crate) async fn playlist_detail(
@@ -367,14 +473,163 @@ pub(crate) async fn playlist_detail(
     tags: SourceTags,
 ) -> Result<Playlist, SongError> {
     let user = authorize(credential, token).await?;
-    let playlist_id: PlaylistId = raw_id.parse().map_err(|_| SongError::NotFound)?;
-    let detail = playlists
-        .detail(user, &playlist_id)
+
+    Ok(playlist_with_songs(
+        &visible_detail(playlists, user, raw_id).await?,
+        tags,
+    ))
+}
+
+pub(crate) async fn playlist_tracks(
+    playlists: &PlaylistService,
+    credential: &CredentialService,
+    token: &str,
+    raw_id: &str,
+    start: u32,
+    end: Option<u32>,
+    tags: SourceTags,
+) -> Result<(Vec<PlaylistSong>, u32), SongError> {
+    let user = authorize(credential, token).await?;
+    let detail = visible_detail(playlists, user, raw_id).await?;
+    let songs = detail
+        .entries
+        .iter()
+        .map(|entry| playlist_song(detail.playlist.id(), entry, tags))
+        .collect::<Vec<_>>();
+    let total = u32::try_from(songs.len()).unwrap_or(u32::MAX);
+    let page = match end {
+        Some(end) => songs
+            .into_iter()
+            .skip(start as usize)
+            .take(end.saturating_sub(start) as usize + 1)
+            .collect(),
+        None => songs.into_iter().skip(start as usize).collect(),
+    };
+
+    Ok((page, total))
+}
+
+pub(crate) async fn playlist_create(
+    playlists: &PlaylistService,
+    credential: &CredentialService,
+    token: &str,
+    request: PlaylistCreate,
+) -> Result<String, SongError> {
+    let user = authorize(credential, token).await?;
+    owner_claim(user, request.owner_id)?;
+
+    let playlist_id = match request.playlist_id {
+        Some(playlist_id) => {
+            let entries = PlaylistEntryChange::Replace(request.additions);
+
+            match playlists
+                .write_at_revision(
+                    user,
+                    &playlist_id,
+                    None,
+                    PlaylistMetadataPatch::default(),
+                    entries,
+                )
+                .await
+                .map_err(SongError::Playlist)?
+            {
+                Some(playlist) => playlist.id().clone(),
+                None => return Err(refuse(playlists, user, &playlist_id).await),
+            }
+        }
+        None => {
+            let name = request.name.ok_or(SongError::InvalidRequest)?;
+            let playlist = playlists
+                .create(user, &name, request.comment.as_deref())
+                .await
+                .map_err(SongError::Playlist)?;
+            let metadata = PlaylistMetadataPatch {
+                name: None,
+                comment: CommentPatch::Keep,
+                public: request.public,
+            };
+
+            match playlists
+                .write_at_revision(
+                    user,
+                    playlist.id(),
+                    None,
+                    metadata,
+                    entry_additions(&request.additions),
+                )
+                .await
+                .map_err(SongError::Playlist)?
+            {
+                Some(playlist) => playlist.id().clone(),
+                None => return Err(SongError::NotFound),
+            }
+        }
+    };
+
+    Ok(playlist_id.to_string())
+}
+
+pub(crate) async fn playlist_edit(
+    playlists: &PlaylistService,
+    credential: &CredentialService,
+    token: &str,
+    raw_id: &str,
+    owner_id: Option<Uuid>,
+    metadata: PlaylistMetadataPatch,
+    entries: PlaylistEntryChange,
+) -> Result<Playlist, SongError> {
+    let user = authorize(credential, token).await?;
+    owner_claim(user, owner_id)?;
+    let playlist_id = playlist_id(raw_id)?;
+
+    match playlists
+        .write_at_revision(user, &playlist_id, None, metadata, entries)
         .await
         .map_err(SongError::Playlist)?
-        .ok_or(SongError::NotFound)?;
+    {
+        Some(playlist) => Ok(playlist_from(&playlist)),
+        None => Err(refuse(playlists, user, &playlist_id).await),
+    }
+}
 
-    Ok(playlist_from(&detail, user, tags))
+pub(crate) async fn playlist_move(
+    playlists: &PlaylistService,
+    credential: &CredentialService,
+    token: &str,
+    raw_id: &str,
+    selector: OccurrenceSelector,
+    target: MoveTarget,
+) -> Result<(), SongError> {
+    let user = authorize(credential, token).await?;
+    let playlist_id = playlist_id(raw_id)?;
+
+    match playlists
+        .move_entry(user, &playlist_id, selector, target, None)
+        .await
+        .map_err(SongError::Playlist)?
+    {
+        true => Ok(()),
+        false => Err(refuse(playlists, user, &playlist_id).await),
+    }
+}
+
+pub(crate) async fn playlist_delete(
+    playlists: &PlaylistService,
+    credential: &CredentialService,
+    token: &str,
+    raw_id: &str,
+) -> Result<(), SongError> {
+    let user = authorize(credential, token).await?;
+    let playlist_id = playlist_id(raw_id)?;
+
+    match playlists
+        .delete(user, &playlist_id)
+        .await
+        .map_err(SongError::Playlist)?
+    {
+        true => Ok(()),
+        false => Err(refuse(playlists, user, &playlist_id).await),
+    }
 }
 
 pub(crate) async fn artist_list(

@@ -1,24 +1,31 @@
 use axum::{
     Extension, Json,
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 
+use uuid::Uuid;
+
 use crate::{
     facades::navidrome::state::NavidromeState,
     features::music_library::domain::{
-        AlbumListFilter, ArtistId, ArtistListFilter, IdSet, Range, RoleSelector, RoleSet,
-        SelectorText,
+        AlbumListFilter, ArtistId, ArtistListFilter, CommentPatch, IdSet, OccurrenceSelector,
+        Playlist, PlaylistEntryChange, PlaylistEntryError, PlaylistMetadataPatch, Range,
+        RoleSelector, RoleSet, SelectorText, SortDirection, TrackId,
     },
     features::music_library::library::{LibraryId, LibraryRegistry},
+    features::music_library::playlists::PlaylistError,
     platform::raw_query::RawQuery,
     platform::request::RequestContext,
 };
 
 use super::{
     auth::NdToken,
-    dto::SongListQuery,
+    dto::{
+        PlaylistAdded, PlaylistCreateBody, PlaylistCreated, PlaylistMoveBody, PlaylistMoved,
+        PlaylistRemoved, PlaylistTracksBody, PlaylistUpdateBody, SongListQuery,
+    },
     errors,
     service::{self, SongError},
 };
@@ -412,20 +419,207 @@ fn list_response<T: serde::Serialize>(items: &[T], total: u32) -> Response {
     response
 }
 
+const PLAYLIST_LIST_PARAMETERS: &[&str] = &["_start", "_end", "_sort", "_order", "smart"];
+const PLAYLIST_TRACK_PARAMETERS: &[&str] = &["_start", "_end", "_sort", "_order", "missing"];
+const PLAYLIST_ITEM_SORTS: &[&str] = &["id"];
+
+fn ascending(query: &RawQuery) -> Result<(), SongError> {
+    match service::sort_direction(query.get("_order"))? {
+        Some(SortDirection::Descending) => Err(SongError::InvalidRequest),
+        None | Some(SortDirection::Ascending) => Ok(()),
+    }
+}
+
+fn playlist_list_query(query: &RawQuery) -> Result<(), SongError> {
+    reject_unknown(query, PLAYLIST_LIST_PARAMETERS)?;
+
+    if query.get("_sort").is_some_and(|sort| sort != "name") {
+        return Err(SongError::InvalidRequest);
+    }
+    ascending(query)?;
+
+    match query.get("smart") {
+        None | Some("false") => Ok(()),
+        Some(_) => Err(SongError::InvalidRequest),
+    }
+}
+
+fn playlist_track_query(query: &RawQuery) -> Result<(), SongError> {
+    reject_unknown(query, PLAYLIST_TRACK_PARAMETERS)?;
+
+    if query
+        .get("_sort")
+        .is_some_and(|sort| !PLAYLIST_ITEM_SORTS.contains(&sort))
+    {
+        return Err(SongError::InvalidRequest);
+    }
+    ascending(query)?;
+
+    match query.get("missing") {
+        None | Some("false") => Ok(()),
+        Some(_) => Err(SongError::InvalidRequest),
+    }
+}
+
+fn track_window(query: &RawQuery) -> Result<(u32, Option<u32>), SongError> {
+    let start = page_start(query)?;
+
+    match query.get("_end") {
+        None => Ok((start, None)),
+        Some(raw) => match raw.trim().parse::<i64>() {
+            Ok(end) if end < 0 => Ok((start, None)),
+            Ok(end) => {
+                let end = u32::try_from(end).map_err(|_| SongError::InvalidSearch)?;
+
+                if end < start {
+                    return Err(SongError::InvalidSearch);
+                }
+
+                Ok((start, Some(end)))
+            }
+            Err(_) => Err(SongError::InvalidSearch),
+        },
+    }
+}
+
+fn smart_playlist(rules: Option<&serde_json::Value>, sync: Option<bool>) -> Result<(), SongError> {
+    if rules.is_some_and(|rules| !rules.is_null()) || sync == Some(true) {
+        return Err(SongError::InvalidRequest);
+    }
+
+    Ok(())
+}
+
+fn principal(raw: Option<&str>) -> Result<Option<Uuid>, SongError> {
+    match raw {
+        Some(raw) => raw.parse().map(Some).map_err(|_| SongError::InvalidRequest),
+        None => Ok(None),
+    }
+}
+
+fn track_ids(raw: Option<&[String]>) -> Result<Vec<TrackId>, SongError> {
+    match raw {
+        Some(ids) => ids
+            .iter()
+            .map(|raw| raw.parse().map_err(|_| SongError::InvalidRequest))
+            .collect(),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn parse_item_index(raw: &str) -> Result<u32, SongError> {
+    let item_id = raw
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| SongError::InvalidRequest)?;
+
+    service::item_index(item_id).ok_or(SongError::InvalidRequest)
+}
+
+fn playlist_create_request(
+    body: &PlaylistCreateBody,
+) -> Result<service::PlaylistCreate, SongError> {
+    smart_playlist(body.rules.as_ref(), body.sync)?;
+
+    let playlist_id = match body.id.as_deref() {
+        Some(raw) => Some(raw.parse().map_err(|_| SongError::InvalidRequest)?),
+        None => None,
+    };
+    let name = match body.name.as_deref() {
+        Some(name) => Some(Playlist::validated_name(name).map_err(|_| SongError::InvalidRequest)?),
+        None => None,
+    };
+    if playlist_id.is_none() && name.is_none() {
+        return Err(SongError::InvalidRequest);
+    }
+
+    Ok(service::PlaylistCreate {
+        playlist_id,
+        owner_id: principal(body.owner_id.as_deref())?,
+        name,
+        comment: Playlist::validated_comment(body.comment.as_deref())
+            .map_err(|_| SongError::InvalidRequest)?,
+        public: body.public,
+        additions: track_ids(body.ids.as_deref())?,
+    })
+}
+
+fn playlist_metadata(
+    body: &PlaylistUpdateBody,
+) -> Result<(Option<Uuid>, PlaylistMetadataPatch), SongError> {
+    smart_playlist(body.rules.as_ref(), body.sync)?;
+
+    let name = match body.name.as_deref() {
+        Some(name) => Some(Playlist::validated_name(name).map_err(|_| SongError::InvalidRequest)?),
+        None => None,
+    };
+    let comment = match body.comment.as_deref() {
+        Some(comment) => CommentPatch::Set(
+            Playlist::validated_comment(Some(comment)).map_err(|_| SongError::InvalidRequest)?,
+        ),
+        None => CommentPatch::Keep,
+    };
+
+    Ok((
+        principal(body.owner_id.as_deref())?,
+        PlaylistMetadataPatch {
+            name,
+            comment,
+            public: body.public,
+        },
+    ))
+}
+
 pub(crate) async fn playlist_list(
     State(state): State<NavidromeState>,
     Extension(context): Extension<RequestContext>,
     token: NdToken,
+    query: RawQuery,
 ) -> Response {
+    if let Err(error) = playlist_list_query(&query) {
+        return song_error(error, &context);
+    }
+    let (start, end) = match window(&query) {
+        Ok(window) => window,
+        Err(error) => return song_error(error, &context),
+    };
+
     match service::playlist_list(
         state.playlists(),
         state.credential(),
         &token.0,
+        start,
+        end,
         state.source_tags(),
     )
     .await
     {
-        Ok(playlists) => Json(playlists).into_response(),
+        Ok((playlists, total)) => list_response(&playlists, total),
+        Err(error) => song_error(error, &context),
+    }
+}
+
+pub(crate) async fn playlist_create(
+    State(state): State<NavidromeState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+    query: RawQuery,
+    body: Result<Json<PlaylistCreateBody>, JsonRejection>,
+) -> Response {
+    if let Err(error) = reject_unknown(&query, &[]) {
+        return song_error(error, &context);
+    }
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => return song_error(SongError::InvalidRequest, &context),
+    };
+    let request = match playlist_create_request(&body) {
+        Ok(request) => request,
+        Err(error) => return song_error(error, &context),
+    };
+
+    match service::playlist_create(state.playlists(), state.credential(), &token.0, request).await {
+        Ok(id) => Json(PlaylistCreated { id }).into_response(),
         Err(error) => song_error(error, &context),
     }
 }
@@ -435,7 +629,12 @@ pub(crate) async fn playlist_detail(
     Extension(context): Extension<RequestContext>,
     token: NdToken,
     Path(id): Path<String>,
+    query: RawQuery,
 ) -> Response {
+    if let Err(error) = reject_unknown(&query, &[]) {
+        return song_error(error, &context);
+    }
+
     match service::playlist_detail(
         state.playlists(),
         state.credential(),
@@ -450,6 +649,227 @@ pub(crate) async fn playlist_detail(
     }
 }
 
+pub(crate) async fn playlist_update(
+    State(state): State<NavidromeState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+    Path(id): Path<String>,
+    query: RawQuery,
+    body: Result<Json<PlaylistUpdateBody>, JsonRejection>,
+) -> Response {
+    if let Err(error) = reject_unknown(&query, &[]) {
+        return song_error(error, &context);
+    }
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => return song_error(SongError::InvalidRequest, &context),
+    };
+    let (owner_id, metadata) = match playlist_metadata(&body) {
+        Ok(metadata) => metadata,
+        Err(error) => return song_error(error, &context),
+    };
+
+    match service::playlist_edit(
+        state.playlists(),
+        state.credential(),
+        &token.0,
+        &id,
+        owner_id,
+        metadata,
+        PlaylistEntryChange::Unchanged,
+    )
+    .await
+    {
+        Ok(playlist) => Json(playlist).into_response(),
+        Err(error) => song_error(error, &context),
+    }
+}
+
+pub(crate) async fn playlist_delete(
+    State(state): State<NavidromeState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+    Path(id): Path<String>,
+    query: RawQuery,
+) -> Response {
+    if let Err(error) = reject_unknown(&query, &[]) {
+        return song_error(error, &context);
+    }
+
+    match service::playlist_delete(state.playlists(), state.credential(), &token.0, &id).await {
+        Ok(()) => Json(()).into_response(),
+        Err(error) => song_error(error, &context),
+    }
+}
+
+pub(crate) async fn playlist_tracks(
+    State(state): State<NavidromeState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+    Path(id): Path<String>,
+    query: RawQuery,
+) -> Response {
+    if let Err(error) = playlist_track_query(&query) {
+        return song_error(error, &context);
+    }
+    let (start, end) = match track_window(&query) {
+        Ok(window) => window,
+        Err(error) => return song_error(error, &context),
+    };
+
+    match service::playlist_tracks(
+        state.playlists(),
+        state.credential(),
+        &token.0,
+        &id,
+        start,
+        end,
+        state.source_tags(),
+    )
+    .await
+    {
+        Ok((songs, total)) => list_response(&songs, total),
+        Err(error) => song_error(error, &context),
+    }
+}
+
+pub(crate) async fn playlist_add_tracks(
+    State(state): State<NavidromeState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+    Path(id): Path<String>,
+    query: RawQuery,
+    body: Result<Json<PlaylistTracksBody>, JsonRejection>,
+) -> Response {
+    if let Err(error) = reject_unknown(&query, &[]) {
+        return song_error(error, &context);
+    }
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => return song_error(SongError::InvalidRequest, &context),
+    };
+    let additions = match track_ids(body.ids.as_deref()) {
+        Ok(additions) => additions,
+        Err(error) => return song_error(error, &context),
+    };
+    let added = u32::try_from(additions.len()).unwrap_or(u32::MAX);
+
+    match service::playlist_edit(
+        state.playlists(),
+        state.credential(),
+        &token.0,
+        &id,
+        None,
+        PlaylistMetadataPatch::default(),
+        service::entry_additions(&additions),
+    )
+    .await
+    {
+        Ok(_) => Json(PlaylistAdded { added }).into_response(),
+        Err(error) => song_error(error, &context),
+    }
+}
+
+pub(crate) async fn playlist_remove_tracks(
+    State(state): State<NavidromeState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+    Path(id): Path<String>,
+    query: RawQuery,
+) -> Response {
+    if let Err(error) = reject_unknown(&query, &["id"]) {
+        return song_error(error, &context);
+    }
+    let raw_ids = query.all("id");
+    let mut removals = Vec::with_capacity(raw_ids.len());
+    for raw in &raw_ids {
+        let index = match parse_item_index(raw) {
+            Ok(index) => index,
+            Err(error) => return song_error(error, &context),
+        };
+        removals.push(OccurrenceSelector::Index(index));
+    }
+    let entries = if removals.is_empty() {
+        PlaylistEntryChange::Unchanged
+    } else {
+        PlaylistEntryChange::Apply {
+            removals,
+            additions: Vec::new(),
+        }
+    };
+
+    match service::playlist_edit(
+        state.playlists(),
+        state.credential(),
+        &token.0,
+        &id,
+        None,
+        PlaylistMetadataPatch::default(),
+        entries,
+    )
+    .await
+    {
+        Ok(_) => Json(PlaylistRemoved {
+            ids: raw_ids.iter().map(|raw| raw.trim().to_owned()).collect(),
+        })
+        .into_response(),
+        Err(error) => song_error(error, &context),
+    }
+}
+
+pub(crate) async fn playlist_move_track(
+    State(state): State<NavidromeState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+    Path((id, raw_item_id)): Path<(String, String)>,
+    query: RawQuery,
+    body: Result<Json<PlaylistMoveBody>, JsonRejection>,
+) -> Response {
+    if let Err(error) = reject_unknown(&query, &[]) {
+        return song_error(error, &context);
+    }
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => return song_error(SongError::InvalidRequest, &context),
+    };
+    let index = match parse_item_index(&raw_item_id) {
+        Ok(index) => index,
+        Err(error) => return song_error(error, &context),
+    };
+    let insert_before = match body.insert_before.trim().parse::<i64>() {
+        Ok(insert_before) => insert_before,
+        Err(_) => return song_error(SongError::InvalidRequest, &context),
+    };
+
+    match service::playlist_move(
+        state.playlists(),
+        state.credential(),
+        &token.0,
+        &id,
+        OccurrenceSelector::Index(index),
+        service::move_target(index, insert_before),
+    )
+    .await
+    {
+        Ok(()) => Json(PlaylistMoved {
+            id: service::item_id(index).to_string(),
+        })
+        .into_response(),
+        Err(error) => song_error(error, &context),
+    }
+}
+
+fn playlist_entry_error(error: PlaylistEntryError) -> Response {
+    match error {
+        PlaylistEntryError::UnknownEntry { .. } | PlaylistEntryError::IndexOutOfRange { .. } => {
+            errors::error(StatusCode::NOT_FOUND, "Not found.")
+        }
+        PlaylistEntryError::UnknownTrack { .. } => {
+            errors::error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid request.")
+        }
+    }
+}
+
 fn song_error(error: SongError, context: &RequestContext) -> Response {
     match error {
         SongError::Unauthorized => errors::error(StatusCode::UNAUTHORIZED, "Not authenticated"),
@@ -458,6 +878,10 @@ fn song_error(error: SongError, context: &RequestContext) -> Response {
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid search parameters.",
         ),
+        SongError::InvalidRequest => {
+            errors::error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid request.")
+        }
+        SongError::Forbidden => errors::error(StatusCode::FORBIDDEN, "Forbidden."),
         SongError::Authentication(error) => {
             tracing::error!(error = %error, request_id = context.request_id().as_str(), "session storage failed");
             errors::error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error.")
@@ -466,8 +890,9 @@ fn song_error(error: SongError, context: &RequestContext) -> Response {
             tracing::error!(error = %error, request_id = context.request_id().as_str(), "catalogue read failed");
             errors::error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error.")
         }
+        SongError::Playlist(PlaylistError::Entry(error)) => playlist_entry_error(error),
         SongError::Playlist(error) => {
-            tracing::error!(error = %error, request_id = context.request_id().as_str(), "playlist read failed");
+            tracing::error!(error = %error, request_id = context.request_id().as_str(), "playlist request failed");
             errors::error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error.")
         }
         SongError::Registry(error) => {
