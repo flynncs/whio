@@ -105,7 +105,7 @@ async fn the_harmless_job_runs_and_is_idempotent(pool: PgPool) {
     };
     assert_eq!(second, Enqueued::Coalesced, "the second request coalesces");
 
-    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM awa.jobs_hot WHERE kind = $1")
+    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM awa.jobs WHERE kind = $1")
         .bind(PROBE_KIND)
         .fetch_one(&pool)
         .await
@@ -118,7 +118,7 @@ async fn the_harmless_job_runs_and_is_idempotent(pool: PgPool) {
     await_completion(&pool, first).await;
 
     let (state, attempt, errors, queue): (String, i16, serde_json::Value, String) = sqlx::query_as(
-        "SELECT state::text, attempt, to_jsonb(errors), queue FROM awa.jobs_hot WHERE id = $1",
+        "SELECT state::text, attempt, to_jsonb(errors), queue FROM awa.jobs WHERE id = $1",
     )
     .bind(first)
     .fetch_one(&pool)
@@ -142,7 +142,7 @@ async fn await_completion(pool: &PgPool, job_id: i64) {
 
     loop {
         let row: Option<String> =
-            sqlx::query_scalar("SELECT state::text FROM awa.jobs_hot WHERE id = $1")
+            sqlx::query_scalar("SELECT state::text FROM awa.jobs WHERE id = $1")
                 .bind(job_id)
                 .fetch_optional(pool)
                 .await
