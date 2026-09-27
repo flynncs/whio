@@ -19,7 +19,10 @@ use whio_core::{
     features::identity::secrets::CredentialKey,
     features::music_library::{
         catalogue::{LibraryService, SearchService},
-        domain::{ProviderId, SourceIdentity, SourceScope, TrackId, TrackMetadata},
+        domain::{
+            AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
+            TrackId, TrackMetadata,
+        },
         playlists::PlaylistService,
         test_support::PlaylistStore,
     },
@@ -31,6 +34,7 @@ struct Fixture {
     app: Router,
     owner: String,
     stranger: String,
+    owner_secret: String,
     owner_id: String,
     stranger_id: String,
 }
@@ -88,6 +92,7 @@ async fn fixture(pool: PgPool) -> Fixture {
         app,
         owner: auth("flynn", &owner_secret),
         stranger: auth("other", &stranger_secret),
+        owner_secret,
         owner_id: owner_id.to_string(),
         stranger_id: stranger_id.to_string(),
     }
@@ -176,6 +181,33 @@ async fn detail(app: &Router, auth: &str, id: &str) -> Response {
 
 async fn detail_body(app: &Router, auth: &str, id: &str) -> Value {
     let response = detail(app, auth, id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    body_of(response).await
+}
+
+async fn login(app: &Router, username: &str, password: &str) -> Value {
+    let response = send(
+        app,
+        "POST",
+        "/compat/navidrome/auth/login",
+        Some(&json!({ "username": username, "password": password })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    body_of(response).await
+}
+
+async fn get_authed(app: &Router, uri: &str, token: &str) -> Value {
+    let request = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("x-request-id", "request-123")
+        .header("x-nd-authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
     body_of(response).await
@@ -353,6 +385,97 @@ async fn native_playlist_detail_carries_entries_and_owner(pool: PgPool) {
     assert_eq!(seen["owner"]["username"], json!("flynn"));
     assert_eq!(seen["editable"], json!(false));
     assert_eq!(entry_titles(&seen), vec!["First", "Second", "First"]);
+}
+
+#[sqlx::test]
+async fn native_playlist_entry_membership_is_not_emitted_by_the_facades(pool: PgPool) {
+    let fixture = fixture(pool.clone()).await;
+    let ports = StorePorts::new(pool.clone());
+    let filed = track(&ports, "path-filed", "Filed").await;
+    let album = ports
+        .catalogue()
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Discovery".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    ports
+        .catalogue()
+        .set_album_track(
+            album.id(),
+            &filed,
+            &AlbumTrack::new(Some(1), Some(3), 2).unwrap(),
+        )
+        .await
+        .unwrap();
+    let created = create(&fixture.app, &fixture.owner, "Trip", None).await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    add_tracks(&fixture.app, &fixture.owner, &id, &[&filed]).await;
+
+    let body = detail_body(&fixture.app, &fixture.owner, &id).await;
+    let entry = &body["entries"][0]["track"];
+    assert_eq!(
+        entry["album"]["title"],
+        json!("Discovery"),
+        "the native entry carries the album context"
+    );
+    assert_eq!(entry["disc_number"], json!(1));
+    assert_eq!(entry["track_number"], json!(3));
+
+    let response = send(
+        &fixture.app,
+        "GET",
+        &with_auth(
+            &format!("/compat/subsonic/rest/getPlaylist.view?id={id}"),
+            &fixture.owner,
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_of(response).await;
+    let entry = &body["subsonic-response"]["playlist"]["entry"][0];
+    assert_eq!(entry["title"], json!("Filed"));
+    assert_eq!(
+        entry["album"],
+        json!("Discovery"),
+        "the subsonic entry keeps the album context"
+    );
+    assert!(
+        entry.get("track").is_none(),
+        "the subsonic entry carries no track number"
+    );
+    assert!(
+        entry.get("discNumber").is_none(),
+        "the subsonic entry carries no disc number"
+    );
+
+    let login = login(&fixture.app, "flynn", &fixture.owner_secret).await;
+    let token = login["token"].as_str().unwrap();
+    let body = get_authed(
+        &fixture.app,
+        &format!("/compat/navidrome/api/playlist/{id}"),
+        token,
+    )
+    .await;
+    let song = &body["songs"][0];
+    assert_eq!(song["title"], json!("Filed"));
+    assert_eq!(song["album"], json!("Discovery"));
+    assert_eq!(song["albumId"], json!(album.id().to_string()));
+    assert!(
+        song.get("albumArtist").is_none(),
+        "the navidrome song carries no album artist"
+    );
+    assert!(
+        song.get("trackNumber").is_none(),
+        "the navidrome song carries no track number"
+    );
+    assert!(
+        song.get("discNumber").is_none(),
+        "the navidrome song carries no disc number"
+    );
 }
 
 #[sqlx::test]
