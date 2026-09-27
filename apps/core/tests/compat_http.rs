@@ -3299,7 +3299,7 @@ async fn post_status(
 }
 
 #[sqlx::test]
-async fn subsonic_a_position_the_store_cannot_hold_is_rejected(pool: PgPool) {
+async fn subsonic_a_position_the_wire_cannot_carry_is_rejected(pool: PgPool) {
     let fixture = queue_fixture(pool.clone()).await;
     let first = playlist_song(&pool, "path-first", "First").await;
 
@@ -3311,27 +3311,29 @@ async fn subsonic_a_position_the_store_cannot_hold_is_rejected(pool: PgPool) {
     .await;
     let saved = read_queue(&fixture.app, &fixture.owner).await;
 
-    let beyond = i64::MAX as u64 + 1;
+    let beyond_wire = i32::MAX as u64 + 1;
     for route in ["savePlayQueue", "savePlayQueueByIndex"] {
-        let (status, body) = get_status(
-            fixture.app.clone(),
-            &playlist_route(
-                route,
-                &fixture.owner,
-                &format!("id={first}&current={first}&currentIndex=0&position={beyond}"),
-            ),
-        )
-        .await;
+        for position in [beyond_wire, i64::MAX as u64 + 1] {
+            let (status, body) = get_status(
+                fixture.app.clone(),
+                &playlist_route(
+                    route,
+                    &fixture.owner,
+                    &format!("id={first}&current={first}&currentIndex=0&position={position}"),
+                ),
+            )
+            .await;
 
-        assert_eq!(
-            status,
-            StatusCode::BAD_REQUEST,
-            "{route} rejects a position the snapshot cannot hold"
-        );
-        assert_eq!(
-            body["subsonic-response"]["error"]["message"],
-            json!("Invalid position.")
-        );
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{route} rejects position {position}, which its own wire cannot carry"
+            );
+            assert_eq!(
+                body["subsonic-response"]["error"]["message"],
+                json!("Invalid position.")
+            );
+        }
     }
 
     let rejected = read_queue(&fixture.app, &fixture.owner).await;
@@ -3346,15 +3348,18 @@ async fn subsonic_a_position_the_store_cannot_hold_is_rejected(pool: PgPool) {
         &playlist_route(
             "savePlayQueue",
             &fixture.owner,
-            &format!("id={first}&current={first}&position={}", i64::MAX),
+            &format!("id={first}&current={first}&position={}", i32::MAX),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let body = read_queue(&fixture.app, &fixture.owner).await;
     assert_eq!(
-        body["subsonic-response"]["status"],
-        json!("ok"),
-        "the bound is the snapshot's, so its maximum is accepted"
+        play_queue(&body)["position"],
+        json!(i32::MAX),
+        "the widest position the wire carries is read back as it was written"
     );
 }
 

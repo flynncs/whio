@@ -1159,13 +1159,17 @@ fn queue_position(query: &RawQuery) -> Result<u64, PlayQueueError> {
                 .parse::<u64>()
                 .map_err(|_| PlayQueueError::InvalidPosition)?;
 
-            if i64::try_from(position_ms).is_err() {
+            if !representable(position_ms) {
                 return Err(PlayQueueError::InvalidPosition);
             }
 
             Ok(position_ms)
         }
     }
+}
+
+fn representable(position_ms: u64) -> bool {
+    i32::try_from(position_ms).is_ok() && i64::try_from(position_ms).is_ok()
 }
 
 pub(crate) fn play_queue_save(query: &RawQuery) -> Result<PlayQueueSave, PlayQueueError> {
