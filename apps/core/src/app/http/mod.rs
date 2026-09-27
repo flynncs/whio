@@ -72,7 +72,7 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .nest(
             "/compat/navidrome",
-            facades::navidrome::router().layer(from_fn(facades::cors)),
+            facades::navidrome::router::<AppState>().layer(from_fn(facades::cors)),
         )
         .fallback(routes::not_found)
         .layer(axum::middleware::from_fn(middleware::request_id))

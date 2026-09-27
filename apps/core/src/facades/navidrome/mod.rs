@@ -16,6 +16,7 @@ pub(crate) fn router<S>() -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
     state::NavidromeState: FromRef<S>,
+    state::NavidromeQueueState: FromRef<S>,
 {
     Router::new()
         .route("/auth/login", post(auth::login))
@@ -46,6 +47,7 @@ where
             "/api/playlist/{id}/tracks/{item_id}",
             put(routes::playlist_move_track),
         )
+        .merge(queue_router::<S>())
         .fallback(errors::not_found)
 }
 

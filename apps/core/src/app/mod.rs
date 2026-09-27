@@ -214,6 +214,18 @@ impl FromRef<AppState> for crate::facades::navidrome::state::NavidromeState {
     }
 }
 
+impl FromRef<AppState> for crate::facades::navidrome::state::NavidromeQueueState {
+    fn from_ref(state: &AppState) -> Self {
+        Self {
+            navidrome:
+                <crate::facades::navidrome::state::NavidromeState as FromRef<AppState>>::from_ref(
+                    state,
+                ),
+            queue: Arc::clone(&state.queue),
+        }
+    }
+}
+
 pub fn router(state: AppState) -> Router {
     http::router(state)
 }
