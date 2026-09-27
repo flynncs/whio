@@ -6,6 +6,7 @@ pub use startup::run;
 pub mod database;
 pub(crate) mod http;
 pub mod resolver;
+pub mod worker;
 
 use std::sync::Arc;
 

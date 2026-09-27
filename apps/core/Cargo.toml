@@ -16,7 +16,12 @@ path = "src/main.rs"
 name = "whio-cli"
 path = "src/bin/whio-cli.rs"
 
+[[bin]]
+name = "whio-worker"
+path = "src/bin/whio-worker.rs"
+
 [dependencies]
+awa = "0.6.9"
 axum = "0.8.9"
 lofty = "0.22"
 bytes = "1"

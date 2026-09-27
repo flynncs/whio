@@ -23,6 +23,19 @@ const ARTWORK_HOST_SUFFIXES: &str = "WHIO_ARTWORK_HOST_SUFFIXES";
 const SOURCE_TAGS: &str = "WHIO_SOURCE_TAGS";
 const MEDIA_ROOTS: &str = "WHIO_MEDIA_ROOTS";
 
+const WORKER_QUEUES: &str = "WHIO_WORKER_QUEUES";
+const WORKER_BIND_ADDRESS: &str = "WHIO_WORKER_BIND_ADDRESS";
+const WORKER_MAX_WORKERS: &str = "WHIO_WORKER_MAX_WORKERS";
+const WORKER_POLL_INTERVAL: &str = "WHIO_WORKER_POLL_INTERVAL_MILLISECONDS";
+const WORKER_PROMOTE_INTERVAL: &str = "WHIO_WORKER_PROMOTE_INTERVAL_MILLISECONDS";
+const WORKER_DRAIN_TIMEOUT: &str = "WHIO_WORKER_DRAIN_TIMEOUT_SECONDS";
+
+const DEFAULT_WORKER_BIND_ADDRESS: &str = "127.0.0.1:3001";
+const DEFAULT_WORKER_MAX_WORKERS: u32 = 4;
+const DEFAULT_WORKER_POLL_INTERVAL_MILLISECONDS: u64 = 200;
+const DEFAULT_WORKER_PROMOTE_INTERVAL_MILLISECONDS: u64 = 250;
+const DEFAULT_WORKER_DRAIN_TIMEOUT_SECONDS: u64 = 30;
+
 const DEFAULT_YOUTUBE_MEDIA_SUFFIX: &str =
     crate::features::playback::media::DEFAULT_YOUTUBE_MEDIA_SUFFIX;
 
@@ -42,6 +55,17 @@ pub(crate) struct Config {
     pub(crate) source_tags: SourceTags,
     pub(crate) dedup_mode: crate::features::music_library::catalogue::DedupMode,
     pub(crate) libraries: Vec<crate::features::music_library::library::LibraryRegistration>,
+    pub(crate) worker: WorkerConfig,
+}
+
+#[derive(Debug)]
+pub(crate) struct WorkerConfig {
+    pub(crate) queues: Vec<String>,
+    pub(crate) bind_address: SocketAddr,
+    pub(crate) max_workers: u32,
+    pub(crate) poll_interval: Duration,
+    pub(crate) promote_interval: Duration,
+    pub(crate) drain_timeout: Duration,
 }
 
 #[derive(Debug)]
@@ -291,6 +315,54 @@ impl Config {
             }
         };
 
+        let worker = WorkerConfig {
+            queues: match vars.get(WORKER_QUEUES) {
+                None => Vec::new(),
+                Some(raw) => parse_queues(raw)?,
+            },
+            bind_address: {
+                let raw = vars
+                    .get(WORKER_BIND_ADDRESS)
+                    .map(String::as_str)
+                    .unwrap_or(DEFAULT_WORKER_BIND_ADDRESS);
+                raw.parse()
+                    .map_err(|_| invalid(WORKER_BIND_ADDRESS, raw, "must be a socket address"))?
+            },
+            max_workers: {
+                let raw = vars
+                    .get(WORKER_MAX_WORKERS)
+                    .map(String::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| DEFAULT_WORKER_MAX_WORKERS.to_string());
+                let workers = raw.parse().map_err(|_| {
+                    invalid(WORKER_MAX_WORKERS, &raw, "must be a positive worker count")
+                })?;
+                if workers == 0 {
+                    return Err(invalid(
+                        WORKER_MAX_WORKERS,
+                        &raw,
+                        "must be a positive worker count",
+                    ));
+                }
+                workers
+            },
+            poll_interval: parse_millis(
+                vars,
+                WORKER_POLL_INTERVAL,
+                DEFAULT_WORKER_POLL_INTERVAL_MILLISECONDS,
+            )?,
+            promote_interval: parse_millis(
+                vars,
+                WORKER_PROMOTE_INTERVAL,
+                DEFAULT_WORKER_PROMOTE_INTERVAL_MILLISECONDS,
+            )?,
+            drain_timeout: parse_timeout(
+                vars,
+                WORKER_DRAIN_TIMEOUT,
+                DEFAULT_WORKER_DRAIN_TIMEOUT_SECONDS,
+            )?,
+        };
+
         Ok(Self {
             dedup_mode,
             bind_address,
@@ -306,6 +378,7 @@ impl Config {
             artwork_host_suffixes,
             source_tags,
             libraries,
+            worker,
         })
     }
 
@@ -342,6 +415,53 @@ fn invalid(name: &'static str, value: &str, reason: &'static str) -> ConfigError
         value: value.to_owned(),
         reason,
     }
+}
+
+fn parse_millis(
+    vars: &HashMap<String, String>,
+    name: &'static str,
+    default_millis: u64,
+) -> Result<Duration, ConfigError> {
+    let default = default_millis.to_string();
+    let raw = vars.get(name).map(String::as_str).unwrap_or(&default);
+    let millis = raw.parse::<u64>().map_err(|_| {
+        invalid(
+            name,
+            raw,
+            "must be a positive integer number of milliseconds",
+        )
+    })?;
+
+    if millis == 0 {
+        return Err(invalid(
+            name,
+            raw,
+            "must be a positive integer number of milliseconds",
+        ));
+    }
+
+    Ok(Duration::from_millis(millis))
+}
+
+fn parse_queues(raw: &str) -> Result<Vec<String>, ConfigError> {
+    let mut queues: Vec<String> = Vec::new();
+
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if queues.iter().any(|queue| queue == entry) {
+            return Err(invalid(WORKER_QUEUES, entry, "must list each queue once"));
+        }
+        queues.push(entry.to_owned());
+    }
+
+    if queues.is_empty() {
+        return Err(invalid(WORKER_QUEUES, raw, "must list at least one queue"));
+    }
+
+    Ok(queues)
 }
 
 fn parse_media_roots(

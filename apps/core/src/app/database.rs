@@ -11,6 +11,9 @@ pub enum DatabaseError {
     #[error("database migration failed")]
     Migrate(#[source] sqlx::migrate::MigrateError),
 
+    #[error("awa migration failed")]
+    AwaMigrate(#[source] awa::AwaError),
+
     #[error("database readiness check failed")]
     Check(#[source] sqlx::Error),
 }
@@ -32,6 +35,10 @@ impl Database {
             .run(&pool)
             .await
             .map_err(DatabaseError::Migrate)?;
+
+        awa::migrations::run(&pool)
+            .await
+            .map_err(DatabaseError::AwaMigrate)?;
 
         Ok(Self { pool })
     }
