@@ -161,6 +161,15 @@ impl FromRef<AppState> for crate::features::music_library::api::playlists::Playl
     }
 }
 
+impl FromRef<AppState> for crate::features::music_library::api::queue::QueueState {
+    fn from_ref(state: &AppState) -> Self {
+        Self {
+            queue: Arc::clone(&state.queue),
+            library: Arc::clone(&state.library),
+        }
+    }
+}
+
 impl FromRef<AppState> for crate::features::playback::api::native::NativeState {
     fn from_ref(state: &AppState) -> Self {
         Self(Arc::clone(&state.streaming))

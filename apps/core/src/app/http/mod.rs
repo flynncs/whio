@@ -48,6 +48,12 @@ pub(crate) fn router(state: AppState) -> Router {
             post(music_library::api::playlists::move_entry),
         )
         .route(
+            "/api/v1/queue",
+            get(music_library::api::queue::read)
+                .put(music_library::api::queue::save)
+                .delete(music_library::api::queue::clear),
+        )
+        .route(
             "/playback/tracks/{track_id}/stream",
             get(playback::api::native::stream),
         )

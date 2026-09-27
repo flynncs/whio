@@ -21,6 +21,7 @@ use whio_core::{
     },
     features::music_library::domain::ProviderKind,
     features::music_library::playlists::PlaylistService,
+    features::music_library::queue::RestoreQueueService,
     features::music_library::sources::SourceQueries,
     features::music_library::test_support::{
         CatalogueWrite, DuplicateReport, LibraryRead, PostgresTrackRepository, SourceLookup,
@@ -99,6 +100,16 @@ pub fn router_with_playlists(
     whio_core::app::router(
         AppState::new(credential, search, library, playback).with_playlists(playlists),
     )
+}
+
+pub fn router_with_queue(
+    credential: Arc<CredentialService>,
+    search: Arc<SearchService>,
+    library: Arc<LibraryService>,
+    queue: Arc<RestoreQueueService>,
+    playback: Arc<StreamingService>,
+) -> Router {
+    whio_core::app::router(AppState::new(credential, search, library, playback).with_queue(queue))
 }
 
 struct StubProvider {
