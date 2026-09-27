@@ -7,6 +7,7 @@ pub(crate) mod state;
 
 use axum::{
     Extension, Json, Router,
+    body::Bytes,
     extract::{FromRef, OriginalUri, State},
     http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_RANGE},
     response::{IntoResponse, Response},
@@ -1227,11 +1228,15 @@ pub(crate) async fn save_play_queue(
     Extension(context): Extension<RequestContext>,
     auth: SubsonicAuth,
     query: RawQuery,
+    body: Bytes,
 ) -> Response {
     let principal = match authenticate(&state, &context, auth).await {
         Ok(principal) => principal,
         Err(response) => return response,
     };
+    if parameters_in_unread_body(&body) {
+        return SubsonicError::MissingParameter.into_response();
+    }
     let save = match service::play_queue_save(&query) {
         Ok(save) => save,
         Err(error) => return queue_failure(&context, error),
@@ -1245,17 +1250,25 @@ pub(crate) async fn save_play_queue_by_index(
     Extension(context): Extension<RequestContext>,
     auth: SubsonicAuth,
     query: RawQuery,
+    body: Bytes,
 ) -> Response {
     let principal = match authenticate(&state, &context, auth).await {
         Ok(principal) => principal,
         Err(response) => return response,
     };
+    if parameters_in_unread_body(&body) {
+        return SubsonicError::MissingParameter.into_response();
+    }
     let save = match service::play_queue_save_by_index(&query) {
         Ok(save) => save,
         Err(error) => return queue_failure(&context, error),
     };
 
     save_play_queue_request(&state, &context, principal.user_id.as_uuid(), save).await
+}
+
+fn parameters_in_unread_body(body: &Bytes) -> bool {
+    !body.is_empty()
 }
 
 async fn save_play_queue_request(
@@ -1274,11 +1287,8 @@ fn queue_failure(context: &RequestContext, error: service::PlayQueueError) -> Re
     use service::PlayQueueError;
 
     match &error {
-        PlayQueueError::TooManyEntries { max_entries } => {
-            return queue_client_error(
-                models::error::Code::Variant0,
-                &format!("Queue holds at most MAX_RESTORE_QUEUE_ENTRIES ({max_entries}) entries."),
-            );
+        PlayQueueError::TooManyEntries { .. } => {
+            return queue_client_error(models::error::Code::Variant0, mapping::BOUND_MESSAGE);
         }
         PlayQueueError::MissingCurrentIndex => {
             return SubsonicError::MissingParameter.into_response();

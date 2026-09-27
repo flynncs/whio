@@ -480,6 +480,8 @@ fn album_child(summary: &AlbumSummary) -> models::Child {
     }
 }
 
+pub(crate) const BOUND_MESSAGE: &str = "Queue holds at most 1000 entries.";
+
 pub(crate) fn play_queue(view: PlayQueueView) -> models::PlayQueue {
     let current = view
         .current_index
@@ -557,6 +559,7 @@ mod tests {
     use crate::features::music_library::domain::{
         Artist, ArtistId, ProviderId, SourceScope, TrackId, TrackMetadata,
     };
+    use crate::features::music_library::queue::MAX_RESTORE_QUEUE_ENTRIES;
 
     fn track(artists: &[&str]) -> Track {
         Track::new(
@@ -699,5 +702,10 @@ mod tests {
         assert_eq!(groups[0].1, ["99 Posse"]);
         assert_eq!(groups[1].1, ["The Beatles", "Bjork"]);
         assert_eq!(groups[2].1, ["Daft Punk"]);
+    }
+
+    #[test]
+    fn the_bound_message_names_the_configured_bound() {
+        assert!(BOUND_MESSAGE.contains(&MAX_RESTORE_QUEUE_ENTRIES.to_string()));
     }
 }

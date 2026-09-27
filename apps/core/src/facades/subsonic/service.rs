@@ -1153,10 +1153,18 @@ fn queue_position(query: &RawQuery) -> Result<u64, PlayQueueError> {
     match query.get("position") {
         None => Ok(0),
         Some("") => Ok(0),
-        Some(raw) => raw
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| PlayQueueError::InvalidPosition),
+        Some(raw) => {
+            let position_ms = raw
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| PlayQueueError::InvalidPosition)?;
+
+            if i64::try_from(position_ms).is_err() {
+                return Err(PlayQueueError::InvalidPosition);
+            }
+
+            Ok(position_ms)
+        }
     }
 }
 

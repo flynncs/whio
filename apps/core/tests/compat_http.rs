@@ -3056,12 +3056,10 @@ async fn subsonic_an_over_bound_save_is_rejected_and_changes_nothing(pool: PgPoo
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["subsonic-response"]["status"], json!("failed"));
-    let message = body["subsonic-response"]["error"]["message"]
-        .as_str()
-        .unwrap();
-    assert!(
-        message.contains("MAX_RESTORE_QUEUE_ENTRIES"),
-        "the bound is named in the error: {message}"
+    assert_eq!(
+        body["subsonic-response"]["error"]["message"],
+        json!("Queue holds at most 1000 entries."),
+        "the client error names the bound it must respect, not an internal identifier"
     );
 
     let body = read_queue(&fixture.app, &fixture.owner).await;
@@ -3273,5 +3271,141 @@ async fn subsonic_play_queue_request_errors_name_the_parameter(pool: PgPool) {
     assert!(
         play_queue(&body).get("entry").is_none(),
         "no rejected save reached the snapshot"
+    );
+}
+
+async fn post_status(
+    app: axum::Router,
+    uri: &str,
+    content_type: Option<&str>,
+    body: &str,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("x-request-id", "request-123");
+
+    if let Some(content_type) = content_type {
+        builder = builder.header("content-type", content_type);
+    }
+
+    let response = app
+        .oneshot(builder.body(Body::from(body.to_owned())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 8192).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+#[sqlx::test]
+async fn subsonic_a_position_the_store_cannot_hold_is_rejected(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+
+    save_queue(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={first}&current={first}&position=10"),
+    )
+    .await;
+    let saved = read_queue(&fixture.app, &fixture.owner).await;
+
+    let beyond = i64::MAX as u64 + 1;
+    for route in ["savePlayQueue", "savePlayQueueByIndex"] {
+        let (status, body) = get_status(
+            fixture.app.clone(),
+            &playlist_route(
+                route,
+                &fixture.owner,
+                &format!("id={first}&current={first}&currentIndex=0&position={beyond}"),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{route} rejects a position the snapshot cannot hold"
+        );
+        assert_eq!(
+            body["subsonic-response"]["error"]["message"],
+            json!("Invalid position.")
+        );
+    }
+
+    let rejected = read_queue(&fixture.app, &fixture.owner).await;
+    assert_eq!(
+        play_queue(&rejected),
+        play_queue(&saved),
+        "a rejected position changed nothing"
+    );
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueue",
+            &fixture.owner,
+            &format!("id={first}&current={first}&position={}", i64::MAX),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["subsonic-response"]["status"],
+        json!("ok"),
+        "the bound is the snapshot's, so its maximum is accepted"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_a_body_the_facade_cannot_read_is_not_a_clear(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+
+    save_queue(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={first}&current={first}"),
+    )
+    .await;
+
+    let (status, body) = post_status(
+        fixture.app.clone(),
+        &playlist_route("savePlayQueue", &fixture.owner, ""),
+        Some("application/x-www-form-urlencoded"),
+        &format!("id={second}&current={second}&position=1000"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(10));
+
+    let body = read_queue(&fixture.app, &fixture.owner).await;
+    assert_eq!(
+        queue_entry_ids(play_queue(&body)),
+        vec![first.to_string()],
+        "a save whose parameters arrived in a body the facade cannot read is not a clear"
+    );
+
+    let (status, body) = post_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueue",
+            &fixture.owner,
+            &format!("id={second}&current={second}"),
+        ),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let body = read_queue(&fixture.app, &fixture.owner).await;
+    assert_eq!(
+        queue_entry_ids(play_queue(&body)),
+        vec![second.to_string()],
+        "a POST whose parameters arrive in the query is read as the protocol intends"
     );
 }
