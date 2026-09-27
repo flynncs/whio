@@ -188,6 +188,15 @@ impl FromRef<AppState> for crate::features::music_library::api::queue::QueueStat
     }
 }
 
+impl FromRef<AppState> for crate::features::music_library::api::history::HistoryState {
+    fn from_ref(state: &AppState) -> Self {
+        Self {
+            listen: Arc::clone(&state.listen),
+            playback_activity: Arc::clone(&state.playback_activity),
+        }
+    }
+}
+
 impl FromRef<AppState> for crate::features::playback::api::native::NativeState {
     fn from_ref(state: &AppState) -> Self {
         Self(Arc::clone(&state.streaming))

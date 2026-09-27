@@ -47,6 +47,12 @@ pub(crate) fn router(state: AppState) -> Router {
             "/api/v1/playlists/{id}/entries/{entry_id}/move",
             post(music_library::api::playlists::move_entry),
         )
+        .route("/api/v1/listens", post(music_library::api::history::submit))
+        .route("/api/v1/history", get(music_library::api::history::read))
+        .route(
+            "/api/v1/activity",
+            get(music_library::api::history::activity).post(music_library::api::history::report),
+        )
         .route(
             "/api/v1/queue",
             get(music_library::api::queue::read)
