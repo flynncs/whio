@@ -31,10 +31,10 @@ use auth::SubsonicError;
 use envelope::{
     album_envelope, album_list2_envelope, artist_envelope, artists_envelope,
     create_playlist_envelope, directory_envelope, extensions_envelope, failed_envelope,
-    genres_envelope, indexes_envelope, ok_envelope, play_queue_by_index_envelope,
-    play_queue_envelope, playlist_envelope, playlists_envelope, random_songs_envelope,
-    scan_status_envelope, search3_envelope, songs_by_genre_envelope, starred2_envelope,
-    start_scan_envelope, user_envelope,
+    genres_envelope, indexes_envelope, now_playing_envelope, ok_envelope,
+    play_queue_by_index_envelope, play_queue_envelope, playlist_envelope, playlists_envelope,
+    random_songs_envelope, scan_status_envelope, search3_envelope, songs_by_genre_envelope,
+    starred2_envelope, start_scan_envelope, user_envelope,
 };
 use state::SubsonicState;
 
@@ -86,6 +86,11 @@ where
         ("/unstar", get(unstar).post(unstar)),
         ("/setRating", get(set_rating).post(set_rating)),
         ("/scrobble", get(scrobble).post(scrobble)),
+        ("/getNowPlaying", get(get_now_playing).post(get_now_playing)),
+        (
+            "/reportPlayback",
+            get(report_playback).post(report_playback),
+        ),
         ("/getPlayQueue", get(get_play_queue).post(get_play_queue)),
         ("/savePlayQueue", get(save_play_queue).post(save_play_queue)),
         (
@@ -1159,13 +1164,78 @@ pub(crate) async fn scrobble(
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let submission = query
-        .get("submission")
-        .is_none_or(|raw| !matches!(raw.trim().to_ascii_lowercase().as_str(), "false" | "0"));
+    let submission = match service::scrobble_submission(&query) {
+        Ok(submission) => submission,
+        Err(error) => return reporting_failure_response(&context, error),
+    };
 
-    match service::scrobble(state.library_state(), user, &ids, &times, submission).await {
+    match service::scrobble(
+        state.activity(),
+        user,
+        query.get("c").unwrap_or_default(),
+        &ids,
+        &times,
+        submission,
+        chrono::Utc::now(),
+    )
+    .await
+    {
         Ok(()) => Json(ok_envelope()).into_response(),
-        Err(error) => state_failure_response(&context, error),
+        Err(error) => reporting_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_now_playing(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+
+    match service::now_playing(
+        state.activity(),
+        state.library(),
+        state.credential(),
+        &principal,
+        state.source_tags(),
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        Ok(entries) => Json(now_playing_envelope(entries)).into_response(),
+        Err(error) => reporting_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn report_playback(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let request = match service::PlaybackReportRequest::parse(&query) {
+        Ok(request) => request,
+        Err(error) => return reporting_failure_response(&context, error),
+    };
+
+    match service::report_playback(
+        state.activity(),
+        principal.user_id.as_uuid(),
+        query.get("c").unwrap_or_default(),
+        &request,
+        chrono::Utc::now(),
+    )
+    .await
+    {
+        Ok(()) => Json(ok_envelope()).into_response(),
+        Err(error) => reporting_failure_response(&context, error),
     }
 }
 
@@ -1335,6 +1405,45 @@ fn queue_failure(context: &RequestContext, error: service::PlayQueueError) -> Re
 fn queue_client_error(code: models::error::Code, message: &str) -> Response {
     let mut response = Json(failed_envelope(code, message)).into_response();
     *response.status_mut() = StatusCode::BAD_REQUEST;
+    response
+}
+
+fn reporting_failure_response(
+    context: &RequestContext,
+    error: service::ReportingError,
+) -> Response {
+    let (status, code, message) = match error {
+        service::ReportingError::InvalidRequest => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            models::error::Code::Variant0,
+            "Invalid parameter.",
+        ),
+        service::ReportingError::MissingParameter => (
+            StatusCode::BAD_REQUEST,
+            models::error::Code::Variant10,
+            "Required parameter is missing.",
+        ),
+        service::ReportingError::NotFound => (
+            StatusCode::NOT_FOUND,
+            models::error::Code::Variant70,
+            "Not found.",
+        ),
+        other => {
+            tracing::error!(
+                error = %other,
+                request_id = context.request_id().as_str(),
+                "playback reporting failed"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                models::error::Code::Variant0,
+                "Internal error.",
+            )
+        }
+    };
+
+    let mut response = Json(failed_envelope(code, message)).into_response();
+    *response.status_mut() = status;
     response
 }
 

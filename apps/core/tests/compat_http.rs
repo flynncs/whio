@@ -5,9 +5,10 @@ use whio_core::features::music_library::domain::{
     AlbumMetadata, AlbumTrack, ArtistCredit, ArtistListFilter, ArtistSort, ProviderId,
     SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
 };
+use whio_core::features::music_library::history::ListenService;
 use whio_core::features::music_library::test_support::{
-    CatalogueWrite, LibraryRead, PlaylistStore, PostgresTrackRepository, RestoreQueueStore,
-    StateStore,
+    CatalogueWrite, LibraryRead, ListenStore, PlaylistStore, PostgresTrackRepository,
+    RestoreQueueStore, StateStore,
 };
 mod support;
 
@@ -30,9 +31,9 @@ use whio_core::{
     features::music_library::catalogue::{LibraryService, SearchService},
     features::music_library::playlists::PlaylistService,
     features::music_library::queue::{RestoreQueueSave, RestoreQueueService},
-    features::playback::PlaybackProvider,
     features::playback::StreamingService,
     features::playback::providers::YtmAdapter,
+    features::playback::{PlaybackActivityService, PlaybackProvider},
 };
 
 use support::credentials::credential_service_with_roles;
@@ -3413,4 +3414,482 @@ async fn subsonic_a_body_the_facade_cannot_read_is_not_a_clear(pool: PgPool) {
         vec![second.to_string()],
         "a POST whose parameters arrive in the query is read as the protocol intends"
     );
+}
+
+struct ReportingFixture {
+    app: axum::Router,
+    secret: String,
+    pool: PgPool,
+    track: TrackId,
+    quick: TrackId,
+}
+
+fn reporting_metadata(title: &str, duration_ms: u64) -> TrackMetadata {
+    TrackMetadata::from_names(
+        title.to_owned(),
+        vec!["Daft Punk".to_owned()],
+        Some(duration_ms),
+    )
+    .unwrap()
+}
+
+async fn reporting_fixture(pool: PgPool) -> ReportingFixture {
+    let ports = StorePorts::new(pool.clone());
+    let album = ports
+        .store
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Discovery".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let track = ports
+        .store
+        .get_or_create(
+            local_source("reporting.flac"),
+            reporting_metadata("Reported", 240_000),
+        )
+        .await
+        .unwrap();
+    let quick = ports
+        .store
+        .get_or_create(
+            local_source("reporting-quick.flac"),
+            reporting_metadata("Quick", 2_000),
+        )
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_album_track(album.id(), quick.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let (search, library) = ports.bare_catalogue();
+    let playback = ports.streaming(vec![
+        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+    ]);
+    let listens = Arc::new(ListenService::new(
+        Arc::clone(&ports.store) as Arc<dyn ListenStore>,
+        Arc::clone(&ports.store) as Arc<dyn LibraryRead>,
+    ));
+    let activity = Arc::new(PlaybackActivityService::new(listens, Arc::clone(&library)));
+    let key = CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).expect("valid key");
+    let provisioning = whio_core::features::identity::provision(pool.clone());
+    provisioning.create_user("flynn", "Flynn").await.unwrap();
+    let (_, secret) = provisioning
+        .mint_app_password(&key, "flynn", "integration")
+        .await
+        .unwrap();
+    let credential = Arc::new(whio_core::features::identity::credentials(
+        pool.clone(),
+        key,
+    ));
+    let app = whio_core::app::router(
+        AppState::new(credential, search, library, playback).with_playback_activity(activity),
+    );
+
+    ReportingFixture {
+        app,
+        secret,
+        pool,
+        track: track.id().clone(),
+        quick: quick.id().clone(),
+    }
+}
+
+fn subsonic_report(
+    auth: &str,
+    track: &TrackId,
+    state: &str,
+    position_ms: u64,
+    extra: &str,
+) -> String {
+    format!(
+        "/compat/subsonic/rest/reportPlayback.view?{auth}&mediaId={track}&mediaType=song&positionMs={position_ms}&state={state}{extra}"
+    )
+}
+
+async fn recorded_listens(pool: &PgPool) -> Vec<(String, Option<bool>)> {
+    sqlx::query_as("SELECT origin, qualified FROM listens ORDER BY listen_at, origin")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+async fn counted_plays(pool: &PgPool, track: &TrackId) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COALESCE(SUM(play_count), 0)::BIGINT FROM track_play_stats WHERE track_id = $1",
+    )
+    .bind(track.as_uuid())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn album_song_play_count(app: axum::Router, auth: &str, track: &TrackId) -> Value {
+    let body = get(
+        app.clone(),
+        &format!("/compat/subsonic/rest/getAlbumList2.view?{auth}&type=alphabeticalByName"),
+    )
+    .await;
+    let album_id = body["subsonic-response"]["albumList2"]["album"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let body = get(
+        app,
+        &format!("/compat/subsonic/rest/getAlbum.view?{auth}&id={album_id}"),
+    )
+    .await;
+
+    body["subsonic-response"]["album"]["song"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|song| song["id"] == json!(track.to_string()))
+        .map(|song| song["playCount"].clone())
+        .expect("the reported track belongs to the album")
+}
+
+async fn now_playing_entries(app: axum::Router, auth: &str) -> Vec<Value> {
+    let body = get(
+        app,
+        &format!("/compat/subsonic/rest/getNowPlaying.view?{auth}"),
+    )
+    .await;
+
+    body["subsonic-response"]["nowPlaying"]["entry"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[sqlx::test]
+async fn subsonic_scrobble_submission_records_one_qualified_play(pool: PgPool) {
+    let fixture = reporting_fixture(pool).await;
+    let auth = auth_query("flynn", &fixture.secret);
+
+    let body = get(
+        fixture.app.clone(),
+        &format!(
+            "/compat/subsonic/rest/scrobble.view?{auth}&id={}",
+            fixture.track
+        ),
+    )
+    .await;
+
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    assert_eq!(
+        recorded_listens(&fixture.pool).await,
+        [("subsonic_scrobble".to_owned(), None)]
+    );
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 1);
+    assert_eq!(
+        album_song_play_count(fixture.app.clone(), &auth, &fixture.track).await,
+        json!(1),
+        "the counter the client reads moves by the one play"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_scrobble_without_submission_is_now_playing_only(pool: PgPool) {
+    let fixture = reporting_fixture(pool).await;
+    let auth = auth_query("flynn", &fixture.secret);
+
+    let body = get(
+        fixture.app.clone(),
+        &format!(
+            "/compat/subsonic/rest/scrobble.view?{auth}&id={}&submission=false",
+            fixture.track
+        ),
+    )
+    .await;
+
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    assert!(recorded_listens(&fixture.pool).await.is_empty());
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 0);
+    assert_eq!(
+        album_song_play_count(fixture.app.clone(), &auth, &fixture.track).await,
+        Value::Null
+    );
+
+    let entries = now_playing_entries(fixture.app.clone(), &auth).await;
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], json!(fixture.track.to_string()));
+    assert_eq!(entries[0]["title"], json!("Reported"));
+    assert_eq!(entries[0]["username"], json!("flynn"));
+    assert_eq!(entries[0]["playerName"], json!("test-client"));
+    assert_eq!(entries[0]["state"], json!("playing"));
+    assert!(
+        entries[0]["positionMs"].is_number(),
+        "a playing session reports the position the server estimates"
+    );
+    assert_eq!(entries[0]["playbackRate"], json!(1.0));
+}
+
+#[sqlx::test]
+async fn subsonic_report_playback_records_one_play_for_a_qualified_sequence(pool: PgPool) {
+    let fixture = reporting_fixture(pool).await;
+    let auth = auth_query("flynn", &fixture.secret);
+
+    for (state, position_ms) in [
+        ("starting", 0_u64),
+        ("playing", 0),
+        ("paused", 1_000),
+        ("stopped", 1_000),
+    ] {
+        let body = get(
+            fixture.app.clone(),
+            &subsonic_report(
+                &auth,
+                &fixture.quick,
+                state,
+                position_ms,
+                "&playbackRate=1000000",
+            ),
+        )
+        .await;
+
+        assert_eq!(body["subsonic-response"]["status"], json!("ok"), "{state}");
+    }
+
+    assert_eq!(
+        recorded_listens(&fixture.pool).await,
+        [("report_playback".to_owned(), Some(true))]
+    );
+    assert_eq!(counted_plays(&fixture.pool, &fixture.quick).await, 1);
+    assert_eq!(
+        album_song_play_count(fixture.app.clone(), &auth, &fixture.quick).await,
+        json!(1)
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_report_playback_below_the_threshold_counts_nothing(pool: PgPool) {
+    let fixture = reporting_fixture(pool).await;
+    let auth = auth_query("flynn", &fixture.secret);
+
+    for (state, position_ms) in [("starting", 0_u64), ("playing", 0), ("paused", 1_000)] {
+        get(
+            fixture.app.clone(),
+            &subsonic_report(&auth, &fixture.track, state, position_ms, ""),
+        )
+        .await;
+    }
+
+    let entries = now_playing_entries(fixture.app.clone(), &auth).await;
+
+    assert_eq!(entries.len(), 1, "an uncounted sequence is still live");
+    assert_eq!(entries[0]["state"], json!("paused"));
+    assert_eq!(entries[0]["positionMs"], json!(1_000));
+
+    get(
+        fixture.app.clone(),
+        &subsonic_report(&auth, &fixture.track, "stopped", 1_000, ""),
+    )
+    .await;
+
+    assert!(recorded_listens(&fixture.pool).await.is_empty());
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 0);
+    assert!(
+        now_playing_entries(fixture.app.clone(), &auth)
+            .await
+            .is_empty()
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_report_playback_ignores_scrobble_across_the_sequence(pool: PgPool) {
+    let fixture = reporting_fixture(pool).await;
+    let auth = auth_query("flynn", &fixture.secret);
+
+    for (state, position_ms) in [
+        ("starting", 0_u64),
+        ("playing", 0),
+        ("paused", 1_000),
+        ("stopped", 1_000),
+    ] {
+        let body = get(
+            fixture.app.clone(),
+            &subsonic_report(
+                &auth,
+                &fixture.quick,
+                state,
+                position_ms,
+                "&playbackRate=1000000&ignoreScrobble=true",
+            ),
+        )
+        .await;
+
+        assert_eq!(body["subsonic-response"]["status"], json!("ok"), "{state}");
+    }
+
+    assert!(recorded_listens(&fixture.pool).await.is_empty());
+    assert_eq!(counted_plays(&fixture.pool, &fixture.quick).await, 0);
+    assert_eq!(
+        album_song_play_count(fixture.app.clone(), &auth, &fixture.quick).await,
+        Value::Null
+    );
+    assert!(
+        now_playing_entries(fixture.app.clone(), &auth)
+            .await
+            .is_empty()
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_repeated_scrobble_of_one_play_counts_once(pool: PgPool) {
+    let fixture = reporting_fixture(pool).await;
+    let auth = auth_query("flynn", &fixture.secret);
+    let uri = format!(
+        "/compat/subsonic/rest/scrobble.view?{auth}&id={}&time=1000",
+        fixture.track
+    );
+
+    for _ in 0..2 {
+        let body = get(fixture.app.clone(), &uri).await;
+
+        assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    }
+
+    assert_eq!(recorded_listens(&fixture.pool).await.len(), 1);
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 1);
+
+    get(
+        fixture.app.clone(),
+        &format!(
+            "/compat/subsonic/rest/scrobble.view?{auth}&id={}&time=1001",
+            fixture.track
+        ),
+    )
+    .await;
+
+    assert_eq!(recorded_listens(&fixture.pool).await.len(), 2);
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 2);
+}
+
+#[sqlx::test]
+async fn subsonic_scrobble_rejects_a_batch_before_writing_any_of_it(pool: PgPool) {
+    let fixture = reporting_fixture(pool).await;
+    let auth = auth_query("flynn", &fixture.secret);
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &format!(
+            "/compat/subsonic/rest/scrobble.view?{auth}&id={}&id=not-a-track&time=1000&time=2000",
+            fixture.track
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(0));
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &format!(
+            "/compat/subsonic/rest/scrobble.view?{auth}&id={}&id={}&time=1000",
+            fixture.track, fixture.quick
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(0));
+    assert!(recorded_listens(&fixture.pool).await.is_empty());
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 0);
+}
+
+#[sqlx::test]
+async fn subsonic_reporting_rejects_unknown_parameters_and_values(pool: PgPool) {
+    let fixture = reporting_fixture(pool).await;
+    let auth = auth_query("flynn", &fixture.secret);
+
+    for uri in [
+        subsonic_report(&auth, &fixture.track, "playing", 0, "&unknown=1"),
+        subsonic_report(&auth, &fixture.track, "stalled", 0, ""),
+        format!(
+            "/compat/subsonic/rest/reportPlayback.view?{auth}&mediaId={}&mediaType=podcast&positionMs=0&state=playing",
+            fixture.track
+        ),
+        format!(
+            "/compat/subsonic/rest/reportPlayback.view?{auth}&mediaId={}&mediaType=song&positionMs=0&state=playing&ignoreScrobble=maybe",
+            fixture.track
+        ),
+        format!(
+            "/compat/subsonic/rest/scrobble.view?{auth}&id={}&submission=maybe",
+            fixture.track
+        ),
+    ] {
+        let (status, body) = get_status(fixture.app.clone(), &uri).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
+        assert_eq!(
+            body["subsonic-response"]["status"],
+            json!("failed"),
+            "{uri}"
+        );
+        assert_eq!(
+            body["subsonic-response"]["error"]["code"],
+            json!(0),
+            "{uri}"
+        );
+        assert_eq!(
+            body["subsonic-response"]["error"]["message"],
+            json!("Invalid parameter."),
+            "{uri}"
+        );
+    }
+
+    assert!(recorded_listens(&fixture.pool).await.is_empty());
+}
+
+#[sqlx::test]
+async fn subsonic_advertises_only_the_extensions_it_serves(pool: PgPool) {
+    let fixture = reporting_fixture(pool).await;
+    let auth = auth_query("flynn", &fixture.secret);
+
+    let body = get(
+        fixture.app.clone(),
+        &format!("/compat/subsonic/rest/getOpenSubsonicExtensions.view?{auth}"),
+    )
+    .await;
+    let extensions = body["subsonic-response"]["openSubsonicExtensions"]
+        .as_array()
+        .unwrap();
+    let names: Vec<&str> = extensions
+        .iter()
+        .map(|extension| extension["name"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(names, ["indexBasedQueue", "playbackReport"]);
+    assert_eq!(
+        extensions
+            .iter()
+            .find(|extension| extension["name"] == json!("playbackReport"))
+            .unwrap()["versions"],
+        json!([1])
+    );
+
+    for state in ["starting", "playing", "paused", "stopped"] {
+        let body = get(
+            fixture.app.clone(),
+            &subsonic_report(&auth, &fixture.track, state, 0, ""),
+        )
+        .await;
+
+        assert_eq!(
+            body["subsonic-response"]["status"],
+            json!("ok"),
+            "the advertised state {state} is served"
+        );
+    }
 }

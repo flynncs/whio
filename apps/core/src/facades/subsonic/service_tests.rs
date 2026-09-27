@@ -1,10 +1,15 @@
 use super::*;
 use crate::features::music_library::test_support::{
-    CatalogueWrite, LibraryRead, SourceLookup, StateStore, TrackRepositoryError,
+    CatalogueWrite, LibraryRead, ListenStore, SourceLookup, StateStore, TrackRepositoryError,
 };
 use crate::{
+    features::identity::{
+        domain::{Principal, UserId, UserRole},
+        secrets::CredentialKey,
+    },
     features::music_library::catalogue::ProviderError,
     features::music_library::catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch},
+    features::music_library::history::ListenService,
     features::music_library::{
         domain::{
             AlbumMetadata, AlbumTrack, ArtistCredit, CreditRole, ProviderId, Resource,
@@ -13,6 +18,7 @@ use crate::{
         library::ScanService,
         test_support::PostgresTrackRepository,
     },
+    features::playback::PlaybackActivityService,
     platform::raw_query::RawQuery,
     platform::request::{RequestContext, RequestId},
 };
@@ -1645,4 +1651,513 @@ async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx:
         artist_detail(&library, &Uuid::now_v7().to_string(), None).await,
         Err(BrowseError::ArtistNotFound)
     ));
+}
+
+struct ReportingFixture {
+    activity: Arc<PlaybackActivityService>,
+    library: Arc<LibraryService>,
+    credential: Arc<CredentialService>,
+    principal: Principal,
+    track: TrackId,
+    pool: sqlx::PgPool,
+}
+
+fn reporting_key() -> CredentialKey {
+    CredentialKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").expect("valid key")
+}
+
+async fn reporting_fixture(pool: sqlx::PgPool, duration_ms: Option<u64>) -> ReportingFixture {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let track = repository
+        .get_or_create(
+            SourceIdentity::new(
+                ProviderId::new("local".to_owned()).unwrap(),
+                SourceScope::Named("/music".to_owned()),
+                "reporting.flac".to_owned(),
+            )
+            .unwrap(),
+            TrackMetadata::from_names(
+                "Reporting".to_owned(),
+                vec!["Daft Punk".to_owned()],
+                duration_ms,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .id()
+        .clone();
+
+    let library = Arc::new(LibraryService::new(
+        Arc::clone(&repository) as Arc<dyn LibraryRead>,
+        Arc::clone(&repository) as Arc<dyn SourceLookup>,
+        Arc::clone(&repository) as Arc<dyn StateStore>,
+    ));
+    let listens = Arc::new(ListenService::new(
+        Arc::clone(&repository) as Arc<dyn ListenStore>,
+        Arc::clone(&repository) as Arc<dyn LibraryRead>,
+    ));
+    let activity = Arc::new(PlaybackActivityService::new(listens, Arc::clone(&library)));
+    let user = Uuid::now_v7();
+
+    sqlx::query("INSERT INTO users (id, username, display_name) VALUES ($1, $2, $3)")
+        .bind(user)
+        .bind("flynn")
+        .bind("Flynn")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    ReportingFixture {
+        activity,
+        library,
+        credential: Arc::new(crate::features::identity::credentials(
+            pool.clone(),
+            reporting_key(),
+        )),
+        principal: Principal {
+            user_id: UserId::from_uuid(user),
+            role: UserRole::Member,
+        },
+        track,
+        pool,
+    }
+}
+
+fn at(millis: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(millis).expect("a representable instant")
+}
+
+async fn counted_plays(pool: &sqlx::PgPool, track: &TrackId) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COALESCE(SUM(play_count), 0)::BIGINT FROM track_play_stats WHERE track_id = $1",
+    )
+    .bind(track.as_uuid())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn recorded_listens(
+    pool: &sqlx::PgPool,
+) -> Vec<(String, Option<i64>, Option<i64>, Option<bool>)> {
+    sqlx::query_as(
+        "SELECT origin, listened_ms, start_position_ms, qualified FROM listens \
+         ORDER BY listen_at, origin",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn report_request(
+    track: &TrackId,
+    state: &str,
+    position_ms: u64,
+    extra: &str,
+) -> PlaybackReportRequest {
+    PlaybackReportRequest::parse(&RawQuery::parse(&format!(
+        "mediaId={track}&mediaType=song&positionMs={position_ms}&state={state}{extra}"
+    )))
+    .expect("a valid report")
+}
+
+#[sqlx::test]
+async fn a_submission_records_one_qualified_play_and_moves_the_counter(pool: sqlx::PgPool) {
+    let fixture = reporting_fixture(pool.clone(), Some(240_000)).await;
+    let ids = vec![fixture.track.to_string()];
+
+    scrobble(
+        &fixture.activity,
+        fixture.principal.user_id.as_uuid(),
+        "phone",
+        &ids,
+        &[],
+        true,
+        at(0),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        recorded_listens(&fixture.pool).await,
+        [("subsonic_scrobble".to_owned(), None, None, None)],
+        "a legacy submission carries no extent and is accepted unconditionally"
+    );
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 1);
+}
+
+#[sqlx::test]
+async fn a_scrobble_batch_records_every_entry(pool: sqlx::PgPool) {
+    let fixture = reporting_fixture(pool.clone(), Some(240_000)).await;
+    let second = fixture.track.to_string();
+    let ids = vec![fixture.track.to_string(), second.clone()];
+    let times = vec!["1000".to_owned(), "2000".to_owned()];
+
+    scrobble(
+        &fixture.activity,
+        fixture.principal.user_id.as_uuid(),
+        "phone",
+        &ids,
+        &times,
+        true,
+        at(0),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(recorded_listens(&fixture.pool).await.len(), 2);
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 2);
+}
+
+#[sqlx::test]
+async fn a_now_playing_notification_records_nothing_and_shows_the_session(pool: sqlx::PgPool) {
+    let fixture = reporting_fixture(pool.clone(), Some(240_000)).await;
+    let ids = vec![fixture.track.to_string()];
+
+    scrobble(
+        &fixture.activity,
+        fixture.principal.user_id.as_uuid(),
+        "phone",
+        &ids,
+        &[],
+        false,
+        at(0),
+    )
+    .await
+    .unwrap();
+
+    assert!(recorded_listens(&fixture.pool).await.is_empty());
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 0);
+
+    let live = fixture
+        .activity
+        .now_playing(fixture.principal.user_id.as_uuid(), at(0));
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].track_id(), &fixture.track);
+    assert_eq!(live[0].state(), PlaybackState::Playing);
+    assert_eq!(live[0].client().as_str(), "phone");
+
+    let entries = now_playing(
+        &fixture.activity,
+        &fixture.library,
+        &fixture.credential,
+        &fixture.principal,
+        SourceTags::Off,
+        at(0),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, fixture.track.to_string());
+    assert_eq!(entries[0].title, "Reporting");
+    assert_eq!(entries[0].username, "flynn");
+    assert_eq!(entries[0].player_name.as_deref(), Some("phone"));
+    assert_eq!(
+        entries[0].state,
+        Some(models::now_playing_entry::State::Playing)
+    );
+    assert_eq!(entries[0].minutes_ago, 0);
+}
+
+#[sqlx::test]
+async fn a_report_sequence_crossing_the_threshold_records_exactly_one_play(pool: sqlx::PgPool) {
+    let fixture = reporting_fixture(pool.clone(), Some(2_000)).await;
+    let user = fixture.principal.user_id.as_uuid();
+
+    for (state, position_ms, millis) in [
+        ("starting", 0_u64, 0_i64),
+        ("playing", 0, 0),
+        ("paused", 600, 600),
+        ("playing", 600, 600),
+        ("stopped", 1_200, 1_200),
+    ] {
+        report_playback(
+            &fixture.activity,
+            user,
+            "phone",
+            &report_request(&fixture.track, state, position_ms, ""),
+            at(millis),
+        )
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(
+        recorded_listens(&fixture.pool).await,
+        [(
+            "report_playback".to_owned(),
+            Some(1_200),
+            Some(0),
+            Some(true)
+        )],
+        "the session's accumulated listening is the extent of its one play"
+    );
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 1);
+}
+
+#[sqlx::test]
+async fn a_report_sequence_below_the_threshold_is_present_and_uncounted(pool: sqlx::PgPool) {
+    let fixture = reporting_fixture(pool.clone(), Some(2_000)).await;
+    let user = fixture.principal.user_id.as_uuid();
+
+    for (state, position_ms, millis) in [
+        ("starting", 0_u64, 0_i64),
+        ("playing", 0, 0),
+        ("paused", 300, 300),
+        ("playing", 300, 300),
+    ] {
+        report_playback(
+            &fixture.activity,
+            user,
+            "phone",
+            &report_request(&fixture.track, state, position_ms, ""),
+            at(millis),
+        )
+        .await
+        .unwrap();
+
+        let live = fixture.activity.now_playing(user, at(millis));
+
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].listened_ms(), u64::try_from(millis).unwrap());
+    }
+
+    report_playback(
+        &fixture.activity,
+        user,
+        "phone",
+        &report_request(&fixture.track, "stopped", 600, ""),
+        at(600),
+    )
+    .await
+    .unwrap();
+
+    assert!(recorded_listens(&fixture.pool).await.is_empty());
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 0);
+    assert!(
+        fixture.activity.now_playing(user, at(600)).is_empty(),
+        "a stopped session is not live"
+    );
+}
+
+#[sqlx::test]
+async fn an_ignored_scrobble_records_nothing_across_the_sequence(pool: sqlx::PgPool) {
+    let fixture = reporting_fixture(pool.clone(), Some(2_000)).await;
+    let user = fixture.principal.user_id.as_uuid();
+
+    for (state, position_ms, millis) in [
+        ("starting", 0_u64, 0_i64),
+        ("playing", 0, 0),
+        ("paused", 600, 600),
+        ("playing", 600, 600),
+        ("stopped", 1_200, 1_200),
+    ] {
+        report_playback(
+            &fixture.activity,
+            user,
+            "phone",
+            &report_request(&fixture.track, state, position_ms, "&ignoreScrobble=true"),
+            at(millis),
+        )
+        .await
+        .unwrap();
+
+        let live = fixture.activity.now_playing(user, at(millis));
+
+        if state == "stopped" {
+            assert!(live.is_empty(), "a stopped session is not live");
+        } else {
+            assert_eq!(
+                live.len(),
+                1,
+                "an ignored sequence is still live now-playing state"
+            );
+        }
+    }
+
+    assert!(recorded_listens(&fixture.pool).await.is_empty());
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 0);
+}
+
+#[sqlx::test]
+async fn a_repeated_scrobble_of_the_same_play_counts_once(pool: sqlx::PgPool) {
+    let fixture = reporting_fixture(pool.clone(), Some(240_000)).await;
+    let user = fixture.principal.user_id.as_uuid();
+    let ids = vec![fixture.track.to_string()];
+    let times = vec!["1000".to_owned()];
+
+    for _ in 0..2 {
+        scrobble(&fixture.activity, user, "phone", &ids, &times, true, at(0))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(recorded_listens(&fixture.pool).await.len(), 1);
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 1);
+
+    scrobble(
+        &fixture.activity,
+        user,
+        "phone",
+        &ids,
+        &["1001".to_owned()],
+        true,
+        at(0),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        recorded_listens(&fixture.pool).await.len(),
+        2,
+        "a distinct timestamp is a distinct listen"
+    );
+    assert_eq!(counted_plays(&fixture.pool, &fixture.track).await, 2);
+}
+
+#[sqlx::test]
+async fn an_unknown_track_is_not_found(pool: sqlx::PgPool) {
+    let fixture = reporting_fixture(pool.clone(), Some(240_000)).await;
+    let user = fixture.principal.user_id.as_uuid();
+
+    assert!(matches!(
+        scrobble(
+            &fixture.activity,
+            user,
+            "phone",
+            &[Uuid::now_v7().to_string()],
+            &[],
+            true,
+            at(0),
+        )
+        .await,
+        Err(ReportingError::NotFound)
+    ));
+    assert!(matches!(
+        report_playback(
+            &fixture.activity,
+            user,
+            "phone",
+            &PlaybackReportRequest {
+                media_id: TrackId::from_uuid(Uuid::now_v7()),
+                state: PlaybackState::Playing,
+                position_ms: 0,
+                playback_rate: PlaybackRate::default(),
+                ignore_scrobble: false,
+            },
+            at(0),
+        )
+        .await,
+        Err(ReportingError::NotFound)
+    ));
+    assert!(recorded_listens(&fixture.pool).await.is_empty());
+}
+
+#[test]
+fn scrobble_rejects_an_invalid_batch_before_any_write() {
+    let track = Uuid::now_v7().to_string();
+
+    assert!(matches!(
+        scrobble_entries(&[], &[], at(0)),
+        Err(ReportingError::MissingParameter)
+    ));
+    assert!(matches!(
+        scrobble_entries(&[track.clone(), track.clone()], &["1".to_owned()], at(0)),
+        Err(ReportingError::InvalidRequest)
+    ));
+    assert!(matches!(
+        scrobble_entries(&["not-a-track".to_owned()], &[], at(0)),
+        Err(ReportingError::InvalidRequest)
+    ));
+    assert!(matches!(
+        scrobble_entries(std::slice::from_ref(&track), &["later".to_owned()], at(0)),
+        Err(ReportingError::InvalidRequest)
+    ));
+    assert!(matches!(
+        scrobble_entries(std::slice::from_ref(&track), &["-1".to_owned()], at(0)),
+        Err(ReportingError::InvalidRequest)
+    ));
+    assert_eq!(
+        scrobble_entries(&[track], &["1000".to_owned()], at(0))
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.listened_at)
+            .collect::<Vec<_>>(),
+        [at(1_000)]
+    );
+}
+
+#[test]
+fn scrobble_submission_defaults_true_and_rejects_an_unknown_value() {
+    assert!(scrobble_submission(&RawQuery::parse("id=x")).unwrap());
+    assert!(scrobble_submission(&RawQuery::parse("submission=true")).unwrap());
+    assert!(scrobble_submission(&RawQuery::parse("submission=1")).unwrap());
+    assert!(!scrobble_submission(&RawQuery::parse("submission=false")).unwrap());
+    assert!(!scrobble_submission(&RawQuery::parse("submission=0")).unwrap());
+    assert!(matches!(
+        scrobble_submission(&RawQuery::parse("submission=maybe")),
+        Err(ReportingError::InvalidRequest)
+    ));
+}
+
+#[test]
+fn report_playback_rejects_unknown_parameters_states_and_values() {
+    let track = Uuid::now_v7().to_string();
+    let valid = format!("mediaId={track}&mediaType=song&positionMs=0&state=playing");
+
+    assert!(
+        PlaybackReportRequest::parse(&RawQuery::parse(&format!("{valid}&position=5"))).is_err()
+    );
+    assert!(
+        PlaybackReportRequest::parse(&RawQuery::parse(&format!(
+            "mediaId={track}&mediaType=song&positionMs=0&state=stalled"
+        )))
+        .is_err()
+    );
+    assert!(
+        PlaybackReportRequest::parse(&RawQuery::parse(&format!(
+            "mediaId={track}&mediaType=podcast&positionMs=0&state=playing"
+        )))
+        .is_err()
+    );
+    assert!(
+        PlaybackReportRequest::parse(&RawQuery::parse(&format!(
+            "mediaId={track}&mediaType=song&positionMs=-1&state=playing"
+        )))
+        .is_err()
+    );
+    assert!(
+        PlaybackReportRequest::parse(&RawQuery::parse(&format!(
+            "mediaId={track}&mediaType=song&positionMs=0&state=playing&playbackRate=0"
+        )))
+        .is_err()
+    );
+    assert!(
+        PlaybackReportRequest::parse(&RawQuery::parse(&format!(
+            "mediaId={track}&mediaType=song&positionMs=0&state=playing&playbackRate=fast"
+        )))
+        .is_err()
+    );
+    assert!(
+        PlaybackReportRequest::parse(&RawQuery::parse(&format!(
+            "mediaId={track}&mediaType=song&positionMs=0&state=playing&ignoreScrobble=maybe"
+        )))
+        .is_err()
+    );
+    assert!(matches!(
+        PlaybackReportRequest::parse(&RawQuery::parse(&format!(
+            "mediaId={track}&mediaType=song&state=playing"
+        ))),
+        Err(ReportingError::MissingParameter)
+    ));
+
+    let request = PlaybackReportRequest::parse(&RawQuery::parse(&valid)).unwrap();
+
+    assert_eq!(request.media_id.to_string(), track);
+    assert_eq!(request.state, PlaybackState::Playing);
+    assert_eq!(request.position_ms, 0);
+    assert_eq!(request.playback_rate, PlaybackRate::default());
+    assert!(!request.ignore_scrobble);
 }

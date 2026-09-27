@@ -9,6 +9,7 @@ use crate::{
         LibraryState, Playlist, SourceIdentity, Track, TrackView,
     },
     features::music_library::playlists::{PlaylistDetail, PlaylistEntry},
+    features::playback::{ActivitySession, PlaybackState},
 };
 
 use super::service::PlayQueueView;
@@ -98,6 +99,90 @@ fn child_from_track(
         media_type: Some(models::MediaType::Song),
         r#type: Some(models::GenericMediaType::Music),
         ..Default::default()
+    }
+}
+
+pub(crate) fn now_playing_entry(
+    hit: &SearchHit,
+    session: &ActivitySession,
+    username: &str,
+    tags: SourceTags,
+    at: chrono::DateTime<chrono::Utc>,
+) -> models::NowPlayingEntry {
+    let child = child_from_hit(hit, tags);
+    let minutes = (at - session.last_event_at()).num_minutes().max(0);
+
+    models::NowPlayingEntry {
+        id: child.id,
+        parent: child.parent,
+        is_dir: child.is_dir,
+        title: child.title,
+        album: child.album,
+        artist: child.artist,
+        track: child.track,
+        year: child.year,
+        genre: child.genre,
+        cover_art: child.cover_art,
+        size: child.size,
+        content_type: child.content_type,
+        suffix: child.suffix,
+        transcoded_content_type: child.transcoded_content_type,
+        transcoded_suffix: child.transcoded_suffix,
+        duration: child.duration,
+        bit_rate: child.bit_rate,
+        bit_depth: child.bit_depth,
+        sampling_rate: child.sampling_rate,
+        channel_count: child.channel_count,
+        path: child.path,
+        is_video: child.is_video,
+        user_rating: child.user_rating,
+        average_rating: child.average_rating,
+        play_count: child.play_count,
+        disc_number: child.disc_number,
+        created: child.created,
+        starred: child.starred,
+        album_id: child.album_id,
+        artist_id: child.artist_id,
+        r#type: child.r#type,
+        media_type: child.media_type,
+        bookmark_position: child.bookmark_position,
+        original_width: child.original_width,
+        original_height: child.original_height,
+        played: child.played,
+        bpm: child.bpm,
+        comment: child.comment,
+        sort_name: child.sort_name,
+        music_brainz_id: child.music_brainz_id,
+        isrc: child.isrc,
+        genres: child.genres,
+        artists: child.artists,
+        display_artist: child.display_artist,
+        album_artists: child.album_artists,
+        display_album_artist: child.display_album_artist,
+        contributors: child.contributors,
+        display_composer: child.display_composer,
+        moods: child.moods,
+        replay_gain: child.replay_gain,
+        explicit_status: child.explicit_status,
+        works: child.works,
+        movements: child.movements,
+        groupings: child.groupings,
+        username: username.to_owned(),
+        minutes_ago: i32::try_from(minutes).unwrap_or(i32::MAX),
+        player_id: 0,
+        player_name: Some(session.client().as_str().to_owned()),
+        state: Some(playback_state(session.state())),
+        position_ms: Some(milliseconds(session.position_ms())),
+        playback_rate: Some(session.playback_rate().get() as f32),
+    }
+}
+
+fn playback_state(state: PlaybackState) -> models::now_playing_entry::State {
+    match state {
+        PlaybackState::Starting => models::now_playing_entry::State::Starting,
+        PlaybackState::Playing => models::now_playing_entry::State::Playing,
+        PlaybackState::Paused => models::now_playing_entry::State::Paused,
+        PlaybackState::Stopped => models::now_playing_entry::State::Stopped,
     }
 }
 

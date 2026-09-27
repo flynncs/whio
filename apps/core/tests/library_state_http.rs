@@ -127,12 +127,24 @@ async fn seeded_app(pool: PgPool) -> Seeded {
             ports.library(),
         ),
     );
+    let listens = Arc::new(
+        whio_core::features::music_library::history::ListenService::new(
+            Arc::clone(&ports.store)
+                as Arc<dyn whio_core::features::music_library::test_support::ListenStore>,
+            ports.library(),
+        ),
+    );
+    let play_activity = Arc::new(whio_core::features::playback::PlaybackActivityService::new(
+        listens,
+        Arc::clone(&library),
+    ));
     let playback = ports.streaming(vec![
         Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
     ]);
     let app = whio_core::app::router(
         AppState::new(credential, search, library, playback)
             .with_library_state(library_state)
+            .with_playback_activity(play_activity)
             .with_scanner(scanner),
     );
 
@@ -240,12 +252,12 @@ async fn subsonic_star_rating_play_and_genre_routes(pool: PgPool) {
 
     get(
         app.clone(),
-        &format!("/rest/scrobble.view?{auth}&id={song}"),
+        &format!("/rest/scrobble.view?{auth}&id={song}&time=1000"),
     )
     .await;
     get(
         app.clone(),
-        &format!("/rest/scrobble.view?{auth}&id={song}"),
+        &format!("/rest/scrobble.view?{auth}&id={song}&time=1001"),
     )
     .await;
 
@@ -386,8 +398,8 @@ async fn subsonic_state_list_types_filter_their_membership(pool: PgPool) {
             format!("id={song}&albumId={album}&artistId={artist}"),
         ),
         ("setRating.view", format!("id={album}&rating=5")),
-        ("scrobble.view", format!("id={song}")),
-        ("scrobble.view", format!("id={song}")),
+        ("scrobble.view", format!("id={song}&time=1000")),
+        ("scrobble.view", format!("id={song}&time=1001")),
     ] {
         get(app.clone(), &format!("/rest/{path}?{auth}&{query}")).await;
     }

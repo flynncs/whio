@@ -2,6 +2,7 @@ use whio_subsonic_api::models;
 
 pub(crate) const SUBSONIC_API_VERSION: &str = "1.16.1";
 pub(crate) const INDEX_BASED_QUEUE_EXTENSION: &str = "indexBasedQueue";
+pub(crate) const PLAYBACK_REPORT_EXTENSION: &str = "playbackReport";
 const SERVER_TYPE: &str = "whio";
 
 pub(crate) fn ok_envelope() -> models::SubsonicResponse {
@@ -55,12 +56,37 @@ pub(crate) fn extensions_envelope() -> models::GetOpenSubsonicExtensionsResponse
                         server_version: env!("CARGO_PKG_VERSION").to_owned(),
                         open_subsonic: true,
                         status: models::get_open_subsonic_extensions_success_response::Status::Ok,
-                        open_subsonic_extensions: vec![models::OpenSubsonicExtension {
-                            name: INDEX_BASED_QUEUE_EXTENSION.to_owned(),
-                            versions: vec![1],
-                        }],
+                        open_subsonic_extensions: vec![
+                            models::OpenSubsonicExtension {
+                                name: INDEX_BASED_QUEUE_EXTENSION.to_owned(),
+                                versions: vec![1],
+                            },
+                            models::OpenSubsonicExtension {
+                                name: PLAYBACK_REPORT_EXTENSION.to_owned(),
+                                versions: vec![1],
+                            },
+                        ],
                     },
                 )),
+        )),
+    }
+}
+
+pub(crate) fn now_playing_envelope(
+    entries: Vec<models::NowPlayingEntry>,
+) -> models::GetNowPlayingResponse {
+    models::GetNowPlayingResponse {
+        subsonic_response: Some(Box::new(
+            models::GetNowPlayingResponseSubsonicResponse::GetNowPlayingSuccessResponse(Box::new(
+                models::GetNowPlayingSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_now_playing_success_response::Status::Ok,
+                    now_playing: Box::new(models::NowPlaying { entry: entries }),
+                },
+            )),
         )),
     }
 }

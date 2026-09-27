@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 use whio_subsonic_api::models;
 
@@ -25,6 +26,10 @@ use crate::{
         PlaylistDetail, PlaylistEdit, PlaylistError, PlaylistService,
     },
     features::music_library::queue::{RestoreQueueError, RestoreQueueSave, RestoreQueueService},
+    features::playback::{
+        ActivityError, PlaybackActivityService, PlaybackClient, PlaybackRate, PlaybackReport,
+        PlaybackState,
+    },
     platform::raw_query::RawQuery,
     platform::request::RequestContext,
 };
@@ -469,41 +474,289 @@ pub(crate) async fn set_rating(
     }
 }
 
+const REPORT_PLAYBACK_PARAMETERS: &[&str] = &[
+    "u",
+    "v",
+    "c",
+    "p",
+    "t",
+    "s",
+    "apiKey",
+    "f",
+    "mediaId",
+    "mediaType",
+    "positionMs",
+    "state",
+    "playbackRate",
+    "ignoreScrobble",
+];
+
+#[derive(Debug, Error)]
+pub(crate) enum ReportingError {
+    #[error("invalid reporting parameters")]
+    InvalidRequest,
+
+    #[error("missing reporting parameter")]
+    MissingParameter,
+
+    #[error("reported media was not found")]
+    NotFound,
+
+    #[error("the reporting principal has no directory entry")]
+    UnresolvedUser,
+
+    #[error("playback activity failed")]
+    Activity(#[source] ActivityError),
+
+    #[error("catalogue read failed")]
+    Catalogue(#[source] CatalogueError),
+
+    #[error("user directory read failed")]
+    Directory(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+struct ScrobbleEntry {
+    track_id: TrackId,
+    listened_at: DateTime<Utc>,
+}
+
+fn boolean(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn reporting_failure(error: ActivityError) -> ReportingError {
+    match error {
+        ActivityError::UnknownTrack => ReportingError::NotFound,
+        other => ReportingError::Activity(other),
+    }
+}
+
+fn scrobble_entries(
+    ids: &[String],
+    times: &[String],
+    at: DateTime<Utc>,
+) -> Result<Vec<ScrobbleEntry>, ReportingError> {
+    if ids.is_empty() {
+        return Err(ReportingError::MissingParameter);
+    }
+
+    if !times.is_empty() && times.len() != ids.len() {
+        return Err(ReportingError::InvalidRequest);
+    }
+
+    ids.iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let track_id = raw
+                .parse::<TrackId>()
+                .map_err(|_| ReportingError::InvalidRequest)?;
+            let listened_at = match times.get(index) {
+                Some(raw) => raw
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|millis| *millis >= 0)
+                    .and_then(DateTime::from_timestamp_millis)
+                    .ok_or(ReportingError::InvalidRequest)?,
+                None => at,
+            };
+
+            Ok(ScrobbleEntry {
+                track_id,
+                listened_at,
+            })
+        })
+        .collect()
+}
+
 pub(crate) async fn scrobble(
-    state: &LibraryStateService,
+    activity: &PlaybackActivityService,
     user: Uuid,
+    client: &str,
     ids: &[String],
     times: &[String],
     submission: bool,
-) -> Result<(), StateError> {
-    if ids.is_empty() {
-        return Err(StateError::MissingParameter);
-    }
-    if !times.is_empty() && times.len() != ids.len() {
-        return Err(StateError::InvalidRequest);
-    }
-    if !submission {
+    at: DateTime<Utc>,
+) -> Result<(), ReportingError> {
+    let entries = scrobble_entries(ids, times, at)?;
+
+    if submission {
+        for entry in &entries {
+            activity
+                .submit_scrobble(user, &entry.track_id, entry.listened_at)
+                .await
+                .map_err(reporting_failure)?;
+        }
+
         return Ok(());
     }
 
-    let now = chrono::Utc::now();
-    for (index, raw) in ids.iter().enumerate() {
-        let Ok(track_id) = raw.parse::<TrackId>() else {
-            continue;
-        };
-        let played_at = times
-            .get(index)
-            .and_then(|raw| raw.trim().parse::<i64>().ok())
-            .and_then(chrono::DateTime::from_timestamp_millis)
-            .unwrap_or(now);
+    let client = playback_client(client)?;
 
-        state
-            .record_play(user, &track_id, played_at)
-            .await
-            .map_err(StateError::State)?;
+    for entry in &entries {
+        let report = PlaybackReport::new(
+            user,
+            client.clone(),
+            entry.track_id.clone(),
+            PlaybackState::Playing,
+            0,
+            PlaybackRate::default(),
+            entry.listened_at,
+        )
+        .with_ignored_scrobble(true);
+
+        activity.report(&report).await.map_err(reporting_failure)?;
     }
 
     Ok(())
+}
+
+pub(crate) fn scrobble_submission(query: &RawQuery) -> Result<bool, ReportingError> {
+    match query.get("submission") {
+        Some(raw) => boolean(raw).ok_or(ReportingError::InvalidRequest),
+        None => Ok(true),
+    }
+}
+
+pub(crate) struct PlaybackReportRequest {
+    media_id: TrackId,
+    state: PlaybackState,
+    position_ms: u64,
+    playback_rate: PlaybackRate,
+    ignore_scrobble: bool,
+}
+
+impl PlaybackReportRequest {
+    pub(crate) fn parse(query: &RawQuery) -> Result<Self, ReportingError> {
+        for name in query.names() {
+            if !REPORT_PLAYBACK_PARAMETERS.contains(&name) {
+                return Err(ReportingError::InvalidRequest);
+            }
+        }
+
+        let media_id = query
+            .get("mediaId")
+            .ok_or(ReportingError::MissingParameter)?
+            .parse::<TrackId>()
+            .map_err(|_| ReportingError::InvalidRequest)?;
+
+        if query.get("mediaType") != Some("song") {
+            return Err(ReportingError::InvalidRequest);
+        }
+
+        let position_ms = query
+            .get("positionMs")
+            .ok_or(ReportingError::MissingParameter)?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| ReportingError::InvalidRequest)?;
+
+        let state = match query.get("state").ok_or(ReportingError::MissingParameter)? {
+            "starting" => PlaybackState::Starting,
+            "playing" => PlaybackState::Playing,
+            "paused" => PlaybackState::Paused,
+            "stopped" => PlaybackState::Stopped,
+            _ => return Err(ReportingError::InvalidRequest),
+        };
+
+        let playback_rate = match query.get("playbackRate") {
+            Some(raw) => PlaybackRate::new(
+                raw.trim()
+                    .parse::<f64>()
+                    .map_err(|_| ReportingError::InvalidRequest)?,
+            )
+            .map_err(|_| ReportingError::InvalidRequest)?,
+            None => PlaybackRate::default(),
+        };
+
+        let ignore_scrobble = match query.get("ignoreScrobble") {
+            Some(raw) => boolean(raw).ok_or(ReportingError::InvalidRequest)?,
+            None => false,
+        };
+
+        Ok(Self {
+            media_id,
+            state,
+            position_ms,
+            playback_rate,
+            ignore_scrobble,
+        })
+    }
+}
+
+fn playback_client(raw: &str) -> Result<PlaybackClient, ReportingError> {
+    PlaybackClient::new(raw.to_owned()).map_err(|_| ReportingError::InvalidRequest)
+}
+
+pub(crate) async fn report_playback(
+    activity: &PlaybackActivityService,
+    user: Uuid,
+    client: &str,
+    request: &PlaybackReportRequest,
+    at: DateTime<Utc>,
+) -> Result<(), ReportingError> {
+    let report = PlaybackReport::new(
+        user,
+        playback_client(client)?,
+        request.media_id.clone(),
+        request.state,
+        request.position_ms,
+        request.playback_rate,
+        at,
+    )
+    .with_ignored_scrobble(request.ignore_scrobble);
+
+    activity
+        .report(&report)
+        .await
+        .map(|_| ())
+        .map_err(reporting_failure)
+}
+
+pub(crate) async fn now_playing(
+    activity: &PlaybackActivityService,
+    library: &LibraryService,
+    credential: &CredentialService,
+    principal: &Principal,
+    tags: SourceTags,
+    at: DateTime<Utc>,
+) -> Result<Vec<models::NowPlayingEntry>, ReportingError> {
+    let username = reporting_username(credential, principal).await?;
+    let mut entries = Vec::new();
+
+    for session in activity.now_playing(principal.user_id.as_uuid(), at) {
+        let Some(hit) = library
+            .track_detail(session.track_id(), Some(&principal.user_id.as_uuid()))
+            .await
+            .map_err(ReportingError::Catalogue)?
+        else {
+            continue;
+        };
+
+        entries.push(mapping::now_playing_entry(
+            &hit, &session, &username, tags, at,
+        ));
+    }
+
+    Ok(entries)
+}
+
+async fn reporting_username(
+    credential: &CredentialService,
+    principal: &Principal,
+) -> Result<String, ReportingError> {
+    credential
+        .directory(principal)
+        .await
+        .map_err(|error| ReportingError::Directory(Box::new(error)))?
+        .into_iter()
+        .find(|user| user.id == principal.user_id)
+        .map(|user| user.username)
+        .ok_or(ReportingError::UnresolvedUser)
 }
 
 pub(crate) async fn album_detail(

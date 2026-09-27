@@ -221,6 +221,7 @@ impl FromRef<AppState> for crate::facades::subsonic::state::SubsonicState {
             queue: Arc::clone(&state.queue),
             artwork: Arc::clone(&state.artwork),
             library_state: Arc::clone(&state.library_state),
+            activity: Arc::clone(&state.playback_activity),
             scanner: Arc::clone(&state.scanner),
             streaming: Arc::clone(&state.streaming),
             source_tags: state.source_tags,

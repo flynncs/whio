@@ -241,6 +241,10 @@ async fn open_subsonic_extensions_lists_the_advertised_extensions(pool: PgPool) 
                     {
                         "name": "indexBasedQueue",
                         "versions": [1]
+                    },
+                    {
+                        "name": "playbackReport",
+                        "versions": [1]
                     }
                 ]
             }

@@ -12,7 +12,7 @@ use crate::{
             playlists::PlaylistService,
             queue::RestoreQueueService,
         },
-        playback::StreamingService,
+        playback::{PlaybackActivityService, StreamingService},
     },
 };
 
@@ -28,6 +28,7 @@ pub(crate) struct SubsonicState {
     pub(crate) queue: Arc<RestoreQueueService>,
     pub(crate) artwork: Arc<ArtworkService>,
     pub(crate) library_state: Arc<LibraryStateService>,
+    pub(crate) activity: Arc<PlaybackActivityService>,
     pub(crate) scanner: Arc<ScanService>,
     pub(crate) streaming: Arc<StreamingService>,
     pub(crate) source_tags: SourceTags,
@@ -60,6 +61,9 @@ impl SubsonicState {
     }
     pub(crate) fn library_state(&self) -> &LibraryStateService {
         &self.library_state
+    }
+    pub(crate) fn activity(&self) -> &PlaybackActivityService {
+        &self.activity
     }
     pub(crate) fn scanner(&self) -> &ScanService {
         &self.scanner
