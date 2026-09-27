@@ -13,6 +13,7 @@ use crate::features::music_library::{
         TrackMetadata, ValidationError,
     },
     library::LibraryId,
+    library_state::test_support::seed_play,
     storage::contracts::{CatalogueWrite, LibraryRead, StateStore, TrackRepositoryError},
 };
 
@@ -354,10 +355,7 @@ async fn count_equals_the_list_for_every_selector(pool: PgPool) {
         .set_starred(user, StateTarget::Album(&fixture.remote), true)
         .await
         .unwrap();
-    repository
-        .record_play(user, &fixture.other_track, chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, &fixture.other_track, chrono::Utc::now()).await;
     set_missing(&pool, &source_in("local", OTHER_ROOT, "beta.flac"), true).await;
 
     let music = register_library(&pool, "main", LOCAL_ROOT).await;
@@ -1373,10 +1371,7 @@ async fn play_count_selector_and_sort_read_the_same_aggregate(pool: PgPool) {
         place(&repository, album_row.id(), track.id()).await;
 
         for _ in 0..plays {
-            repository
-                .record_play(user, track.id(), chrono::Utc::now())
-                .await
-                .unwrap();
+            seed_play(&pool, user, track.id(), chrono::Utc::now()).await;
         }
 
         albums.push(album_row.id().clone());
@@ -1475,10 +1470,7 @@ async fn state_sorts_keep_entities_without_the_state(pool: PgPool) {
         .set_rating(user, StateTarget::Album(&albums[1].0), Some(5))
         .await
         .unwrap();
-    repository
-        .record_play(user, &albums[2].1, chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, &albums[2].1, chrono::Utc::now()).await;
     age_album_favorite(&pool, &albums[0].0, user, -1).await;
 
     let expected = sorted(&[&albums[0].0, &albums[1].0, &albums[2].0, &albums[3].0]);

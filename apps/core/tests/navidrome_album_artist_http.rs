@@ -22,6 +22,7 @@ use whio_core::{
             SourceScope, StateTarget, TrackId, TrackMetadata,
         },
         library::{Library, LibraryId, LibraryRegistration, LibraryRegistry},
+        library_state::test_support::seed_play,
         test_support::{
             CatalogueWrite, LibraryStore, PostgresLibraryStore, PostgresTrackRepository,
             StateStore, TrackRepositoryError,
@@ -405,11 +406,7 @@ async fn contrast(fixture: &Fixture) -> Contrast {
         .set_rating(fixture.user, StateTarget::Album(&kept), Some(4))
         .await
         .unwrap();
-    fixture
-        .store
-        .record_play(fixture.user, &kept_track, chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&fixture.pool, fixture.user, &kept_track, chrono::Utc::now()).await;
     set_missing(fixture, ELSEWHERE_ROOT, "other-track.flac").await;
 
     let daft_punk = album_artist_of(fixture, &kept).await;

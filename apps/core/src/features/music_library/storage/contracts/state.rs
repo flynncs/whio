@@ -46,15 +46,6 @@ pub trait StateStore: Send + Sync {
     ) -> Result<(), TrackRepositoryError> {
         Ok(())
     }
-
-    async fn record_play(
-        &self,
-        _user: Uuid,
-        _track_id: &TrackId,
-        _played_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), TrackRepositoryError> {
-        Ok(())
-    }
 }
 
 #[async_trait]

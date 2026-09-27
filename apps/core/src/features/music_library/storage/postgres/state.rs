@@ -166,30 +166,6 @@ impl StateStore for PgStore {
             }
         }
     }
-
-    async fn record_play(
-        &self,
-        user: Uuid,
-        track_id: &TrackId,
-        played_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), TrackRepositoryError> {
-        sqlx::query(
-            r#"
-            INSERT INTO track_play_stats (user_id, track_id, play_count, last_played_at)
-            VALUES ($1, $2, 1, $3)
-            ON CONFLICT (user_id, track_id) DO UPDATE
-            SET play_count = track_play_stats.play_count + 1,
-                last_played_at = EXCLUDED.last_played_at
-            "#,
-        )
-        .bind(user)
-        .bind(track_id.as_uuid())
-        .bind(played_at)
-        .execute(&self.pool)
-        .await
-        .map(|_| ())
-        .map_err(repository_error)
-    }
 }
 
 async fn set_starred_row(

@@ -17,6 +17,7 @@ use crate::features::music_library::{
         ValidationError,
     },
     library::LibraryId,
+    library_state::test_support::seed_play,
     storage::contracts::{
         CatalogueWrite, LibraryRead, SourceLookup, StateStore, TrackRepositoryError,
     },
@@ -962,16 +963,10 @@ async fn play_count_sums_distinct_credited_tracks(pool: PgPool) {
     place(&repository, single_album.id(), single_track.id()).await;
 
     for _ in 0..2 {
-        repository
-            .record_play(user, doubled_track.id(), chrono::Utc::now())
-            .await
-            .unwrap();
+        seed_play(&pool, user, doubled_track.id(), chrono::Utc::now()).await;
     }
     for _ in 0..3 {
-        repository
-            .record_play(user, single_track.id(), chrono::Utc::now())
-            .await
-            .unwrap();
+        seed_play(&pool, user, single_track.id(), chrono::Utc::now()).await;
     }
 
     let stored: i32 = sqlx::query_scalar(
@@ -1319,10 +1314,7 @@ async fn state_sorts_keep_entities_without_the_state(pool: PgPool) {
         .set_rating(user, StateTarget::Artist(&rated), Some(5))
         .await
         .unwrap();
-    repository
-        .record_play(user, &played_track, chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, &played_track, chrono::Utc::now()).await;
     age_artist_favorite(&pool, &starred, user, -1).await;
 
     let expected = sorted(&[&starred, &rated, &played, &plain]);

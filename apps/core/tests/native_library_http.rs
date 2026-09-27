@@ -31,6 +31,7 @@ mod native_library {
                 SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
             },
             library::LibraryId,
+            library_state::test_support::seed_play,
             test_support::{CatalogueWrite, PostgresTrackRepository, SourceFileFacts},
         },
     };
@@ -846,11 +847,7 @@ mod native_library {
             .set_rating(user, StateTarget::Track(alpha.id()), Some(4))
             .await
             .unwrap();
-        ports
-            .state()
-            .record_play(user, beta.id(), Utc::now())
-            .await
-            .unwrap();
+        seed_play(pool, user, beta.id(), Utc::now()).await;
         set_missing(pool, &source_in("local", OTHER_ROOT, "beta.flac"), true).await;
         age_source(pool, &source("local", "alpha.flac"), -2).await;
 
@@ -1352,11 +1349,7 @@ mod native_library {
             .set_rating(user, StateTarget::Album(kept.id()), Some(4))
             .await
             .unwrap();
-        ports
-            .state()
-            .record_play(user, member.as_ref().unwrap(), Utc::now())
-            .await
-            .unwrap();
+        seed_play(&pool, user, member.as_ref().unwrap(), Utc::now()).await;
         ports
             .state()
             .set_starred(user, StateTarget::Album(provider_only.id()), true)
@@ -1640,11 +1633,7 @@ mod native_library {
             .set_rating(user, StateTarget::Artist(&fronted), Some(5))
             .await
             .unwrap();
-        ports
-            .state()
-            .record_play(user, member.as_ref().unwrap(), Utc::now())
-            .await
-            .unwrap();
+        seed_play(&pool, user, member.as_ref().unwrap(), Utc::now()).await;
 
         let album_artists = library.page("artists", "role=albumartist&order=name").await;
 

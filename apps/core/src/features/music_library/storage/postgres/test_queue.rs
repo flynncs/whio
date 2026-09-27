@@ -5,8 +5,9 @@ use crate::features::music_library::{
         ProviderId, RestoreQueueSnapshot, RestoreQueueValidationError, SourceIdentity, SourceScope,
         TrackId, TrackListFilter, TrackMetadata, TrackOrder,
     },
+    library_state::test_support::seed_play,
     queue::{MAX_RESTORE_QUEUE_ENTRIES, RestoreQueueError, RestoreQueueSave, RestoreQueueService},
-    storage::contracts::{CatalogueWrite, LibraryRead, RestoreQueueStore, Retention, StateStore},
+    storage::contracts::{CatalogueWrite, LibraryRead, RestoreQueueStore, Retention},
 };
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -517,10 +518,13 @@ async fn a_queued_track_is_a_retention_pin(pool: PgPool) {
         .await
         .unwrap();
 
-    store
-        .record_play(owner, &heard, "2026-09-01T00:00:00Z".parse().unwrap())
-        .await
-        .unwrap();
+    seed_play(
+        &pool,
+        owner,
+        &heard,
+        "2026-09-01T00:00:00Z".parse().unwrap(),
+    )
+    .await;
     let saved = service
         .save(
             owner,

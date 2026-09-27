@@ -6,6 +6,7 @@ use crate::features::music_library::{
         SelectorText, SourceIdentity, SourceScope, StateTarget, TrackId, TrackListFilter,
         TrackListScope, TrackMetadata, TrackOrder, TrackPage,
     },
+    library_state::test_support::seed_play,
     storage::contracts::{
         CatalogueWrite, LibraryRead, PlaylistStore, ReconcileReport, SourceFileFacts, SourceLookup,
         StateStore,
@@ -692,14 +693,8 @@ async fn per_user_state_round_trips_for_every_entity(pool: sqlx::PgPool) {
         .set_rating(user, StateTarget::Track(track.id()), Some(4))
         .await
         .unwrap();
-    repository
-        .record_play(user, track.id(), chrono::Utc::now())
-        .await
-        .unwrap();
-    repository
-        .record_play(user, track.id(), chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, track.id(), chrono::Utc::now()).await;
+    seed_play(&pool, user, track.id(), chrono::Utc::now()).await;
 
     let state = repository.find_track_state(track.id(), user).await.unwrap();
     assert!(state.is_starred());
@@ -798,14 +793,8 @@ async fn album_orders_reflect_plays_and_ratings(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    repository
-        .record_play(user, second_track.id(), chrono::Utc::now())
-        .await
-        .unwrap();
-    repository
-        .record_play(user, second_track.id(), chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, second_track.id(), chrono::Utc::now()).await;
+    seed_play(&pool, user, second_track.id(), chrono::Utc::now()).await;
     repository
         .set_rating(user, StateTarget::Album(first.id()), Some(5))
         .await
@@ -1121,10 +1110,7 @@ async fn engaged_scope_is_principal_derived(pool: sqlx::PgPool) {
         .set_rating(listener, StateTarget::Track(rated.id()), Some(4))
         .await
         .unwrap();
-    repository
-        .record_play(listener, played.id(), chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, listener, played.id(), chrono::Utc::now()).await;
     let playlist = repository
         .create_playlist(listener, "Mixed", None)
         .await
@@ -1200,10 +1186,7 @@ async fn anonymous_engaged_scope_equals_owned(pool: sqlx::PgPool) {
         .set_starred(user, StateTarget::Track(favourited.id()), true)
         .await
         .unwrap();
-    repository
-        .record_play(user, played.id(), chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, played.id(), chrono::Utc::now()).await;
 
     let anonymous = repository
         .page_tracks(0, 500, TrackOrder::Title, &TrackListFilter::new(), None)
@@ -1263,10 +1246,7 @@ async fn owned_scope_excludes_engaged_only_tracks(pool: sqlx::PgPool) {
         .set_rating(user, StateTarget::Track(rated.id()), Some(3))
         .await
         .unwrap();
-    repository
-        .record_play(user, played.id(), chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, played.id(), chrono::Utc::now()).await;
 
     let owned = repository
         .page_tracks(
@@ -1404,10 +1384,7 @@ async fn page_items_carry_album_membership_state_and_sources(pool: sqlx::PgPool)
         .set_rating(user, StateTarget::Track(gamma.id()), Some(5))
         .await
         .unwrap();
-    repository
-        .record_play(user, gamma.id(), chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, gamma.id(), chrono::Utc::now()).await;
 
     let page = repository
         .page_tracks(2, 1, TrackOrder::Title, &TrackListFilter::new(), Some(user))

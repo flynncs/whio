@@ -6,6 +6,7 @@ use crate::features::music_library::domain::{
     ArtistListFilter, ArtistSort, ArtworkRef, IdSet, KeepReason, MatchQuality, ProviderId, Range,
     SelectorText, SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
 };
+use crate::features::music_library::library_state::test_support::seed_play;
 use crate::features::music_library::sources::SourceQueries;
 use crate::features::music_library::storage::contracts::{
     CatalogueWrite, DuplicateReport, LibraryRead, SourceFileFacts, SourceLookup, StateStore,
@@ -925,7 +926,7 @@ async fn browse_reads_order_and_count_albums_and_artists(pool: PgPool) {
 async fn browse_shows_only_engaged_albums_and_artists(pool: PgPool) {
     let user = Uuid::now_v7();
     insert_user(&pool, user, "engaged-listener").await;
-    let repository = PostgresTrackRepository::new(pool);
+    let repository = PostgresTrackRepository::new(pool.clone());
 
     let owned_album = repository
         .resolve_or_create_album(&album("Owned").with_album_artist(credit("Owner", None)))
@@ -977,10 +978,7 @@ async fn browse_shows_only_engaged_albums_and_artists(pool: PgPool) {
             .unwrap();
     }
 
-    repository
-        .record_play(user, played_track.id(), chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, played_track.id(), chrono::Utc::now()).await;
 
     let listed = |order: AlbumOrder| {
         let repository = &repository;
@@ -1812,14 +1810,8 @@ async fn per_user_state_and_genres_round_trip(pool: PgPool) {
         .set_rating(user, StateTarget::Album(album.id()), Some(5))
         .await
         .unwrap();
-    repository
-        .record_play(user, track.id(), chrono::Utc::now())
-        .await
-        .unwrap();
-    repository
-        .record_play(user, track.id(), chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, track.id(), chrono::Utc::now()).await;
+    seed_play(&pool, user, track.id(), chrono::Utc::now()).await;
 
     let state = repository.find_track_state(track.id(), user).await.unwrap();
     assert!(state.is_starred());

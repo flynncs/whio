@@ -13,6 +13,7 @@ use crate::features::music_library::{
         TrackOrder, ValidationError,
     },
     library::LibraryId,
+    library_state::test_support::seed_play,
     storage::contracts::{
         CatalogueWrite, LibraryRead, SourceFileFacts, StateStore, TrackRepositoryError,
     },
@@ -465,10 +466,7 @@ async fn total_agrees_with_the_list_for_every_selector(pool: PgPool) {
         .set_rating(user, StateTarget::Track(&alpha_id), Some(4))
         .await
         .unwrap();
-    repository
-        .record_play(user, &beta_id, chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, &beta_id, chrono::Utc::now()).await;
     set_missing(&pool, &source_in("local", OTHER_ROOT, "beta.flac"), true).await;
 
     let alpha_artist = credit_artist(&pool, &alpha_id, "Composer One").await;
@@ -1643,10 +1641,7 @@ async fn page_projection_carries_membership_state_and_sources_on_a_deep_page(poo
         .set_starred(user, StateTarget::Track(&placed_id), true)
         .await
         .unwrap();
-    repository
-        .record_play(user, &placed_id, chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, &placed_id, chrono::Utc::now()).await;
 
     let observed = repository
         .page_tracks(
@@ -1734,10 +1729,7 @@ async fn page_reads_do_not_follow_the_page_size(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    repository
-        .record_play(user, first.id(), chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, first.id(), chrono::Utc::now()).await;
 
     let mut measured = Vec::new();
 

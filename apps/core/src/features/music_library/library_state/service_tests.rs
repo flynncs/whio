@@ -1,7 +1,12 @@
 use super::*;
 use crate::features::music_library::storage::contracts::{CatalogueWrite, LibraryRead, StateStore};
 use crate::features::music_library::{
-    domain::{AlbumMetadata, ArtistCredit, ProviderId, SourceIdentity, SourceScope, TrackMetadata},
+    domain::{
+        AlbumMetadata, ArtistCredit, ListenOrigin, ListenSubmission, ProviderId, SourceIdentity,
+        SourceScope, TrackMetadata,
+    },
+    history::ListenError,
+    library_state::test_support::{listen_service, seed_play},
     storage::postgres::PostgresTrackRepository,
 };
 
@@ -52,14 +57,8 @@ async fn starring_rating_and_playing_are_per_user(pool: sqlx::PgPool) {
             .await
             .unwrap()
     );
-    service
-        .record_play(user, &track_id, chrono::Utc::now())
-        .await
-        .unwrap();
-    service
-        .record_play(user, &track_id, chrono::Utc::now())
-        .await
-        .unwrap();
+    seed_play(&pool, user, &track_id, chrono::Utc::now()).await;
+    seed_play(&pool, user, &track_id, chrono::Utc::now()).await;
 
     let state = repository.find_track_state(&track_id, user).await.unwrap();
     assert!(state.is_starred());
@@ -92,10 +91,19 @@ async fn unknown_targets_are_skipped(pool: sqlx::PgPool) {
         .set_starred(user, StateTarget::Track(&TrackId::new()), true)
         .await
         .unwrap();
-    service
-        .record_play(user, &TrackId::new(), chrono::Utc::now())
-        .await
-        .unwrap();
+    assert!(matches!(
+        listen_service(&pool)
+            .submit_listen(&ListenSubmission::new(
+                user,
+                ListenOrigin::SubsonicScrobble,
+                TrackId::new(),
+                chrono::Utc::now(),
+                None,
+                None,
+            ))
+            .await,
+        Err(ListenError::UnknownTrack)
+    ));
     assert!(
         !service
             .rate_id(user, &AlbumId::new().to_string(), Some(3))

@@ -2,6 +2,7 @@ use super::PostgresTrackRepository;
 use crate::features::music_library::domain::{
     AlbumMetadata, AlbumTrack, ProviderId, SourceIdentity, SourceScope, StateTarget, TrackMetadata,
 };
+use crate::features::music_library::library_state::test_support::seed_play;
 use crate::features::music_library::storage::contracts::{
     CatalogueWrite, LibraryRead, Retention, StateStore,
 };
@@ -73,10 +74,7 @@ async fn retention_reports_and_evicts_only_unengaged_provider_rows(pool: PgPool)
         .set_starred(user, StateTarget::Track(starred.id()), true)
         .await
         .unwrap();
-    repository
-        .record_play(user, played.id(), played_at)
-        .await
-        .unwrap();
+    seed_play(&pool, user, played.id(), played_at).await;
 
     let playlist_id = Uuid::now_v7();
     sqlx::query("INSERT INTO playlists (id, user_id, name) VALUES ($1, $2, 'mix')")

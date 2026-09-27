@@ -143,30 +143,6 @@ impl LibraryStateService {
 
         Ok(false)
     }
-
-    pub async fn record_play(
-        &self,
-        user: Uuid,
-        track_id: &TrackId,
-        played_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), LibraryStateError> {
-        let (Some(state), Some(library)) = (&self.state, &self.library) else {
-            return Ok(());
-        };
-        if library
-            .find_track(track_id)
-            .await
-            .map_err(LibraryStateError::Repository)?
-            .is_none()
-        {
-            return Ok(());
-        }
-
-        state
-            .record_play(user, track_id, played_at)
-            .await
-            .map_err(LibraryStateError::Repository)
-    }
 }
 
 #[cfg(all(test, feature = "postgres-integration"))]
