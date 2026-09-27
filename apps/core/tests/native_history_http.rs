@@ -384,6 +384,30 @@ async fn a_short_submission_is_recorded_and_does_not_count(pool: PgPool) {
     let user = user_id(&fixture.pool, FLYNN).await;
     assert_eq!(ledger_rows(&fixture.pool, user, &track).await, 1);
     assert_eq!(counter(&fixture.pool, user, &track).await, None);
+
+    let qualified = submit(
+        &fixture.app,
+        &fixture.flynn,
+        &submission(
+            &track,
+            "native",
+            "2026-09-02T11:00:00Z",
+            Some("session-played"),
+            Some((0, 240_000, true)),
+        ),
+    )
+    .await;
+    assert_eq!(qualified.status(), StatusCode::OK);
+
+    let mixed = json_body(history(&fixture.app, &fixture.flynn, "").await).await;
+    assert_eq!(mixed["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        mixed["total"],
+        json!(1),
+        "one qualified listen and one skip: the total is the counter, not the two rows"
+    );
+    assert_eq!(ledger_rows(&fixture.pool, user, &track).await, 2);
+    assert_eq!(counter(&fixture.pool, user, &track).await, Some(1));
 }
 
 #[sqlx::test]
