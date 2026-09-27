@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool};
 use uuid::Uuid;
 use whio_core::{
     app::database::Database,
@@ -135,6 +135,55 @@ async fn the_harmless_job_runs_and_is_idempotent(pool: PgPool) {
         .filter(|line| line.contains("probe job applied"))
         .count();
     assert_eq!(applied, 1, "the request applies once:\n{}", worker.log());
+}
+
+#[sqlx::test]
+async fn a_coalesced_enqueue_keeps_the_callers_transaction(pool: PgPool) {
+    Database::connect(&database_url(&pool))
+        .await
+        .expect("the worker's own migrations");
+
+    let operation_id = Uuid::now_v7();
+
+    let mut tx = pool.begin().await.expect("a transaction");
+    whio_core::jobs::probe::enqueue(&mut tx, operation_id)
+        .await
+        .expect("a committed probe request");
+    tx.commit().await.expect("the transaction to commit");
+
+    let mut connection = pool.acquire().await.expect("a caller connection");
+    sqlx::query("CREATE TEMPORARY TABLE caller_row (id INTEGER)")
+        .execute(&mut *connection)
+        .await
+        .expect("a caller-owned table");
+
+    let mut tx = connection.begin().await.expect("a caller transaction");
+    sqlx::query("INSERT INTO caller_row (id) VALUES (1)")
+        .execute(&mut *tx)
+        .await
+        .expect("the caller's write");
+
+    let enqueued = whio_core::jobs::probe::enqueue(&mut tx, operation_id)
+        .await
+        .expect("a coalesced probe request");
+    assert_eq!(
+        enqueued,
+        Enqueued::Coalesced,
+        "the request joins the claimed key"
+    );
+
+    tx.commit()
+        .await
+        .expect("the caller's transaction to commit");
+
+    let written: i64 = sqlx::query_scalar("SELECT count(*) FROM caller_row")
+        .fetch_one(&mut *connection)
+        .await
+        .expect("the caller's row");
+    assert_eq!(
+        written, 1,
+        "the coalesced request did not abort the caller's transaction"
+    );
 }
 
 async fn await_completion(pool: &PgPool, job_id: i64) {
