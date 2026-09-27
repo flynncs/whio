@@ -1,5 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
+const BOUND_MESSAGE: &str = "The restore queue holds at most 1000 entries";
+
 use axum::{
     Extension, Json,
     extract::{State, rejection::JsonRejection},
@@ -59,7 +61,7 @@ impl IntoResponse for QueueApiError {
             Self::Bound(context) => error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
-                "The restore queue holds at most 1000 entries",
+                BOUND_MESSAGE,
                 context,
             ),
         }
@@ -326,4 +328,15 @@ pub(crate) async fn clear(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BOUND_MESSAGE;
+    use crate::features::music_library::queue::MAX_RESTORE_QUEUE_ENTRIES;
+
+    #[test]
+    fn the_bound_message_names_the_configured_bound() {
+        assert!(BOUND_MESSAGE.contains(&MAX_RESTORE_QUEUE_ENTRIES.to_string()));
+    }
 }
