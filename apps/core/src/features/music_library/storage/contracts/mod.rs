@@ -1,5 +1,6 @@
 mod catalogue;
 mod error;
+mod history;
 mod libraries;
 mod library;
 mod playlist;
@@ -8,6 +9,7 @@ mod state;
 
 pub use catalogue::{CatalogueWrite, ReconcileReport};
 pub use error::{SourceFileFacts, TrackRepositoryError};
+pub use history::ListenStore;
 pub use libraries::LibraryStore;
 pub use library::{LibraryRead, SourceLookup};
 pub use playlist::PlaylistStore;

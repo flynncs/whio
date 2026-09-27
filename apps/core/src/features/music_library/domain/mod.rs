@@ -4,6 +4,7 @@ mod artwork;
 mod dedup;
 mod duplicate_report;
 mod error;
+mod history;
 mod metadata;
 mod page;
 mod playlist;
@@ -33,6 +34,10 @@ pub use duplicate_report::{
     DuplicateCandidate, DuplicateSource, KeepReason, SplitArtist, SplitArtistRow,
 };
 pub use error::ValidationError;
+pub use history::{
+    ListenCount, ListenCoverage, ListenExtent, ListenOrder, ListenOrigin, ListenOutcome,
+    ListenPage, ListenQuery, ListenRecord, ListenSessionId, ListenSubmission, ListenWindow,
+};
 pub use metadata::TrackMetadata;
 pub use page::{MAX_PAGE_LIMIT, PageLimit, TrackListFilter, TrackListScope, TrackOrder, TrackPage};
 pub use playlist::{

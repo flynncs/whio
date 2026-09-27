@@ -16,6 +16,7 @@ pub mod test_support {
 pub(crate) mod api;
 pub mod artwork;
 pub mod catalogue;
+pub mod history;
 pub mod library;
 pub mod library_state;
 pub mod maintenance;
