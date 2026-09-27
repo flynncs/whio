@@ -59,7 +59,7 @@ impl IntoResponse for QueueApiError {
             Self::Bound(context) => error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
-                "The restore queue holds at most MAX_RESTORE_QUEUE_ENTRIES entries",
+                "The restore queue holds at most 1000 entries",
                 context,
             ),
         }
@@ -239,6 +239,10 @@ pub(crate) struct SaveRequest {
 
 impl SaveRequest {
     fn save(&self, context: &RequestContext) -> Result<RestoreQueueSave, QueueApiError> {
+        if i64::try_from(self.position_ms).is_err() {
+            return Err(invalid_field(context, "position_ms"));
+        }
+
         let entries = self
             .entries
             .iter()

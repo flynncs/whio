@@ -353,13 +353,10 @@ async fn an_over_bound_save_is_rejected_and_changes_nothing(pool: PgPool) {
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     let rejected_body = json_body(rejected).await;
     assert_eq!(rejected_body["code"], json!("invalid_request"));
-    assert!(
-        rejected_body["message"]
-            .as_str()
-            .unwrap()
-            .contains("MAX_RESTORE_QUEUE_ENTRIES"),
-        "the client error names the bound, got {}",
-        rejected_body["message"]
+    assert_eq!(
+        rejected_body["message"],
+        json!("The restore queue holds at most 1000 entries"),
+        "the client error names the bound it must respect, not an internal identifier"
     );
 
     let read_back = read(&fixture.app, &fixture.auth, "").await;
@@ -532,6 +529,15 @@ async fn an_unknown_parameter_is_rejected(pool: PgPool) {
             Some(&json!({
                 "entries": [amber.to_string()],
                 "current_index": 0,
+            })),
+        ),
+        (
+            "PUT",
+            "/api/v1/queue",
+            Some(&json!({
+                "entries": [amber.to_string()],
+                "current_index": 0,
+                "position_ms": i64::MAX as u64 + 1,
             })),
         ),
     ];
