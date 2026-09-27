@@ -14,14 +14,18 @@ use crate::features::music_library::{
 use super::PgStore;
 use super::decode::repository_error;
 
-type RestoreQueueRow = (
-    Option<i32>,
-    i64,
-    i64,
-    Uuid,
-    String,
-    chrono::DateTime<chrono::Utc>,
-);
+#[derive(sqlx::FromRow)]
+struct RestoreQueueRow {
+    current_index: Option<i32>,
+    position_ms: i64,
+    revision: i64,
+    changed_by: Uuid,
+    username: String,
+    changed_at: chrono::DateTime<chrono::Utc>,
+    entry_id: Option<Uuid>,
+    position: Option<i32>,
+    track_id: Option<Uuid>,
+}
 
 fn validate_save(write: &RestoreQueueWrite) -> Result<(), RestoreQueueValidationError> {
     let entry_count = write.entries.len();
@@ -118,29 +122,42 @@ impl RestoreQueueStore for PgStore {
         &self,
         user: Uuid,
     ) -> Result<Option<RestoreQueueSnapshot>, TrackRepositoryError> {
-        let row = sqlx::query_as::<_, RestoreQueueRow>(
+        let rows = sqlx::query_as::<_, RestoreQueueRow>(
             "SELECT q.current_index, q.position_ms, q.revision, q.changed_by, u.username, \
-             q.changed_at FROM restore_queues AS q JOIN users AS u ON u.id = q.changed_by \
-             WHERE q.user_id = $1",
+             q.changed_at, e.entry_id, e.position, e.track_id \
+             FROM restore_queues AS q JOIN users AS u ON u.id = q.changed_by \
+             LEFT JOIN restore_queue_entries AS e ON e.queue_user_id = q.user_id \
+             WHERE q.user_id = $1 ORDER BY e.position",
         )
         .bind(user)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(repository_error)?;
 
-        let Some((current_index, position_ms, revision, changed_by, username, changed_at)) = row
-        else {
+        let Some(head) = rows.first() else {
             return Ok(None);
         };
-        let current_index = current_index
+        let current_index = head
+            .current_index
             .map(u32::try_from)
             .transpose()
             .map_err(|_| TrackRepositoryError::InvalidData)?;
         let position_ms =
-            u64::try_from(position_ms).map_err(|_| TrackRepositoryError::InvalidData)?;
+            u64::try_from(head.position_ms).map_err(|_| TrackRepositoryError::InvalidData)?;
+        let revision = head.revision;
+        let changed_by = head.changed_by;
+        let changed_at = head.changed_at;
+        let username = head.username.clone();
 
-        let mut connection = self.pool.acquire().await.map_err(repository_error)?;
-        let entries = entries(&mut connection, user).await?;
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (Some(entry_id), Some(position), Some(track_id)) =
+                (row.entry_id, row.position, row.track_id)
+            else {
+                continue;
+            };
+            entries.push(decode_entry((entry_id, position, track_id))?);
+        }
 
         Ok(Some(RestoreQueueSnapshot::new(
             user,

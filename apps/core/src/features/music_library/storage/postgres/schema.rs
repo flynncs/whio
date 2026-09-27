@@ -145,6 +145,10 @@ pub(crate) fn album_scope(scope: AlbumListScope, user_bind: u8, libraries_bind: 
                   SELECT 1 FROM playlist_entries AS entry
                   JOIN playlists AS list ON list.id = entry.playlist_id
                   WHERE entry.track_id = t.id AND list.user_id = ${user_bind}
+              )
+              OR EXISTS (
+                  SELECT 1 FROM restore_queue_entries AS queued
+                  WHERE queued.track_id = t.id AND queued.queue_user_id = ${user_bind}
               ))
     )
     OR EXISTS (
@@ -187,6 +191,10 @@ pub(crate) const TRACK_ENGAGED: &str = "(EXISTS (
         SELECT 1 FROM playlist_entries AS entry
         JOIN playlists AS list ON list.id = entry.playlist_id
         WHERE entry.track_id = t.id AND list.user_id = $1
+    )
+    OR EXISTS (
+        SELECT 1 FROM restore_queue_entries AS queued
+        WHERE queued.track_id = t.id AND queued.queue_user_id = $1
     ))";
 
 pub(crate) const TRACK_OWNED: &str = "($1::UUID IS NOT NULL OR $1::UUID IS NULL) AND EXISTS (
@@ -226,6 +234,10 @@ fn artist_engaged_track(user_bind: u8, libraries_bind: u8) -> String {
         SELECT 1 FROM playlist_entries AS engaged_entry
         JOIN playlists AS engaged_list ON engaged_list.id = engaged_entry.playlist_id
         WHERE engaged_entry.track_id = t.id AND engaged_list.user_id = ${user_bind}
+    )
+    OR EXISTS (
+        SELECT 1 FROM restore_queue_entries AS engaged_queue
+        WHERE engaged_queue.track_id = t.id AND engaged_queue.queue_user_id = ${user_bind}
     ))"
     )
 }

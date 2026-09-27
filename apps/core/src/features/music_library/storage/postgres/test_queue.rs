@@ -1,11 +1,12 @@
 use super::PostgresTrackRepository;
 use crate::features::music_library::{
     domain::{
+        AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistListFilter, ArtistSort,
         ProviderId, RestoreQueueSnapshot, RestoreQueueValidationError, SourceIdentity, SourceScope,
-        TrackId, TrackMetadata,
+        TrackId, TrackListFilter, TrackMetadata, TrackOrder,
     },
     queue::{MAX_RESTORE_QUEUE_ENTRIES, RestoreQueueError, RestoreQueueSave, RestoreQueueService},
-    storage::contracts::{CatalogueWrite, RestoreQueueStore},
+    storage::contracts::{CatalogueWrite, LibraryRead, RestoreQueueStore, Retention, StateStore},
 };
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -25,6 +26,10 @@ fn metadata(title: &str) -> TrackMetadata {
     TrackMetadata::from_names(title.to_owned(), vec!["Artist".to_owned()], Some(1_000)).unwrap()
 }
 
+fn metadata_by(title: &str, artist: &str) -> TrackMetadata {
+    TrackMetadata::from_names(title.to_owned(), vec![artist.to_owned()], Some(1_000)).unwrap()
+}
+
 async fn insert_user(pool: &PgPool, id: Uuid, username: &str) {
     sqlx::query("INSERT INTO users (id, username, display_name) VALUES ($1, $2, $3)")
         .bind(id)
@@ -42,6 +47,78 @@ async fn track(store: &Arc<PostgresTrackRepository>, name: &str) -> TrackId {
         .unwrap()
         .id()
         .clone()
+}
+
+fn remote_source(external_id: &str) -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        external_id.to_owned(),
+    )
+    .unwrap()
+}
+
+async fn remote_track(
+    store: &Arc<PostgresTrackRepository>,
+    external_id: &str,
+    title: &str,
+    artist: &str,
+) -> TrackId {
+    store
+        .get_or_create(remote_source(external_id), metadata_by(title, artist))
+        .await
+        .unwrap()
+        .id()
+        .clone()
+}
+
+async fn engaged_titles(store: &Arc<PostgresTrackRepository>, user: Uuid) -> Vec<String> {
+    store
+        .page_tracks(
+            0,
+            50,
+            TrackOrder::default(),
+            &TrackListFilter::default(),
+            Some(user),
+        )
+        .await
+        .unwrap()
+        .items()
+        .iter()
+        .map(|view| view.track().title().to_owned())
+        .collect()
+}
+
+async fn browsable_artists(store: &Arc<PostgresTrackRepository>, user: Uuid) -> Vec<String> {
+    store
+        .list_artists(
+            0,
+            50,
+            ArtistSort::default(),
+            &ArtistListFilter::default(),
+            Some(user),
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|summary| summary.artist().name().to_owned())
+        .collect()
+}
+
+async fn browsable_albums(store: &Arc<PostgresTrackRepository>, user: Uuid) -> Vec<String> {
+    store
+        .list_albums(
+            0,
+            50,
+            AlbumOrder::Name,
+            AlbumListFilter::default(),
+            Some(user),
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|summary| summary.album().title().to_owned())
+        .collect()
 }
 
 fn service(store: &Arc<PostgresTrackRepository>) -> RestoreQueueService {
@@ -416,6 +493,108 @@ async fn the_snapshot_survives_a_restart(pool: PgPool) {
     assert_eq!(read.position_ms(), 7_500);
 
     restarted.close().await;
+}
+
+#[sqlx::test]
+async fn a_queued_track_is_a_retention_pin(pool: PgPool) {
+    let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let owner = Uuid::now_v7();
+    let stranger = Uuid::now_v7();
+    insert_user(&pool, owner, "flynn").await;
+    insert_user(&pool, stranger, "other").await;
+
+    let queued = remote_track(&store, "queued", "Queued", "Queue Only").await;
+    let heard = remote_track(&store, "heard", "Heard", "Artist").await;
+    let orphan = remote_track(&store, "orphan", "Orphan", "Artist").await;
+    let service = service(&store);
+
+    let album = store
+        .resolve_or_create_album(&AlbumMetadata::new("Queued Album".to_owned()).unwrap())
+        .await
+        .unwrap();
+    store
+        .set_album_track(album.id(), &queued, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    store
+        .record_play(owner, &heard, "2026-09-01T00:00:00Z".parse().unwrap())
+        .await
+        .unwrap();
+    let saved = service
+        .save(
+            owner,
+            save(vec![queued.clone(), heard.clone()], Some(1), 1_000),
+        )
+        .await
+        .unwrap();
+
+    let report = store.retention_report().await.unwrap();
+    assert_eq!(report.evictable_tracks, 1, "only the track no queue names");
+    assert_eq!(
+        report.play_held_tracks, 0,
+        "a played track its queue still names is engaged, not play-held"
+    );
+    assert_eq!(
+        report.evictable_artists, 0,
+        "an artist credited only on a queued track is engaged"
+    );
+    assert_eq!(
+        report.evictable_albums, 0,
+        "an album whose only member a queue names is engaged"
+    );
+
+    assert!(
+        engaged_titles(&store, owner)
+            .await
+            .contains(&"Queued".to_owned())
+    );
+    assert!(
+        !engaged_titles(&store, owner)
+            .await
+            .contains(&"Orphan".to_owned())
+    );
+    assert!(
+        !engaged_titles(&store, stranger)
+            .await
+            .contains(&"Queued".to_owned()),
+        "another user's queue does not engage the track for them"
+    );
+    assert!(
+        browsable_artists(&store, owner)
+            .await
+            .contains(&"Queue Only".to_owned())
+    );
+    assert!(
+        !browsable_artists(&store, stranger)
+            .await
+            .contains(&"Queue Only".to_owned())
+    );
+    assert!(
+        browsable_albums(&store, owner)
+            .await
+            .contains(&"Queued Album".to_owned())
+    );
+    assert!(
+        !browsable_albums(&store, stranger)
+            .await
+            .contains(&"Queued Album".to_owned())
+    );
+
+    let evicted = store.evict_unengaged().await.unwrap();
+    assert_eq!(evicted.tracks, 1);
+    assert!(store.find_track(&orphan).await.unwrap().is_none());
+    assert!(
+        store.find_track(&queued).await.unwrap().is_some(),
+        "a track its queue names survives the eviction scan"
+    );
+    assert!(store.find_track(&heard).await.unwrap().is_some());
+    assert_eq!(
+        service.read(owner).await.unwrap().unwrap(),
+        saved,
+        "the queue entries are still there afterwards"
+    );
+    assert_eq!(stored_entry_count(&pool, owner).await, 2);
 }
 
 #[sqlx::test]

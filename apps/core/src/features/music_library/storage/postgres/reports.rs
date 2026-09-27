@@ -20,7 +20,8 @@ fn track_engaged(id: &str) -> String {
           OR EXISTS (SELECT 1 FROM track_favorites AS tf WHERE tf.track_id = {id})
           OR EXISTS (SELECT 1 FROM track_ratings AS tr WHERE tr.track_id = {id})
           OR EXISTS (SELECT 1 FROM track_play_stats AS tp WHERE tp.track_id = {id} AND tp.play_count > 0)
-          OR EXISTS (SELECT 1 FROM playlist_entries AS pe WHERE pe.track_id = {id}))"
+          OR EXISTS (SELECT 1 FROM playlist_entries AS pe WHERE pe.track_id = {id})
+          OR EXISTS (SELECT 1 FROM restore_queue_entries AS queued WHERE queued.track_id = {id}))"
     )
 }
 
@@ -29,7 +30,8 @@ fn track_engaged_without_plays(id: &str) -> String {
         "(EXISTS (SELECT 1 FROM track_sources AS ts WHERE ts.track_id = {id} AND ts.provider_id = ANY($1))
           OR EXISTS (SELECT 1 FROM track_favorites AS tf WHERE tf.track_id = {id})
           OR EXISTS (SELECT 1 FROM track_ratings AS tr WHERE tr.track_id = {id})
-          OR EXISTS (SELECT 1 FROM playlist_entries AS pe WHERE pe.track_id = {id}))"
+          OR EXISTS (SELECT 1 FROM playlist_entries AS pe WHERE pe.track_id = {id})
+          OR EXISTS (SELECT 1 FROM restore_queue_entries AS queued WHERE queued.track_id = {id}))"
     )
 }
 
