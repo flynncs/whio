@@ -20,6 +20,7 @@ use crate::{
     features::music_library::library::{LibraryRegistry, ScanService},
     features::music_library::library_state::LibraryStateService,
     features::music_library::playlists::PlaylistService,
+    features::music_library::queue::RestoreQueueService,
     features::playback::StreamingService,
 };
 
@@ -30,6 +31,7 @@ pub struct AppState {
     library: Arc<LibraryService>,
     completion: Arc<CompletionService>,
     playlists: Arc<PlaylistService>,
+    queue: Arc<RestoreQueueService>,
     credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
     library_state: Arc<LibraryStateService>,
@@ -74,6 +76,11 @@ impl AppState {
         self
     }
 
+    pub fn with_queue(mut self, queue: Arc<RestoreQueueService>) -> Self {
+        self.queue = queue;
+        self
+    }
+
     pub fn with_playlists(mut self, playlists: Arc<PlaylistService>) -> Self {
         self.playlists = playlists;
         self
@@ -111,6 +118,7 @@ impl AppState {
     ) -> Self {
         let completion = Arc::new(CompletionService::disabled(Arc::clone(&library)));
         let playlists = Arc::new(PlaylistService::disabled(Arc::clone(&library)));
+        let queue = Arc::new(RestoreQueueService::disabled());
 
         Self {
             artwork: Arc::new(ArtworkService::disabled()),
@@ -119,6 +127,7 @@ impl AppState {
             library,
             completion,
             playlists,
+            queue,
             database,
             library_state: Arc::new(LibraryStateService::disabled()),
             streaming,

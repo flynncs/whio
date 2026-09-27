@@ -152,6 +152,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         AppState::with_database(credential, music.search, music.library, streaming, database)
             .with_completion(music.completion)
             .with_playlists(music.playlists)
+            .with_queue(music.queue)
             .with_artwork(music.artwork)
             .with_library_state(music.activity)
             .with_scanner(music.scanner)
