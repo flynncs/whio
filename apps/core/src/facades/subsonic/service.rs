@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use thiserror::Error;
 use whio_subsonic_api::models;
 
@@ -5,14 +7,15 @@ use uuid::Uuid;
 
 use crate::{
     facades::SourceTags,
+    features::identity::{domain::Principal, service::CredentialService},
     features::music_library::catalogue::{
         CatalogueError, CompletionService, LibraryService, MAX_PAGE_LIMIT, PageLimit, SearchQuery,
         SearchRequest, SearchService, SearchWindows, TrackListFilter, TrackOrder,
     },
     features::music_library::domain::{
         AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, ArtistListFilter,
-        ArtistSort, IdSet, Playlist, PlaylistId, RandomSeed, Range, RoleSelector, RoleSet,
-        SelectorText, SortDirection, StateTarget, TrackId, ValidationError,
+        ArtistSort, IdSet, Playlist, PlaylistId, RandomSeed, Range, RestoreQueueValidationError,
+        RoleSelector, RoleSet, SelectorText, SortDirection, StateTarget, TrackId, ValidationError,
     },
     features::music_library::library::{
         LibraryId, LibraryRegistrationError, LibraryRegistry, ScanService,
@@ -21,6 +24,7 @@ use crate::{
     features::music_library::playlists::{
         PlaylistDetail, PlaylistEdit, PlaylistError, PlaylistService,
     },
+    features::music_library::queue::{RestoreQueueError, RestoreQueueSave, RestoreQueueService},
     platform::raw_query::RawQuery,
     platform::request::RequestContext,
 };
@@ -964,6 +968,250 @@ pub(crate) async fn delete_playlist(
     }
 
     Ok(PlaylistEdited::NotFound)
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum PlayQueueError {
+    #[error("the queue holds at most {max_entries} entries")]
+    TooManyEntries { max_entries: usize },
+
+    #[error("a non-empty queue must name its current index")]
+    MissingCurrentIndex,
+
+    #[error("the current index is outside the queue")]
+    InvalidCurrentIndex,
+
+    #[error("the current parameter does not name an entry in the queue")]
+    CurrentNotInQueue,
+
+    #[error("the current parameter is meaningless without a queue")]
+    CurrentWithoutQueue,
+
+    #[error("the position is not a count of milliseconds")]
+    InvalidPosition,
+
+    #[error("a queue entry is not a track id")]
+    InvalidTrackId,
+
+    #[error("the queue names a track that is not in the library")]
+    UnknownTrack,
+
+    #[error("a queued entry names a track the catalogue does not resolve")]
+    UnresolvedEntry,
+
+    #[error("the caller is not in the user directory")]
+    UnresolvedUser,
+
+    #[error("the restore queue is not configured")]
+    Disabled,
+
+    #[error("restore queue request failed")]
+    Queue(#[source] RestoreQueueError),
+
+    #[error("catalogue read failed")]
+    Catalogue(#[source] CatalogueError),
+
+    #[error("user directory read failed")]
+    Directory(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl PlayQueueError {
+    fn from_queue(error: RestoreQueueError) -> Self {
+        match error {
+            RestoreQueueError::Invalid(RestoreQueueValidationError::TooManyEntries {
+                max_entries,
+            }) => Self::TooManyEntries { max_entries },
+            RestoreQueueError::Invalid(RestoreQueueValidationError::CurrentIndexMissing {
+                ..
+            }) => Self::MissingCurrentIndex,
+            RestoreQueueError::Invalid(RestoreQueueValidationError::CurrentIndexOutOfRange {
+                ..
+            }) => Self::InvalidCurrentIndex,
+            RestoreQueueError::Invalid(RestoreQueueValidationError::UnknownTrack { .. }) => {
+                Self::UnknownTrack
+            }
+            RestoreQueueError::Disabled => Self::Disabled,
+            error => Self::Queue(error),
+        }
+    }
+}
+
+pub(crate) struct PlayQueueView {
+    pub(crate) entries: Vec<models::Child>,
+    pub(crate) current_index: Option<u32>,
+    pub(crate) position_ms: u64,
+    pub(crate) username: String,
+    pub(crate) changed_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub(crate) enum PlayQueueSave {
+    Replace {
+        entries: Vec<TrackId>,
+        current_index: Option<u32>,
+        position_ms: u64,
+    },
+    Clear,
+}
+
+pub(crate) async fn read_play_queue(
+    queue: &RestoreQueueService,
+    library: &LibraryService,
+    user: Uuid,
+    tags: SourceTags,
+) -> Result<Option<PlayQueueView>, PlayQueueError> {
+    let Some(snapshot) = queue.read(user).await.map_err(PlayQueueError::from_queue)? else {
+        return Ok(None);
+    };
+    if snapshot.is_empty() {
+        return Ok(None);
+    }
+
+    let track_ids = snapshot
+        .entries()
+        .iter()
+        .map(|entry| entry.track_id().clone())
+        .collect::<Vec<_>>();
+    let views = library
+        .track_views(&track_ids, Some(&user))
+        .await
+        .map_err(PlayQueueError::Catalogue)?;
+    let views = views
+        .into_iter()
+        .map(|view| (view.track().id().clone(), view))
+        .collect::<HashMap<_, _>>();
+    let mut entries = Vec::with_capacity(snapshot.entries().len());
+    for entry in snapshot.entries() {
+        let view = views
+            .get(entry.track_id())
+            .ok_or(PlayQueueError::UnresolvedEntry)?;
+        entries.push(mapping::child_from_view(view, tags));
+    }
+
+    Ok(Some(PlayQueueView {
+        entries,
+        current_index: snapshot.current_index(),
+        position_ms: snapshot.position_ms(),
+        username: snapshot.changed_by_username().to_owned(),
+        changed_at: snapshot.changed_at(),
+    }))
+}
+
+pub(crate) async fn save_play_queue(
+    queue: &RestoreQueueService,
+    user: Uuid,
+    save: PlayQueueSave,
+) -> Result<(), PlayQueueError> {
+    match save {
+        PlayQueueSave::Clear => queue
+            .clear(user)
+            .await
+            .map(|_| ())
+            .map_err(PlayQueueError::from_queue),
+        PlayQueueSave::Replace {
+            entries,
+            current_index,
+            position_ms,
+        } => queue
+            .save(
+                user,
+                RestoreQueueSave {
+                    entries,
+                    current_index,
+                    position_ms,
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(PlayQueueError::from_queue),
+    }
+}
+
+pub(crate) async fn queue_owner_name(
+    credential: &CredentialService,
+    principal: &Principal,
+) -> Result<Option<String>, PlayQueueError> {
+    let users = credential
+        .directory(principal)
+        .await
+        .map_err(|error| PlayQueueError::Directory(Box::new(error)))?;
+
+    Ok(users
+        .into_iter()
+        .find(|user| user.id == principal.user_id)
+        .map(|user| user.username))
+}
+
+fn queue_entries(query: &RawQuery) -> Result<Vec<TrackId>, PlayQueueError> {
+    query
+        .all("id")
+        .into_iter()
+        .map(|raw| raw.parse().map_err(|_| PlayQueueError::InvalidTrackId))
+        .collect()
+}
+
+fn queue_position(query: &RawQuery) -> Result<u64, PlayQueueError> {
+    match query.get("position") {
+        None => Ok(0),
+        Some("") => Ok(0),
+        Some(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| PlayQueueError::InvalidPosition),
+    }
+}
+
+pub(crate) fn play_queue_save(query: &RawQuery) -> Result<PlayQueueSave, PlayQueueError> {
+    let entries = queue_entries(query)?;
+    let position_ms = queue_position(query)?;
+    let Some(raw_current) = query.get("current") else {
+        return if entries.is_empty() {
+            Ok(PlayQueueSave::Clear)
+        } else {
+            Err(PlayQueueError::MissingCurrentIndex)
+        };
+    };
+    if entries.is_empty() {
+        return Err(PlayQueueError::CurrentWithoutQueue);
+    }
+
+    let current: TrackId = raw_current
+        .parse()
+        .map_err(|_| PlayQueueError::InvalidTrackId)?;
+    let current_index = entries
+        .iter()
+        .position(|entry| entry == &current)
+        .ok_or(PlayQueueError::CurrentNotInQueue)?;
+
+    Ok(PlayQueueSave::Replace {
+        entries,
+        current_index: Some(current_index as u32),
+        position_ms,
+    })
+}
+
+pub(crate) fn play_queue_save_by_index(query: &RawQuery) -> Result<PlayQueueSave, PlayQueueError> {
+    let entries = queue_entries(query)?;
+    let position_ms = queue_position(query)?;
+    if entries.is_empty() {
+        return match query.get("currentIndex") {
+            None => Ok(PlayQueueSave::Clear),
+            Some(_) => Err(PlayQueueError::CurrentWithoutQueue),
+        };
+    }
+
+    let Some(raw_index) = query.get("currentIndex") else {
+        return Err(PlayQueueError::MissingCurrentIndex);
+    };
+    let current_index = raw_index
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| PlayQueueError::InvalidCurrentIndex)?;
+
+    Ok(PlayQueueSave::Replace {
+        entries,
+        current_index: Some(current_index),
+        position_ms,
+    })
 }
 
 #[cfg(all(test, feature = "postgres-integration"))]

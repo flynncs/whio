@@ -6,7 +6,8 @@ use whio_core::features::music_library::domain::{
     SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
 };
 use whio_core::features::music_library::test_support::{
-    CatalogueWrite, LibraryRead, PlaylistStore, PostgresTrackRepository, StateStore,
+    CatalogueWrite, LibraryRead, PlaylistStore, PostgresTrackRepository, RestoreQueueStore,
+    StateStore,
 };
 mod support;
 
@@ -22,17 +23,22 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 use whio_core::{
+    app::AppState,
+    facades::SourceTags,
     features::identity::secrets::CredentialKey,
+    features::identity::service::CredentialService,
     features::music_library::catalogue::{LibraryService, SearchService},
     features::music_library::playlists::PlaylistService,
+    features::music_library::queue::{RestoreQueueSave, RestoreQueueService},
     features::playback::PlaybackProvider,
+    features::playback::StreamingService,
     features::playback::providers::YtmAdapter,
 };
 
 use support::credentials::credential_service_with_roles;
 use support::{
     StorePorts, credential_service_with_known_app_password, router, router_with_completion,
-    router_with_playlists,
+    router_with_playlists, router_with_queue,
 };
 
 fn role_app(
@@ -2679,4 +2685,593 @@ async fn enumerated_song_children_carry_the_membership_facts(pool: PgPool) {
     assert_eq!(enumerated["userRating"], json!(4));
     assert_eq!(enumerated["album"], json!("Discovery"));
     assert_eq!(enumerated["albumId"], json!(album.id().to_string()));
+}
+
+struct QueueFixture {
+    app: axum::Router,
+    credential: Arc<CredentialService>,
+    search: Arc<SearchService>,
+    library: Arc<LibraryService>,
+    queue: Arc<RestoreQueueService>,
+    playback: Arc<StreamingService>,
+    owner: String,
+    stranger: String,
+    stranger_id: Uuid,
+}
+
+async fn queue_fixture(pool: PgPool) -> QueueFixture {
+    let key = CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).unwrap();
+    let (service, owner_secret) =
+        support::credentials::database_credential_service(pool.clone()).await;
+    let provisioning = whio_core::features::identity::provision(pool.clone());
+    let stranger_id = provisioning.create_user("other", "Other").await.unwrap();
+    let (_, stranger_secret) = provisioning
+        .mint_app_password(&key, "other", "integration")
+        .await
+        .unwrap();
+    let ports = StorePorts::new(pool.clone());
+    let library = Arc::new(LibraryService::new(
+        ports.library(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let search = Arc::new(SearchService::new(
+        ports.library(),
+        ports.catalogue(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let queue = Arc::new(RestoreQueueService::new(
+        Arc::clone(&ports.store) as Arc<dyn RestoreQueueStore>
+    ));
+    let playback = ports.streaming(vec![]);
+
+    QueueFixture {
+        app: router_with_queue(
+            Arc::clone(&service),
+            Arc::clone(&search),
+            Arc::clone(&library),
+            Arc::clone(&queue),
+            Arc::clone(&playback),
+        ),
+        credential: service,
+        search,
+        library,
+        queue,
+        playback,
+        owner: playlist_auth("flynn", &owner_secret),
+        stranger: playlist_auth("other", &stranger_secret),
+        stranger_id,
+    }
+}
+
+async fn provider_song(pool: &PgPool, external_id: &str, title: &str) -> TrackId {
+    let ports = StorePorts::new(pool.clone());
+
+    ports
+        .store
+        .get_or_create(
+            SourceIdentity::new(
+                ProviderId::new("youtube_music".to_owned()).unwrap(),
+                SourceScope::Global,
+                external_id.to_owned(),
+            )
+            .unwrap(),
+            TrackMetadata::from_names(title.to_owned(), vec!["Artist".to_owned()], Some(1_000))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .id()
+        .clone()
+}
+
+fn play_queue(body: &Value) -> &Value {
+    &body["subsonic-response"]["playQueue"]
+}
+
+fn play_queue_by_index(body: &Value) -> &Value {
+    &body["subsonic-response"]["playQueueByIndex"]
+}
+
+fn queue_entry_ids(queue: &Value) -> Vec<String> {
+    queue["entry"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn queue_entry_titles(queue: &Value) -> Vec<String> {
+    queue["entry"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry["title"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn read_queue(app: &axum::Router, auth: &str) -> Value {
+    get(app.clone(), &playlist_route("getPlayQueue", auth, "")).await
+}
+
+async fn read_queue_by_index(app: &axum::Router, auth: &str) -> Value {
+    get(
+        app.clone(),
+        &playlist_route("getPlayQueueByIndex", auth, ""),
+    )
+    .await
+}
+
+async fn save_queue(app: &axum::Router, auth: &str, parameters: &str) -> Value {
+    get(
+        app.clone(),
+        &playlist_route("savePlayQueue", auth, parameters),
+    )
+    .await
+}
+
+async fn save_queue_by_index(app: &axum::Router, auth: &str, parameters: &str) -> Value {
+    get(
+        app.clone(),
+        &playlist_route("savePlayQueueByIndex", auth, parameters),
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn subsonic_play_queue_round_trips(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+    let third = playlist_song(&pool, "path-third", "Third").await;
+
+    let body = save_queue(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={first}&id={second}&id={third}&current={second}&position=12000"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let body = read_queue(&fixture.app, &fixture.owner).await;
+    let queue = play_queue(&body);
+    assert_eq!(
+        queue_entry_ids(queue),
+        vec![first.to_string(), second.to_string(), third.to_string()],
+        "the entries keep the saved order"
+    );
+    assert_eq!(queue_entry_titles(queue), ["First", "Second", "Third"]);
+    assert_eq!(queue["current"], json!(second.to_string()));
+    assert_eq!(queue["position"], json!(12000));
+    assert_eq!(queue["username"], json!("flynn"));
+    assert!(
+        queue["changed"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "a saved queue carries when it changed"
+    );
+
+    let body = read_queue_by_index(&fixture.app, &fixture.owner).await;
+    let queue = play_queue_by_index(&body);
+    assert_eq!(queue["currentIndex"], json!(1));
+    assert_eq!(queue["position"], json!(12000));
+    assert_eq!(
+        queue_entry_ids(queue),
+        vec![first.to_string(), second.to_string(), third.to_string()],
+        "the index-based read returns the same occurrences"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_absent_and_empty_queues_are_an_identical_shape(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+
+    let absent = read_queue(&fixture.app, &fixture.stranger).await;
+    let absent_by_index = read_queue_by_index(&fixture.app, &fixture.stranger).await;
+
+    assert_eq!(absent["subsonic-response"]["status"], json!("ok"));
+    assert_eq!(
+        play_queue(&absent),
+        &json!({
+            "username": "other",
+            "changed": "0001-01-01T00:00:00Z",
+            "changedBy": "",
+        }),
+        "nothing saved is an empty queue, not an error"
+    );
+
+    fixture
+        .queue
+        .save(
+            fixture.stranger_id,
+            RestoreQueueSave {
+                entries: Vec::new(),
+                current_index: None,
+                position_ms: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+    let empty = read_queue(&fixture.app, &fixture.stranger).await;
+    let empty_by_index = read_queue_by_index(&fixture.app, &fixture.stranger).await;
+
+    assert_eq!(
+        play_queue(&empty),
+        play_queue(&absent),
+        "the wire cannot tell a saved empty queue from none at all"
+    );
+    assert_eq!(
+        play_queue_by_index(&empty_by_index),
+        play_queue_by_index(&absent_by_index),
+        "nor the index-based read"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_a_save_replaces_the_whole_queue(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+    let third = playlist_song(&pool, "path-third", "Third").await;
+
+    save_queue(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={first}&id={second}&current={first}"),
+    )
+    .await;
+    save_queue(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={third}&current={third}"),
+    )
+    .await;
+
+    let body = read_queue(&fixture.app, &fixture.owner).await;
+    let queue = play_queue(&body);
+    assert_eq!(
+        queue_entry_ids(queue),
+        vec![third.to_string()],
+        "the second save leaves nothing of the first"
+    );
+    assert_eq!(queue["current"], json!(third.to_string()));
+}
+
+#[sqlx::test]
+async fn subsonic_current_names_the_first_matching_occurrence(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+
+    save_queue(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={first}&id={second}&id={first}&current={first}"),
+    )
+    .await;
+
+    let body = read_queue_by_index(&fixture.app, &fixture.owner).await;
+    assert_eq!(
+        play_queue_by_index(&body)["currentIndex"],
+        json!(0),
+        "an ambiguous current id names the first matching occurrence"
+    );
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueueByIndex",
+            &fixture.owner,
+            &format!("id={first}&id={second}&id={first}&currentIndex=2"),
+        ),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let body = read_queue_by_index(&fixture.app, &fixture.owner).await;
+    let queue = play_queue_by_index(&body);
+    assert_eq!(queue["currentIndex"], json!(2));
+    assert_eq!(
+        queue_entry_ids(queue),
+        vec![first.to_string(), second.to_string(), first.to_string()],
+        "the repeated track is two distinct occurrences"
+    );
+
+    let body = read_queue(&fixture.app, &fixture.owner).await;
+    assert_eq!(
+        play_queue(&body)["current"],
+        json!(first.to_string()),
+        "the id-based read cannot say which occurrence is current"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_an_index_outside_the_queue_is_a_client_error(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+
+    save_queue_by_index(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={first}&id={second}&currentIndex=1&position=5000"),
+    )
+    .await;
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueueByIndex",
+            &fixture.owner,
+            &format!("id={first}&id={second}&currentIndex=7&position=5000"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["subsonic-response"]["status"], json!("failed"));
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(10));
+
+    let saved = read_queue(&fixture.app, &fixture.owner).await;
+    assert_eq!(play_queue(&saved)["position"], json!(5000));
+    let rejected = read_queue(&fixture.app, &fixture.owner).await;
+    assert_eq!(
+        play_queue(&rejected),
+        play_queue(&saved),
+        "the rejected save changed nothing"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_an_over_bound_save_is_rejected_and_changes_nothing(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+
+    save_queue(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={first}&id={second}&current={first}"),
+    )
+    .await;
+
+    let over_bound = std::iter::repeat_n(format!("id={first}"), 1001).collect::<Vec<_>>();
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueue",
+            &fixture.owner,
+            &format!("{}&current={first}", over_bound.join("&")),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["subsonic-response"]["status"], json!("failed"));
+    let message = body["subsonic-response"]["error"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        message.contains("MAX_RESTORE_QUEUE_ENTRIES"),
+        "the bound is named in the error: {message}"
+    );
+
+    let body = read_queue(&fixture.app, &fixture.owner).await;
+    assert_eq!(
+        queue_entry_ids(play_queue(&body)),
+        vec![first.to_string(), second.to_string()],
+        "the rejected save left the previous snapshot untouched"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_an_unavailable_track_keeps_its_entry(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let unavailable = provider_song(&pool, "vid-1", "Unplayable").await;
+    let app = whio_core::app::router(
+        AppState::new(
+            Arc::clone(&fixture.credential),
+            Arc::clone(&fixture.search),
+            Arc::clone(&fixture.library),
+            Arc::clone(&fixture.playback),
+        )
+        .with_queue(Arc::clone(&fixture.queue))
+        .with_source_tags(SourceTags::ArtistPrefix),
+    );
+
+    save_queue(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={unavailable}&current={unavailable}"),
+    )
+    .await;
+
+    let body = read_queue(&app, &fixture.owner).await;
+    let queue = play_queue(&body);
+    assert_eq!(
+        queue_entry_ids(queue),
+        vec![unavailable.to_string()],
+        "an entry nothing can play is reported, not dropped"
+    );
+    assert_eq!(
+        queue["entry"][0]["artist"],
+        json!("[YTM] Artist"),
+        "the entry carries the availability its sources report"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_a_save_without_ids_clears_the_queue(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+
+    save_queue(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={first}&current={first}&position=900"),
+    )
+    .await;
+
+    let body = save_queue(&fixture.app, &fixture.owner, "").await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let body = read_queue(&fixture.app, &fixture.owner).await;
+    let queue = play_queue(&body);
+    assert!(queue.get("entry").is_none());
+    assert!(queue.get("current").is_none());
+    assert_eq!(queue["username"], json!("flynn"));
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route("savePlayQueue", &fixture.owner, &format!("current={first}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(10));
+    assert_eq!(
+        body["subsonic-response"]["status"],
+        json!("failed"),
+        "current without a queue is a missing parameter, not a clear"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_another_users_queue_is_invisible(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+
+    save_queue(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={first}&current={first}"),
+    )
+    .await;
+    save_queue(
+        &fixture.app,
+        &fixture.stranger,
+        &format!("id={second}&current={second}"),
+    )
+    .await;
+
+    let body = read_queue(&fixture.app, &fixture.stranger).await;
+    assert_eq!(
+        queue_entry_ids(play_queue(&body)),
+        vec![second.to_string()],
+        "a caller reads their own queue"
+    );
+
+    let body = read_queue(&fixture.app, &fixture.owner).await;
+    assert_eq!(
+        queue_entry_ids(play_queue(&body)),
+        vec![first.to_string()],
+        "one caller's save never reaches another's queue"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_the_advertisement_ships_with_the_index_based_endpoints(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route("getOpenSubsonicExtensions", &fixture.owner, ""),
+    )
+    .await;
+    let extensions = body["subsonic-response"]["openSubsonicExtensions"]
+        .as_array()
+        .unwrap();
+    let queue_extension = extensions
+        .iter()
+        .find(|extension| extension["name"] == json!("indexBasedQueue"))
+        .expect("the index-based queue is advertised");
+
+    assert_eq!(queue_extension["versions"], json!([1]));
+
+    save_queue_by_index(
+        &fixture.app,
+        &fixture.owner,
+        &format!("id={first}&currentIndex=0"),
+    )
+    .await;
+
+    let body = read_queue_by_index(&fixture.app, &fixture.owner).await;
+    assert_eq!(
+        queue_entry_ids(play_queue_by_index(&body)),
+        vec![first.to_string()],
+        "the advertised extension answers on the same revision"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_play_queue_request_errors_name_the_parameter(pool: PgPool) {
+    let fixture = queue_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueue",
+            &fixture.owner,
+            &format!("id={first}&id={second}"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(10));
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueue",
+            &fixture.owner,
+            &format!("id={first}&current={second}"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["subsonic-response"]["status"], json!("failed"));
+
+    let (status, _) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueue",
+            &fixture.owner,
+            &format!("id={first}&current={first}&position=soon"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let missing = Uuid::now_v7();
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueue",
+            &fixture.owner,
+            &format!("id={missing}&current={missing}"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["subsonic-response"]["error"]["message"],
+        json!("Invalid track ID.")
+    );
+
+    let body = read_queue(&fixture.app, &fixture.owner).await;
+    assert!(
+        play_queue(&body).get("entry").is_none(),
+        "no rejected save reached the snapshot"
+    );
 }

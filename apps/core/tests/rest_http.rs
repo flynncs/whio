@@ -218,7 +218,7 @@ async fn open_subsonic_extensions_requires_authentication(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn open_subsonic_extensions_returns_an_empty_list(pool: PgPool) {
+async fn open_subsonic_extensions_lists_the_advertised_extensions(pool: PgPool) {
     let (service, secret) = credential_service_with_known_api_key();
     let response = get(
         app(pool.clone(), service),
@@ -237,7 +237,12 @@ async fn open_subsonic_extensions_returns_an_empty_list(pool: PgPool) {
                 "type": "whio",
                 "serverVersion": "0.1.0",
                 "openSubsonic": true,
-                "openSubsonicExtensions": []
+                "openSubsonicExtensions": [
+                    {
+                        "name": "indexBasedQueue",
+                        "versions": [1]
+                    }
+                ]
             }
         })
     );

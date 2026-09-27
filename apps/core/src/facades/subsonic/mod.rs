@@ -30,9 +30,10 @@ use auth::SubsonicError;
 use envelope::{
     album_envelope, album_list2_envelope, artist_envelope, artists_envelope,
     create_playlist_envelope, directory_envelope, extensions_envelope, failed_envelope,
-    genres_envelope, indexes_envelope, ok_envelope, playlist_envelope, playlists_envelope,
-    random_songs_envelope, scan_status_envelope, search3_envelope, songs_by_genre_envelope,
-    starred2_envelope, start_scan_envelope, user_envelope,
+    genres_envelope, indexes_envelope, ok_envelope, play_queue_by_index_envelope,
+    play_queue_envelope, playlist_envelope, playlists_envelope, random_songs_envelope,
+    scan_status_envelope, search3_envelope, songs_by_genre_envelope, starred2_envelope,
+    start_scan_envelope, user_envelope,
 };
 use state::SubsonicState;
 
@@ -84,6 +85,16 @@ where
         ("/unstar", get(unstar).post(unstar)),
         ("/setRating", get(set_rating).post(set_rating)),
         ("/scrobble", get(scrobble).post(scrobble)),
+        ("/getPlayQueue", get(get_play_queue).post(get_play_queue)),
+        ("/savePlayQueue", get(save_play_queue).post(save_play_queue)),
+        (
+            "/getPlayQueueByIndex",
+            get(get_play_queue_by_index).post(get_play_queue_by_index),
+        ),
+        (
+            "/savePlayQueueByIndex",
+            get(save_play_queue_by_index).post(save_play_queue_by_index),
+        ),
         ("/stream", get(stream)),
         ("/getCoverArt", get(get_cover_art)),
         (
@@ -1155,6 +1166,166 @@ pub(crate) async fn scrobble(
         Ok(()) => Json(ok_envelope()).into_response(),
         Err(error) => state_failure_response(&context, error),
     }
+}
+
+pub(crate) async fn get_play_queue(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let user = principal.user_id.as_uuid();
+
+    match service::read_play_queue(state.queue(), state.library(), user, state.source_tags()).await
+    {
+        Ok(Some(view)) => Json(play_queue_envelope(mapping::play_queue(view))).into_response(),
+        Ok(None) => match service::queue_owner_name(state.credential(), &principal).await {
+            Ok(Some(username)) => {
+                Json(play_queue_envelope(mapping::empty_play_queue(&username))).into_response()
+            }
+            Ok(None) => queue_failure(&context, service::PlayQueueError::UnresolvedUser),
+            Err(error) => queue_failure(&context, error),
+        },
+        Err(error) => queue_failure(&context, error),
+    }
+}
+
+pub(crate) async fn get_play_queue_by_index(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let user = principal.user_id.as_uuid();
+
+    match service::read_play_queue(state.queue(), state.library(), user, state.source_tags()).await
+    {
+        Ok(Some(view)) => Json(play_queue_by_index_envelope(mapping::play_queue_by_index(
+            view,
+        )))
+        .into_response(),
+        Ok(None) => match service::queue_owner_name(state.credential(), &principal).await {
+            Ok(Some(username)) => Json(play_queue_by_index_envelope(
+                mapping::empty_play_queue_by_index(&username),
+            ))
+            .into_response(),
+            Ok(None) => queue_failure(&context, service::PlayQueueError::UnresolvedUser),
+            Err(error) => queue_failure(&context, error),
+        },
+        Err(error) => queue_failure(&context, error),
+    }
+}
+
+pub(crate) async fn save_play_queue(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let save = match service::play_queue_save(&query) {
+        Ok(save) => save,
+        Err(error) => return queue_failure(&context, error),
+    };
+
+    save_play_queue_request(&state, &context, principal.user_id.as_uuid(), save).await
+}
+
+pub(crate) async fn save_play_queue_by_index(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let save = match service::play_queue_save_by_index(&query) {
+        Ok(save) => save,
+        Err(error) => return queue_failure(&context, error),
+    };
+
+    save_play_queue_request(&state, &context, principal.user_id.as_uuid(), save).await
+}
+
+async fn save_play_queue_request(
+    state: &SubsonicState,
+    context: &RequestContext,
+    user: uuid::Uuid,
+    save: service::PlayQueueSave,
+) -> Response {
+    match service::save_play_queue(state.queue(), user, save).await {
+        Ok(()) => Json(ok_envelope()).into_response(),
+        Err(error) => queue_failure(context, error),
+    }
+}
+
+fn queue_failure(context: &RequestContext, error: service::PlayQueueError) -> Response {
+    use service::PlayQueueError;
+
+    match &error {
+        PlayQueueError::TooManyEntries { max_entries } => {
+            return queue_client_error(
+                models::error::Code::Variant0,
+                &format!("Queue holds at most MAX_RESTORE_QUEUE_ENTRIES ({max_entries}) entries."),
+            );
+        }
+        PlayQueueError::MissingCurrentIndex => {
+            return SubsonicError::MissingParameter.into_response();
+        }
+        PlayQueueError::InvalidCurrentIndex => {
+            return queue_client_error(
+                models::error::Code::Variant10,
+                "Current index is outside the queue.",
+            );
+        }
+        PlayQueueError::CurrentWithoutQueue => {
+            return SubsonicError::MissingParameter.into_response();
+        }
+        PlayQueueError::CurrentNotInQueue => {
+            return queue_client_error(
+                models::error::Code::Variant0,
+                "The current parameter must name an entry in the queue.",
+            );
+        }
+        PlayQueueError::InvalidPosition => {
+            return queue_client_error(models::error::Code::Variant0, "Invalid position.");
+        }
+        PlayQueueError::InvalidTrackId | PlayQueueError::UnknownTrack => {
+            return queue_client_error(models::error::Code::Variant0, "Invalid track ID.");
+        }
+        _ => {}
+    }
+
+    tracing::error!(
+        error = %error,
+        request_id = context.request_id().as_str(),
+        "play queue request failed"
+    );
+
+    let mut response = Json(failed_envelope(
+        models::error::Code::Variant0,
+        "Internal error.",
+    ))
+    .into_response();
+    *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    response
+}
+
+fn queue_client_error(code: models::error::Code, message: &str) -> Response {
+    let mut response = Json(failed_envelope(code, message)).into_response();
+    *response.status_mut() = StatusCode::BAD_REQUEST;
+    response
 }
 
 fn state_failure_response(context: &RequestContext, error: service::StateError) -> Response {

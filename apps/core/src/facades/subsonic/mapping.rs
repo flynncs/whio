@@ -11,6 +11,8 @@ use crate::{
     features::music_library::playlists::{PlaylistDetail, PlaylistEntry},
 };
 
+use super::service::PlayQueueView;
+
 pub(crate) fn child_from_hit(hit: &SearchHit, tags: SourceTags) -> models::Child {
     child_from_track(
         hit.track(),
@@ -476,6 +478,77 @@ fn album_child(summary: &AlbumSummary) -> models::Child {
         media_type: Some(models::MediaType::Album),
         ..Default::default()
     }
+}
+
+pub(crate) fn play_queue(view: PlayQueueView) -> models::PlayQueue {
+    let current = view
+        .current_index
+        .and_then(|index| view.entries.get(index as usize))
+        .map(|entry| entry.id.clone());
+
+    models::PlayQueue {
+        current,
+        position: Some(milliseconds(view.position_ms)),
+        username: view.username,
+        changed: view.changed_at.fixed_offset(),
+        changed_by: no_changed_by(),
+        entry: Some(view.entries),
+    }
+}
+
+pub(crate) fn empty_play_queue(username: &str) -> models::PlayQueue {
+    models::PlayQueue {
+        current: None,
+        position: None,
+        username: username.to_owned(),
+        changed: no_queue_changed(),
+        changed_by: no_changed_by(),
+        entry: None,
+    }
+}
+
+pub(crate) fn play_queue_by_index(view: PlayQueueView) -> models::PlayQueueByIndex {
+    models::PlayQueueByIndex {
+        current_index: view.current_index.map(zero_based),
+        position: Some(milliseconds(view.position_ms)),
+        username: view.username,
+        changed: view.changed_at.fixed_offset(),
+        changed_by: no_changed_by(),
+        entry: Some(view.entries),
+    }
+}
+
+pub(crate) fn empty_play_queue_by_index(username: &str) -> models::PlayQueueByIndex {
+    models::PlayQueueByIndex {
+        current_index: None,
+        position: None,
+        username: username.to_owned(),
+        changed: no_queue_changed(),
+        changed_by: no_changed_by(),
+        entry: None,
+    }
+}
+
+fn zero_based(index: u32) -> i32 {
+    i32::try_from(index).unwrap_or(i32::MAX)
+}
+
+fn milliseconds(position_ms: u64) -> i32 {
+    i32::try_from(position_ms).unwrap_or(i32::MAX)
+}
+
+fn no_changed_by() -> String {
+    String::new()
+}
+
+fn no_queue_changed() -> chrono::DateTime<chrono::FixedOffset> {
+    chrono::DateTime::from_naive_utc_and_offset(
+        chrono::NaiveDate::from_ymd_opt(1, 1, 1)
+            .expect("year 1 is a representable date")
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight is a representable time"),
+        chrono::FixedOffset::east_opt(0).expect("utc is a valid fixed offset"),
+    )
 }
 
 #[cfg(test)]

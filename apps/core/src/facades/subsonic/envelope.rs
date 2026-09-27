@@ -1,6 +1,7 @@
 use whio_subsonic_api::models;
 
 pub(crate) const SUBSONIC_API_VERSION: &str = "1.16.1";
+pub(crate) const INDEX_BASED_QUEUE_EXTENSION: &str = "indexBasedQueue";
 const SERVER_TYPE: &str = "whio";
 
 pub(crate) fn ok_envelope() -> models::SubsonicResponse {
@@ -54,7 +55,10 @@ pub(crate) fn extensions_envelope() -> models::GetOpenSubsonicExtensionsResponse
                         server_version: env!("CARGO_PKG_VERSION").to_owned(),
                         open_subsonic: true,
                         status: models::get_open_subsonic_extensions_success_response::Status::Ok,
-                        open_subsonic_extensions: Vec::new(),
+                        open_subsonic_extensions: vec![models::OpenSubsonicExtension {
+                            name: INDEX_BASED_QUEUE_EXTENSION.to_owned(),
+                            versions: vec![1],
+                        }],
                     },
                 )),
         )),
@@ -406,6 +410,41 @@ pub(crate) fn directory_envelope(
                     open_subsonic: true,
                     status: models::get_music_directory_success_response::Status::Ok,
                     directory: Box::new(directory),
+                }),
+            ),
+        )),
+    }
+}
+pub(crate) fn play_queue_envelope(play_queue: models::PlayQueue) -> models::GetPlayQueueResponse {
+    models::GetPlayQueueResponse {
+        subsonic_response: Some(Box::new(
+            models::GetPlayQueueResponseSubsonicResponse::GetPlayQueueSuccessResponse(Box::new(
+                models::GetPlayQueueSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_play_queue_success_response::Status::Ok,
+                    play_queue: Box::new(play_queue),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn play_queue_by_index_envelope(
+    play_queue: models::PlayQueueByIndex,
+) -> models::GetPlayQueueByIndexResponse {
+    models::GetPlayQueueByIndexResponse {
+        subsonic_response: Some(Box::new(
+            models::GetPlayQueueByIndexResponseSubsonicResponse::GetPlayQueueByIndexSuccessResponse(
+                Box::new(models::GetPlayQueueByIndexSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_play_queue_by_index_success_response::Status::Ok,
+                    play_queue_by_index: Box::new(play_queue),
                 }),
             ),
         )),

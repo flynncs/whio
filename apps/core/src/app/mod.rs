@@ -191,6 +191,7 @@ impl FromRef<AppState> for crate::facades::subsonic::state::SubsonicState {
             libraries: Arc::clone(&state.library_registry),
             completion: Arc::clone(&state.completion),
             playlists: Arc::clone(&state.playlists),
+            queue: Arc::clone(&state.queue),
             artwork: Arc::clone(&state.artwork),
             library_state: Arc::clone(&state.library_state),
             scanner: Arc::clone(&state.scanner),

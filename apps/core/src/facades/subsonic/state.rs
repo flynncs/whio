@@ -10,6 +10,7 @@ use crate::{
             library::{LibraryRegistry, ScanService},
             library_state::LibraryStateService,
             playlists::PlaylistService,
+            queue::RestoreQueueService,
         },
         playback::StreamingService,
     },
@@ -24,6 +25,7 @@ pub(crate) struct SubsonicState {
     pub(crate) libraries: Arc<LibraryRegistry>,
     pub(crate) completion: Arc<CompletionService>,
     pub(crate) playlists: Arc<PlaylistService>,
+    pub(crate) queue: Arc<RestoreQueueService>,
     pub(crate) artwork: Arc<ArtworkService>,
     pub(crate) library_state: Arc<LibraryStateService>,
     pub(crate) scanner: Arc<ScanService>,
@@ -49,6 +51,9 @@ impl SubsonicState {
     }
     pub(crate) fn playlists(&self) -> &PlaylistService {
         &self.playlists
+    }
+    pub(crate) fn queue(&self) -> &RestoreQueueService {
+        &self.queue
     }
     pub(crate) fn artwork(&self) -> &ArtworkService {
         &self.artwork
