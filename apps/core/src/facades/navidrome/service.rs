@@ -223,22 +223,17 @@ pub(crate) async fn song_list(
 }
 
 fn song_window(query: &SongListQuery) -> Result<(u32, PageLimit), SongError> {
-    let start = u64::from(query.start.unwrap_or(0));
-    let end = match query.end {
-        Some(end) if end >= 0 => end as u64,
-        _ => start.saturating_add(24),
+    let start = query.start.unwrap_or(0);
+    let end = u32::try_from(query.end.unwrap_or(0).max(0)).unwrap_or(u32::MAX);
+    let bound = end.saturating_sub(start);
+    let window = if bound == 0 {
+        MAX_PAGE_LIMIT
+    } else {
+        bound.min(MAX_PAGE_LIMIT)
     };
-    if end < start {
-        return Err(SongError::InvalidSearch);
-    }
+    let limit = PageLimit::new(window).map_err(|_| SongError::InvalidSearch)?;
 
-    let window = (end - start)
-        .saturating_add(1)
-        .min(u64::from(MAX_PAGE_LIMIT));
-    let limit = u32::try_from(window).map_err(|_| SongError::InvalidSearch)?;
-    let limit = PageLimit::new(limit).map_err(|_| SongError::InvalidSearch)?;
-
-    Ok((query.start.unwrap_or(0), limit))
+    Ok((start, limit))
 }
 
 pub(crate) async fn song_detail(
@@ -501,7 +496,7 @@ pub(crate) async fn playlist_tracks(
         Some(end) => songs
             .into_iter()
             .skip(start as usize)
-            .take(end.saturating_sub(start) as usize + 1)
+            .take(end.saturating_sub(start) as usize)
             .collect(),
         None => songs.into_iter().skip(start as usize).collect(),
     };

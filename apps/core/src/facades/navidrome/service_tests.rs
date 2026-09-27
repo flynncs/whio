@@ -271,7 +271,7 @@ async fn song_list_matches_a_normalised_title_and_treats_blank_as_absent(pool: s
 }
 
 #[sqlx::test]
-async fn song_list_window_is_inclusive_and_honours_deep_offsets(pool: sqlx::PgPool) {
+async fn song_list_window_is_end_exclusive_and_honours_deep_offsets(pool: sqlx::PgPool) {
     let auth = auth();
     let library = library(pool.clone());
     let store = Arc::new(PostgresTrackRepository::new(pool));
@@ -279,22 +279,34 @@ async fn song_list_window_is_inclusive_and_honours_deep_offsets(pool: sqlx::PgPo
 
     let (songs, total) = song_page(&library, &auth, &query(None, Some(0), Some(9))).await;
     assert_eq!(total, 30);
-    assert_eq!(songs.len(), 10);
+    assert_eq!(songs.len(), 9, "max(0, _end - _start) is the row count");
     assert_eq!(songs[0].title, "Track 0000");
-    assert_eq!(songs[9].title, "Track 0009");
+    assert_eq!(songs[8].title, "Track 0008");
 
     let (songs, _) = song_page(&library, &auth, &query(None, Some(10), Some(19))).await;
-    assert_eq!(songs.len(), 10);
+    assert_eq!(songs.len(), 9);
     assert_eq!(songs[0].title, "Track 0010");
 
     let (songs, _) = song_page(&library, &auth, &query(None, Some(0), Some(99))).await;
-    assert_eq!(songs.len(), 30);
+    assert_eq!(
+        songs.len(),
+        30,
+        "a bound past the collection returns the rows that exist"
+    );
 
     let (songs, _) = song_page(&library, &auth, &query(None, None, None)).await;
-    assert_eq!(songs.len(), 25);
+    assert_eq!(
+        songs.len(),
+        30,
+        "an absent bound is zero, which is no bound"
+    );
 
     let (songs, _) = song_page(&library, &auth, &query(None, Some(0), Some(-1))).await;
-    assert_eq!(songs.len(), 25);
+    assert_eq!(
+        songs.len(),
+        30,
+        "a negative bound is zero, which is no bound"
+    );
 
     let (songs, total) = song_page(
         &library,
@@ -305,15 +317,9 @@ async fn song_list_window_is_inclusive_and_honours_deep_offsets(pool: sqlx::PgPo
     assert!(songs.is_empty());
     assert_eq!(total, 30);
 
-    let result = song_list(
-        &library,
-        &auth.service,
-        &auth.token,
-        &query(None, Some(10), Some(9)),
-        SourceTags::Off,
-    )
-    .await;
-    assert!(matches!(result, Err(SongError::InvalidSearch)));
+    let (songs, _) = song_page(&library, &auth, &query(None, Some(10), Some(9))).await;
+    assert_eq!(songs.len(), 20, "an empty bound offsets without limiting");
+    assert_eq!(songs[0].title, "Track 0010");
 }
 
 #[sqlx::test]

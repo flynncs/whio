@@ -843,6 +843,99 @@ async fn navidrome_playlist_stale_position_is_a_client_error(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn navidrome_playlist_track_window_is_end_exclusive(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let tracks = four_tracks(&fixture.ports).await;
+    let id = create(&fixture.app, &fixture.owner, json!({ "name": "Window" })).await;
+    let response = add(
+        &fixture.app,
+        &fixture.owner,
+        &id,
+        &[&tracks[0], &tracks[1], &tracks[2], &tracks[3]],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let (headers, songs) = read_tracks(&fixture.app, &fixture.owner, &id).await;
+    assert_eq!(titles(&songs).len(), 4);
+    assert_eq!(headers["x-total-count"], "4");
+
+    let response = send(
+        &fixture.app,
+        "GET",
+        &format!("{API}/{id}/tracks?_start=1&_end=3&_sort=id&_order=ASC"),
+        &fixture.owner,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-total-count"], "4");
+    let page = body_of(response).await;
+    assert_eq!(
+        titles(&page),
+        vec!["Second", "Third"],
+        "a bounded window returns exactly end - start rows"
+    );
+
+    let response = send(
+        &fixture.app,
+        "GET",
+        &format!("{API}/{id}/tracks?_start=0&_end=0&_sort=id&_order=ASC"),
+        &fixture.owner,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = body_of(response).await;
+    assert_eq!(
+        titles(&page),
+        vec!["First", "Second", "Third", "Fourth"],
+        "an end at or before the start means the whole collection"
+    );
+
+    let response = send(
+        &fixture.app,
+        "GET",
+        &format!("{API}/{id}/tracks?_start=2&_end=2&_sort=id&_order=ASC"),
+        &fixture.owner,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let page = body_of(response).await;
+    assert_eq!(
+        titles(&page),
+        vec!["Third", "Fourth"],
+        "the start still offsets a collection with no end bound"
+    );
+
+    let response = send(
+        &fixture.app,
+        "GET",
+        &format!("{API}/{id}/tracks?_start=0&_end=-1&_sort=id&_order=ASC"),
+        &fixture.owner,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        titles(&body_of(response).await),
+        vec!["First", "Second", "Third", "Fourth"],
+        "the client's -1 still means the whole collection"
+    );
+
+    let response = send(
+        &fixture.app,
+        "GET",
+        &format!("{API}/{id}/tracks?_end=two"),
+        &fixture.owner,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[sqlx::test]
 async fn existing_navidrome_cases_still_pass(pool: PgPool) {
     let fixture = fixture(pool).await;
     let first = track(&fixture.ports, "path-a", "First").await;

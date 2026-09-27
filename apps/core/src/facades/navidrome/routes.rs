@@ -467,13 +467,9 @@ fn track_window(query: &RawQuery) -> Result<(u32, Option<u32>), SongError> {
     match query.get("_end") {
         None => Ok((start, None)),
         Some(raw) => match raw.trim().parse::<i64>() {
-            Ok(end) if end < 0 => Ok((start, None)),
+            Ok(end) if end <= i64::from(start) => Ok((start, None)),
             Ok(end) => {
                 let end = u32::try_from(end).map_err(|_| SongError::InvalidSearch)?;
-
-                if end < start {
-                    return Err(SongError::InvalidSearch);
-                }
 
                 Ok((start, Some(end)))
             }

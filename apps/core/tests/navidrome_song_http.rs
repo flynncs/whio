@@ -253,20 +253,35 @@ async fn paging_past_25_is_honoured(pool: PgPool) {
     let (status, headers, body) =
         get(fixture.app.clone(), &fixture.token, "?_start=0&_end=99").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.as_array().unwrap().len(), 100);
+    assert_eq!(
+        body.as_array().unwrap().len(),
+        99,
+        "the react-admin bound is exclusive: max(0, _end - _start) rows"
+    );
     assert_eq!(titles(&body)[0], "Track 0000");
-    assert_eq!(titles(&body)[99], "Track 0099");
+    assert_eq!(titles(&body)[98], "Track 0098");
     assert_eq!(total(&headers), "520");
 
     let (status, headers, body) =
         get(fixture.app.clone(), &fixture.token, "?_start=0&_end=100000").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.as_array().unwrap().len(), 500);
+    assert_eq!(
+        body.as_array().unwrap().len(),
+        500,
+        "the requested bound is capped at the page ceiling"
+    );
     assert_eq!(total(&headers), "520");
 
-    let (status, _, body) = get(fixture.app.clone(), &fixture.token, "?_start=10&_end=9").await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body, json!({"error": "Invalid search parameters."}));
+    let (status, headers, body) =
+        get(fixture.app.clone(), &fixture.token, "?_start=10&_end=9").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        titles(&body)[0],
+        "Track 0010",
+        "max(0, _end - _start) is zero, so the collection is unbounded from the offset"
+    );
+    assert_eq!(body.as_array().unwrap().len(), 500);
+    assert_eq!(total(&headers), "520");
 
     let (status, _, body) = get(fixture.app, &fixture.token, "?_start=ten").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -281,12 +296,20 @@ async fn total_is_the_page_total(pool: PgPool) {
     let (status, headers, body) =
         get(fixture.app.clone(), &fixture.token, "?_start=1&_end=2").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(titles(&body), ["Track 0001", "Track 0002"]);
+    assert_eq!(
+        titles(&body),
+        ["Track 0001"],
+        "the exclusive bound leaves exactly one row for max(0, _end - _start)"
+    );
     assert_eq!(total(&headers), "5");
 
     let (status, headers, body) = get(fixture.app, &fixture.token, "?_start=4&_end=4").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(titles(&body), ["Track 0004"]);
+    assert_eq!(
+        titles(&body),
+        ["Track 0004"],
+        "max(0, _end - _start) is zero, so the page is unbounded and the fixture leaves one row from the offset"
+    );
     assert_eq!(total(&headers), "5");
 }
 
