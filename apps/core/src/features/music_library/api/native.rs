@@ -272,7 +272,7 @@ const ARTIST_PARAMETERS: &[&str] = &[
     "starred",
 ];
 
-fn reject_unknown(query: &RawQuery, allowed: &[&str]) -> Result<(), ValidationError> {
+pub(crate) fn reject_unknown(query: &RawQuery, allowed: &[&str]) -> Result<(), ValidationError> {
     for name in query.names() {
         if !IDENTITY_PARAMETERS.contains(&name) && !allowed.contains(&name) {
             return Err(ValidationError::Invalid { field: "parameter" });
@@ -282,7 +282,7 @@ fn reject_unknown(query: &RawQuery, allowed: &[&str]) -> Result<(), ValidationEr
     Ok(())
 }
 
-fn rejected(
+pub(crate) fn rejected(
     error: crate::features::music_library::domain::ValidationError,
     field: &'static str,
 ) -> ValidationError {
@@ -314,7 +314,7 @@ fn timestamp(raw: &str) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
-fn offset(query: &RawQuery) -> Result<u32, ValidationError> {
+pub(crate) fn offset(query: &RawQuery) -> Result<u32, ValidationError> {
     match query.get("offset") {
         Some(raw) => raw
             .parse()
@@ -323,7 +323,7 @@ fn offset(query: &RawQuery) -> Result<u32, ValidationError> {
     }
 }
 
-fn page_limit(query: &RawQuery) -> Result<PageLimit, ValidationError> {
+pub(crate) fn page_limit(query: &RawQuery) -> Result<PageLimit, ValidationError> {
     let raw = match query.get("limit") {
         Some(raw) => raw
             .parse()
@@ -661,7 +661,11 @@ fn ownership(availability: Availability) -> &'static str {
     }
 }
 
-fn page_response<T: Serialize>(items: Vec<T>, total: u32, seed: Option<u64>) -> Response {
+pub(crate) fn page_response<T: Serialize>(
+    items: Vec<T>,
+    total: u32,
+    seed: Option<u64>,
+) -> Response {
     let mut response = Json(PageResponse { items, total, seed }).into_response();
     response.headers_mut().insert(
         "x-total-count",
@@ -699,7 +703,7 @@ pub(crate) struct TrackPageAlbum {
 }
 
 impl TrackPageItem {
-    fn from_view(view: TrackView, availability: Availability) -> Self {
+    pub(crate) fn from_view(view: &TrackView, availability: Availability) -> Self {
         let state = view.state();
 
         Self {
@@ -834,7 +838,7 @@ pub(crate) async fn library_tracks(
         .map(|view| {
             let availability = state.library.availability(view.sources());
 
-            TrackPageItem::from_view(view, availability)
+            TrackPageItem::from_view(&view, availability)
         })
         .collect();
 

@@ -34,6 +34,20 @@ pub(crate) fn router(state: AppState) -> Router {
             get(music_library::api::native::library_artists),
         )
         .route(
+            "/api/v1/playlists",
+            get(music_library::api::playlists::list).post(music_library::api::playlists::create),
+        )
+        .route(
+            "/api/v1/playlists/{id}",
+            get(music_library::api::playlists::detail)
+                .patch(music_library::api::playlists::update)
+                .delete(music_library::api::playlists::remove),
+        )
+        .route(
+            "/api/v1/playlists/{id}/entries/{entry_id}/move",
+            post(music_library::api::playlists::move_entry),
+        )
+        .route(
             "/playback/tracks/{track_id}/stream",
             get(playback::api::native::stream),
         )
