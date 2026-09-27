@@ -160,7 +160,7 @@ pub(crate) fn playlist_from_domain(playlist: &Playlist) -> models::Playlist {
         id: playlist.id().to_string(),
         name: playlist.name().to_owned(),
         comment: playlist.comment().map(str::to_owned),
-        owner: None,
+        owner: Some(playlist.owner_username().to_owned()),
         public: Some(playlist.is_public()),
         song_count: i32::try_from(playlist.track_count()).unwrap_or(i32::MAX),
         duration: (playlist.duration_ms() / 1000) as i32,

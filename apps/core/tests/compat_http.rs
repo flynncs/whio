@@ -3,10 +3,10 @@
 use sqlx::PgPool;
 use whio_core::features::music_library::domain::{
     AlbumMetadata, AlbumTrack, ArtistCredit, ArtistListFilter, ArtistSort, ProviderId,
-    SourceIdentity, SourceScope, StateTarget, TrackMetadata,
+    SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
 };
 use whio_core::features::music_library::test_support::{
-    CatalogueWrite, LibraryRead, PostgresTrackRepository, StateStore,
+    CatalogueWrite, LibraryRead, PlaylistStore, PostgresTrackRepository, StateStore,
 };
 mod support;
 
@@ -16,9 +16,18 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD_NO_PAD;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use whio_core::{features::playback::PlaybackProvider, features::playback::providers::YtmAdapter};
+use uuid::Uuid;
+use whio_core::{
+    features::identity::secrets::CredentialKey,
+    features::music_library::catalogue::{LibraryService, SearchService},
+    features::music_library::playlists::PlaylistService,
+    features::playback::PlaybackProvider,
+    features::playback::providers::YtmAdapter,
+};
 
 use support::credentials::credential_service_with_roles;
 use support::{
@@ -1067,6 +1076,857 @@ async fn subsonic_playlist_verbs_round_trip(pool: PgPool) {
         body["subsonic-response"]["playlists"]
             .get("playlist")
             .is_none()
+    );
+}
+
+struct PlaylistFixture {
+    app: axum::Router,
+    owner: String,
+    stranger: String,
+}
+
+fn playlist_auth(username: &str, secret: &str) -> String {
+    format!("u={username}&v=1.16.1&c=test-client&p={secret}")
+}
+
+fn playlist_route(route: &str, auth: &str, parameters: &str) -> String {
+    let separator = if parameters.is_empty() { "" } else { "&" };
+
+    format!("/compat/subsonic/rest/{route}.view?{auth}{separator}{parameters}")
+}
+
+async fn playlist_fixture(pool: PgPool) -> PlaylistFixture {
+    let key = CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).unwrap();
+    let (service, owner_secret) =
+        support::credentials::database_credential_service(pool.clone()).await;
+    let provisioning = whio_core::features::identity::provision(pool.clone());
+    provisioning.create_user("other", "Other").await.unwrap();
+    let (_, stranger_secret) = provisioning
+        .mint_app_password(&key, "other", "integration")
+        .await
+        .unwrap();
+    let ports = StorePorts::new(pool.clone());
+    let library = Arc::new(LibraryService::new(
+        ports.library(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let search = Arc::new(SearchService::new(
+        ports.library(),
+        ports.catalogue(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let playlists = Arc::new(PlaylistService::new(
+        Arc::clone(&ports.store) as Arc<dyn PlaylistStore>,
+        Arc::clone(&library),
+    ));
+    let playback = ports.streaming(vec![]);
+
+    PlaylistFixture {
+        app: router_with_playlists(service, search, library, playlists, playback),
+        owner: playlist_auth("flynn", &owner_secret),
+        stranger: playlist_auth("other", &stranger_secret),
+    }
+}
+
+async fn playlist_song(pool: &PgPool, external_id: &str, title: &str) -> TrackId {
+    let ports = StorePorts::new(pool.clone());
+
+    ports
+        .store
+        .get_or_create(
+            SourceIdentity::new(
+                ProviderId::new("local".to_owned()).unwrap(),
+                SourceScope::Named("/music".to_owned()),
+                external_id.to_owned(),
+            )
+            .unwrap(),
+            TrackMetadata::from_names(title.to_owned(), vec!["Artist".to_owned()], Some(1_000))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .id()
+        .clone()
+}
+
+fn playlist_of(body: &Value) -> &Value {
+    &body["subsonic-response"]["playlist"]
+}
+
+fn playlist_id_of(body: &Value) -> String {
+    playlist_of(body)["id"].as_str().unwrap().to_owned()
+}
+
+fn entry_titles(body: &Value) -> Vec<String> {
+    playlist_of(body)["entry"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry["title"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn song_ids(body: &Value) -> Vec<String> {
+    playlist_of(body)["entry"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn read_playlist(app: axum::Router, auth: &str, id: &str) -> Value {
+    get(
+        app,
+        &playlist_route("getPlaylist", auth, &format!("id={id}")),
+    )
+    .await
+}
+
+async fn edit_playlist(app: axum::Router, auth: &str, parameters: &str) -> Value {
+    get(app, &playlist_route("updatePlaylist", auth, parameters)).await
+}
+
+#[sqlx::test]
+async fn subsonic_create_with_an_id_replaces_and_preserves_metadata(pool: PgPool) {
+    let fixture = playlist_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+    let third = playlist_song(&pool, "path-third", "Third").await;
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("name=Trip&songId={first}&songId={second}"),
+        ),
+    )
+    .await;
+    let id = playlist_id_of(&body);
+    assert_eq!(entry_titles(&body), vec!["First", "Second"]);
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&public=true&comment=hello"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("playlistId={id}&songId={third}"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        body["subsonic-response"]["status"],
+        json!("ok"),
+        "an existing-id create is accepted"
+    );
+    assert_eq!(
+        entry_titles(&body),
+        vec!["Third"],
+        "the entries are replaced rather than appended"
+    );
+
+    let body = read_playlist(fixture.app, &fixture.owner, &id).await;
+    assert_eq!(
+        entry_titles(&body),
+        vec!["Third"],
+        "the replaced entries are gone from the stored playlist"
+    );
+    assert_eq!(
+        playlist_of(&body)["name"],
+        json!("Trip"),
+        "an omitted name is kept"
+    );
+    assert_eq!(
+        playlist_of(&body)["comment"],
+        json!("hello"),
+        "the comment is not cleared"
+    );
+    assert_eq!(
+        playlist_of(&body)["public"],
+        json!(true),
+        "the visibility is not forced private"
+    );
+    assert_eq!(playlist_of(&body)["songCount"], json!(1));
+}
+
+#[sqlx::test]
+async fn subsonic_update_applies_only_present_fields(pool: PgPool) {
+    let fixture = playlist_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("name=Trip&songId={first}&songId={second}"),
+        ),
+    )
+    .await;
+    let id = playlist_id_of(&body);
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&comment=hello"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(playlist_of(&body)["comment"], json!("hello"));
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&name=Tripped"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(playlist_of(&body)["name"], json!("Tripped"));
+    assert_eq!(
+        playlist_of(&body)["comment"],
+        json!("hello"),
+        "an omitted comment is left alone"
+    );
+    assert_eq!(
+        playlist_of(&body)["public"],
+        json!(false),
+        "an omitted public flag is left alone"
+    );
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&comment="),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(
+        playlist_of(&body)["comment"],
+        Value::Null,
+        "an empty comment clears it"
+    );
+    assert_eq!(
+        playlist_of(&body)["name"],
+        json!("Tripped"),
+        "clearing the comment leaves the name"
+    );
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&public=true"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(playlist_of(&body)["public"], json!(true));
+    assert_eq!(playlist_of(&body)["name"], json!("Tripped"));
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "updatePlaylist",
+            &fixture.owner,
+            &format!("playlistId={id}&name="),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an empty name cannot clear a required field"
+    );
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(0));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(
+        playlist_of(&body)["name"],
+        json!("Tripped"),
+        "the rejected edit changed nothing"
+    );
+    assert_eq!(playlist_of(&body)["public"], json!(true));
+}
+
+#[sqlx::test]
+async fn subsonic_remove_index_is_zero_based(pool: PgPool) {
+    let fixture = playlist_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+    let third = playlist_song(&pool, "path-third", "Third").await;
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("name=Trip&songId={first}&songId={second}&songId={third}"),
+        ),
+    )
+    .await;
+    let id = playlist_id_of(&body);
+    assert_eq!(entry_titles(&body), vec!["First", "Second", "Third"]);
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&songIndexToRemove=0"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(
+        entry_titles(&body),
+        vec!["Second", "Third"],
+        "index 0 removes the first entry"
+    );
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&songIndexToRemove=1"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(
+        entry_titles(&body),
+        vec!["Second"],
+        "index n-1 removes the last entry, not the one a one-based index names"
+    );
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "updatePlaylist",
+            &fixture.owner,
+            &format!("playlistId={id}&songIndexToRemove=1"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an index past the end is a client error, not a silent no-op"
+    );
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(0));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(entry_titles(&body), vec!["Second"]);
+
+    let (status, body) = get_status(
+        fixture.app,
+        &playlist_route(
+            "updatePlaylist",
+            &fixture.owner,
+            &format!("playlistId={id}&songIndexToRemove=first"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unparsable index is a client error, not a dropped parameter"
+    );
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(0));
+}
+
+#[sqlx::test]
+async fn subsonic_add_and_remove_in_one_call_keeps_the_added_occurrence(pool: PgPool) {
+    let fixture = playlist_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+    let third = playlist_song(&pool, "path-third", "Third").await;
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("name=Trip&songId={first}&songId={second}"),
+        ),
+    )
+    .await;
+    let id = playlist_id_of(&body);
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&songIndexToRemove=0&songIdToAdd={first}"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(
+        entry_titles(&body),
+        vec!["Second", "First"],
+        "the removal is resolved before the addition, so the added occurrence survives"
+    );
+    assert_eq!(
+        song_ids(&body),
+        vec![second.to_string(), first.to_string()],
+        "the added occurrence is the one present"
+    );
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "updatePlaylist",
+            &fixture.owner,
+            &format!("playlistId={id}&songIndexToRemove=9&songIdToAdd={third}"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a failing edit reports the error"
+    );
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(0));
+    let body = read_playlist(fixture.app, &fixture.owner, &id).await;
+    assert_eq!(
+        entry_titles(&body),
+        vec!["Second", "First"],
+        "the failed edit left no partial result: the addition was not applied"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_repeated_tracks_are_distinct_entries(pool: PgPool) {
+    let fixture = playlist_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("name=Trip&songId={first}&songId={first}&songId={second}"),
+        ),
+    )
+    .await;
+    let id = playlist_id_of(&body);
+    assert_eq!(
+        song_ids(&body),
+        vec![first.to_string(), first.to_string(), second.to_string()],
+        "the same song id twice is two entries"
+    );
+    assert_eq!(playlist_of(&body)["songCount"], json!(3));
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&songIndexToRemove=0"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(
+        song_ids(&body),
+        vec![first.to_string(), second.to_string()],
+        "removing one occurrence leaves the other"
+    );
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&songIdToAdd={first}"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app, &fixture.owner, &id).await;
+    assert_eq!(
+        song_ids(&body),
+        vec![first.to_string(), second.to_string(), first.to_string()],
+        "adding a present track appends a further occurrence"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_visibility_and_ownership(pool: PgPool) {
+    let fixture = playlist_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("name=Shared&songId={first}"),
+        ),
+    )
+    .await;
+    let shared = playlist_id_of(&body);
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={shared}&public=true"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("name=Hidden&songId={second}"),
+        ),
+    )
+    .await;
+    let hidden = playlist_id_of(&body);
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route("getPlaylists", &fixture.stranger, ""),
+    )
+    .await;
+    let listed = body["subsonic-response"]["playlists"]["playlist"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "another principal's private playlist is invisible"
+    );
+    assert_eq!(listed[0]["id"], json!(shared));
+    assert_eq!(
+        listed[0]["owner"],
+        json!("flynn"),
+        "a non-owner is told the real owner, not themselves"
+    );
+
+    let body = read_playlist(fixture.app.clone(), &fixture.stranger, &shared).await;
+    assert_eq!(entry_titles(&body), vec!["First"]);
+    assert_eq!(
+        playlist_of(&body)["owner"],
+        json!("flynn"),
+        "the real owner is reported on the read"
+    );
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route("getPlaylist", &fixture.stranger, &format!("id={hidden}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(70));
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "updatePlaylist",
+            &fixture.stranger,
+            &format!("playlistId={shared}&name=Hijacked"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a public playlist is read-only for a non-owner"
+    );
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(50));
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route("deletePlaylist", &fixture.stranger, &format!("id={shared}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(50));
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.stranger,
+            &format!("playlistId={shared}&songId={second}"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "replacing an existing playlist's entries is an edit"
+    );
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(50));
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "updatePlaylist",
+            &fixture.stranger,
+            &format!("playlistId={hidden}&name=Hijacked"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["subsonic-response"]["error"]["code"],
+        json!(70),
+        "a private playlist is not even visible"
+    );
+
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &shared).await;
+    assert_eq!(entry_titles(&body), vec!["First"]);
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &hidden).await;
+    assert_eq!(entry_titles(&body), vec!["Second"]);
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={shared}&name=StillMine"),
+    )
+    .await;
+    assert_eq!(
+        body["subsonic-response"]["status"],
+        json!("ok"),
+        "public does not stop the owner editing"
+    );
+    let body = edit_playlist(
+        fixture.app,
+        &fixture.owner,
+        &format!("playlistId={hidden}&name=AlsoMine"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+}
+
+#[sqlx::test]
+async fn subsonic_playlist_errors_are_the_existing_shapes(pool: PgPool) {
+    let fixture = playlist_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let unknown = Uuid::now_v7();
+
+    for (route, parameters) in [
+        ("getPlaylist", format!("id={unknown}")),
+        (
+            "updatePlaylist",
+            format!("playlistId={unknown}&name=Hijacked"),
+        ),
+        ("deletePlaylist", format!("id={unknown}")),
+        ("getPlaylist", "id=not-a-playlist".to_owned()),
+        ("updatePlaylist", "playlistId=not-a-playlist".to_owned()),
+        ("deletePlaylist", "id=not-a-playlist".to_owned()),
+    ] {
+        let (status, body) = get_status(
+            fixture.app.clone(),
+            &playlist_route(route, &fixture.owner, &parameters),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{route}: {parameters}");
+        assert_eq!(body["subsonic-response"]["status"], json!("failed"));
+        assert_eq!(
+            body["subsonic-response"]["error"]["code"],
+            json!(70),
+            "{route}: {parameters}"
+        );
+        assert_eq!(
+            body["subsonic-response"]["error"]["message"],
+            json!("Playlist not found.")
+        );
+    }
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("name=Shared&songId={first}"),
+        ),
+    )
+    .await;
+    let shared = playlist_id_of(&body);
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={shared}&public=true"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "updatePlaylist",
+            &fixture.stranger,
+            &format!("playlistId={shared}&name=Hijacked"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["subsonic-response"]["status"], json!("failed"));
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(50));
+    assert_eq!(
+        body["subsonic-response"]["error"]["message"],
+        json!("Not authorized.")
+    );
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route("deletePlaylist", &fixture.stranger, &format!("id={shared}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(50));
+
+    let body = read_playlist(fixture.app, &fixture.owner, &shared).await;
+    assert_eq!(
+        playlist_of(&body)["name"],
+        json!("Shared"),
+        "the refused edits changed nothing"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_playlist_client_errors_name_the_parameter(pool: PgPool) {
+    let fixture = playlist_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route("createPlaylist", &fixture.owner, &format!("songId={first}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["status"], json!("failed"));
+    assert_eq!(
+        body["subsonic-response"]["error"]["code"],
+        json!(10),
+        "a create without a name or an id is the missing-parameter shape"
+    );
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            "playlistId=not-a-playlist&songId=whatever",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["subsonic-response"]["error"]["code"],
+        json!(70),
+        "a malformed playlist id is the not-found shape, not a silent create"
+    );
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("name=Trip&songId={first}"),
+        ),
+    )
+    .await;
+    let id = playlist_id_of(&body);
+
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "updatePlaylist",
+            &fixture.owner,
+            &format!("playlistId={id}&songIdToAdd=not-a-track"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(0));
+    assert_eq!(
+        body["subsonic-response"]["error"]["message"],
+        json!("Invalid track ID.")
+    );
+
+    let unknown = Uuid::now_v7();
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &playlist_route(
+            "updatePlaylist",
+            &fixture.owner,
+            &format!("playlistId={id}&songIdToAdd={unknown}"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unknown track is a client error rather than a server failure"
+    );
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(0));
+
+    let body = read_playlist(fixture.app, &fixture.owner, &id).await;
+    assert_eq!(
+        entry_titles(&body),
+        vec!["First"],
+        "the rejected additions changed nothing"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_edit_without_a_revision_is_last_write_wins(pool: PgPool) {
+    let fixture = playlist_fixture(pool.clone()).await;
+    let first = playlist_song(&pool, "path-first", "First").await;
+    let second = playlist_song(&pool, "path-second", "Second").await;
+    let third = playlist_song(&pool, "path-third", "Third").await;
+    let fourth = playlist_song(&pool, "path-fourth", "Fourth").await;
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &fixture.owner,
+            &format!("name=Trip&songId={first}&songId={second}&songId={third}&songId={fourth}"),
+        ),
+    )
+    .await;
+    let id = playlist_id_of(&body);
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&songIndexToRemove=0"),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let body = read_playlist(fixture.app.clone(), &fixture.owner, &id).await;
+    assert_eq!(entry_titles(&body), vec!["Second", "Third", "Fourth"]);
+
+    let body = edit_playlist(
+        fixture.app.clone(),
+        &fixture.owner,
+        &format!("playlistId={id}&songIndexToRemove=2"),
+    )
+    .await;
+    assert_eq!(
+        body["subsonic-response"]["status"],
+        json!("ok"),
+        "the compat wire carries no revision, so a stale edit is not a conflict"
+    );
+    let body = read_playlist(fixture.app, &fixture.owner, &id).await;
+    assert_eq!(
+        entry_titles(&body),
+        vec!["Second", "Third"],
+        "the stale index addressed a different occurrence than the caller read"
     );
 }
 

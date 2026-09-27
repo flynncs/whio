@@ -17,9 +17,9 @@ use whio_subsonic_api::models;
 use crate::{
     features::identity::{domain::Principal, service::AuthError},
     features::music_library::catalogue::{SearchLimit, SearchOffset, SearchWindow, SearchWindows},
-    features::music_library::domain::{RandomSeed, Resource, TrackId},
+    features::music_library::domain::{RandomSeed, Resource},
     features::music_library::library::{ScanMode, ScanRequestError},
-    features::music_library::playlists::{PlaylistEdit, PlaylistError},
+    features::music_library::playlists::PlaylistError,
     features::playback::{DeliveryError, PlaybackError},
     platform::http::FetchError,
     platform::raw_query::RawQuery,
@@ -796,6 +796,10 @@ pub(crate) async fn get_genres(
 }
 
 fn playlist_failure(context: &RequestContext, error: PlaylistError) -> Response {
+    if matches!(error, PlaylistError::Entry(_)) {
+        return playlist_client_error("Invalid playlist edit.");
+    }
+
     tracing::warn!(
         error = %error,
         request_id = context.request_id().as_str(),
@@ -808,6 +812,41 @@ fn playlist_failure(context: &RequestContext, error: PlaylistError) -> Response 
     ))
     .into_response();
     *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    response
+}
+
+fn playlist_request_failure(error: service::PlaylistRequestError) -> Response {
+    match error {
+        service::PlaylistRequestError::MissingPlaylistId
+        | service::PlaylistRequestError::MissingName => {
+            SubsonicError::MissingParameter.into_response()
+        }
+        service::PlaylistRequestError::UnknownPlaylist => playlist_not_found(),
+        service::PlaylistRequestError::InvalidName => {
+            playlist_client_error("Invalid playlist name.")
+        }
+        service::PlaylistRequestError::InvalidComment => {
+            playlist_client_error("Invalid playlist comment.")
+        }
+        service::PlaylistRequestError::InvalidTrackId => playlist_client_error("Invalid track ID."),
+        service::PlaylistRequestError::InvalidIndex => playlist_client_error("Invalid song index."),
+    }
+}
+
+fn playlist_client_error(message: &'static str) -> Response {
+    let mut response =
+        Json(failed_envelope(models::error::Code::Variant0, message)).into_response();
+    *response.status_mut() = StatusCode::BAD_REQUEST;
+    response
+}
+
+fn playlist_forbidden() -> Response {
+    let mut response = Json(failed_envelope(
+        models::error::Code::Variant50,
+        "Not authorized.",
+    ))
+    .into_response();
+    *response.status_mut() = StatusCode::FORBIDDEN;
     response
 }
 
@@ -854,11 +893,9 @@ pub(crate) async fn get_playlist(
     };
     let user = principal.user_id.as_uuid();
 
-    let Some(raw_id) = query.get("id") else {
-        return SubsonicError::MissingParameter.into_response();
-    };
-    let Ok(playlist_id) = raw_id.parse() else {
-        return playlist_not_found();
+    let playlist_id = match service::playlist_id(&query, "id") {
+        Ok(playlist_id) => playlist_id,
+        Err(error) => return playlist_request_failure(error),
     };
 
     match state.playlists().detail(user, &playlist_id).await {
@@ -884,28 +921,18 @@ pub(crate) async fn create_playlist(
     };
     let user = principal.user_id.as_uuid();
 
-    let name = query.get("name").unwrap_or_default().trim().to_owned();
-    let playlist_id = query.get("playlistId").and_then(|raw| {
-        raw.parse::<crate::features::music_library::domain::PlaylistId>()
-            .ok()
-    });
-    let additions = query
-        .all("songId")
-        .iter()
-        .filter_map(|raw| raw.parse::<TrackId>().ok())
-        .collect::<Vec<_>>();
+    let request = match service::playlist_create(&query) {
+        Ok(request) => request,
+        Err(error) => return playlist_request_failure(error),
+    };
 
-    match state
-        .playlists()
-        .create_or_append(user, playlist_id, &name, &additions)
-        .await
-    {
-        Ok(Some(detail)) => Json(create_playlist_envelope(mapping::playlist_with_songs(
-            &detail,
-            state.source_tags(),
-        )))
+    match service::create_playlist(state.playlists(), user, request).await {
+        Ok(service::PlaylistCreated::Created(detail)) => Json(create_playlist_envelope(
+            mapping::playlist_with_songs(&detail, state.source_tags()),
+        ))
         .into_response(),
-        Ok(None) => playlist_not_found(),
+        Ok(service::PlaylistCreated::Forbidden) => playlist_forbidden(),
+        Ok(service::PlaylistCreated::NotFound) => playlist_not_found(),
         Err(error) => playlist_failure(&context, error),
     }
 }
@@ -922,43 +949,15 @@ pub(crate) async fn update_playlist(
     };
     let user = principal.user_id.as_uuid();
 
-    let Some(raw_id) = query.get("playlistId") else {
-        return SubsonicError::MissingParameter.into_response();
-    };
-    let Ok(playlist_id) = raw_id.parse() else {
-        return playlist_not_found();
+    let request = match service::playlist_update(&query) {
+        Ok(request) => request,
+        Err(error) => return playlist_request_failure(error),
     };
 
-    let additions = query
-        .all("songIdToAdd")
-        .iter()
-        .filter_map(|raw| raw.parse::<TrackId>().ok())
-        .collect::<Vec<_>>();
-    let removals = query
-        .all("songIndexToRemove")
-        .iter()
-        .filter_map(|raw| raw.parse::<usize>().ok())
-        .collect::<Vec<_>>();
-    let public = query
-        .get("public")
-        .map(|raw| raw.trim().eq_ignore_ascii_case("true"));
-    match state
-        .playlists()
-        .edit(
-            user,
-            &playlist_id,
-            PlaylistEdit {
-                name: query.get("name"),
-                comment: query.get("comment"),
-                public,
-                additions: &additions,
-                removals,
-            },
-        )
-        .await
-    {
-        Ok(true) => Json(ok_envelope()).into_response(),
-        Ok(false) => playlist_not_found(),
+    match service::update_playlist(state.playlists(), user, &request).await {
+        Ok(service::PlaylistEdited::Applied) => Json(ok_envelope()).into_response(),
+        Ok(service::PlaylistEdited::Forbidden) => playlist_forbidden(),
+        Ok(service::PlaylistEdited::NotFound) => playlist_not_found(),
         Err(error) => playlist_failure(&context, error),
     }
 }
@@ -975,16 +974,15 @@ pub(crate) async fn delete_playlist(
     };
     let user = principal.user_id.as_uuid();
 
-    let Some(raw_id) = query.get("id") else {
-        return SubsonicError::MissingParameter.into_response();
-    };
-    let Ok(playlist_id) = raw_id.parse() else {
-        return playlist_not_found();
+    let playlist_id = match service::playlist_id(&query, "id") {
+        Ok(playlist_id) => playlist_id,
+        Err(error) => return playlist_request_failure(error),
     };
 
-    match state.playlists().delete(user, &playlist_id).await {
-        Ok(true) => Json(ok_envelope()).into_response(),
-        Ok(false) => playlist_not_found(),
+    match service::delete_playlist(state.playlists(), user, &playlist_id).await {
+        Ok(service::PlaylistEdited::Applied) => Json(ok_envelope()).into_response(),
+        Ok(service::PlaylistEdited::Forbidden) => playlist_forbidden(),
+        Ok(service::PlaylistEdited::NotFound) => playlist_not_found(),
         Err(error) => playlist_failure(&context, error),
     }
 }

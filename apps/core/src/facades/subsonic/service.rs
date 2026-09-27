@@ -11,13 +11,17 @@ use crate::{
     },
     features::music_library::domain::{
         AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, ArtistListFilter,
-        ArtistSort, IdSet, RandomSeed, Range, RoleSelector, RoleSet, SelectorText, SortDirection,
-        StateTarget, TrackId, ValidationError,
+        ArtistSort, IdSet, Playlist, PlaylistId, RandomSeed, Range, RoleSelector, RoleSet,
+        SelectorText, SortDirection, StateTarget, TrackId, ValidationError,
     },
     features::music_library::library::{
         LibraryId, LibraryRegistrationError, LibraryRegistry, ScanService,
     },
     features::music_library::library_state::{LibraryStateError, LibraryStateService},
+    features::music_library::playlists::{
+        PlaylistDetail, PlaylistEdit, PlaylistError, PlaylistService,
+    },
+    platform::raw_query::RawQuery,
     platform::request::RequestContext,
 };
 
@@ -748,6 +752,218 @@ pub(crate) async fn music_directory(
         )),
         None => Err(BrowseError::AlbumNotFound),
     }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum PlaylistRequestError {
+    #[error("the playlist id parameter is missing")]
+    MissingPlaylistId,
+
+    #[error("the playlist id does not name a playlist")]
+    UnknownPlaylist,
+
+    #[error("a playlist name is required")]
+    MissingName,
+
+    #[error("invalid playlist name")]
+    InvalidName,
+
+    #[error("invalid playlist comment")]
+    InvalidComment,
+
+    #[error("invalid track id")]
+    InvalidTrackId,
+
+    #[error("invalid song index")]
+    InvalidIndex,
+}
+
+pub(crate) struct PlaylistCreate {
+    pub(crate) playlist_id: Option<PlaylistId>,
+    pub(crate) name: String,
+    pub(crate) additions: Vec<TrackId>,
+}
+
+pub(crate) struct PlaylistUpdate {
+    pub(crate) playlist_id: PlaylistId,
+    pub(crate) name: Option<String>,
+    pub(crate) comment: Option<String>,
+    pub(crate) public: Option<bool>,
+    pub(crate) additions: Vec<TrackId>,
+    pub(crate) removals: Vec<usize>,
+}
+
+pub(crate) enum PlaylistCreated {
+    Created(PlaylistDetail),
+    Forbidden,
+    NotFound,
+}
+
+pub(crate) enum PlaylistEdited {
+    Applied,
+    Forbidden,
+    NotFound,
+}
+
+pub(crate) fn playlist_id(
+    query: &RawQuery,
+    parameter: &str,
+) -> Result<PlaylistId, PlaylistRequestError> {
+    let Some(raw) = query.get(parameter) else {
+        return Err(PlaylistRequestError::MissingPlaylistId);
+    };
+
+    raw.parse()
+        .map_err(|_| PlaylistRequestError::UnknownPlaylist)
+}
+
+fn track_ids(query: &RawQuery, parameter: &str) -> Result<Vec<TrackId>, PlaylistRequestError> {
+    query
+        .all(parameter)
+        .into_iter()
+        .map(|raw| {
+            raw.parse()
+                .map_err(|_| PlaylistRequestError::InvalidTrackId)
+        })
+        .collect()
+}
+
+pub(crate) fn playlist_create(query: &RawQuery) -> Result<PlaylistCreate, PlaylistRequestError> {
+    let playlist_id = query
+        .get("playlistId")
+        .map(|_| playlist_id(query, "playlistId"))
+        .transpose()?;
+    let name = query.get("name").map(str::trim).unwrap_or_default();
+    let name = if name.is_empty() {
+        if playlist_id.is_none() {
+            return Err(PlaylistRequestError::MissingName);
+        }
+
+        String::new()
+    } else {
+        Playlist::validated_name(name).map_err(|_| PlaylistRequestError::InvalidName)?
+    };
+
+    Ok(PlaylistCreate {
+        playlist_id,
+        name,
+        additions: track_ids(query, "songId")?,
+    })
+}
+
+pub(crate) fn playlist_update(query: &RawQuery) -> Result<PlaylistUpdate, PlaylistRequestError> {
+    let playlist_id = playlist_id(query, "playlistId")?;
+    let name = match query.get("name") {
+        Some(raw) => {
+            Some(Playlist::validated_name(raw).map_err(|_| PlaylistRequestError::InvalidName)?)
+        }
+        None => None,
+    };
+    let comment = match query.get("comment") {
+        Some(raw) => Some(
+            Playlist::validated_comment(Some(raw))
+                .map_err(|_| PlaylistRequestError::InvalidComment)?
+                .unwrap_or_default(),
+        ),
+        None => None,
+    };
+    let removals = query
+        .all("songIndexToRemove")
+        .into_iter()
+        .map(|raw| {
+            raw.parse::<usize>()
+                .map_err(|_| PlaylistRequestError::InvalidIndex)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PlaylistUpdate {
+        playlist_id,
+        name,
+        comment,
+        public: query
+            .get("public")
+            .map(|raw| raw.trim().eq_ignore_ascii_case("true")),
+        additions: track_ids(query, "songIdToAdd")?,
+        removals,
+    })
+}
+
+async fn forbidden(
+    service: &PlaylistService,
+    user: Uuid,
+    playlist_id: &PlaylistId,
+) -> Result<bool, PlaylistError> {
+    Ok(service
+        .detail(user, playlist_id)
+        .await?
+        .is_some_and(|detail| !detail.editable))
+}
+
+pub(crate) async fn create_playlist(
+    service: &PlaylistService,
+    user: Uuid,
+    request: PlaylistCreate,
+) -> Result<PlaylistCreated, PlaylistError> {
+    let requested = request.playlist_id.clone();
+
+    match service
+        .create_or_append(user, request.playlist_id, &request.name, &request.additions)
+        .await?
+    {
+        Some(detail) => Ok(PlaylistCreated::Created(detail)),
+        None => match requested {
+            Some(playlist_id) if forbidden(service, user, &playlist_id).await? => {
+                Ok(PlaylistCreated::Forbidden)
+            }
+            _ => Ok(PlaylistCreated::NotFound),
+        },
+    }
+}
+
+pub(crate) async fn update_playlist(
+    service: &PlaylistService,
+    user: Uuid,
+    request: &PlaylistUpdate,
+) -> Result<PlaylistEdited, PlaylistError> {
+    let applied = service
+        .edit(
+            user,
+            &request.playlist_id,
+            PlaylistEdit {
+                name: request.name.as_deref(),
+                comment: request.comment.as_deref(),
+                public: request.public,
+                additions: &request.additions,
+                removals: request.removals.clone(),
+            },
+        )
+        .await?;
+
+    if applied {
+        return Ok(PlaylistEdited::Applied);
+    }
+
+    if forbidden(service, user, &request.playlist_id).await? {
+        return Ok(PlaylistEdited::Forbidden);
+    }
+
+    Ok(PlaylistEdited::NotFound)
+}
+
+pub(crate) async fn delete_playlist(
+    service: &PlaylistService,
+    user: Uuid,
+    playlist_id: &PlaylistId,
+) -> Result<PlaylistEdited, PlaylistError> {
+    if service.delete(user, playlist_id).await? {
+        return Ok(PlaylistEdited::Applied);
+    }
+
+    if forbidden(service, user, playlist_id).await? {
+        return Ok(PlaylistEdited::Forbidden);
+    }
+
+    Ok(PlaylistEdited::NotFound)
 }
 
 #[cfg(all(test, feature = "postgres-integration"))]
