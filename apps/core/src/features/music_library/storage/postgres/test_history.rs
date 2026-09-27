@@ -248,6 +248,59 @@ async fn the_all_time_total_is_the_counter(pool: PgPool) {
         state.play_count(),
         u32::try_from(counter + ledger as i32).unwrap()
     );
+
+    let unbounded = service
+        .count(principal, ListenWindow::unbounded(), Some(track.id()))
+        .await
+        .unwrap();
+    assert_eq!(unbounded.count(), u64::from(state.play_count()));
+
+    let unbounded_principal = service
+        .count(principal, ListenWindow::unbounded(), None)
+        .await
+        .unwrap();
+    assert_eq!(unbounded_principal.count(), u64::from(state.play_count()));
+
+    let windowed = service
+        .count(
+            principal,
+            ListenWindow::new(Some(at("2026-09-01T00:00:00Z")), None),
+            Some(track.id()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(windowed.count(), u64::try_from(ledger).unwrap());
+
+    let baseline_only = create_track(&repository, "baseline-only.flac").await;
+    sqlx::query(
+        "INSERT INTO track_play_stats (user_id, track_id, play_count, last_played_at) \
+         VALUES ($1, $2, 4, $3)",
+    )
+    .bind(principal)
+    .bind(baseline_only.id().as_uuid())
+    .bind(at("2026-08-02T10:00:00Z"))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let baseline_state = repository
+        .find_track_state(baseline_only.id(), principal)
+        .await
+        .unwrap();
+    let baseline_count = service
+        .count(
+            principal,
+            ListenWindow::unbounded(),
+            Some(baseline_only.id()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        baseline_count.count(),
+        u64::from(baseline_state.play_count())
+    );
+    assert_eq!(baseline_count.count(), 4);
+    assert_eq!(ledger_rows(&pool, principal, baseline_only.id()).await, 0);
 }
 
 #[sqlx::test]

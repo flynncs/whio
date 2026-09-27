@@ -74,6 +74,24 @@ async fn listen_marker(
     .map_err(repository_error)
 }
 
+async fn all_time_plays(
+    pool: &PgPool,
+    principal: Uuid,
+    track: Option<&TrackId>,
+) -> Result<u64, TrackRepositoryError> {
+    let plays = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(SUM(play_count), 0)::BIGINT FROM track_play_stats \
+         WHERE user_id = $1 AND ($2::UUID IS NULL OR track_id = $2)",
+    )
+    .bind(principal)
+    .bind(track.map(TrackId::as_uuid))
+    .fetch_one(pool)
+    .await
+    .map_err(repository_error)?;
+
+    u64::try_from(plays).map_err(|_| TrackRepositoryError::InvalidData)
+}
+
 #[async_trait]
 impl ListenStore for PgStore {
     async fn submit_listen(
@@ -194,6 +212,13 @@ impl ListenStore for PgStore {
     ) -> Result<ListenCount, TrackRepositoryError> {
         let marker = listen_marker(&self.pool, principal).await?;
         let coverage = window.coverage(marker);
+
+        if window.is_unbounded() {
+            let count = all_time_plays(&self.pool, principal, track).await?;
+
+            return Ok(ListenCount::new(count, coverage));
+        }
+
         let Some(start) = window.covered_start(marker) else {
             return Ok(ListenCount::new(0, coverage));
         };

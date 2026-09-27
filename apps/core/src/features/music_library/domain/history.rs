@@ -158,6 +158,10 @@ impl ListenWindow {
         Self::default()
     }
 
+    pub fn is_unbounded(&self) -> bool {
+        self.since.is_none() && self.until.is_none()
+    }
+
     pub fn since(&self) -> Option<DateTime<Utc>> {
         self.since
     }

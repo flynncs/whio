@@ -17,6 +17,8 @@ CREATE INDEX IF NOT EXISTS listens_user_track_time_idx ON listens (user_id, trac
 
 CREATE INDEX IF NOT EXISTS listens_user_time_idx ON listens (user_id, listen_at);
 
+CREATE INDEX IF NOT EXISTS listens_track_idx ON listens (track_id);
+
 CREATE TABLE IF NOT EXISTS listen_marks (
     user_id UUID PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
     started_at TIMESTAMPTZ NOT NULL
