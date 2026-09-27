@@ -2152,6 +2152,12 @@ fn report_playback_rejects_unknown_parameters_states_and_values() {
         ))),
         Err(ReportingError::MissingParameter)
     ));
+    assert!(matches!(
+        PlaybackReportRequest::parse(&RawQuery::parse(&format!(
+            "mediaId={track}&positionMs=0&state=playing"
+        ))),
+        Err(ReportingError::MissingParameter)
+    ));
 
     let request = PlaybackReportRequest::parse(&RawQuery::parse(&valid)).unwrap();
 

@@ -3849,6 +3849,23 @@ async fn subsonic_reporting_rejects_unknown_parameters_and_values(pool: PgPool) 
         );
     }
 
+    let (status, body) = get_status(
+        fixture.app.clone(),
+        &format!(
+            "/compat/subsonic/rest/reportPlayback.view?{auth}&mediaId={}&positionMs=0&state=playing",
+            fixture.track
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["subsonic-response"]["status"], json!("failed"));
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(10));
+    assert_eq!(
+        body["subsonic-response"]["error"]["message"],
+        json!("Required parameter is missing."),
+        "an absent required parameter is missing, not invalid"
+    );
     assert!(recorded_listens(&fixture.pool).await.is_empty());
 }
 

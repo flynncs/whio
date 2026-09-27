@@ -644,7 +644,11 @@ impl PlaybackReportRequest {
             .parse::<TrackId>()
             .map_err(|_| ReportingError::InvalidRequest)?;
 
-        if query.get("mediaType") != Some("song") {
+        let media_type = query
+            .get("mediaType")
+            .ok_or(ReportingError::MissingParameter)?;
+
+        if media_type != "song" {
             return Err(ReportingError::InvalidRequest);
         }
 
