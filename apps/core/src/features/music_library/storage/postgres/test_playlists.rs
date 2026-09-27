@@ -659,6 +659,28 @@ async fn remove_before_add_cannot_remove_a_new_occurrence(pool: PgPool) {
         "removing one occurrence of a repeated track leaves the other"
     );
     assert_eq!(trimmed[1].entry_id(), duplicated[2].entry_id());
+
+    let occupied = service
+        .edit(
+            owner,
+            playlist.id(),
+            edit(None, std::slice::from_ref(&first), vec![trimmed.len()]),
+        )
+        .await;
+    match occupied {
+        Err(PlaylistError::Entry(PlaylistEntryError::IndexOutOfRange { index })) => {
+            assert_eq!(usize::try_from(index).unwrap(), trimmed.len());
+        }
+        other => panic!(
+            "a removal naming the position the addition would occupy must be rejected, got {other:?}"
+        ),
+    }
+
+    let rolled_back = occurrences(&service, owner, playlist.id()).await;
+    assert_eq!(
+        rolled_back, trimmed,
+        "the rejected edit rolls back: the originals stay and the addition is not applied"
+    );
 }
 
 #[sqlx::test]
