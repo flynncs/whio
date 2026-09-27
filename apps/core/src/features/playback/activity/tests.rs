@@ -875,3 +875,42 @@ async fn a_principal_holds_one_live_session_per_client_up_to_the_bound() {
             .any(|session| session.client().as_str() == "client-16")
     );
 }
+
+#[tokio::test]
+async fn an_unusable_duration_qualifies_on_the_unknown_duration_limit() {
+    for duration_ms in [0, 1] {
+        let harness = harness(&[track(1, Some(duration_ms))]);
+        let phone = client("phone");
+
+        let started = harness
+            .service
+            .report(&report(&phone, PlaybackState::Starting, 0, 0))
+            .await
+            .unwrap();
+
+        assert_eq!(started.listened_ms(), 0);
+        assert_eq!(harness.ledger.plays(), 0, "duration {duration_ms}");
+        assert!(
+            harness.ledger.rows().is_empty(),
+            "duration {duration_ms} submitted {} rows",
+            harness.ledger.rows().len()
+        );
+
+        for report in ramp(&phone, 9, 0, 0) {
+            harness.service.report(&report).await.unwrap();
+        }
+
+        let rows = harness.ledger.rows();
+
+        assert_eq!(rows.len(), 1, "duration {duration_ms}");
+        assert_eq!(
+            rows[0].extent().map(|extent| extent.listened_ms()),
+            Some(240_000)
+        );
+        assert_eq!(rows[0].listen_at(), at(270_000));
+        assert_eq!(
+            rows[0].extent().map(|extent| extent.qualified()),
+            Some(true)
+        );
+    }
+}

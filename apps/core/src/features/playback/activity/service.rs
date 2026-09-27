@@ -260,9 +260,11 @@ impl LiveSessions {
 }
 
 fn qualification_threshold(duration_ms: Option<u64>) -> u64 {
-    duration_ms.map_or(QUALIFICATION_LIMIT_MS, |duration| {
-        (duration / 2).min(QUALIFICATION_LIMIT_MS)
-    })
+    duration_ms
+        .filter(|duration| *duration > 1)
+        .map_or(QUALIFICATION_LIMIT_MS, |duration| {
+            (duration / 2).min(QUALIFICATION_LIMIT_MS)
+        })
 }
 
 fn session_identity() -> Result<ListenSessionId, ActivityError> {
