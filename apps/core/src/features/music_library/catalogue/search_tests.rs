@@ -74,6 +74,14 @@ impl LibraryRead for FailingTrackRepository {
     ) -> Result<crate::features::music_library::domain::TrackPage, TrackRepositoryError> {
         Err(TrackRepositoryError::Unavailable)
     }
+
+    async fn track_views(
+        &self,
+        _track_ids: &[crate::features::music_library::domain::TrackId],
+        _user: Option<Uuid>,
+    ) -> Result<Vec<crate::features::music_library::domain::TrackView>, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
 }
 
 #[async_trait]

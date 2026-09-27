@@ -521,6 +521,63 @@ impl LibraryRead for PgStore {
         Ok(TrackPage::new(items, total))
     }
 
+    async fn track_views(
+        &self,
+        track_ids: &[TrackId],
+        user: Option<Uuid>,
+    ) -> Result<Vec<TrackView>, TrackRepositoryError> {
+        if track_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let ids = track_ids
+            .iter()
+            .map(|track_id| *track_id.as_uuid())
+            .collect::<Vec<_>>();
+        let rows = sqlx::query_as::<_, TrackRecord>(&format!(
+            "SELECT {TRACK_COLUMNS} FROM tracks AS t WHERE t.id = ANY($1)"
+        ))
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        let mut credits = credits_for_tracks(&self.pool, &ids).await?;
+        let mut genres = genres_for_tracks(&self.pool, &ids).await?;
+        let mut sources = sources_for_tracks(&self.pool, &ids).await?;
+        let states = track_states(&self.pool, user, &ids).await?;
+        let mut albums = albums_for_tracks(&self.pool, &ids).await?;
+        let mut views = Vec::with_capacity(rows.len());
+
+        for row in rows {
+            let id = row.id;
+            let track = decode_track(
+                row,
+                genres.remove(&id).unwrap_or_default(),
+                credits.remove(&id).unwrap_or_default(),
+            )?;
+            let (album, membership, album_artist) = match albums.remove(&id) {
+                Some((album, membership, album_artist)) => {
+                    (Some(album), Some(membership), album_artist)
+                }
+                None => (None, None, None),
+            };
+            let state = states.get(&id).copied().unwrap_or_default();
+            let sources = sources.remove(&id).unwrap_or_default();
+
+            views.push(TrackView::new(
+                track,
+                album,
+                membership,
+                album_artist,
+                state,
+                sources,
+            ));
+        }
+
+        Ok(views)
+    }
+
     async fn search_tracks(
         &self,
         query: &str,

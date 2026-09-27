@@ -1,14 +1,15 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::features::music_library::{
-    catalogue::{CatalogueError, LibraryService, SearchHit},
+    catalogue::{CatalogueError, LibraryService},
     domain::{
         CommentPatch, MoveTarget, OccurrenceSelector, Playlist, PlaylistEntryChange,
-        PlaylistEntryError, PlaylistId, PlaylistMetadataPatch, PlaylistOccurrence, PlaylistWrite,
-        PlaylistWriteOutcome, TrackId,
+        PlaylistEntryError, PlaylistEntryId, PlaylistId, PlaylistMetadataPatch, PlaylistOccurrence,
+        PlaylistWrite, PlaylistWriteOutcome, TrackId, TrackView,
     },
     storage::contracts::{PlaylistStore, TrackRepositoryError},
 };
@@ -33,8 +34,36 @@ pub enum PlaylistError {
 
 pub struct PlaylistDetail {
     pub playlist: Playlist,
-    pub entries: Vec<SearchHit>,
+    pub entries: Vec<PlaylistEntry>,
     pub editable: bool,
+}
+
+pub struct PlaylistEntry {
+    entry_id: PlaylistEntryId,
+    position: u32,
+    track: TrackView,
+}
+
+impl PlaylistEntry {
+    pub fn new(entry_id: PlaylistEntryId, position: u32, track: TrackView) -> Self {
+        Self {
+            entry_id,
+            position,
+            track,
+        }
+    }
+
+    pub fn entry_id(&self) -> &PlaylistEntryId {
+        &self.entry_id
+    }
+
+    pub fn position(&self) -> u32 {
+        self.position
+    }
+
+    pub fn track(&self) -> &TrackView {
+        &self.track
+    }
 }
 
 pub struct PlaylistEdit<'a> {
@@ -87,16 +116,29 @@ impl PlaylistService {
             .playlist_occurrences(playlist_id)
             .await
             .map_err(PlaylistError::Repository)?;
+        let track_ids = occurrences
+            .iter()
+            .map(|occurrence| occurrence.track_id().clone())
+            .collect::<Vec<_>>();
+        let views = self
+            .library
+            .track_views(&track_ids, Some(&principal))
+            .await
+            .map_err(PlaylistError::Library)?;
+        let views = views
+            .into_iter()
+            .map(|view| (view.track().id().clone(), view))
+            .collect::<HashMap<_, _>>();
         let mut entries = Vec::with_capacity(occurrences.len());
         for occurrence in &occurrences {
-            if let Some(hit) = self
-                .library
-                .track_detail(occurrence.track_id(), Some(&principal))
-                .await
-                .map_err(PlaylistError::Library)?
-            {
-                entries.push(hit);
-            }
+            let Some(view) = views.get(occurrence.track_id()) else {
+                continue;
+            };
+            entries.push(PlaylistEntry::new(
+                occurrence.entry_id().clone(),
+                occurrence.position(),
+                view.clone(),
+            ));
         }
 
         Ok(Some(PlaylistDetail {
@@ -235,6 +277,25 @@ impl PlaylistService {
         };
 
         Ok(applied(self.write(write).await?)?.is_some())
+    }
+
+    pub async fn write_at_revision(
+        &self,
+        principal: Uuid,
+        playlist_id: &PlaylistId,
+        expected_revision: Option<i64>,
+        metadata: PlaylistMetadataPatch,
+        entries: PlaylistEntryChange,
+    ) -> Result<Option<Playlist>, PlaylistError> {
+        let write = PlaylistWrite {
+            principal,
+            playlist_id: playlist_id.clone(),
+            expected_revision,
+            metadata,
+            entries,
+        };
+
+        applied(self.write(write).await?)
     }
 
     pub async fn move_entry(

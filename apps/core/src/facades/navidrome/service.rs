@@ -14,7 +14,9 @@ use crate::{
         SelectorText, SortDirection, TrackId, TrackListFilter, TrackOrder, TrackView,
     },
     features::music_library::library::{LibraryId, LibraryRegistrationError, LibraryRegistry},
-    features::music_library::playlists::{PlaylistDetail, PlaylistError, PlaylistService},
+    features::music_library::playlists::{
+        PlaylistDetail, PlaylistEntry, PlaylistError, PlaylistService,
+    },
 };
 
 use super::{
@@ -97,6 +99,15 @@ fn song_from_view(view: &TrackView, tags: SourceTags) -> Song {
         play_count: u64::from(state.play_count()),
         play_date: state.last_played_at().map(|at| at.to_rfc3339()),
     }
+}
+
+fn song_from_playlist_entry(entry: &PlaylistEntry, tags: SourceTags) -> Song {
+    let mut song = song_from_view(entry.track(), tags);
+    song.album_artist = None;
+    song.track_number = None;
+    song.disc_number = None;
+
+    song
 }
 
 fn song_from_entry(entry: &AlbumEntry, album: &AlbumSummary, tags: SourceTags) -> Song {
@@ -320,7 +331,7 @@ fn playlist_from(detail: &PlaylistDetail, owner: Uuid, tags: SourceTags) -> Play
         songs: detail
             .entries
             .iter()
-            .map(|hit| song_from(hit, tags))
+            .map(|entry| song_from_playlist_entry(entry, tags))
             .collect(),
     }
 }

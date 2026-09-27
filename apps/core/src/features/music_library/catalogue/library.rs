@@ -9,7 +9,7 @@ use crate::features::music_library::{
             AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId,
             ArtistListFilter, ArtistSort, ArtistSummary, Availability, GenreSummary, LibraryState,
             PageLimit, SourceIdentity, Track, TrackId, TrackListFilter, TrackOrder, TrackPage,
-            ValidationError,
+            TrackView, ValidationError,
         },
         storage::contracts::{LibraryRead, SourceLookup, StateStore, TrackRepositoryError},
     },
@@ -229,6 +229,17 @@ impl LibraryService {
             .page_tracks(offset, limit.get(), order, filter, user.copied())
             .await
             .map_err(catalogue_error)
+    }
+
+    pub async fn track_views(
+        &self,
+        track_ids: &[TrackId],
+        user: Option<&Uuid>,
+    ) -> Result<Vec<TrackView>, CatalogueError> {
+        self.library
+            .track_views(track_ids, user.copied())
+            .await
+            .map_err(CatalogueError::Repository)
     }
 
     pub async fn sources(&self, track_id: &TrackId) -> Result<Vec<SourceIdentity>, CatalogueError> {

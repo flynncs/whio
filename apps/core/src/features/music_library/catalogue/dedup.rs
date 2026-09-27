@@ -410,6 +410,16 @@ mod tests {
         > {
             Err(crate::features::music_library::storage::contracts::TrackRepositoryError::Unavailable)
         }
+        async fn track_views(
+            &self,
+            _: &[crate::features::music_library::domain::TrackId],
+            _: Option<uuid::Uuid>,
+        ) -> Result<
+            Vec<crate::features::music_library::domain::TrackView>,
+            crate::features::music_library::storage::contracts::TrackRepositoryError,
+        > {
+            Err(crate::features::music_library::storage::contracts::TrackRepositoryError::Unavailable)
+        }
     }
     #[async_trait::async_trait]
     impl crate::features::music_library::storage::contracts::CatalogueWrite for UnusableCandidates {

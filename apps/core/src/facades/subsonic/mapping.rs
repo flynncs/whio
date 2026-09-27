@@ -8,7 +8,7 @@ use crate::{
         Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary, GenreSummary,
         LibraryState, Playlist, SourceIdentity, Track, TrackView,
     },
-    features::music_library::playlists::PlaylistDetail,
+    features::music_library::playlists::{PlaylistDetail, PlaylistEntry},
 };
 
 pub(crate) fn child_from_hit(hit: &SearchHit, tags: SourceTags) -> models::Child {
@@ -20,6 +20,20 @@ pub(crate) fn child_from_hit(hit: &SearchHit, tags: SourceTags) -> models::Child
         tags,
         None,
         hit.state(),
+    )
+}
+
+pub(crate) fn child_from_playlist_entry(entry: &PlaylistEntry, tags: SourceTags) -> models::Child {
+    let view = entry.track();
+
+    child_from_track(
+        view.track(),
+        view.album().map(Album::id),
+        view.album().map(Album::title),
+        view.sources(),
+        tags,
+        None,
+        *view.state(),
     )
 }
 
@@ -183,7 +197,7 @@ pub(crate) fn playlist_with_songs(
             detail
                 .entries
                 .iter()
-                .map(|hit| child_from_hit(hit, tags))
+                .map(|entry| child_from_playlist_entry(entry, tags))
                 .collect(),
         ),
     }

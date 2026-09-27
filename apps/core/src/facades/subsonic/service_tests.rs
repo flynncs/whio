@@ -351,6 +351,14 @@ impl LibraryRead for CountingLibrary {
             .page_tracks(offset, limit, order, filter, user)
             .await
     }
+
+    async fn track_views(
+        &self,
+        track_ids: &[crate::features::music_library::domain::TrackId],
+        user: Option<Uuid>,
+    ) -> Result<Vec<crate::features::music_library::domain::TrackView>, TrackRepositoryError> {
+        self.inner.track_views(track_ids, user).await
+    }
 }
 
 async fn counting_catalogue(

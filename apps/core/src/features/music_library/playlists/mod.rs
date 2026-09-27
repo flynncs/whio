@@ -1,3 +1,3 @@
 mod service;
 
-pub use service::{PlaylistDetail, PlaylistEdit, PlaylistError, PlaylistService};
+pub use service::{PlaylistDetail, PlaylistEdit, PlaylistEntry, PlaylistError, PlaylistService};
