@@ -6,7 +6,7 @@ mod storage;
 #[cfg(any(test, feature = "postgres-integration"))]
 pub mod test_support {
     pub use super::storage::contracts::{
-        CatalogueWrite, DuplicateReport, LibraryRead, LibraryStore, PlaylistStore,
+        CatalogueWrite, DuplicateReport, LibraryRead, LibraryStore, ListenStore, PlaylistStore,
         RestoreQueueStore, Retention, SourceFileFacts, SourceLookup, StateStore,
         TrackRepositoryError,
     };

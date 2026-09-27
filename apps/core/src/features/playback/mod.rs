@@ -1,3 +1,4 @@
+pub mod activity;
 pub(crate) mod api;
 pub mod delivery;
 mod domain;
@@ -7,8 +8,12 @@ pub mod providers;
 mod service;
 mod source;
 
+pub use activity::{ActivityError, PlaybackActivityService};
 pub use delivery::{DeliveryError, DeliveryResult};
-pub use domain::{LocalMedia, MediaMetadata, PlayableMedia, PlaybackUrl, ValidationError};
+pub use domain::{
+    ActivityInputError, ActivitySession, LocalMedia, MediaMetadata, PlayableMedia, PlaybackClient,
+    PlaybackRate, PlaybackReport, PlaybackState, PlaybackUrl, ValidationError,
+};
 pub use ports::{PlaybackDelivery, PlaybackProvider};
 pub use service::{PlaybackError, ResolvedPlayback, StreamingService};
 pub use source::{LocalSource, PlaybackSource, YoutubeSource};
