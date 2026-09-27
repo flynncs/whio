@@ -8,7 +8,7 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    facades::navidrome::state::NavidromeState,
+    facades::navidrome::state::{NavidromeQueueState, NavidromeState},
     features::music_library::domain::{
         AlbumListFilter, ArtistId, ArtistListFilter, CommentPatch, IdSet, OccurrenceSelector,
         Playlist, PlaylistEntryChange, PlaylistEntryError, PlaylistMetadataPatch, Range,
@@ -16,6 +16,7 @@ use crate::{
     },
     features::music_library::library::{LibraryId, LibraryRegistry},
     features::music_library::playlists::PlaylistError,
+    features::music_library::queue::RestoreQueueError,
     platform::raw_query::RawQuery,
     platform::request::RequestContext,
 };
@@ -24,7 +25,7 @@ use super::{
     auth::NdToken,
     dto::{
         PlaylistAdded, PlaylistCreateBody, PlaylistCreated, PlaylistMoveBody, PlaylistMoved,
-        PlaylistRemoved, PlaylistTracksBody, PlaylistUpdateBody, SongListQuery,
+        PlaylistRemoved, PlaylistTracksBody, PlaylistUpdateBody, QueueSaveBody, SongListQuery,
     },
     errors,
     service::{self, SongError},
@@ -855,6 +856,49 @@ pub(crate) async fn playlist_move_track(
     }
 }
 
+pub(crate) async fn queue_read(
+    State(state): State<NavidromeQueueState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+) -> Response {
+    match service::queue_read(
+        state.navidrome().library(),
+        state.navidrome().credential(),
+        &token.0,
+        state.queue(),
+        state.navidrome().source_tags(),
+    )
+    .await
+    {
+        Ok(queue) => Json(queue).into_response(),
+        Err(error) => song_error(error, &context),
+    }
+}
+
+pub(crate) async fn queue_save(
+    State(state): State<NavidromeQueueState>,
+    Extension(context): Extension<RequestContext>,
+    token: NdToken,
+    body: Result<Json<QueueSaveBody>, JsonRejection>,
+) -> Response {
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => return song_error(SongError::InvalidRequest, &context),
+    };
+
+    match service::queue_save(
+        state.navidrome().credential(),
+        &token.0,
+        state.queue(),
+        body,
+    )
+    .await
+    {
+        Ok(()) => Json(()).into_response(),
+        Err(error) => song_error(error, &context),
+    }
+}
+
 fn playlist_entry_error(error: PlaylistEntryError) -> Response {
     match error {
         PlaylistEntryError::UnknownEntry { .. } | PlaylistEntryError::IndexOutOfRange { .. } => {
@@ -893,6 +937,27 @@ fn song_error(error: SongError, context: &RequestContext) -> Response {
         }
         SongError::Registry(error) => {
             tracing::error!(error = %error, request_id = context.request_id().as_str(), "library registry read failed");
+            errors::error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error.")
+        }
+        SongError::Queue(error) => queue_error(error, context),
+    }
+}
+
+fn queue_error(error: RestoreQueueError, context: &RequestContext) -> Response {
+    match error {
+        RestoreQueueError::Invalid(_) => {
+            errors::error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid request.")
+        }
+        RestoreQueueError::Conflict { .. } => errors::error(StatusCode::CONFLICT, "Conflict."),
+        RestoreQueueError::Disabled => {
+            tracing::error!(
+                request_id = context.request_id().as_str(),
+                "restore queue is not configured"
+            );
+            errors::error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error.")
+        }
+        RestoreQueueError::Repository(error) => {
+            tracing::error!(error = %error, request_id = context.request_id().as_str(), "restore queue request failed");
             errors::error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error.")
         }
     }

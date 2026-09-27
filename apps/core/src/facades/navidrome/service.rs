@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -12,17 +14,20 @@ use crate::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistListFilter,
         ArtistSort, ArtistSummary, CommentPatch, GenreSummary, IdSet, MAX_PAGE_LIMIT, MoveTarget,
         OccurrenceSelector, PageLimit, Playlist as PlaylistRecord, PlaylistEntryChange, PlaylistId,
-        PlaylistMetadataPatch, SelectorText, SortDirection, TrackId, TrackListFilter, TrackOrder,
-        TrackView,
+        PlaylistMetadataPatch, RestoreQueueSnapshot, SelectorText, SortDirection, TrackId,
+        TrackListFilter, TrackOrder, TrackView,
     },
     features::music_library::library::{LibraryId, LibraryRegistrationError, LibraryRegistry},
     features::music_library::playlists::{
         PlaylistDetail, PlaylistEntry, PlaylistError, PlaylistService,
     },
+    features::music_library::queue::{RestoreQueueError, RestoreQueueSave, RestoreQueueService},
 };
 
 use super::{
-    dto::{Album, Artist, Genre, Playlist, PlaylistSong, Song, SongListQuery},
+    dto::{
+        Album, Artist, Genre, Playlist, PlaylistSong, Queue, QueueSaveBody, Song, SongListQuery,
+    },
     session,
 };
 
@@ -54,6 +59,9 @@ pub(crate) enum SongError {
 
     #[error("library registry read failed")]
     Registry(#[source] LibraryRegistrationError),
+
+    #[error("restore queue request failed")]
+    Queue(#[source] RestoreQueueError),
 }
 
 fn song_from(hit: &SearchHit, tags: SourceTags) -> Song {
@@ -733,6 +741,83 @@ pub(crate) async fn genre_list(
         .await
         .map(|genres| genres.iter().map(genre_from_summary).collect())
         .map_err(SongError::Catalogue)
+}
+
+pub(crate) async fn queue_read(
+    library: &LibraryService,
+    credential: &CredentialService,
+    token: &str,
+    queue: &RestoreQueueService,
+    tags: SourceTags,
+) -> Result<Queue, SongError> {
+    let user = authorize(credential, token).await?;
+    let Some(snapshot) = queue.read(user).await.map_err(SongError::Queue)? else {
+        return Ok(Queue::empty());
+    };
+
+    if snapshot.is_empty() {
+        return Ok(Queue::empty());
+    }
+
+    let track_ids: Vec<TrackId> = snapshot
+        .entries()
+        .iter()
+        .map(|entry| entry.track_id().clone())
+        .collect();
+    let views = library
+        .track_views(&track_ids, Some(&user))
+        .await
+        .map_err(SongError::Catalogue)?;
+    let mut by_track: HashMap<TrackId, TrackView> = views
+        .into_iter()
+        .map(|view| (view.track().id().clone(), view))
+        .collect();
+    let items = snapshot
+        .entries()
+        .iter()
+        .filter_map(|entry| by_track.remove(entry.track_id()))
+        .map(|view| song_from_view(&view, tags))
+        .collect();
+
+    Ok(queue_from(&snapshot, items))
+}
+
+pub(crate) async fn queue_save(
+    credential: &CredentialService,
+    token: &str,
+    queue: &RestoreQueueService,
+    body: QueueSaveBody,
+) -> Result<(), SongError> {
+    let user = authorize(credential, token).await?;
+    let entries = body
+        .ids
+        .unwrap_or_default()
+        .iter()
+        .map(|raw| track_id(raw))
+        .collect::<Result<Vec<_>, _>>()?;
+    let save = RestoreQueueSave {
+        entries,
+        current_index: body.current,
+        position_ms: body.position.unwrap_or(0),
+    };
+
+    queue.save(user, save).await.map_err(SongError::Queue)?;
+
+    Ok(())
+}
+
+pub(crate) fn queue_from(snapshot: &RestoreQueueSnapshot, items: Vec<Song>) -> Queue {
+    Queue {
+        changed_by: snapshot.changed_by_username().to_owned(),
+        current: snapshot.current_index().unwrap_or(0),
+        items,
+        position: snapshot.position_ms(),
+        updated_at: snapshot.changed_at().to_rfc3339(),
+    }
+}
+
+fn track_id(raw: &str) -> Result<TrackId, SongError> {
+    raw.parse().map_err(|_| SongError::NotFound)
 }
 
 async fn authorize(credential: &CredentialService, token: &str) -> Result<Uuid, SongError> {

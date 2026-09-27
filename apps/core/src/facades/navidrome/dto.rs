@@ -228,6 +228,39 @@ pub(crate) struct PlaylistMoveBody {
     pub(crate) insert_before: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QueueSaveBody {
+    #[serde(default)]
+    pub(crate) current: Option<u32>,
+    #[serde(default)]
+    pub(crate) ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub(crate) position: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Queue {
+    pub(crate) changed_by: String,
+    pub(crate) current: u32,
+    pub(crate) items: Vec<Song>,
+    pub(crate) position: u64,
+    pub(crate) updated_at: String,
+}
+
+impl Queue {
+    pub(crate) fn empty() -> Self {
+        Self {
+            changed_by: String::new(),
+            current: 0,
+            items: Vec::new(),
+            position: 0,
+            updated_at: String::new(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub(crate) struct NdError {
     pub(crate) error: String,

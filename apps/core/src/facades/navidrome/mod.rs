@@ -48,3 +48,17 @@ where
         )
         .fallback(errors::not_found)
 }
+
+pub(crate) fn queue_router<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+    state::NavidromeQueueState: FromRef<S>,
+{
+    Router::new()
+        .route("/api/queue", get(routes::queue_read))
+        .route("/api/queue", post(routes::queue_save))
+}
+
+#[cfg(test)]
+#[path = "queue_tests.rs"]
+mod queue_tests;
