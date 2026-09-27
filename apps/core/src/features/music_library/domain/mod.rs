@@ -9,6 +9,7 @@ mod page;
 mod playlist;
 mod provider_state;
 mod query;
+mod queue;
 mod retention;
 mod search;
 mod source;
@@ -43,6 +44,10 @@ pub use provider_state::ProviderEntityState;
 pub use query::{
     IdSet, MAX_SELECTOR_IDS, MAX_SELECTOR_TEXT, RandomSeed, Range, Resource, RoleSelector, RoleSet,
     SelectorText, SortDirection,
+};
+pub use queue::{
+    RestoreQueueEntry, RestoreQueueEntryId, RestoreQueueSnapshot, RestoreQueueValidationError,
+    RestoreQueueWrite, RestoreQueueWriteOutcome,
 };
 pub use retention::{EvictionReport, RetentionReport};
 pub use search::{MatchQuality, SearchConfidence, SearchTerms};

@@ -3,6 +3,7 @@ mod error;
 mod libraries;
 mod library;
 mod playlist;
+mod queue;
 mod state;
 
 pub use catalogue::{CatalogueWrite, ReconcileReport};
@@ -10,4 +11,5 @@ pub use error::{SourceFileFacts, TrackRepositoryError};
 pub use libraries::LibraryStore;
 pub use library::{LibraryRead, SourceLookup};
 pub use playlist::PlaylistStore;
+pub use queue::RestoreQueueStore;
 pub use state::{DuplicateReport, Retention, StateStore};

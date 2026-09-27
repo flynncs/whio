@@ -21,6 +21,7 @@ pub mod library_state;
 pub mod maintenance;
 pub mod playlists;
 pub mod providers;
+pub mod queue;
 
 pub(crate) use storage::maintenance;
 pub mod sources;

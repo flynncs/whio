@@ -9,6 +9,7 @@ pub(crate) mod decode;
 mod libraries;
 mod library;
 mod playlists;
+mod queue;
 mod reports;
 pub(crate) mod schema;
 mod sources;
@@ -39,6 +40,9 @@ mod test_query_artists;
 #[cfg(all(test, feature = "postgres-integration"))]
 #[path = "test_query_tracks.rs"]
 mod test_query_tracks;
+#[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_queue.rs"]
+mod test_queue;
 #[cfg(all(test, feature = "postgres-integration"))]
 #[path = "test_retention.rs"]
 mod test_retention;
