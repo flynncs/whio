@@ -817,6 +817,49 @@ mod tests {
     }
 
     #[test]
+    fn worker_queues_parse_as_a_list_and_reject_a_malformed_one() {
+        let config =
+            parse_config(&[(WORKER_QUEUES, " whio.jobs.probe , whio.jobs.other ")]).unwrap();
+        assert_eq!(
+            config.worker.queues,
+            vec!["whio.jobs.probe".to_owned(), "whio.jobs.other".to_owned()]
+        );
+
+        for value in ["", " , ", "whio.jobs.probe,whio.jobs.probe", "a, a"] {
+            assert!(
+                matches!(
+                    parse_config(&[(WORKER_QUEUES, value)]),
+                    Err(ConfigError::Invalid {
+                        name: WORKER_QUEUES,
+                        ..
+                    })
+                ),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_limits_reject_absent_bounds() {
+        for (name, value) in [
+            (WORKER_BIND_ADDRESS, "not an address"),
+            (WORKER_MAX_WORKERS, "0"),
+            (WORKER_MAX_WORKERS, "many"),
+            (WORKER_POLL_INTERVAL, "0"),
+            (WORKER_PROMOTE_INTERVAL, "later"),
+            (WORKER_DRAIN_TIMEOUT, "0"),
+        ] {
+            assert!(
+                matches!(
+                    parse_config(&[(name, value)]),
+                    Err(ConfigError::Invalid { .. })
+                ),
+                "{name}={value}"
+            );
+        }
+    }
+
+    #[test]
     fn database_configuration_is_required() {
         let vars = HashMap::new();
 

@@ -69,7 +69,7 @@ pub async fn enqueue<T: JobArgs>(
     }
 }
 
-async fn savepoint(tx: &mut PgConnection, statement: &str) -> Result<(), JobsError> {
+async fn savepoint(tx: &mut PgConnection, statement: &'static str) -> Result<(), JobsError> {
     sqlx::query(&format!("{statement} {COALESCE_SAVEPOINT}"))
         .execute(&mut *tx)
         .await

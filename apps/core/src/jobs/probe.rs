@@ -10,7 +10,7 @@ use crate::platform::jobs::{Enqueued, JobsError, PendingJob};
 pub const PROBE_QUEUE: &str = "whio.jobs.probe";
 pub const PROBE_KIND: &str = "whio.jobs.probe.v1";
 
-const PROBE_RESULT: &str = "whio.jobs.probe.v1";
+const PROBE_RESULT: &str = PROBE_KIND;
 const PROBE_PRIORITY: i16 = 2;
 const PROBE_MAX_ATTEMPTS: i16 = 5;
 
