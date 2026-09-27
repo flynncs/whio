@@ -9,11 +9,15 @@ pub const NON_TERMINAL_UNIQUE_STATES: u8 = 0b0001_0111;
 pub enum JobsError {
     #[error("job enqueue failed")]
     Enqueue(#[source] AwaError),
+
+    #[error("enqueue savepoint failed")]
+    Savepoint(#[source] sqlx::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Enqueued {
-    pub job_id: i64,
+pub enum Enqueued {
+    Inserted { job_id: i64 },
+    Coalesced,
 }
 
 pub struct PendingJob<'a, T> {
@@ -24,6 +28,8 @@ pub struct PendingJob<'a, T> {
     pub operation_id: Uuid,
     pub coalesce: bool,
 }
+
+const COALESCE_SAVEPOINT: &str = "whio_job_enqueue";
 
 pub async fn enqueue<T: JobArgs>(
     tx: &mut PgConnection,
@@ -43,11 +49,30 @@ pub async fn enqueue<T: JobArgs>(
             by_period: None,
             states: NON_TERMINAL_UNIQUE_STATES,
         });
+
+        savepoint(tx, "SAVEPOINT").await?;
     }
 
-    let row = insert_with(&mut *tx, job.payload, options)
-        .await
-        .map_err(JobsError::Enqueue)?;
+    match insert_with(&mut *tx, job.payload, options).await {
+        Ok(row) => {
+            if job.coalesce {
+                savepoint(tx, "RELEASE SAVEPOINT").await?;
+            }
+            Ok(Enqueued::Inserted { job_id: row.id })
+        }
+        Err(AwaError::UniqueConflict { .. }) if job.coalesce => {
+            savepoint(tx, "ROLLBACK TO SAVEPOINT").await?;
+            savepoint(tx, "RELEASE SAVEPOINT").await?;
+            Ok(Enqueued::Coalesced)
+        }
+        Err(error) => Err(JobsError::Enqueue(error)),
+    }
+}
 
-    Ok(Enqueued { job_id: row.id })
+async fn savepoint(tx: &mut PgConnection, statement: &str) -> Result<(), JobsError> {
+    sqlx::query(&format!("{statement} {COALESCE_SAVEPOINT}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(JobsError::Savepoint)?;
+    Ok(())
 }

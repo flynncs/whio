@@ -40,6 +40,8 @@ pub use credentials::{
 mod media;
 pub use media::{delivery, pictured_flac};
 
+pub mod worker;
+
 // the single place test suites assemble app state; new services are wired
 // here once instead of in every suite
 pub fn router(

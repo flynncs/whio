@@ -39,7 +39,7 @@ impl Worker for ProbeWorker {
             JobError::Terminal(format!("probe payload is not applicable: {error}"))
         })?;
 
-        if applied_operation(ctx) == Some(args.operation_id) {
+        if applied_operation(ctx.job.progress.as_ref()) == Some(args.operation_id) {
             tracing::info!(
                 job_id = ctx.job.id,
                 operation_id = %args.operation_id,
@@ -48,13 +48,8 @@ impl Worker for ProbeWorker {
             return Ok(JobResult::Completed);
         }
 
-        ctx.update_metadata(serde_json::json!({
-            PROBE_RESULT: {
-                "operation_id": args.operation_id.to_string(),
-                "transitions": 1,
-            }
-        }))
-        .map_err(JobError::retryable)?;
+        ctx.update_metadata(result_record(args.operation_id))
+            .map_err(JobError::retryable)?;
         ctx.set_progress(100, "applied");
         ctx.flush_progress().await.map_err(JobError::retryable)?;
 
@@ -68,10 +63,17 @@ impl Worker for ProbeWorker {
     }
 }
 
-fn applied_operation(ctx: &JobContext) -> Option<Uuid> {
-    ctx.job
-        .progress
-        .as_ref()?
+fn result_record(operation_id: Uuid) -> serde_json::Value {
+    serde_json::json!({
+        PROBE_RESULT: {
+            "operation_id": operation_id.to_string(),
+            "transitions": 1,
+        }
+    })
+}
+
+fn applied_operation(progress: Option<&serde_json::Value>) -> Option<Uuid> {
+    progress?
         .get("metadata")?
         .get(PROBE_RESULT)?
         .get("operation_id")?
@@ -119,4 +121,26 @@ pub(crate) fn register(builder: ClientBuilder) -> ClientBuilder {
             },
         )
         .register_worker(ProbeWorker)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_recorded_result_names_its_operation() {
+        let operation_id = Uuid::now_v7();
+        let progress = serde_json::json!({ "metadata": result_record(operation_id) });
+
+        assert_eq!(applied_operation(Some(&progress)), Some(operation_id));
+        assert_eq!(
+            applied_operation(Some(&serde_json::json!({
+                "metadata": result_record(Uuid::now_v7())
+            })))
+            .map(|applied| applied == operation_id),
+            Some(false)
+        );
+        assert_eq!(applied_operation(Some(&serde_json::json!({}))), None);
+        assert_eq!(applied_operation(None), None);
+    }
 }

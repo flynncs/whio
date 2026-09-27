@@ -15,7 +15,7 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub(crate) enum WorkerError {
-    #[error("invalid worker configuration")]
+    #[error(transparent)]
     Config(#[from] ConfigError),
 
     #[error("missing required WHIO_WORKER_QUEUES")]
