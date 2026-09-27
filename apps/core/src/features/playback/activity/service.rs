@@ -49,6 +49,14 @@ impl PlaybackActivityService {
         }
     }
 
+    pub fn disabled(library: Arc<LibraryService>) -> Self {
+        Self {
+            listens: Arc::new(ListenService::disabled()),
+            library,
+            sessions: Mutex::new(LiveSessions::default()),
+        }
+    }
+
     pub async fn report(&self, report: &PlaybackReport) -> Result<ActivitySession, ActivityError> {
         let Some(track) = self
             .library

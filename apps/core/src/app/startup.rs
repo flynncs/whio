@@ -11,6 +11,7 @@ use crate::{
         self, catalogue::CatalogueProvider, domain::YOUTUBE_MUSIC_PROVIDER_ID,
         library::LibraryRegistrationError, providers::YoutubeCatalogueProvider,
     },
+    features::playback::activity::PlaybackActivityService,
     features::playback::delivery::StreamDelivery,
     features::playback::media::{self, HttpMediaFetcher},
     features::playback::providers::{LocalPlaybackProvider, ProviderError, YtmAdapter},
@@ -148,11 +149,18 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         delivery,
     ));
 
+    let playback_activity = Arc::new(PlaybackActivityService::new(
+        Arc::clone(&music.listen),
+        Arc::clone(&music.library),
+    ));
+
     Ok(
         AppState::with_database(credential, music.search, music.library, streaming, database)
             .with_completion(music.completion)
             .with_playlists(music.playlists)
             .with_queue(music.queue)
+            .with_listen(Arc::clone(&music.listen))
+            .with_playback_activity(playback_activity)
             .with_artwork(music.artwork)
             .with_library_state(music.activity)
             .with_scanner(music.scanner)

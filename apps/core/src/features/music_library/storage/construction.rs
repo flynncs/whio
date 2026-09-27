@@ -6,14 +6,15 @@ use super::super::{
     artwork::ArtworkService,
     availability::ProviderRegistry,
     catalogue::{CatalogueProvider, CompletionService, DedupMode, LibraryService, SearchService},
+    history::ListenService,
     library::{LibraryRegistry, ScanService},
     library_state::LibraryStateService,
     playlists::PlaylistService,
     queue::RestoreQueueService,
     sources::SourceQueries,
     storage::contracts::{
-        CatalogueWrite, LibraryRead, LibraryStore, PlaylistStore, RestoreQueueStore, SourceLookup,
-        StateStore,
+        CatalogueWrite, LibraryRead, LibraryStore, ListenStore, PlaylistStore, RestoreQueueStore,
+        SourceLookup, StateStore,
     },
     storage::postgres::{PostgresLibraryStore, PostgresTrackRepository},
 };
@@ -24,6 +25,7 @@ pub struct MusicServices {
     pub completion: Arc<CompletionService>,
     pub playlists: Arc<PlaylistService>,
     pub queue: Arc<RestoreQueueService>,
+    pub listen: Arc<ListenService>,
     pub artwork: Arc<ArtworkService>,
     pub activity: Arc<LibraryStateService>,
     pub scanner: Arc<ScanService>,
@@ -80,6 +82,10 @@ pub fn construct(
         Arc::clone(&store) as Arc<dyn PlaylistStore>,
         Arc::clone(&library_service),
     ));
+    let listen = Arc::new(ListenService::new(
+        Arc::clone(&store) as Arc<dyn ListenStore>,
+        Arc::clone(&library) as Arc<dyn LibraryRead>,
+    ));
     let queue = Arc::new(RestoreQueueService::new(
         Arc::clone(&store) as Arc<dyn RestoreQueueStore>
     ));
@@ -96,6 +102,7 @@ pub fn construct(
         completion,
         playlists,
         queue,
+        listen,
         artwork,
         activity,
         scanner,

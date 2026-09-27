@@ -17,11 +17,13 @@ use crate::{
     features::identity::service::CredentialService,
     features::music_library::artwork::ArtworkService,
     features::music_library::catalogue::{CompletionService, LibraryService, SearchService},
+    features::music_library::history::ListenService,
     features::music_library::library::{LibraryRegistry, ScanService},
     features::music_library::library_state::LibraryStateService,
     features::music_library::playlists::PlaylistService,
     features::music_library::queue::RestoreQueueService,
     features::playback::StreamingService,
+    features::playback::activity::PlaybackActivityService,
 };
 
 #[derive(Clone)]
@@ -32,6 +34,8 @@ pub struct AppState {
     completion: Arc<CompletionService>,
     playlists: Arc<PlaylistService>,
     queue: Arc<RestoreQueueService>,
+    listen: Arc<ListenService>,
+    playback_activity: Arc<PlaybackActivityService>,
     credential: Arc<CredentialService>,
     database: Option<Arc<database::Database>>,
     library_state: Arc<LibraryStateService>,
@@ -81,6 +85,16 @@ impl AppState {
         self
     }
 
+    pub fn with_listen(mut self, listen: Arc<ListenService>) -> Self {
+        self.listen = listen;
+        self
+    }
+
+    pub fn with_playback_activity(mut self, activity: Arc<PlaybackActivityService>) -> Self {
+        self.playback_activity = activity;
+        self
+    }
+
     pub fn with_playlists(mut self, playlists: Arc<PlaylistService>) -> Self {
         self.playlists = playlists;
         self
@@ -119,6 +133,8 @@ impl AppState {
         let completion = Arc::new(CompletionService::disabled(Arc::clone(&library)));
         let playlists = Arc::new(PlaylistService::disabled(Arc::clone(&library)));
         let queue = Arc::new(RestoreQueueService::disabled());
+        let listen = Arc::new(ListenService::disabled());
+        let playback_activity = Arc::new(PlaybackActivityService::disabled(Arc::clone(&library)));
 
         Self {
             artwork: Arc::new(ArtworkService::disabled()),
@@ -128,6 +144,8 @@ impl AppState {
             completion,
             playlists,
             queue,
+            listen,
+            playback_activity,
             database,
             library_state: Arc::new(LibraryStateService::disabled()),
             streaming,
