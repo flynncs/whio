@@ -253,7 +253,7 @@ async fn a_duplicate_execution_has_one_effect(pool: PgPool) {
     let operation_id = Uuid::now_v7();
 
     let mut tx = pool.begin().await.expect("a transaction");
-    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, 60_000)
+    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, 60_000, false)
         .await
         .expect("an enqueue");
     tx.commit().await.expect("the commit");
@@ -421,7 +421,7 @@ async fn a_graceful_stop_drains_or_releases(pool: PgPool) {
     let queued_id = Uuid::now_v7();
 
     let mut tx = pool.begin().await.expect("a transaction");
-    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, 60_000)
+    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, 60_000, false)
         .await
         .expect("an enqueue");
     tx.commit().await.expect("the commit");
@@ -469,6 +469,54 @@ async fn a_graceful_stop_drains_or_releases(pool: PgPool) {
             + count_jobs(&pool, operation_id, "running").await,
         1,
         "the in-flight job was finished or released, not lost:\n{}",
+        worker.log()
+    );
+
+    assert_eq!(
+        effect_transitions(&pool, operation_id).await,
+        1,
+        "the in-flight work was processed, not dropped:\n{}",
+        worker.log()
+    );
+}
+
+#[sqlx::test]
+async fn a_graceful_stop_releases_a_job_that_outlasts_the_drain(pool: PgPool) {
+    Database::connect(&database_url(&pool))
+        .await
+        .expect("the worker's own migrations");
+
+    let operation_id = Uuid::now_v7();
+
+    let mut tx = pool.begin().await.expect("a transaction");
+    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, 60_000, true)
+        .await
+        .expect("an enqueue");
+    tx.commit().await.expect("the commit");
+    assert!(matches!(enqueued, Enqueued::Inserted { .. }));
+
+    let mut worker = Worker::start(&pool, PROBE_QUEUE);
+    worker.await_health("/health/ready", 200).await;
+    await_job_state(&pool, operation_id, "running", Duration::from_secs(60)).await;
+    await_progress_flushed(&pool, operation_id, Duration::from_secs(30)).await;
+
+    worker.interrupt();
+
+    let status = worker.await_exit(Duration::from_secs(60)).await;
+    assert!(
+        status.success(),
+        "the draining worker exits cleanly: {status}"
+    );
+
+    assert!(
+        worker.log().contains("drain timeout exceeded"),
+        "the outlasting job forced the drain to time out:\n{}",
+        worker.log()
+    );
+    assert_eq!(
+        count_jobs(&pool, operation_id, "running").await,
+        1,
+        "the outlasting job was released, not finished or lost:\n{}",
         worker.log()
     );
 

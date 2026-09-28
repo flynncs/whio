@@ -36,6 +36,8 @@ pub(crate) struct SlowProbeV1 {
     pub(crate) operation_id: Uuid,
     #[serde(default)]
     pub(crate) sleep_ms: u64,
+    #[serde(default)]
+    pub(crate) ignore_cancel: bool,
 }
 
 impl JobArgs for SlowProbeV1 {
@@ -132,7 +134,8 @@ impl Worker for SlowProbeWorker {
         let deadline =
             tokio::time::Instant::now() + std::time::Duration::from_millis(args.sleep_ms);
         loop {
-            if ctx.is_cancelled() || tokio::time::Instant::now() >= deadline {
+            let released = ctx.is_cancelled() && !args.ignore_cancel;
+            if released || tokio::time::Instant::now() >= deadline {
                 return Ok(JobResult::Completed);
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -220,6 +223,7 @@ pub async fn enqueue_slow(
     tx: &mut sqlx::PgConnection,
     operation_id: Uuid,
     sleep_ms: u64,
+    ignore_cancel: bool,
 ) -> Result<Enqueued, JobsError> {
     crate::platform::jobs::enqueue(
         tx,
@@ -228,6 +232,7 @@ pub async fn enqueue_slow(
             payload: &SlowProbeV1 {
                 operation_id,
                 sleep_ms,
+                ignore_cancel,
             },
             priority: PROBE_PRIORITY,
             max_attempts: PROBE_SLOW_MAX_ATTEMPTS,
