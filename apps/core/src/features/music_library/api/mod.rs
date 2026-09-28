@@ -1,3 +1,4 @@
+pub(crate) mod admin;
 pub(crate) mod cli;
 mod errors;
 pub(crate) mod history;

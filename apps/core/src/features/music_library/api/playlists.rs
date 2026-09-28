@@ -108,7 +108,7 @@ fn entry_field(error: PlaylistEntryError) -> &'static str {
     }
 }
 
-fn failure(context: &RequestContext, error: PlaylistError) -> PlaylistApiError {
+pub(crate) fn failure(context: &RequestContext, error: PlaylistError) -> PlaylistApiError {
     match error {
         PlaylistError::Disabled => {
             tracing::error!(
@@ -141,6 +141,8 @@ fn failure(context: &RequestContext, error: PlaylistError) -> PlaylistApiError {
                 field: entry_field(error),
             },
         ),
+        PlaylistError::Forbidden => forbidden(context),
+        PlaylistError::NotFound => not_found(context),
     }
 }
 
@@ -165,7 +167,7 @@ pub(crate) struct PlaylistItem {
 }
 
 impl PlaylistItem {
-    fn from_playlist(playlist: &Playlist) -> Self {
+    pub(crate) fn from_playlist(playlist: &Playlist) -> Self {
         Self {
             id: playlist.id().to_string(),
             name: playlist.name().to_owned(),

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::features::identity::domain::{Principal, UserId};
 use crate::features::music_library::{
     catalogue::{CatalogueError, LibraryService},
     domain::{
@@ -30,6 +31,29 @@ pub enum PlaylistError {
 
     #[error("playlist entry was not applied")]
     Entry(#[source] PlaylistEntryError),
+
+    #[error("only an admin may transfer playlist ownership")]
+    Forbidden,
+
+    #[error("playlist was not found")]
+    NotFound,
+}
+
+#[derive(Clone, Copy)]
+enum EditCaller<'a> {
+    Owner(Uuid),
+    Principal(&'a Principal),
+}
+
+impl EditCaller<'_> {
+    fn may_edit(&self, playlist: &Playlist) -> bool {
+        let (caller, admin) = match self {
+            Self::Owner(owner) => (*owner, false),
+            Self::Principal(principal) => (principal.user_id.as_uuid(), principal.is_admin()),
+        };
+
+        playlist.owner_id() == caller || admin
+    }
 }
 
 pub struct PlaylistDetail {
@@ -201,7 +225,7 @@ impl PlaylistService {
             entries: PlaylistEntryChange::Unchanged,
         };
 
-        applied(self.write(write).await?)
+        applied(self.write_as(EditCaller::Owner(principal), write).await?)
     }
 
     pub async fn delete(
@@ -232,7 +256,7 @@ impl PlaylistService {
             },
         };
 
-        Ok(applied(self.write(write).await?)?.is_some())
+        Ok(applied(self.write_as(EditCaller::Owner(principal), write).await?)?.is_some())
     }
 
     pub async fn edit(
@@ -276,7 +300,7 @@ impl PlaylistService {
             },
         };
 
-        Ok(applied(self.write(write).await?)?.is_some())
+        Ok(applied(self.write_as(EditCaller::Owner(principal), write).await?)?.is_some())
     }
 
     pub async fn write_at_revision(
@@ -295,7 +319,62 @@ impl PlaylistService {
             entries,
         };
 
-        applied(self.write(write).await?)
+        applied(self.write_as(EditCaller::Owner(principal), write).await?)
+    }
+
+    pub async fn write_at_revision_as(
+        &self,
+        caller: &Principal,
+        playlist_id: &PlaylistId,
+        expected_revision: Option<i64>,
+        metadata: PlaylistMetadataPatch,
+        entries: PlaylistEntryChange,
+    ) -> Result<Option<Playlist>, PlaylistError> {
+        let write = PlaylistWrite {
+            principal: caller.user_id.as_uuid(),
+            playlist_id: playlist_id.clone(),
+            expected_revision,
+            metadata,
+            entries,
+        };
+
+        applied(self.write_as(EditCaller::Principal(caller), write).await?)
+    }
+
+    pub async fn transfer_owner(
+        &self,
+        caller: &Principal,
+        playlist_id: &PlaylistId,
+        new_owner: UserId,
+    ) -> Result<Playlist, PlaylistError> {
+        if !caller.is_admin() {
+            return Err(PlaylistError::Forbidden);
+        }
+
+        let store = self.store()?;
+        let Some(current) = store
+            .find_playlist(playlist_id)
+            .await
+            .map_err(PlaylistError::Repository)?
+        else {
+            return Err(PlaylistError::NotFound);
+        };
+        if current.owner_id() == new_owner.as_uuid() {
+            return Ok(current);
+        }
+        if !store
+            .transfer_playlist_owner(playlist_id, new_owner.as_uuid())
+            .await
+            .map_err(PlaylistError::Repository)?
+        {
+            return Err(PlaylistError::NotFound);
+        }
+
+        store
+            .find_playlist(playlist_id)
+            .await
+            .map_err(PlaylistError::Repository)?
+            .ok_or(PlaylistError::NotFound)
     }
 
     pub async fn move_entry(
@@ -314,7 +393,7 @@ impl PlaylistService {
             entries: PlaylistEntryChange::Move { selector, target },
         };
 
-        Ok(applied(self.write(write).await?)?.is_some())
+        Ok(applied(self.write_as(EditCaller::Owner(principal), write).await?)?.is_some())
     }
 
     pub async fn create_or_append(
@@ -337,7 +416,7 @@ impl PlaylistService {
                     },
                     entries: PlaylistEntryChange::Replace(additions.to_vec()),
                 };
-                if applied(self.write(write).await?)?.is_none() {
+                if applied(self.write_as(EditCaller::Owner(principal), write).await?)?.is_none() {
                     return Ok(None);
                 }
 
@@ -356,7 +435,7 @@ impl PlaylistService {
                             additions: additions.to_vec(),
                         },
                     };
-                    applied(self.write(write).await?)?;
+                    applied(self.write_as(EditCaller::Owner(principal), write).await?)?;
                 }
 
                 playlist.id().clone()
@@ -371,7 +450,7 @@ impl PlaylistService {
     }
 
     fn editable_by(principal: Uuid, playlist: &Playlist) -> bool {
-        playlist.owner_id() == principal
+        EditCaller::Owner(principal).may_edit(playlist)
     }
 
     async fn visible_playlist(
@@ -388,7 +467,11 @@ impl PlaylistService {
         Ok(found.filter(|playlist| Self::visible_to(principal, playlist)))
     }
 
-    async fn write(&self, write: PlaylistWrite) -> Result<PlaylistWriteOutcome, PlaylistError> {
+    async fn write_as(
+        &self,
+        caller: EditCaller<'_>,
+        write: PlaylistWrite,
+    ) -> Result<PlaylistWriteOutcome, PlaylistError> {
         let store = self.store()?;
         let Some(current) = store
             .find_playlist(&write.playlist_id)
@@ -397,12 +480,15 @@ impl PlaylistService {
         else {
             return Ok(PlaylistWriteOutcome::Missing);
         };
-        if !Self::editable_by(write.principal, &current) {
+        if !caller.may_edit(&current) {
             return Ok(PlaylistWriteOutcome::Missing);
         }
 
         store
-            .write_playlist(write)
+            .write_playlist(PlaylistWrite {
+                principal: current.owner_id(),
+                ..write
+            })
             .await
             .map_err(PlaylistError::Repository)
     }

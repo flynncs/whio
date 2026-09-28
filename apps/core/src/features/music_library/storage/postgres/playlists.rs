@@ -387,6 +387,24 @@ impl PlaylistStore for PgStore {
         Ok(deleted > 0)
     }
 
+    async fn transfer_playlist_owner(
+        &self,
+        playlist_id: &PlaylistId,
+        new_owner: Uuid,
+    ) -> Result<bool, TrackRepositoryError> {
+        let transferred = sqlx::query(
+            "UPDATE playlists SET user_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+        )
+        .bind(playlist_id.as_uuid())
+        .bind(new_owner)
+        .execute(&self.pool)
+        .await
+        .map_err(repository_error)?
+        .rows_affected();
+
+        Ok(transferred > 0)
+    }
+
     async fn playlist_occurrences(
         &self,
         playlist_id: &PlaylistId,

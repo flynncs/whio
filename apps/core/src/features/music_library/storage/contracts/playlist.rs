@@ -29,6 +29,12 @@ pub trait PlaylistStore: Send + Sync {
         playlist_id: &PlaylistId,
     ) -> Result<bool, TrackRepositoryError>;
 
+    async fn transfer_playlist_owner(
+        &self,
+        playlist_id: &PlaylistId,
+        new_owner: Uuid,
+    ) -> Result<bool, TrackRepositoryError>;
+
     async fn playlist_occurrences(
         &self,
         playlist_id: &PlaylistId,
