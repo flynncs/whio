@@ -80,6 +80,12 @@ pub(crate) fn router(state: AppState) -> Router {
             "/compat/navidrome",
             facades::navidrome::router::<AppState>().layer(from_fn(facades::cors)),
         )
+        .merge(music_library::api::admin::routes().with_state(
+            music_library::api::admin::AdminState {
+                playlists: std::sync::Arc::clone(&state.playlists),
+                credential: std::sync::Arc::clone(&state.credential),
+            },
+        ))
         .fallback(routes::not_found)
         .layer(axum::middleware::from_fn(middleware::request_id))
         .with_state(state)
