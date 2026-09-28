@@ -19,6 +19,8 @@ mod support;
 
 use support::worker::{CREDENTIAL_KEY, Worker, database_url};
 
+const RETRY_OVERHEAD_MS: i64 = 1_000;
+
 fn free_address() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
     listener.local_addr().expect("a local address")
@@ -122,6 +124,26 @@ async fn await_progress_flushed(pool: &PgPool, operation_id: Uuid, within: Durat
         assert!(
             tokio::time::Instant::now() < deadline,
             "job {operation_id} never flushed its effect"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn await_runtime_shutting_down(pool: &PgPool, within: Duration) {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        let shutting_down: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM awa.runtime_instances WHERE shutting_down = TRUE",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("the runtime snapshot");
+        if shutting_down > 0 {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the runtime instance never reported shutting down"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -334,18 +356,19 @@ async fn the_retry_schedule_is_measured(pool: PgPool) {
         let gap_ms = (*next_at - *at).num_milliseconds();
         let base_seconds = 2.0_f64.powi(*attempt as i32);
         let lower_ms = (base_seconds * 1000.0) as i64 - 150;
-        let upper_ms = (base_seconds * 1.25 * 1000.0) as i64 + 8000;
+        let upper_ms = (base_seconds * 1.25 * 1000.0) as i64 + RETRY_OVERHEAD_MS;
         assert!(
             gap_ms >= lower_ms && gap_ms <= upper_ms,
             "attempt {attempt} gap {gap_ms}ms outside the backoff envelope [{lower_ms}, {upper_ms}]"
         );
     }
 
-    let predicted_worst_seconds: f64 = (1..max_attempts)
+    let backoff_supremum_seconds: f64 = (1..max_attempts)
         .map(|attempt| 2.0_f64.powi(attempt as i32) * 1.25)
         .sum();
+    let overhead_seconds = max_attempts as f64 * (RETRY_OVERHEAD_MS as f64 / 1000.0);
     assert!(
-        elapsed < Duration::from_secs((predicted_worst_seconds + 30.0) as u64),
+        elapsed < Duration::from_secs_f64(backoff_supremum_seconds + overhead_seconds + 5.0),
         "the realised schedule is bounded in time: {elapsed:?}"
     );
 }
@@ -395,6 +418,7 @@ async fn a_graceful_stop_drains_or_releases(pool: PgPool) {
         .expect("the worker's own migrations");
 
     let operation_id = Uuid::now_v7();
+    let queued_id = Uuid::now_v7();
 
     let mut tx = pool.begin().await.expect("a transaction");
     let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, 60_000)
@@ -403,7 +427,14 @@ async fn a_graceful_stop_drains_or_releases(pool: PgPool) {
     tx.commit().await.expect("the commit");
     assert!(matches!(enqueued, Enqueued::Inserted { .. }));
 
-    let mut worker = Worker::start(&pool, PROBE_QUEUE);
+    let mut tx = pool.begin().await.expect("a transaction");
+    let queued = whio_core::jobs::probe::enqueue(&mut tx, queued_id)
+        .await
+        .expect("an enqueue");
+    tx.commit().await.expect("the commit");
+    assert!(matches!(queued, Enqueued::Inserted { .. }));
+
+    let mut worker = Worker::start_with(&pool, PROBE_QUEUE, &[("WHIO_WORKER_MAX_WORKERS", "1")]);
     worker.await_health("/health/ready", 200).await;
     await_job_state(&pool, operation_id, "running", Duration::from_secs(60)).await;
     await_progress_flushed(&pool, operation_id, Duration::from_secs(30)).await;
@@ -411,6 +442,7 @@ async fn a_graceful_stop_drains_or_releases(pool: PgPool) {
     worker.interrupt();
 
     worker.await_draining().await;
+    await_runtime_shutting_down(&pool, Duration::from_secs(10)).await;
 
     let status = worker.await_exit(Duration::from_secs(30)).await;
     assert!(
@@ -423,10 +455,31 @@ async fn a_graceful_stop_drains_or_releases(pool: PgPool) {
         "the drain released the in-flight handler within the timeout:\n{}",
         worker.log()
     );
+
+    assert_eq!(
+        count_jobs(&pool, queued_id, "available").await
+            + count_jobs(&pool, queued_id, "scheduled").await,
+        1,
+        "the drain stopped claiming new jobs after the handler released its slot:\n{}",
+        worker.log()
+    );
+
+    assert_eq!(
+        count_jobs(&pool, operation_id, "completed").await
+            + count_jobs(&pool, operation_id, "running").await,
+        1,
+        "the in-flight job was finished or released, not lost:\n{}",
+        worker.log()
+    );
+
+    let mut worker = Worker::start(&pool, PROBE_QUEUE);
+    worker.await_health("/health/ready", 200).await;
+    await_job_state(&pool, operation_id, "completed", Duration::from_secs(180)).await;
+
     assert_eq!(
         effect_transitions(&pool, operation_id).await,
         1,
-        "the in-flight work was processed, not dropped:\n{}",
+        "the recovered run did not duplicate the effect:\n{}",
         worker.log()
     );
 }
