@@ -25,6 +25,7 @@ COPY apps/subsonic-types-generated/Cargo.toml ./apps/subsonic-types-generated/
 RUN mkdir -p apps/core/src/bin apps/resolver-client-generated/src apps/subsonic-types-generated/src \
     && printf 'fn main() {}\n' > apps/core/src/main.rs \
     && printf 'fn main() {}\n' > apps/core/src/bin/whio-cli.rs \
+    && printf 'fn main() {}\n' > apps/core/src/bin/whio-worker.rs \
     && touch apps/core/src/lib.rs apps/resolver-client-generated/src/lib.rs apps/subsonic-types-generated/src/lib.rs
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -49,6 +50,7 @@ FROM debian:bookworm-slim AS runtime
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /workspace/apps/core/target/release/whio-api /usr/local/bin/whio-api
 COPY --from=builder /workspace/apps/core/target/release/whio-cli /usr/local/bin/whio-cli
+COPY --from=builder /workspace/apps/core/target/release/whio-worker /usr/local/bin/whio-worker
 
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     WHIO_BIND_ADDRESS=0.0.0.0:3000

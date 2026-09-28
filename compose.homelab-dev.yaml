@@ -69,6 +69,40 @@ services:
     ports:
       - 3100:3000
 
+  worker:
+    build:
+      context: .
+      dockerfile: docker/core.Dockerfile
+      target: dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - cargo
+      - watch
+      - --poll
+      - --why
+      - -w
+      - .
+      - -w
+      - ../resolver-client-generated
+      - -w
+      - ../subsonic-types-generated
+      - -x
+      - run --bin whio-worker
+    environment:
+      WHIO_DATABASE_URL: postgres://whio:whio-dev@postgres:5432/whio
+      WHIO_CREDENTIAL_KEY: ${WHIO_CREDENTIAL_KEY:?set WHIO_CREDENTIAL_KEY in .env (openssl rand -base64 32)}
+      WHIO_WORKER_QUEUES: whio.jobs.probe
+      WHIO_WORKER_DRAIN_TIMEOUT_SECONDS: "30"
+      WHIO_LOG_LEVEL: info
+      CARGO_BUILD_JOBS: "2"
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - core-target:/workspace/apps/core/target
+    stop_grace_period: 45s
+
 volumes:
   cargo-registry:
   core-target:

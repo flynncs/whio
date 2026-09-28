@@ -29,5 +29,18 @@ services:
     ports:
       - 3000:3000
 
+  worker:
+    image: ghcr.io/flynncs/whio-core:latest
+    entrypoint: ["/usr/local/bin/whio-worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      WHIO_DATABASE_URL: postgres://whio:whio-dev@postgres:5432/whio
+      WHIO_CREDENTIAL_KEY: ${WHIO_CREDENTIAL_KEY:?set WHIO_CREDENTIAL_KEY in .env (openssl rand -base64 32)}
+      WHIO_WORKER_QUEUES: whio.jobs.probe
+      WHIO_WORKER_DRAIN_TIMEOUT_SECONDS: "30"
+    stop_grace_period: 45s
+
 volumes:
   postgres-data:

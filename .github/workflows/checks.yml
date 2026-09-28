@@ -78,6 +78,14 @@ jobs:
           OPENAPI_GENERATOR_JAR: /tmp/openapi-generator-cli.jar
         run: ./tools/generate-subsonic-types.sh --check
 
+      - name: Test the worker and durable jobs as a spawned process
+        env:
+          DATABASE_URL: postgres://whio:whio-test@localhost:5432/whio
+        run: >-
+          cargo test --locked --manifest-path apps/core/Cargo.toml
+          --features postgres-integration
+          --test worker_binary --test worker_job --test worker_jobs
+
       - name: Test PostgreSQL integration suites
         env:
           DATABASE_URL: postgres://whio:whio-test@localhost:5432/whio
