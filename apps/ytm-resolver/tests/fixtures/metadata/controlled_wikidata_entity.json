@@ -1,0 +1,32 @@
+{
+  "entities": {
+    "Q11647": {
+      "id": "Q11647",
+      "type": "item",
+      "claims": {
+        "P18": [
+          {
+            "mainsnak": {
+              "snaktype": "value",
+              "property": "P18",
+              "datatype": "commonsMedia",
+              "datavalue": {
+                "value": "ColdplayWembley.jpg",
+                "type": "string"
+              }
+            },
+            "type": "statement",
+            "rank": "normal"
+          }
+        ]
+      },
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Coldplay",
+          "badges": []
+        }
+      }
+    }
+  }
+}

@@ -9,14 +9,21 @@ use uuid::Uuid;
 use crate::{
     facades::SourceTags,
     features::identity::{domain::Principal, service::CredentialService},
+    features::metadata::MetadataProfile,
     features::music_library::catalogue::{
-        CatalogueError, CompletionService, LibraryService, MAX_PAGE_LIMIT, PageLimit, SearchQuery,
-        SearchRequest, SearchService, SearchWindows, TrackListFilter, TrackOrder,
+        CatalogueError, CompletionService, LibraryService, MAX_PAGE_LIMIT, PageLimit,
+        ProviderError, SearchQuery, SearchRequest, SearchService, SearchWindows, TrackListFilter,
+        TrackOrder,
+    },
+    features::music_library::discovery::{
+        DiscoveryBasis, DiscoveryError, DiscoverySeed, DiscoveryService, RelatedRequest,
+        SimilarTracksRequest, TopItem, TopRequest,
     },
     features::music_library::domain::{
-        AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, ArtistListFilter,
-        ArtistSort, IdSet, Playlist, PlaylistId, RandomSeed, Range, RestoreQueueValidationError,
-        RoleSelector, RoleSet, SelectorText, SortDirection, StateTarget, TrackId, ValidationError,
+        AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, ArtistId, ArtistInformation,
+        ArtistListFilter, ArtistSort, IdSet, Playlist, PlaylistId, RandomSeed, Range,
+        RefreshDemand, RestoreQueueValidationError, RoleSelector, RoleSet, SelectorText,
+        SortDirection, StateTarget, TrackId, TrackView, ValidationError,
     },
     features::music_library::library::{
         LibraryId, LibraryRegistrationError, LibraryRegistry, ScanService,
@@ -811,6 +818,291 @@ pub(crate) async fn artist_detail(
         .ok_or(BrowseError::ArtistNotFound)?;
 
     Ok(mapping::artist_with_albums(&detail))
+}
+
+const ARTIST_INFO_LANGUAGE: &str = "en";
+const DEFAULT_ARTIST_INFO_COUNT: u32 = 20;
+const DEFAULT_SONG_COUNT: u32 = 50;
+
+pub(crate) fn artist_info_count(raw: Option<&str>) -> Result<u32, BrowseError> {
+    browse_size(raw, DEFAULT_ARTIST_INFO_COUNT)
+}
+
+pub(crate) fn song_count(raw: Option<&str>) -> Result<u32, BrowseError> {
+    browse_size(raw, DEFAULT_SONG_COUNT)
+}
+
+pub(crate) fn include_not_present(raw: Option<&str>) -> Result<bool, BrowseError> {
+    match raw {
+        None => Ok(false),
+        Some(raw) => boolean(raw).ok_or(BrowseError::InvalidRequest),
+    }
+}
+
+async fn load_artist_information(
+    library: &LibraryService,
+    raw_id: &str,
+    user: Option<&Uuid>,
+) -> Result<ArtistInformation, BrowseError> {
+    let artist_id: ArtistId = raw_id.parse().map_err(|_| BrowseError::ArtistNotFound)?;
+
+    library
+        .artist_information(
+            &artist_id,
+            user,
+            &MetadataProfile::artist_display(),
+            ARTIST_INFO_LANGUAGE,
+            RefreshDemand::RequestIfDue,
+        )
+        .await
+        .map_err(BrowseError::Catalogue)?
+        .ok_or(BrowseError::ArtistNotFound)
+}
+
+pub(crate) async fn artist_info(
+    library: &LibraryService,
+    raw_id: &str,
+    user: Option<&Uuid>,
+) -> Result<models::ArtistInfo, BrowseError> {
+    Ok(mapping::artist_info(
+        &load_artist_information(library, raw_id, user).await?,
+    ))
+}
+
+pub(crate) async fn artist_info2(
+    library: &LibraryService,
+    discovery: Option<&DiscoveryService>,
+    raw_id: &str,
+    user: Option<&Uuid>,
+    count: u32,
+) -> Result<models::ArtistInfo2, BrowseError> {
+    let information = load_artist_information(library, raw_id, user).await?;
+    let artist_id = information.artist.artist.artist().id().clone();
+    let discovery = require_discovery(discovery)?;
+    let similar = similar_artists(library, discovery, &artist_id, user, count).await?;
+
+    Ok(mapping::artist_info2(&information, similar))
+}
+
+fn require_discovery(
+    discovery: Option<&DiscoveryService>,
+) -> Result<&DiscoveryService, BrowseError> {
+    match discovery {
+        Some(discovery) => Ok(discovery),
+        None => {
+            tracing::error!("the discovery service is not configured");
+
+            Err(BrowseError::Catalogue(CatalogueError::Provider(
+                ProviderError::ProviderUnavailable,
+            )))
+        }
+    }
+}
+
+fn discovery_failure(error: DiscoveryError) -> BrowseError {
+    match error {
+        DiscoveryError::UnknownSeed => BrowseError::ArtistNotFound,
+        DiscoveryError::UnsupportedBasis { .. } => {
+            BrowseError::Catalogue(CatalogueError::Provider(ProviderError::Internal))
+        }
+        DiscoveryError::Unavailable => {
+            BrowseError::Catalogue(CatalogueError::Provider(ProviderError::ProviderUnavailable))
+        }
+        DiscoveryError::Repository(error) => {
+            BrowseError::Catalogue(CatalogueError::Repository(error))
+        }
+    }
+}
+
+fn local_basis_limit(count: u32) -> Result<PageLimit, BrowseError> {
+    PageLimit::new(count).map_err(|_| BrowseError::InvalidRequest)
+}
+
+async fn songs_from_top(
+    library: &LibraryService,
+    items: &[TopItem],
+    user: Option<&Uuid>,
+    tags: SourceTags,
+) -> Result<Vec<models::Child>, BrowseError> {
+    let track_ids = items
+        .iter()
+        .filter_map(|item| item.canonical.clone())
+        .collect::<Vec<_>>();
+    let views = library
+        .track_views(&track_ids, user)
+        .await
+        .map_err(BrowseError::Catalogue)?;
+    let mut by_id = views
+        .into_iter()
+        .map(|view| (view.track().id().clone(), view))
+        .collect::<HashMap<TrackId, TrackView>>();
+    let mut songs = Vec::new();
+    for item in items {
+        let Some(track_id) = item.canonical.as_ref() else {
+            continue;
+        };
+        let Some(view) = by_id.remove(track_id) else {
+            continue;
+        };
+        songs.push(mapping::child_from_view(&view, tags));
+    }
+
+    Ok(songs)
+}
+
+pub(crate) async fn similar_artists(
+    library: &LibraryService,
+    discovery: &DiscoveryService,
+    artist_id: &ArtistId,
+    user: Option<&Uuid>,
+    count: u32,
+) -> Result<Vec<models::ArtistId3>, BrowseError> {
+    let result = discovery
+        .related(RelatedRequest {
+            seed: DiscoverySeed::Artist(artist_id.clone()),
+            basis: DiscoveryBasis::Library,
+            window: None,
+            limit: local_basis_limit(count)?,
+            user: user.copied(),
+        })
+        .await
+        .map_err(discovery_failure)?;
+    let mut artists = Vec::new();
+    for item in result.items {
+        let Some(canonical) = item.canonical else {
+            continue;
+        };
+        let Some(detail) = library
+            .artist_detail(&canonical, user)
+            .await
+            .map_err(BrowseError::Catalogue)?
+        else {
+            continue;
+        };
+        artists.push(mapping::artist_from_summary(&detail.artist));
+    }
+
+    Ok(artists)
+}
+
+pub(crate) async fn top_songs(
+    library: &LibraryService,
+    discovery: Option<&DiscoveryService>,
+    artist: &str,
+    user: Option<&Uuid>,
+    count: u32,
+    tags: SourceTags,
+) -> Result<models::TopSongs, BrowseError> {
+    let Some(artist_id) = library
+        .artist_by_exact_name(artist)
+        .await
+        .map_err(BrowseError::Catalogue)?
+    else {
+        return Err(BrowseError::ArtistNotFound);
+    };
+    let discovery = require_discovery(discovery)?;
+    let result = discovery
+        .top(TopRequest {
+            seed: DiscoverySeed::Artist(artist_id),
+            basis: DiscoveryBasis::Library,
+            window: None,
+            limit: local_basis_limit(count)?,
+            user: user.copied(),
+        })
+        .await
+        .map_err(discovery_failure)?;
+    let songs = songs_from_top(library, &result.items, user, tags).await?;
+
+    Ok(models::TopSongs { song: Some(songs) })
+}
+
+async fn similar_seed(
+    library: &LibraryService,
+    raw_id: &str,
+    user: Option<&Uuid>,
+) -> Result<DiscoverySeed, BrowseError> {
+    let id: Uuid = raw_id.parse().map_err(|_| BrowseError::ArtistNotFound)?;
+    let track_id = TrackId::from_uuid(id);
+    if library
+        .track(&track_id)
+        .await
+        .map_err(BrowseError::Catalogue)?
+        .is_some()
+    {
+        return Ok(DiscoverySeed::Track(track_id));
+    }
+    let Some(detail) = library
+        .album_detail(&AlbumId::from_uuid(id), user)
+        .await
+        .map_err(BrowseError::Catalogue)?
+    else {
+        return Err(BrowseError::ArtistNotFound);
+    };
+    let Some(album_artist_id) = detail.album.album().album_artist_id().cloned() else {
+        return Err(BrowseError::ArtistNotFound);
+    };
+
+    Ok(DiscoverySeed::Artist(album_artist_id))
+}
+
+async fn similar_songs_for(
+    library: &LibraryService,
+    discovery: &DiscoveryService,
+    seed: DiscoverySeed,
+    user: Option<&Uuid>,
+    count: u32,
+    tags: SourceTags,
+) -> Result<Vec<models::Child>, BrowseError> {
+    let result = discovery
+        .similar_tracks(SimilarTracksRequest {
+            seed,
+            basis: DiscoveryBasis::Library,
+            window: None,
+            limit: local_basis_limit(count)?,
+            user: user.copied(),
+        })
+        .await
+        .map_err(discovery_failure)?;
+
+    songs_from_top(library, &result.items, user, tags).await
+}
+
+pub(crate) async fn similar_songs(
+    library: &LibraryService,
+    discovery: Option<&DiscoveryService>,
+    raw_id: &str,
+    user: Option<&Uuid>,
+    count: u32,
+    tags: SourceTags,
+) -> Result<models::SimilarSongs, BrowseError> {
+    let seed = similar_seed(library, raw_id, user).await?;
+    let discovery = require_discovery(discovery)?;
+    let songs = similar_songs_for(library, discovery, seed, user, count, tags).await?;
+
+    Ok(models::SimilarSongs { song: Some(songs) })
+}
+
+pub(crate) async fn similar_songs2(
+    library: &LibraryService,
+    discovery: Option<&DiscoveryService>,
+    raw_id: &str,
+    user: Option<&Uuid>,
+    count: u32,
+    tags: SourceTags,
+) -> Result<models::SimilarSongs2, BrowseError> {
+    let artist_id: ArtistId = raw_id.parse().map_err(|_| BrowseError::ArtistNotFound)?;
+    let discovery = require_discovery(discovery)?;
+    let songs = similar_songs_for(
+        library,
+        discovery,
+        DiscoverySeed::Artist(artist_id),
+        user,
+        count,
+        tags,
+    )
+    .await?;
+
+    Ok(models::SimilarSongs2 { song: Some(songs) })
 }
 
 pub(crate) fn artist_indexes(artists: Vec<models::ArtistId3>) -> Vec<models::IndexId3> {

@@ -1,0 +1,26 @@
+[
+  {
+    "artist_mbids": ["b7ffd2af-418f-4be2-bdd1-22f8b48613da"],
+    "caa_id": 2546761764,
+    "recording_mbid": "13dd61c7-ce73-4e97-9f0c-9f0e53144411",
+    "recording_name": "Closer",
+    "total_listen_count": 1380798,
+    "total_user_count": 129454
+  },
+  {
+    "artist_mbids": ["cc197bad-dc9c-440d-a5b5-d52ba2e14234"],
+    "caa_id": 1111111111,
+    "recording_mbid": "0f2a1b3c-4d5e-4f60-8172-93a4b5c6d7e8",
+    "recording_name": "Yellow",
+    "total_listen_count": 900000,
+    "total_user_count": 80000
+  },
+  {
+    "artist_mbids": ["cc197bad-dc9c-440d-a5b5-d52ba2e14234"],
+    "caa_id": null,
+    "recording_mbid": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    "recording_name": "Viva la Vida",
+    "total_listen_count": 500000,
+    "total_user_count": 40000
+  }
+]

@@ -2,11 +2,12 @@ use whio_subsonic_api::models;
 
 use crate::{
     facades::SourceTags,
+    features::metadata::domain::{Attribution, FieldEntry, FieldId, FieldValue, Presence},
     features::music_library::artwork::CoverArtTarget,
     features::music_library::catalogue::{AlbumDetail, ArtistDetail, SearchHit},
     features::music_library::domain::{
-        Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistSummary, GenreSummary,
-        LibraryState, Playlist, SourceIdentity, Track, TrackView,
+        Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistInformation,
+        ArtistSummary, GenreSummary, LibraryState, Playlist, SourceIdentity, Track, TrackView,
     },
     features::music_library::playlists::{PlaylistDetail, PlaylistEntry},
     features::playback::{ActivitySession, PlaybackState},
@@ -222,6 +223,112 @@ pub(crate) fn artist_with_albums(detail: &ArtistDetail) -> models::ArtistWithAlb
         album: detail.albums.iter().map(album_from_summary).collect(),
         ..Default::default()
     }
+}
+
+const LASTFM_PROVIDER: &str = "lastfm";
+
+struct ArtistInfoFields {
+    biography: Option<String>,
+    music_brainz_id: Option<String>,
+    last_fm_url: Option<String>,
+    small_image_url: Option<String>,
+    medium_image_url: Option<String>,
+    large_image_url: Option<String>,
+}
+
+fn artist_info_fields(information: &ArtistInformation) -> ArtistInfoFields {
+    let artist = information.artist.artist.artist();
+    let image_url = CoverArtTarget::artist(artist.id()).encode();
+    let (biography, last_fm_url) = served_biography(&information.metadata.fields);
+
+    ArtistInfoFields {
+        biography,
+        music_brainz_id: artist.musicbrainz_artist_id().map(str::to_owned),
+        last_fm_url,
+        small_image_url: Some(image_url.clone()),
+        medium_image_url: Some(image_url.clone()),
+        large_image_url: Some(image_url),
+    }
+}
+
+pub(crate) fn artist_info(information: &ArtistInformation) -> models::ArtistInfo {
+    let fields = artist_info_fields(information);
+
+    models::ArtistInfo {
+        biography: fields.biography,
+        music_brainz_id: fields.music_brainz_id,
+        last_fm_url: fields.last_fm_url,
+        small_image_url: fields.small_image_url,
+        medium_image_url: fields.medium_image_url,
+        large_image_url: fields.large_image_url,
+        similar_artist: None,
+    }
+}
+
+pub(crate) fn artist_info2(
+    information: &ArtistInformation,
+    similar_artist: Vec<models::ArtistId3>,
+) -> models::ArtistInfo2 {
+    let fields = artist_info_fields(information);
+
+    models::ArtistInfo2 {
+        biography: fields.biography,
+        music_brainz_id: fields.music_brainz_id,
+        last_fm_url: fields.last_fm_url,
+        small_image_url: fields.small_image_url,
+        medium_image_url: fields.medium_image_url,
+        large_image_url: fields.large_image_url,
+        similar_artist: Some(similar_artist),
+    }
+}
+
+fn served_biography(entries: &[FieldEntry]) -> (Option<String>, Option<String>) {
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.field == FieldId::BiographyContent)
+    else {
+        return (None, None);
+    };
+    if entry.presence != Presence::Present {
+        return (None, None);
+    }
+    let Some(FieldValue::Text(text)) = entry.value.as_ref() else {
+        return (None, None);
+    };
+    let Some(terms) = entry.licence.as_ref() else {
+        return (None, None);
+    };
+    if !terms.redistribution_allowed {
+        return (None, None);
+    }
+
+    let credited = if terms.attribution_required {
+        match entry.attribution.as_ref() {
+            Some(attribution) => credited_text(text, attribution),
+            None => return (None, None),
+        }
+    } else {
+        text.clone()
+    };
+
+    (Some(credited), last_fm_url(entry))
+}
+
+fn credited_text(text: &str, attribution: &Attribution) -> String {
+    match attribution.url.as_deref().filter(|url| !url.is_empty()) {
+        Some(url) => format!("{text}\n\n{} {url}", attribution.text),
+        None => format!("{text}\n\n{}", attribution.text),
+    }
+}
+
+fn last_fm_url(entry: &FieldEntry) -> Option<String> {
+    let source = entry.source.as_ref()?;
+
+    if source.provider_id != LASTFM_PROVIDER {
+        return None;
+    }
+
+    source.url.clone().filter(|url| !url.is_empty())
 }
 
 pub(crate) fn album_detail_with_songs(
@@ -641,8 +748,13 @@ fn no_queue_changed() -> chrono::DateTime<chrono::FixedOffset> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::metadata::domain::{
+        EntityKey, FactSource, FieldValue, Freshness, MatchBasis, MetadataEntityKind,
+        MetadataRecord,
+    };
+    use crate::features::metadata::licences::{LicenceTerms, licence_terms};
     use crate::features::music_library::domain::{
-        Artist, ArtistId, ProviderId, SourceScope, TrackId, TrackMetadata,
+        Artist, ArtistId, ProviderId, RefreshStatus, SourceScope, TrackId, TrackMetadata,
     };
     use crate::features::music_library::queue::MAX_RESTORE_QUEUE_ENTRIES;
 
@@ -792,5 +904,282 @@ mod tests {
     #[test]
     fn the_bound_message_names_the_configured_bound() {
         assert!(BOUND_MESSAGE.contains(&MAX_RESTORE_QUEUE_ENTRIES.to_string()));
+    }
+
+    fn terms(id: &str) -> LicenceTerms {
+        licence_terms(id, 1).expect("the registry carries the licence")
+    }
+
+    fn artist(mbid: Option<&str>) -> Artist {
+        Artist::new(
+            ArtistId::new(),
+            "Daft Punk".to_owned(),
+            Some("Daft Punk".to_owned()),
+            mbid.map(str::to_owned),
+        )
+        .expect("valid artist")
+    }
+
+    fn information(artist: Artist, fields: Vec<FieldEntry>) -> ArtistInformation {
+        ArtistInformation {
+            cover_art: CoverArtTarget::artist(artist.id()).encode(),
+            artist: crate::features::music_library::catalogue::ArtistDetail {
+                artist: ArtistSummary::new(artist, 2),
+                albums: Vec::new(),
+            },
+            metadata: MetadataRecord {
+                entity: EntityKey::new(MetadataEntityKind::Artist, uuid::Uuid::nil()),
+                display_name: "Daft Punk".to_owned(),
+                identity: None,
+                fields,
+                disagreements: Vec::new(),
+                contested: false,
+                generated_at: chrono::Utc::now(),
+            },
+            portraits: Vec::new(),
+            refresh: RefreshStatus {
+                state: crate::features::metadata::RefreshState {
+                    phase: crate::features::metadata::RefreshPhase::Idle,
+                    identity_revision: "revision".to_owned(),
+                    job_id: None,
+                },
+                outcome: None,
+            },
+        }
+    }
+
+    fn entry(field: FieldId, value: FieldValue, licence: &str) -> FieldEntry {
+        FieldEntry {
+            field,
+            presence: Presence::Present,
+            value: Some(value),
+            source: Some(FactSource {
+                provider_id: licence.to_owned(),
+                external_id: "external-1".to_owned(),
+                url: None,
+                match_basis: MatchBasis::Identifier,
+            }),
+            licence: Some(terms(licence)),
+            attribution: Some(Attribution {
+                text: "Wikipedia contributors".to_owned(),
+                url: Some("https://en.wikipedia.org/wiki/Daft_Punk".to_owned()),
+            }),
+            bytes: None,
+            facts: Vec::new(),
+            attempt: None,
+            retrieved_at: None,
+            freshness: Freshness::Fresh,
+            absence: None,
+        }
+    }
+
+    fn biography(
+        text: &str,
+        licence: &str,
+        provider: &str,
+        source_url: Option<&str>,
+    ) -> FieldEntry {
+        let mut entry = entry(
+            FieldId::BiographyContent,
+            FieldValue::Text(text.to_owned()),
+            licence,
+        );
+        entry.source = Some(FactSource {
+            provider_id: provider.to_owned(),
+            external_id: "external-1".to_owned(),
+            url: source_url.map(str::to_owned),
+            match_basis: MatchBasis::Identifier,
+        });
+
+        entry
+    }
+
+    #[test]
+    fn a_wikipedia_biography_carries_its_attribution_and_link() {
+        let information = information(
+            artist(None),
+            vec![biography(
+                "A French electronic duo.",
+                "wikipedia",
+                "wikipedia",
+                Some("https://en.wikipedia.org/wiki/Daft_Punk"),
+            )],
+        );
+
+        let info = artist_info2(&information, Vec::new());
+
+        assert_eq!(
+            info.biography.as_deref(),
+            Some(
+                "A French electronic duo.\n\nWikipedia contributors \
+                 https://en.wikipedia.org/wiki/Daft_Punk"
+            )
+        );
+        assert_eq!(info.last_fm_url, None);
+    }
+
+    #[test]
+    fn a_lastfm_biography_populates_the_lastfm_url() {
+        let information = information(
+            artist(None),
+            vec![biography(
+                "A French electronic duo.",
+                "lastfm",
+                "lastfm",
+                Some("https://www.last.fm/music/Daft+Punk"),
+            )],
+        );
+
+        let info = artist_info2(&information, Vec::new());
+
+        assert_eq!(
+            info.last_fm_url.as_deref(),
+            Some("https://www.last.fm/music/Daft+Punk")
+        );
+        assert!(
+            info.biography
+                .as_deref()
+                .is_some_and(|text| text.contains("Wikipedia contributors"))
+        );
+    }
+
+    #[test]
+    fn a_lastfm_biography_without_a_source_url_omits_the_lastfm_url() {
+        let information = information(
+            artist(None),
+            vec![biography("A duo.", "lastfm", "lastfm", None)],
+        );
+
+        assert_eq!(artist_info2(&information, Vec::new()).last_fm_url, None);
+    }
+
+    #[test]
+    fn a_biography_whose_licence_forbids_redistribution_is_omitted() {
+        let information = information(
+            artist(None),
+            vec![biography(
+                "A biography we may not redistribute.",
+                "theaudiodb",
+                "theaudiodb",
+                Some("https://www.theaudiodb.com/artist/1"),
+            )],
+        );
+
+        let info = artist_info2(&information, Vec::new());
+
+        assert_eq!(info.biography, None);
+        assert_eq!(info.last_fm_url, None);
+    }
+
+    #[test]
+    fn a_biography_that_cannot_be_cited_is_omitted() {
+        let mut entry = biography("A duo.", "wikipedia", "wikipedia", None);
+        entry.attribution = None;
+        let information = information(artist(None), vec![entry]);
+
+        assert_eq!(artist_info2(&information, Vec::new()).biography, None);
+    }
+
+    #[test]
+    fn an_absent_or_unlicensed_biography_is_omitted() {
+        let mut absent = biography("A duo.", "wikipedia", "wikipedia", None);
+        absent.presence = Presence::Absent;
+        absent.value = None;
+        let mut unlicensed = biography("A duo.", "wikipedia", "wikipedia", None);
+        unlicensed.licence = None;
+        let present = information(
+            artist(None),
+            vec![biography("A duo.", "wikipedia", "wikipedia", None)],
+        );
+        let absent = information(artist(None), vec![absent]);
+        let unlicensed = information(artist(None), vec![unlicensed]);
+
+        for missing in [&absent, &unlicensed] {
+            assert_eq!(artist_info(missing).biography, None);
+            assert_eq!(artist_info2(missing, Vec::new()).biography, None);
+        }
+
+        assert!(artist_info(&present).biography.is_some());
+        assert!(artist_info2(&present, Vec::new()).biography.is_some());
+    }
+
+    #[test]
+    fn a_biography_without_a_citation_requirement_is_served_verbatim() {
+        let information = information(
+            artist(None),
+            vec![biography("A duo.", "musicbrainz", "musicbrainz", None)],
+        );
+
+        assert_eq!(
+            artist_info2(&information, Vec::new()).biography.as_deref(),
+            Some("A duo.")
+        );
+    }
+
+    #[test]
+    fn the_canonical_mbid_is_served_rather_than_the_identity_fact() {
+        let mut mbid_fact = entry(
+            FieldId::IdentityMbid,
+            FieldValue::Text("from-a-fact".to_owned()),
+            "musicbrainz",
+        );
+        mbid_fact.source = Some(FactSource {
+            provider_id: "musicbrainz".to_owned(),
+            external_id: "from-a-fact".to_owned(),
+            url: None,
+            match_basis: MatchBasis::Identifier,
+        });
+        let information = information(artist(Some("canonical-column")), vec![mbid_fact]);
+
+        assert_eq!(
+            artist_info2(&information, Vec::new())
+                .music_brainz_id
+                .as_deref(),
+            Some("canonical-column")
+        );
+    }
+
+    #[test]
+    fn the_image_urls_are_the_mounted_artist_route() {
+        let artist = artist(None);
+        let id = artist.id().to_string();
+        let information = information(
+            artist,
+            vec![entry(
+                FieldId::ImagePortrait,
+                FieldValue::Reference("https://external.example/portrait.jpg".to_owned()),
+                "commons",
+            )],
+        );
+
+        let info = artist_info2(&information, Vec::new());
+        let mounted = format!("ar-{id}");
+
+        assert_eq!(info.large_image_url.as_deref(), Some(mounted.as_str()));
+        assert_eq!(info.medium_image_url.as_deref(), Some(mounted.as_str()));
+        assert_eq!(info.small_image_url.as_deref(), Some(mounted.as_str()));
+    }
+
+    #[test]
+    fn both_artist_info_shapes_agree_on_the_shared_fields() {
+        let information = information(
+            artist(Some("canonical-column")),
+            vec![biography(
+                "A duo.",
+                "wikipedia",
+                "wikipedia",
+                Some("https://en.wikipedia.org/wiki/Daft_Punk"),
+            )],
+        );
+
+        let legacy = artist_info(&information);
+        let id3 = artist_info2(&information, Vec::new());
+
+        assert_eq!(legacy.biography, id3.biography);
+        assert_eq!(legacy.music_brainz_id, id3.music_brainz_id);
+        assert_eq!(legacy.last_fm_url, id3.last_fm_url);
+        assert_eq!(legacy.large_image_url, id3.large_image_url);
+        assert_eq!(legacy.medium_image_url, id3.medium_image_url);
+        assert_eq!(legacy.small_image_url, id3.small_image_url);
     }
 }

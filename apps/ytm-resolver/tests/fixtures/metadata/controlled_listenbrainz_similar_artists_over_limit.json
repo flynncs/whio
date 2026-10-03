@@ -1,0 +1,308 @@
+[
+  {
+    "artist_mbid": "d5b98829-de49-59e2-88d5-ed8a12dcf765",
+    "name": "Similar Artist 0",
+    "score": 0.99,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "203ec950-9bf8-52cd-9d0f-2015ae4577e6",
+    "name": "Similar Artist 1",
+    "score": 0.98,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "f5ab4044-18d2-5188-b28a-0ef80a506bac",
+    "name": "Similar Artist 2",
+    "score": 0.97,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "5bfb6d12-5c65-5d4c-bf32-997a4db09fb4",
+    "name": "Similar Artist 3",
+    "score": 0.96,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "70a76d6f-55f8-50aa-9076-9e6ac493f480",
+    "name": "Similar Artist 4",
+    "score": 0.95,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "889d49aa-428f-58a9-bb83-ee6621be3ae1",
+    "name": "Similar Artist 5",
+    "score": 0.94,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "e13587c9-814c-5e56-86d8-d5ab06afc6c2",
+    "name": "Similar Artist 6",
+    "score": 0.93,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "5137fedc-ca2a-563a-bf4e-82c22e671aa8",
+    "name": "Similar Artist 7",
+    "score": 0.92,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "1113aa49-0fda-53a8-8966-72360174f7c1",
+    "name": "Similar Artist 8",
+    "score": 0.91,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "9fdc4538-ac45-50a4-aff5-0417f3b1eb90",
+    "name": "Similar Artist 9",
+    "score": 0.9,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "75a60633-73a1-5c75-b09c-30e2238409e1",
+    "name": "Similar Artist 10",
+    "score": 0.89,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "8c6e3f88-fd4f-5dbc-9187-584c0f23e38d",
+    "name": "Similar Artist 11",
+    "score": 0.88,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "42130682-0bd0-520a-b490-a7711a10ab50",
+    "name": "Similar Artist 12",
+    "score": 0.87,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "fb0c570b-5ac1-583c-b388-08a356eb5c54",
+    "name": "Similar Artist 13",
+    "score": 0.86,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "7bcbc4cd-ab48-5617-983d-dbfc32ef2524",
+    "name": "Similar Artist 14",
+    "score": 0.85,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "31635b1b-69b7-5514-b079-43976213673b",
+    "name": "Similar Artist 15",
+    "score": 0.84,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "030a870f-4e57-5350-90e4-78b15128a0cf",
+    "name": "Similar Artist 16",
+    "score": 0.83,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "c5dad552-35a1-5892-9d13-db9155d3153d",
+    "name": "Similar Artist 17",
+    "score": 0.82,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "1e14e3cf-8adc-5932-80fa-68fcb70f4676",
+    "name": "Similar Artist 18",
+    "score": 0.81,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "f677e05b-528a-537b-80ae-de55dbd369c8",
+    "name": "Similar Artist 19",
+    "score": 0.8,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "f1da462e-732f-538f-b77f-11e24f570bd2",
+    "name": "Similar Artist 20",
+    "score": 0.79,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "c1f369a5-0cc9-5484-be11-b2c4f84334a0",
+    "name": "Similar Artist 21",
+    "score": 0.78,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "6f655402-bfa9-5faa-b5f2-347b94e11ed3",
+    "name": "Similar Artist 22",
+    "score": 0.77,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "3d6de08b-128f-5f02-9c33-2bf21fbf524e",
+    "name": "Similar Artist 23",
+    "score": 0.76,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "4702e72e-f3dd-5d81-affe-72a0088b4b26",
+    "name": "Similar Artist 24",
+    "score": 0.75,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "86b49948-6304-52b4-8f8c-184b7a8a4099",
+    "name": "Similar Artist 25",
+    "score": 0.74,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "1b9920ec-3380-5d9e-8d31-cebc7da18a6f",
+    "name": "Similar Artist 26",
+    "score": 0.73,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "6668fff7-72d2-5f9b-9f7b-0ec88e6f4e46",
+    "name": "Similar Artist 27",
+    "score": 0.72,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "bbfa8305-7aab-54bc-a97c-b9df0dd9b215",
+    "name": "Similar Artist 28",
+    "score": 0.71,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "4e402616-04c5-573f-8beb-788be17fcb74",
+    "name": "Similar Artist 29",
+    "score": 0.7,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "d4d56ae9-da2c-56c6-9270-d6f540e284bb",
+    "name": "Similar Artist 30",
+    "score": 0.69,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "539c1b03-19f4-5c83-8808-4005954c937f",
+    "name": "Similar Artist 31",
+    "score": 0.68,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "55cacb05-9f01-55e2-b3bc-02b6b7de3bff",
+    "name": "Similar Artist 32",
+    "score": 0.67,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "2cb50ad4-c9af-540f-a639-1b9da151253a",
+    "name": "Similar Artist 33",
+    "score": 0.66,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "a4a95a76-aefa-5d1a-b27a-3147f7ea5c02",
+    "name": "Similar Artist 34",
+    "score": 0.65,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "c462396a-e621-5106-b4cc-32d1e47558fa",
+    "name": "Similar Artist 35",
+    "score": 0.64,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "38b50797-fc29-5016-9cc4-01bd32cbbdfa",
+    "name": "Similar Artist 36",
+    "score": 0.63,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "b4f98ebb-71f8-5c66-9491-192f3b4e965d",
+    "name": "Similar Artist 37",
+    "score": 0.62,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "eb3b4b4e-5c34-5b05-a78b-bc3e667742b7",
+    "name": "Similar Artist 38",
+    "score": 0.61,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "e3f1474f-5c61-59e0-a278-4762cd01483c",
+    "name": "Similar Artist 39",
+    "score": 0.6,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "d84221ca-ecff-5bac-aad3-33518ef78b07",
+    "name": "Similar Artist 40",
+    "score": 0.59,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "d0d5a9f5-e511-51a8-91d0-7db64e468f13",
+    "name": "Similar Artist 41",
+    "score": 0.58,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "dd876cbf-3525-5907-b3d9-489de7f76e1b",
+    "name": "Similar Artist 42",
+    "score": 0.57,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "4840ce92-494f-5f78-987e-9e32575eb022",
+    "name": "Similar Artist 43",
+    "score": 0.56,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "357d11f8-4707-5858-b729-e1f021b9d6d3",
+    "name": "Similar Artist 44",
+    "score": 0.55,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "9f95851b-110b-5ee8-a8e9-c86b59cd1a1f",
+    "name": "Similar Artist 45",
+    "score": 0.54,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "0cb50d8d-9327-510f-8ac1-fb1256f7d0d8",
+    "name": "Similar Artist 46",
+    "score": 0.53,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "688d9ca4-756f-53b6-92a1-7dc70447b9c1",
+    "name": "Similar Artist 47",
+    "score": 0.52,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "431bdaae-ef4d-553f-9576-1c94de47bb20",
+    "name": "Similar Artist 48",
+    "score": 0.51,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "8ae4decf-cd51-56ac-8350-8568c7f9097a",
+    "name": "Similar Artist 49",
+    "score": 0.5,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "d1c58f14-c00d-5bf2-bb6b-8075ed87c5d8",
+    "name": "Similar Artist 50",
+    "score": 0.49,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  }
+]

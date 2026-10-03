@@ -170,6 +170,51 @@ paths:
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 
+  /v1/metadata/artist/display:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: fetchArtistMetadata
+      summary: Fetch one addressed artist source document as per-field candidates
+      description: |
+        One core operation per addressed source, profile and language. The
+        resolver answers with every candidate it can produce for that address and
+        independent per-field errors; it never merges two upstreams into one
+        value. Each candidate names the upstream that produced it, so the core can
+        record a per-fact licence and attribution.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MetadataArtistDocumentRequest"
+            example:
+              source:
+                provider_id: musicbrainz
+                external_id: b7ffd2af-418f-4be2-bdd1-22f8b48613da
+              language: en
+              profile: artist-display.v1
+      responses:
+        "200":
+          description: The addressed source document's normalized candidates
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetadataArtistDocumentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/SourceNotFound"
+        "422":
+          $ref: "#/components/responses/UnsupportedProvider"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
   /v1/playback/resolve:
     parameters:
       - $ref: "#/components/parameters/RequestId"
@@ -609,6 +654,378 @@ components:
             - integer
             - "null"
           minimum: 0
+
+    MetadataProfile:
+      type: string
+      const: artist-display.v1
+
+    MetadataFieldId:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-z][a-z0-9_]*(?:\\.[a-z0-9_]+)*$"
+      examples:
+        - biography.content
+        - image.portrait
+
+    MetadataLanguage:
+      type: string
+      minLength: 2
+      maxLength: 35
+
+    MetadataArtistDocumentRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - profile
+      properties:
+        source:
+          $ref: "#/components/schemas/SourceIdentity"
+        language:
+          $ref: "#/components/schemas/MetadataLanguage"
+        profile:
+          $ref: "#/components/schemas/MetadataProfile"
+        fields:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/MetadataFieldId"
+          description: The requested field subset. Absent means every field the profile covers.
+
+    MetadataArtistDocumentResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - address
+        - retrieved_at
+        - candidates
+        - errors
+      properties:
+        address:
+          $ref: "#/components/schemas/SourceIdentity"
+          description: The addressed identity. It must equal the request's source or the response is discarded.
+        source_revision:
+          type:
+            - string
+            - "null"
+          maxLength: 256
+          description: The producing source's own revision, when it supplies one.
+        retrieved_at:
+          type: string
+          format: date-time
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/MetadataFieldCandidate"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/MetadataFieldError"
+
+    CandidateSource:
+      type: object
+      additionalProperties: false
+      required:
+        - provider_id
+        - external_id
+        - match_basis
+      properties:
+        provider_id:
+          $ref: "#/components/schemas/ProviderId"
+        external_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        source_scope:
+          type:
+            - string
+            - "null"
+          maxLength: 512
+          description: The provider's own scope for the identity, when it has one.
+        url:
+          type:
+            - string
+            - "null"
+          format: uri
+          maxLength: 2048
+        match_basis:
+          type: string
+          enum:
+            - identifier
+            - established_source
+          description: How the candidate's identity was matched. A name match is not a basis.
+
+    MetadataFieldCandidate:
+      type: object
+      additionalProperties: false
+      required:
+        - field
+        - source
+        - licence
+      properties:
+        field:
+          $ref: "#/components/schemas/MetadataFieldId"
+        source:
+          $ref: "#/components/schemas/CandidateSource"
+          description: The upstream that produced this value, not the addressed provider.
+        text:
+          type:
+            - string
+            - "null"
+          maxLength: 65536
+        count:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        reference:
+          type:
+            - string
+            - "null"
+          format: uri
+          maxLength: 2048
+        candidates:
+          type:
+            - array
+            - "null"
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/MetadataCandidate"
+        image:
+          oneOf:
+            - $ref: "#/components/schemas/ImageDescriptor"
+            - type: "null"
+        language:
+          oneOf:
+            - $ref: "#/components/schemas/MetadataLanguage"
+            - type: "null"
+        rank:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        score:
+          type:
+            - number
+            - "null"
+        metric:
+          oneOf:
+            - $ref: "#/components/schemas/MetricDescriptor"
+            - type: "null"
+        ranking_scope:
+          type:
+            - string
+            - "null"
+          maxLength: 200
+          description: The named ranking a list field came from (for example a pinned similarity algorithm id), recorded verbatim per candidate. A ranking whose basis cannot be named must not be served.
+        licence:
+          $ref: "#/components/schemas/LicenceDescriptor"
+        attribution:
+          oneOf:
+            - $ref: "#/components/schemas/Attribution"
+            - type: "null"
+
+    MetadataCandidate:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - name
+      properties:
+        source:
+          $ref: "#/components/schemas/CandidateSource"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 500
+        artists:
+          type:
+            - array
+            - "null"
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 500
+        release_name:
+          type:
+            - string
+            - "null"
+          maxLength: 500
+        duration_ms:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        isrc:
+          type:
+            - string
+            - "null"
+          maxLength: 32
+        recording_id:
+          type:
+            - string
+            - "null"
+          maxLength: 64
+        rank:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        score:
+          type:
+            - number
+            - "null"
+
+    ImageDescriptor:
+      type: object
+      additionalProperties: false
+      required:
+        - role
+        - reference
+      properties:
+        role:
+          type: string
+          minLength: 1
+          maxLength: 64
+          examples:
+            - portrait
+            - wide
+        reference:
+          type: string
+          format: uri
+          maxLength: 2048
+        width:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        height:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        content_type:
+          type:
+            - string
+            - "null"
+          maxLength: 100
+
+    MetricDescriptor:
+      type: object
+      additionalProperties: false
+      required:
+        - unit
+      properties:
+        unit:
+          type: string
+          minLength: 1
+          maxLength: 64
+        population:
+          type:
+            - string
+            - "null"
+          maxLength: 200
+        period:
+          type:
+            - string
+            - "null"
+          maxLength: 200
+        as_of:
+          type:
+            - string
+            - "null"
+          format: date-time
+
+    LicenceDescriptor:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - url
+        - attribution_required
+        - redistribution_allowed
+        - cache_allowed
+        - share_alike
+        - non_commercial
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 200
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+        attribution_required:
+          type: boolean
+        redistribution_allowed:
+          type: boolean
+        cache_allowed:
+          type: boolean
+        share_alike:
+          type: boolean
+        non_commercial:
+          type: boolean
+        storage_cap_bytes:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        terms_basis:
+          type:
+            - string
+            - "null"
+          maxLength: 500
+          description: The terms clause or file metadata this licence was read from.
+        uncertainty:
+          type: boolean
+          default: false
+          description: True when the terms do not resolve the redistribution right for this fact.
+
+    Attribution:
+      type: object
+      additionalProperties: false
+      required:
+        - text
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        url:
+          type:
+            - string
+            - "null"
+          format: uri
+          maxLength: 2048
+
+    MetadataFieldError:
+      type: object
+      additionalProperties: false
+      required:
+        - field
+        - code
+        - retryable
+      properties:
+        field:
+          $ref: "#/components/schemas/MetadataFieldId"
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        retryable:
+          type: boolean
+        message:
+          type:
+            - string
+            - "null"
+          maxLength: 500
 
     ErrorCode:
       type: string

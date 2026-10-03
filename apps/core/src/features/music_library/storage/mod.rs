@@ -1,5 +1,8 @@
 mod construction;
-pub use construction::{MusicServices, construct};
+pub use construction::{
+    ArtworkCacheWiring, DeliveryWiring, LibraryWiring, MetadataWiring, MusicServices,
+    W4Dependencies, construct,
+};
 pub(crate) mod contracts;
 pub(crate) mod postgres;
 

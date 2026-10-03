@@ -1,27 +1,33 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use uuid::Uuid;
 
+use crate::features::metadata::{MetadataError, MetadataProfile, MetadataService, RefreshReason};
 use crate::features::music_library::{
+    artwork::{ArtworkCache, ArtworkError, ArtworkRole, CoverArtTarget},
     availability::ProviderRegistry,
     {
         domain::{
             AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId,
-            ArtistListFilter, ArtistSort, ArtistSummary, Availability, GenreSummary, LibraryState,
-            PageLimit, SourceIdentity, Track, TrackId, TrackListFilter, TrackOrder, TrackPage,
-            TrackView, ValidationError,
+            ArtistInformation, ArtistListFilter, ArtistSort, ArtistSummary, Availability,
+            EnrichmentSubject, GenreSummary, LibraryState, PageLimit, RefreshDemand, RefreshStatus,
+            SourceIdentity, Track, TrackId, TrackListFilter, TrackOrder, TrackPage, TrackView,
+            ValidationError,
         },
         storage::contracts::{LibraryRead, SourceLookup, StateStore, TrackRepositoryError},
     },
 };
 
-use super::{CatalogueError, SearchHit};
+use super::{CatalogueError, ProviderError, SearchHit};
 
 pub struct LibraryService {
     library: Arc<dyn LibraryRead>,
     source_lookup: Arc<dyn SourceLookup>,
     state: Arc<dyn StateStore>,
     registry: ProviderRegistry,
+    metadata: Option<Arc<MetadataService>>,
+    artwork: Option<Arc<ArtworkCache>>,
 }
 
 pub struct AlbumDetail {
@@ -47,6 +53,27 @@ fn catalogue_error(error: TrackRepositoryError) -> CatalogueError {
     }
 }
 
+fn metadata_failure(error: MetadataError) -> CatalogueError {
+    match error {
+        MetadataError::Disabled => CatalogueError::Provider(ProviderError::Disabled),
+        MetadataError::Unavailable
+        | MetadataError::DisabledSource
+        | MetadataError::ProviderUnavailable => {
+            CatalogueError::Provider(ProviderError::ProviderUnavailable)
+        }
+        MetadataError::InvalidData => {
+            CatalogueError::Provider(ProviderError::malformed(MetadataError::InvalidData))
+        }
+    }
+}
+
+fn artwork_failure(error: ArtworkError) -> CatalogueError {
+    match error {
+        ArtworkError::Repository(error) => CatalogueError::Repository(error),
+        error => CatalogueError::Provider(ProviderError::request(error)),
+    }
+}
+
 impl LibraryService {
     pub fn new(
         library: Arc<dyn LibraryRead>,
@@ -58,11 +85,23 @@ impl LibraryService {
             source_lookup: sources,
             state,
             registry: ProviderRegistry::builtin(),
+            metadata: None,
+            artwork: None,
         }
     }
 
     pub fn with_registry(mut self, registry: ProviderRegistry) -> Self {
         self.registry = registry;
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: Arc<MetadataService>) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn with_artwork_cache(mut self, cache: Arc<ArtworkCache>) -> Self {
+        self.artwork = Some(cache);
         self
     }
 
@@ -185,6 +224,16 @@ impl LibraryService {
             .map_err(catalogue_error)
     }
 
+    pub async fn artist_by_exact_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<ArtistId>, CatalogueError> {
+        self.library
+            .find_artist_by_exact_name(name)
+            .await
+            .map_err(catalogue_error)
+    }
+
     pub async fn artist_detail(
         &self,
         artist_id: &ArtistId,
@@ -215,6 +264,98 @@ impl LibraryService {
         let artist = ArtistSummary::new(artist, albums.len() as u32).with_state(state);
 
         Ok(Some(ArtistDetail { artist, albums }))
+    }
+
+    pub async fn enrichment_subject(
+        &self,
+        artist_id: &ArtistId,
+    ) -> Result<Option<EnrichmentSubject>, CatalogueError> {
+        let Some(artist) = self
+            .library
+            .find_artist(artist_id, None)
+            .await
+            .map_err(CatalogueError::Repository)?
+        else {
+            return Ok(None);
+        };
+
+        let identities = self
+            .source_lookup
+            .find_artist_sources(artist_id)
+            .await
+            .map_err(CatalogueError::Repository)?;
+
+        Ok(Some(EnrichmentSubject::new(
+            artist.id().clone(),
+            artist.name().to_owned(),
+            artist.musicbrainz_artist_id().map(str::to_owned),
+            identities,
+        )))
+    }
+
+    pub async fn artist_information(
+        &self,
+        artist_id: &ArtistId,
+        user: Option<&Uuid>,
+        profile: &MetadataProfile,
+        language: &str,
+        refresh: RefreshDemand,
+    ) -> Result<Option<ArtistInformation>, CatalogueError> {
+        let Some(artist) = self.artist_detail(artist_id, user).await? else {
+            return Ok(None);
+        };
+        let metadata = self
+            .metadata
+            .as_ref()
+            .ok_or_else(|| CatalogueError::Provider(ProviderError::Disabled))?;
+        let Some(subject) = self.enrichment_subject(artist_id).await? else {
+            return Ok(None);
+        };
+
+        let record = metadata
+            .read_artist(&subject, profile, language, Utc::now())
+            .await
+            .map_err(metadata_failure)?;
+        let outcome = match refresh {
+            RefreshDemand::ReadOnly => None,
+            RefreshDemand::RequestIfDue => Some(
+                metadata
+                    .request_refresh(&subject, profile, language, RefreshReason::Read)
+                    .await
+                    .map_err(metadata_failure)?,
+            ),
+            RefreshDemand::Force => Some(
+                metadata
+                    .request_refresh(&subject, profile, language, RefreshReason::Manual)
+                    .await
+                    .map_err(metadata_failure)?,
+            ),
+        };
+        let state = metadata
+            .refresh_state(&subject, profile, language)
+            .await
+            .map_err(metadata_failure)?;
+
+        let mut portraits = Vec::new();
+        if let Some(cache) = self.artwork.as_ref() {
+            for role in [ArtworkRole::Portrait, ArtworkRole::Wide] {
+                if let Some(asset) = cache
+                    .ready(artist_id, role, None)
+                    .await
+                    .map_err(artwork_failure)?
+                {
+                    portraits.push(asset.descriptor);
+                }
+            }
+        }
+
+        Ok(Some(ArtistInformation {
+            artist,
+            metadata: record,
+            portraits,
+            cover_art: CoverArtTarget::artist(artist_id).encode(),
+            refresh: RefreshStatus { state, outcome },
+        }))
     }
 
     pub async fn track_page(

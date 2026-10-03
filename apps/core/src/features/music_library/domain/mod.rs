@@ -1,8 +1,10 @@
 mod album;
 mod artist;
+mod artist_information;
 mod artwork;
 mod dedup;
 mod duplicate_report;
+mod enrichment;
 mod error;
 mod history;
 mod metadata;
@@ -26,6 +28,7 @@ pub use album::{
 pub use artist::{
     Artist, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort, ArtistSummary, CreditRole,
 };
+pub use artist_information::{ArtistInformation, RefreshDemand, RefreshStatus};
 pub use artwork::ArtworkRef;
 pub use dedup::{
     MATCHER_VERSION, MatchDecision, MatchRecord, MatchStatus, ParsedTitle, RecordingIndex,
@@ -33,6 +36,7 @@ pub use dedup::{
 pub use duplicate_report::{
     DuplicateCandidate, DuplicateSource, KeepReason, SplitArtist, SplitArtistRow,
 };
+pub use enrichment::{EnrichmentSubject, identity_revision};
 pub use error::ValidationError;
 pub use history::{
     ListenCount, ListenCoverage, ListenExtent, ListenOrder, ListenOrigin, ListenOutcome,

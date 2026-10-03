@@ -14,9 +14,13 @@ use axum::{Router, extract::FromRef};
 
 use crate::{
     facades::SourceTags,
+    features::identity::destinations::DestinationService,
     features::identity::service::CredentialService,
+    features::metadata::MetadataService,
     features::music_library::artwork::ArtworkService,
     features::music_library::catalogue::{CompletionService, LibraryService, SearchService},
+    features::music_library::delivery::DeliveryService,
+    features::music_library::discovery::DiscoveryService,
     features::music_library::history::ListenService,
     features::music_library::library::{LibraryRegistry, ScanService},
     features::music_library::library_state::LibraryStateService,
@@ -42,6 +46,12 @@ pub struct AppState {
     streaming: Arc<StreamingService>,
     scanner: Arc<ScanService>,
     library_registry: Arc<LibraryRegistry>,
+    discovery: Option<Arc<DiscoveryService>>,
+    destinations: Option<Arc<DestinationService>>,
+    delivery: Option<Arc<DeliveryService>>,
+    metadata: Option<Arc<MetadataService>>,
+    metadata_profile: crate::features::metadata::MetadataProfile,
+    metadata_language: String,
     source_tags: SourceTags,
 }
 
@@ -100,6 +110,44 @@ impl AppState {
         self
     }
 
+    pub fn with_discovery(mut self, discovery: Arc<DiscoveryService>) -> Self {
+        self.discovery = Some(discovery);
+        self
+    }
+
+    pub fn with_destinations(mut self, destinations: Arc<DestinationService>) -> Self {
+        self.destinations = Some(destinations);
+        self
+    }
+
+    pub fn with_delivery(mut self, delivery: Arc<DeliveryService>) -> Self {
+        self.delivery = Some(delivery);
+        self
+    }
+
+    pub fn with_metadata_service(mut self, metadata: Arc<MetadataService>) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn with_metadata_defaults(
+        mut self,
+        profile: crate::features::metadata::MetadataProfile,
+        language: String,
+    ) -> Self {
+        self.metadata_profile = profile;
+        self.metadata_language = language;
+        self
+    }
+
+    pub fn metadata_profile(&self) -> &crate::features::metadata::MetadataProfile {
+        &self.metadata_profile
+    }
+
+    pub fn metadata_language(&self) -> &str {
+        &self.metadata_language
+    }
+
     pub fn with_source_tags(mut self, tags: SourceTags) -> Self {
         self.source_tags = tags;
         self
@@ -121,6 +169,22 @@ impl AppState {
 
     pub fn scanner_handle(&self) -> Arc<ScanService> {
         Arc::clone(&self.scanner)
+    }
+
+    pub fn delivery(&self) -> Option<Arc<DeliveryService>> {
+        self.delivery.clone()
+    }
+
+    pub fn destinations(&self) -> Option<Arc<DestinationService>> {
+        self.destinations.clone()
+    }
+
+    pub fn metadata_service(&self) -> Option<Arc<MetadataService>> {
+        self.metadata.clone()
+    }
+
+    pub fn discovery_service(&self) -> Option<Arc<DiscoveryService>> {
+        self.discovery.clone()
     }
 
     fn build(
@@ -151,6 +215,12 @@ impl AppState {
             streaming,
             scanner: ScanService::disabled(),
             library_registry: Arc::new(LibraryRegistry::disabled()),
+            discovery: None,
+            destinations: None,
+            delivery: None,
+            metadata: None,
+            metadata_profile: crate::features::metadata::MetadataProfile::artist_display(),
+            metadata_language: "en".to_owned(),
             source_tags: SourceTags::Off,
         }
     }
@@ -224,6 +294,7 @@ impl FromRef<AppState> for crate::facades::subsonic::state::SubsonicState {
             activity: Arc::clone(&state.playback_activity),
             scanner: Arc::clone(&state.scanner),
             streaming: Arc::clone(&state.streaming),
+            discovery: state.discovery.clone(),
             source_tags: state.source_tags,
         }
     }

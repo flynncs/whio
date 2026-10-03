@@ -1,4 +1,7 @@
+mod artwork;
 mod catalogue;
+mod delivery;
+mod enrichment;
 mod error;
 mod history;
 mod libraries;
@@ -7,7 +10,10 @@ mod playlist;
 mod queue;
 mod state;
 
+pub use artwork::ArtworkStore;
 pub use catalogue::{CatalogueWrite, ReconcileReport};
+pub use delivery::DeliveryStore;
+pub use enrichment::EnrichmentGuard;
 pub use error::{SourceFileFacts, TrackRepositoryError};
 pub use history::ListenStore;
 pub use libraries::LibraryStore;

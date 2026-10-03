@@ -578,6 +578,34 @@ impl LibraryRead for PgStore {
         Ok(views)
     }
 
+    async fn tracks_credited_to(
+        &self,
+        artist_ids: &[ArtistId],
+    ) -> Result<Vec<TrackId>, TrackRepositoryError> {
+        if artist_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let ids = artist_ids
+            .iter()
+            .map(|artist_id| *artist_id.as_uuid())
+            .collect::<Vec<_>>();
+        let rows = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT DISTINCT credits.track_id
+            FROM track_artist_credits AS credits
+            WHERE credits.artist_id = ANY($1)
+            ORDER BY credits.track_id
+            "#,
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        Ok(rows.into_iter().map(TrackId::from_uuid).collect())
+    }
+
     async fn search_tracks(
         &self,
         query: &str,
@@ -769,6 +797,30 @@ impl LibraryRead for PgStore {
         attach_artist_states(&self.pool, user, &mut summaries).await?;
 
         Ok(summaries)
+    }
+
+    async fn find_artist_by_exact_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<ArtistId>, TrackRepositoryError> {
+        let ids = sqlx::query_scalar::<_, Uuid>(&format!(
+            r#"
+            SELECT id
+            FROM artists
+            WHERE name_normalized = {key}
+            LIMIT 2
+            "#,
+            key = folded("$1"),
+        ))
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        match ids.as_slice() {
+            [only] => Ok(Some(ArtistId::from_uuid(*only))),
+            _ => Ok(None),
+        }
     }
 
     async fn candidate_tracks(

@@ -109,6 +109,13 @@ pub trait LibraryRead: Send + Sync {
         user: Option<Uuid>,
     ) -> Result<Vec<TrackView>, TrackRepositoryError>;
 
+    async fn tracks_credited_to(
+        &self,
+        _artist_ids: &[ArtistId],
+    ) -> Result<Vec<TrackId>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
     async fn search_tracks(
         &self,
         _query: &str,
@@ -135,6 +142,13 @@ pub trait LibraryRead: Send + Sync {
         _filter: &ArtistListFilter,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         Ok(Vec::new())
+    }
+
+    async fn find_artist_by_exact_name(
+        &self,
+        _name: &str,
+    ) -> Result<Option<ArtistId>, TrackRepositoryError> {
+        Ok(None)
     }
 
     async fn candidate_tracks(
@@ -177,6 +191,13 @@ pub trait SourceLookup: Send + Sync {
         _artist_id: &ArtistId,
     ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
         Ok(Vec::new())
+    }
+
+    async fn find_artist_by_source(
+        &self,
+        _source: &SourceIdentity,
+    ) -> Result<Option<ArtistId>, TrackRepositoryError> {
+        Ok(None)
     }
 
     async fn find_provider_entity_state(

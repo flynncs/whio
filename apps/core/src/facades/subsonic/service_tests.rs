@@ -4,9 +4,21 @@ use crate::features::music_library::test_support::{
 };
 use crate::{
     features::identity::{
+        api::native::AuthenticatedPrincipal,
         domain::{Principal, UserId, UserRole},
         secrets::CredentialKey,
     },
+    features::metadata::capabilities::{
+        CAPABILITY_TTL, CapabilityError, CapabilitySnapshot, CapabilitySource, Snapshot,
+    },
+    features::metadata::domain::{CandidateItem, FieldId, FieldValue, FieldWrite, MatchBasis},
+    features::metadata::freshness::NoJitter,
+    features::metadata::refresh::{DocumentError, DocumentOutcome, MetadataDocuments},
+    features::metadata::selection::{FieldOrder, YOUTUBE_MUSIC},
+    features::metadata::service::{MetadataProfile, MetadataService},
+    features::metadata::{MetadataStore, PostgresMetadataStore},
+    features::music_library::EnrichmentGuard,
+    features::music_library::api::artist_info::{ArtistInfoState, related, top},
     features::music_library::catalogue::ProviderError,
     features::music_library::catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch},
     features::music_library::history::ListenService,
@@ -23,6 +35,11 @@ use crate::{
     platform::request::{RequestContext, RequestId},
 };
 use async_trait::async_trait;
+use axum::{
+    Extension, Json,
+    extract::{Path, State},
+    response::IntoResponse,
+};
 use std::{
     collections::VecDeque,
     sync::{
@@ -286,6 +303,7 @@ struct CountingLibrary {
     track_calls: AtomicU32,
     album_calls: AtomicU32,
     artist_calls: AtomicU32,
+    log: Mutex<Vec<String>>,
 }
 
 impl CountingLibrary {
@@ -300,6 +318,28 @@ impl CountingLibrary {
     fn artists(&self) -> u32 {
         self.artist_calls.load(Ordering::SeqCst)
     }
+
+    fn note(&self, entry: String) {
+        self.log.lock().expect("the call log").push(entry);
+    }
+
+    fn clear_log(&self) {
+        self.log.lock().expect("the call log").clear();
+    }
+
+    fn composition_log(&self) -> Vec<String> {
+        self.log
+            .lock()
+            .expect("the call log")
+            .iter()
+            .filter(|entry| {
+                entry.starts_with("page_tracks")
+                    || entry.starts_with("track_views")
+                    || entry.starts_with("tracks_credited_to")
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -309,6 +349,42 @@ impl LibraryRead for CountingLibrary {
         track_id: &crate::features::music_library::domain::TrackId,
     ) -> Result<Option<crate::features::music_library::domain::Track>, TrackRepositoryError> {
         self.inner.find_track(track_id).await
+    }
+
+    async fn find_artist(
+        &self,
+        artist_id: &ArtistId,
+        user: Option<Uuid>,
+    ) -> Result<Option<crate::features::music_library::domain::Artist>, TrackRepositoryError> {
+        self.inner.find_artist(artist_id, user).await
+    }
+
+    async fn find_artist_by_exact_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<ArtistId>, TrackRepositoryError> {
+        self.note("find_artist_by_exact_name".to_owned());
+
+        self.inner.find_artist_by_exact_name(name).await
+    }
+
+    async fn tracks_credited_to(
+        &self,
+        artist_ids: &[ArtistId],
+    ) -> Result<Vec<crate::features::music_library::domain::TrackId>, TrackRepositoryError> {
+        self.note(format!("tracks_credited_to:{}", artist_ids.len()));
+
+        self.inner.tracks_credited_to(artist_ids).await
+    }
+
+    async fn dedup_candidates(
+        &self,
+        keys: &[String],
+        limit: u32,
+    ) -> Result<Vec<crate::features::music_library::domain::TrackHit>, TrackRepositoryError> {
+        self.note(format!("dedup_candidates:{}", keys.len()));
+
+        self.inner.dedup_candidates(keys, limit).await
     }
 
     async fn list_albums(
@@ -352,6 +428,7 @@ impl LibraryRead for CountingLibrary {
         user: Option<Uuid>,
     ) -> Result<crate::features::music_library::domain::TrackPage, TrackRepositoryError> {
         self.track_calls.fetch_add(1, Ordering::SeqCst);
+        self.note("page_tracks".to_owned());
 
         self.inner
             .page_tracks(offset, limit, order, filter, user)
@@ -363,6 +440,8 @@ impl LibraryRead for CountingLibrary {
         track_ids: &[crate::features::music_library::domain::TrackId],
         user: Option<Uuid>,
     ) -> Result<Vec<crate::features::music_library::domain::TrackView>, TrackRepositoryError> {
+        self.note(format!("track_views:{}", track_ids.len()));
+
         self.inner.track_views(track_ids, user).await
     }
 }
@@ -378,6 +457,7 @@ async fn counting_catalogue(
         track_calls: AtomicU32::new(0),
         album_calls: AtomicU32::new(0),
         artist_calls: AtomicU32::new(0),
+        log: Mutex::new(Vec::new()),
     });
 
     let library = LibraryService::new(
@@ -962,6 +1042,15 @@ fn library_over(repository: &Arc<PostgresTrackRepository>) -> LibraryService {
         Arc::clone(repository) as Arc<dyn LibraryRead>,
         Arc::clone(repository) as Arc<dyn SourceLookup>,
         Arc::clone(repository) as Arc<dyn StateStore>,
+    )
+}
+
+fn discovery_over(repository: &Arc<PostgresTrackRepository>) -> DiscoveryService {
+    DiscoveryService::new(
+        Arc::clone(repository) as Arc<dyn LibraryRead>,
+        Arc::clone(repository) as Arc<dyn SourceLookup>,
+        Arc::clone(repository) as Arc<dyn StateStore>,
+        Arc::clone(repository) as Arc<dyn ListenStore>,
     )
 }
 
@@ -2166,4 +2255,989 @@ fn report_playback_rejects_unknown_parameters_states_and_values() {
     assert_eq!(request.position_ms, 0);
     assert_eq!(request.playback_rate, PlaybackRate::default());
     assert!(!request.ignore_scrobble);
+}
+
+#[test]
+fn artist_info_count_defaults_caps_and_rejects() {
+    let over = (MAX_BROWSE_SIZE + 1).to_string();
+
+    assert_eq!(artist_info_count(None).unwrap(), 20);
+    assert_eq!(artist_info_count(Some("10")).unwrap(), 10);
+    assert_eq!(artist_info_count(Some("0")).unwrap(), 0);
+    assert_eq!(
+        artist_info_count(Some(over.as_str())).unwrap(),
+        MAX_BROWSE_SIZE
+    );
+    assert!(matches!(
+        artist_info_count(Some("-1")),
+        Err(BrowseError::InvalidRequest)
+    ));
+    assert!(matches!(
+        artist_info_count(Some("many")),
+        Err(BrowseError::InvalidRequest)
+    ));
+}
+
+#[test]
+fn include_not_present_defaults_false_and_rejects_an_unknown_value() {
+    assert!(!include_not_present(None).unwrap());
+    assert!(include_not_present(Some("true")).unwrap());
+    assert!(include_not_present(Some("1")).unwrap());
+    assert!(!include_not_present(Some("false")).unwrap());
+    assert!(!include_not_present(Some("0")).unwrap());
+    assert!(matches!(
+        include_not_present(Some("maybe")),
+        Err(BrowseError::InvalidRequest)
+    ));
+}
+
+#[sqlx::test]
+async fn subsonic_artist_info_reports_a_disabled_metadata_feature(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let artist = repository
+        .resolve_or_create_artist(
+            &ArtistCredit::new("Daft Punk".to_owned(), Some("mbid-daft-punk".to_owned())).unwrap(),
+        )
+        .await
+        .unwrap();
+    let library = library_over(&repository);
+    let discovery = discovery_over(&repository);
+
+    let error = artist_info2(
+        &library,
+        Some(&discovery),
+        &artist.id().to_string(),
+        None,
+        20,
+    )
+    .await
+    .expect_err("no metadata feature is configured");
+
+    assert!(matches!(
+        error,
+        BrowseError::Catalogue(CatalogueError::Provider(ProviderError::Disabled))
+    ));
+    assert!(
+        artist_detail(&library, &artist.id().to_string(), None)
+            .await
+            .is_ok(),
+        "the artist read stays usable without the metadata feature"
+    );
+    assert!(
+        artists(&library, None).await.is_ok(),
+        "the artist index stays usable without the metadata feature"
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_artist_info_distinguishes_a_bad_id_from_an_unknown_one(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let library = library_over(&repository);
+    let discovery = discovery_over(&repository);
+
+    assert!(matches!(
+        artist_info2(&library, Some(&discovery), "not-a-uuid", None, 20).await,
+        Err(BrowseError::ArtistNotFound)
+    ));
+
+    let unknown = ArtistId::new().to_string();
+
+    assert!(matches!(
+        artist_info2(&library, Some(&discovery), &unknown, None, 20).await,
+        Err(BrowseError::ArtistNotFound)
+    ));
+    assert!(matches!(
+        artist_info(&library, &unknown, None).await,
+        Err(BrowseError::ArtistNotFound)
+    ));
+}
+
+const MAX_METADATA_BYTES: u64 = 4 * 1024 * 1024;
+
+const SEED_MBID: &str = "mbid-discovery-seed";
+const PEER_MBID: &str = "mbid-discovery-peer";
+const SECOND_PEER_MBID: &str = "mbid-discovery-second-peer";
+const QUIET_MBID: &str = "mbid-discovery-quiet";
+const EMPTY_MBID: &str = "mbid-discovery-empty";
+const TWIN_ONE_MBID: &str = "mbid-discovery-twin-one";
+const TWIN_TWO_MBID: &str = "mbid-discovery-twin-two";
+const PROVIDER_ONLY_MBID: &str = "mbid-discovery-provider-only";
+
+fn mbid_credit(name: &str, mbid: &str) -> ArtistCredit {
+    ArtistCredit::new(name.to_owned(), Some(mbid.to_owned())).expect("a credit")
+}
+
+fn mbid_role(name: &str, mbid: &str, role: CreditRole) -> ArtistCredit {
+    mbid_credit(name, mbid).with_role(role)
+}
+
+fn musicbrainz_identity(mbid: &str) -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new("musicbrainz".to_owned()).expect("a provider"),
+        SourceScope::Global,
+        mbid.to_owned(),
+    )
+    .expect("a source identity")
+}
+
+async fn named_artist(repository: &PostgresTrackRepository, name: &str, mbid: &str) -> ArtistId {
+    let artist = repository
+        .resolve_or_create_artist(&mbid_credit(name, mbid))
+        .await
+        .expect("an artist");
+    repository
+        .set_artist_source(artist.id(), &musicbrainz_identity(mbid))
+        .await
+        .expect("the artist source");
+
+    artist.id().clone()
+}
+
+struct SeededDiscovery {
+    seed: ArtistId,
+    seed_album: crate::features::music_library::domain::AlbumId,
+    peer: ArtistId,
+    second_peer: ArtistId,
+    quiet: ArtistId,
+    empty: ArtistId,
+    seed_solo: TrackId,
+    seed_track: TrackId,
+    bridge: TrackId,
+    peer_track: TrackId,
+    quiet_track: TrackId,
+}
+
+async fn seeded_discovery(repository: &PostgresTrackRepository) -> SeededDiscovery {
+    let seed = named_artist(repository, "Seed Artist", SEED_MBID).await;
+    let peer = named_artist(repository, "Peer Artist", PEER_MBID).await;
+    let second_peer = named_artist(repository, "Second Peer", SECOND_PEER_MBID).await;
+    let quiet = named_artist(repository, "Quiet Artist", QUIET_MBID).await;
+    let empty = named_artist(repository, "Empty Artist", EMPTY_MBID).await;
+    named_artist(repository, "Twin Artist", TWIN_ONE_MBID).await;
+    named_artist(repository, "Twin Artist", TWIN_TWO_MBID).await;
+
+    let seed_album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Seed Album".to_owned())
+                .expect("album metadata")
+                .with_album_artist(mbid_credit("Seed Artist", SEED_MBID)),
+        )
+        .await
+        .expect("the seed album");
+    let peer_album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Peer Album".to_owned())
+                .expect("album metadata")
+                .with_album_artist(mbid_credit("Peer Artist", PEER_MBID)),
+        )
+        .await
+        .expect("the peer album");
+
+    let seed_track = repository
+        .get_or_create(
+            local_source("discovery-seed.flac"),
+            TrackMetadata::new(
+                "Zeta Seed".to_owned(),
+                vec![mbid_credit("Seed Artist", SEED_MBID)],
+                Some(1_000),
+            )
+            .expect("track metadata")
+            .with_credits(vec![
+                mbid_role("Seed Artist", SEED_MBID, CreditRole::Composer),
+                mbid_role("Peer Artist", PEER_MBID, CreditRole::Composer),
+                mbid_role("Second Peer", SECOND_PEER_MBID, CreditRole::Composer),
+            ]),
+        )
+        .await
+        .expect("the seed track")
+        .id()
+        .clone();
+    let seed_solo = repository
+        .get_or_create(
+            local_source("discovery-solo.flac"),
+            TrackMetadata::new(
+                "Alpha Solo".to_owned(),
+                vec![mbid_credit("Seed Artist", SEED_MBID)],
+                Some(2_000),
+            )
+            .expect("track metadata"),
+        )
+        .await
+        .expect("the solo track")
+        .id()
+        .clone();
+    let bridge = repository
+        .get_or_create(
+            local_source("discovery-bridge.flac"),
+            TrackMetadata::new(
+                "Mid Bridge".to_owned(),
+                vec![mbid_credit("Seed Artist", SEED_MBID)],
+                Some(3_000),
+            )
+            .expect("track metadata")
+            .with_credits(vec![mbid_role(
+                "Peer Artist",
+                PEER_MBID,
+                CreditRole::Composer,
+            )]),
+        )
+        .await
+        .expect("the bridge track")
+        .id()
+        .clone();
+    let peer_track = repository
+        .get_or_create(
+            local_source("discovery-peer.flac"),
+            TrackMetadata::new(
+                "Peer Song".to_owned(),
+                vec![mbid_credit("Peer Artist", PEER_MBID)],
+                Some(4_000),
+            )
+            .expect("track metadata"),
+        )
+        .await
+        .expect("the peer track")
+        .id()
+        .clone();
+    let quiet_track = repository
+        .get_or_create(
+            local_source("discovery-quiet.flac"),
+            TrackMetadata::new(
+                "Quiet Song".to_owned(),
+                vec![mbid_credit("Quiet Artist", QUIET_MBID)],
+                Some(5_000),
+            )
+            .expect("track metadata")
+            .with_credits(vec![mbid_role(
+                "Quiet Artist",
+                QUIET_MBID,
+                CreditRole::Composer,
+            )]),
+        )
+        .await
+        .expect("the quiet track")
+        .id()
+        .clone();
+
+    for (album, track, position) in [
+        (seed_album.id(), &seed_track, 0u32),
+        (seed_album.id(), &seed_solo, 1),
+        (seed_album.id(), &bridge, 2),
+        (peer_album.id(), &peer_track, 0),
+    ] {
+        repository
+            .set_album_track(
+                album,
+                track,
+                &AlbumTrack::new(Some(1), Some((position + 1) as u16), position)
+                    .expect("a membership"),
+            )
+            .await
+            .expect("the album membership");
+    }
+
+    SeededDiscovery {
+        seed,
+        seed_album: seed_album.id().clone(),
+        peer,
+        second_peer,
+        quiet,
+        empty,
+        seed_solo,
+        seed_track,
+        bridge,
+        peer_track,
+        quiet_track,
+    }
+}
+
+fn song_ids(songs: &models::TopSongs) -> Vec<String> {
+    songs
+        .song
+        .as_ref()
+        .expect("the declared song list")
+        .iter()
+        .map(|song| song.id.clone())
+        .collect()
+}
+
+#[sqlx::test]
+async fn top_songs_resolves_an_exact_name_and_serves_the_local_tracks_capped_at_count(
+    pool: sqlx::PgPool,
+) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let data = seeded_discovery(&repository).await;
+    let library = library_over(&repository);
+    let discovery = discovery_over(&repository);
+
+    let songs = top_songs(
+        &library,
+        Some(&discovery),
+        "Seed Artist",
+        None,
+        50,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the local top songs");
+    let mut ids = song_ids(&songs);
+    ids.sort();
+
+    let mut expected = vec![
+        data.seed_solo.to_string(),
+        data.bridge.to_string(),
+        data.seed_track.to_string(),
+    ];
+    expected.sort();
+    assert_eq!(ids, expected, "the local relationship basis");
+
+    let capped = top_songs(
+        &library,
+        Some(&discovery),
+        "Seed Artist",
+        None,
+        1,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the capped local top songs");
+    let capped_ids = song_ids(&capped);
+
+    assert_eq!(capped_ids.len(), 1, "the cap is honoured");
+    assert!(expected.contains(&capped_ids[0]));
+}
+
+#[sqlx::test]
+async fn top_songs_reports_not_found_for_zero_and_for_several_exact_matches(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let data = seeded_discovery(&repository).await;
+    let library = library_over(&repository);
+    let discovery = discovery_over(&repository);
+
+    assert_eq!(
+        library
+            .artist_by_exact_name("Seed Artist")
+            .await
+            .expect("the exact read"),
+        Some(data.seed.clone())
+    );
+    assert_eq!(
+        library
+            .artist_by_exact_name("Twin Artist")
+            .await
+            .expect("the exact read"),
+        None,
+        "several canonical artists share the name, so no artist is picked"
+    );
+    assert!(matches!(
+        top_songs(
+            &library,
+            Some(&discovery),
+            "Nobody",
+            None,
+            50,
+            SourceTags::Off
+        )
+        .await,
+        Err(BrowseError::ArtistNotFound)
+    ));
+    assert!(matches!(
+        top_songs(
+            &library,
+            Some(&discovery),
+            "Twin Artist",
+            None,
+            50,
+            SourceTags::Off
+        )
+        .await,
+        Err(BrowseError::ArtistNotFound)
+    ));
+}
+
+#[sqlx::test]
+async fn similar_songs_exclude_the_seed_and_honour_count(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let data = seeded_discovery(&repository).await;
+    let library = library_over(&repository);
+    let discovery = discovery_over(&repository);
+
+    let songs = similar_songs(
+        &library,
+        Some(&discovery),
+        &data.seed_track.to_string(),
+        None,
+        50,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the similar songs");
+    let mut ids = song_ids_from(&songs);
+    ids.sort();
+
+    let mut expected = vec![data.bridge.to_string(), data.peer_track.to_string()];
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert!(
+        !ids.contains(&data.seed_track.to_string()),
+        "the seed track is excluded even though a related artist is credited on it"
+    );
+}
+
+fn song_ids_from(songs: &models::SimilarSongs) -> Vec<String> {
+    song_ids_of(songs.song.as_ref())
+}
+
+fn song_ids_of(songs: Option<&Vec<models::Child>>) -> Vec<String> {
+    songs
+        .expect("the declared song list")
+        .iter()
+        .map(|song| song.id.clone())
+        .collect()
+}
+
+#[sqlx::test]
+async fn similar_songs2_serves_the_related_artists_tracks_in_rank_order(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let data = seeded_discovery(&repository).await;
+    let library = library_over(&repository);
+    let discovery = discovery_over(&repository);
+
+    let songs = similar_songs2(
+        &library,
+        Some(&discovery),
+        &data.seed.to_string(),
+        None,
+        50,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the similar songs");
+    let mut ids = song_ids_of(songs.song.as_ref());
+    ids.sort();
+
+    let mut expected = vec![
+        data.bridge.to_string(),
+        data.peer_track.to_string(),
+        data.seed_track.to_string(),
+    ];
+    expected.sort();
+    assert_eq!(ids, expected);
+
+    let capped = similar_songs2(
+        &library,
+        Some(&discovery),
+        &data.seed.to_string(),
+        None,
+        1,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the capped similar songs");
+
+    assert_eq!(
+        song_ids_of(capped.song.as_ref()).len(),
+        1,
+        "the cap is honoured without a second related artist's tracks"
+    );
+}
+
+#[sqlx::test]
+async fn similar_songs_by_album_id_seed_the_album_artist(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let data = seeded_discovery(&repository).await;
+    let library = library_over(&repository);
+    let discovery = discovery_over(&repository);
+    let songs = similar_songs(
+        &library,
+        Some(&discovery),
+        &data.seed_album.to_string(),
+        None,
+        50,
+        SourceTags::Off,
+    )
+    .await
+    .expect("album radio");
+    let mut ids = song_ids_from(&songs);
+    ids.sort();
+
+    let mut expected = vec![
+        data.bridge.to_string(),
+        data.peer_track.to_string(),
+        data.seed_track.to_string(),
+    ];
+    expected.sort();
+    assert_eq!(ids, expected, "album radio is anchored on the album artist");
+}
+
+#[sqlx::test]
+async fn similar_songs_and_top_songs_declare_an_empty_list_when_nothing_is_available(
+    pool: sqlx::PgPool,
+) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let data = seeded_discovery(&repository).await;
+    let library = library_over(&repository);
+    let discovery = discovery_over(&repository);
+
+    let songs = similar_songs(
+        &library,
+        Some(&discovery),
+        &data.quiet_track.to_string(),
+        None,
+        50,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the declared absence");
+
+    assert_eq!(songs.song, Some(Vec::new()));
+
+    let songs = similar_songs2(
+        &library,
+        Some(&discovery),
+        &data.quiet.to_string(),
+        None,
+        50,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the declared absence");
+
+    assert_eq!(songs.song, Some(Vec::new()));
+
+    let songs = top_songs(
+        &library,
+        Some(&discovery),
+        "Empty Artist",
+        None,
+        50,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the declared absence");
+
+    assert_eq!(songs.song, Some(Vec::new()));
+}
+
+#[sqlx::test]
+async fn similar_artists_serve_only_canonical_matches_capped_at_count(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let data = seeded_discovery(&repository).await;
+    let library = library_over(&repository);
+    let discovery = discovery_over(&repository);
+
+    let artists = similar_artists(&library, &discovery, &data.seed, None, 20)
+        .await
+        .expect("the related artists");
+
+    let ids = artists
+        .iter()
+        .map(|artist| artist.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![data.peer.to_string(), data.second_peer.to_string()]
+    );
+    assert_eq!(artists[0].name, "Peer Artist");
+    assert_eq!(artists[0].album_count, Some(1));
+    assert_eq!(artists[0].cover_art, Some(format!("ar-{}", data.peer)));
+    assert_eq!(artists[0].starred, None);
+    assert_eq!(artists[1].name, "Second Peer");
+
+    let capped = similar_artists(&library, &discovery, &data.seed, None, 1)
+        .await
+        .expect("the capped related artists");
+
+    assert_eq!(
+        capped
+            .iter()
+            .map(|artist| artist.id.clone())
+            .collect::<Vec<_>>(),
+        vec![data.peer.to_string()]
+    );
+}
+
+#[sqlx::test]
+async fn similar_artists_and_top_songs_report_not_found_for_an_unmatched_name_or_id(
+    pool: sqlx::PgPool,
+) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let data = seeded_discovery(&repository).await;
+    let library = library_over(&repository);
+    let discovery = discovery_over(&repository);
+
+    assert!(matches!(
+        top_songs(
+            &library,
+            Some(&discovery),
+            "Nobody",
+            None,
+            50,
+            SourceTags::Off
+        )
+        .await,
+        Err(BrowseError::ArtistNotFound)
+    ));
+    assert!(matches!(
+        top_songs(
+            &library,
+            Some(&discovery),
+            "Twin Artist",
+            None,
+            50,
+            SourceTags::Off
+        )
+        .await,
+        Err(BrowseError::ArtistNotFound)
+    ));
+    assert!(matches!(
+        similar_songs2(
+            &library,
+            Some(&discovery),
+            &ArtistId::new().to_string(),
+            None,
+            50,
+            SourceTags::Off
+        )
+        .await,
+        Err(BrowseError::ArtistNotFound)
+    ));
+    assert!(matches!(
+        similar_songs2(
+            &library,
+            Some(&discovery),
+            "not-a-uuid",
+            None,
+            50,
+            SourceTags::Off
+        )
+        .await,
+        Err(BrowseError::ArtistNotFound)
+    ));
+    assert!(
+        similar_artists(&library, &discovery, &data.empty, None, 20)
+            .await
+            .expect("a served absence")
+            .is_empty()
+    );
+}
+
+struct FixedCapabilities {
+    providers: Vec<String>,
+}
+
+#[async_trait]
+impl CapabilitySource for FixedCapabilities {
+    async fn fetch(&self) -> Result<Snapshot, CapabilityError> {
+        Ok(Snapshot::new(self.providers.clone()))
+    }
+}
+
+struct NoDocuments;
+
+#[async_trait]
+impl MetadataDocuments for NoDocuments {
+    async fn fetch(
+        &self,
+        _source: &SourceIdentity,
+        _profile: &MetadataProfile,
+        _language: &str,
+        _fields: &[FieldId],
+    ) -> Result<DocumentOutcome, DocumentError> {
+        Err(DocumentError::Unsupported)
+    }
+}
+
+fn provider_write(field: FieldId, provider_id: &str, external_id: &str) -> FieldWrite {
+    FieldWrite {
+        field,
+        source_provider_id: provider_id.to_owned(),
+        source_external_id: format!("{provider_id}-{external_id}"),
+        adapter_version: "v1".to_owned(),
+        language: "en".to_owned(),
+        value: Some(FieldValue::Candidates(vec![CandidateItem {
+            name: "Provider Candidate".to_owned(),
+            external_id: Some("ytm-channel-1".to_owned()),
+            url: None,
+            rank: Some(1),
+            score: Some(0.9),
+            artists: vec!["Provider Only".to_owned()],
+            release_name: None,
+            duration_ms: None,
+            isrc: None,
+            recording_id: None,
+            ranking_scope: Some("ytm.similar.v1".to_owned()),
+        }])),
+        licence_id: Some(provider_id.to_owned()),
+        licence_revision: Some(1),
+        attribution: None,
+        source_url: None,
+        match_basis: MatchBasis::Identifier,
+        operation: "artist.discovery.v1".to_owned(),
+        terms_basis: None,
+        uncertainty: false,
+        image: None,
+        metric: None,
+        rank: Some(1),
+        score: Some(0.9),
+        fetched_at: Utc::now(),
+    }
+}
+
+fn discovery_field_order() -> FieldOrder {
+    FieldOrder::from_entries([
+        (FieldId::Similar, vec![YOUTUBE_MUSIC.to_owned()]),
+        (FieldId::TopTracks, vec![YOUTUBE_MUSIC.to_owned()]),
+    ])
+}
+
+#[sqlx::test]
+async fn a_provider_only_ranking_is_not_served_through_the_subsonic_discovery_lists(
+    pool: sqlx::PgPool,
+) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let artist = named_artist(&repository, "Provider Only", PROVIDER_ONLY_MBID).await;
+    let library = library_over(&repository);
+    let store = Arc::new(PostgresMetadataStore::new(
+        pool.clone(),
+        Arc::clone(&repository) as Arc<dyn EnrichmentGuard>,
+        MAX_METADATA_BYTES,
+    ));
+    let snapshot = Arc::new(CapabilitySnapshot::new(
+        Arc::new(FixedCapabilities {
+            providers: vec![YOUTUBE_MUSIC.to_owned()],
+        }),
+        CAPABILITY_TTL,
+    ));
+    snapshot
+        .current(Utc::now())
+        .await
+        .expect("the capability snapshot warms");
+    let subject = library
+        .enrichment_subject(&artist)
+        .await
+        .expect("the enrichment subject")
+        .expect("the canonical artist");
+    let external_id = subject
+        .musicbrainz_artist_id()
+        .unwrap_or_default()
+        .to_owned();
+    store
+        .commit_field(
+            &subject,
+            &provider_write(FieldId::Similar, YOUTUBE_MUSIC, &external_id),
+        )
+        .await
+        .expect("the provider fact");
+    let metadata = Arc::new(MetadataService::new(
+        pool.clone(),
+        Arc::clone(&store) as Arc<dyn MetadataStore>,
+        Arc::new(NoDocuments) as Arc<dyn MetadataDocuments>,
+        Arc::clone(&snapshot),
+        discovery_field_order(),
+        "v1".to_owned(),
+        Arc::new(NoJitter),
+    ));
+    let discovery = discovery_over(&repository).with_metadata(Arc::clone(&metadata));
+
+    let external = discovery
+        .related(RelatedRequest {
+            seed: DiscoverySeed::Artist(artist.clone()),
+            basis: DiscoveryBasis::External,
+            window: None,
+            limit: PageLimit::new(20).expect("the page limit"),
+            user: None,
+        })
+        .await
+        .expect("the provider basis");
+    assert!(
+        !external.items.is_empty(),
+        "the provider ranking is available on the native external basis"
+    );
+    assert!(
+        external.items.iter().all(|item| item.canonical.is_none()),
+        "no provider candidate is a verified match"
+    );
+
+    let songs = similar_songs2(
+        &library,
+        Some(&discovery),
+        &artist.to_string(),
+        None,
+        50,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the declared absence");
+
+    assert_eq!(
+        songs.song,
+        Some(Vec::new()),
+        "an unattributable provider ranking is not served through the facade"
+    );
+    assert!(
+        similar_artists(&library, &discovery, &artist, None, 20)
+            .await
+            .expect("the declared absence")
+            .is_empty()
+    );
+    assert_eq!(
+        top_songs(
+            &library,
+            Some(&discovery),
+            "Provider Only",
+            None,
+            50,
+            SourceTags::Off
+        )
+        .await
+        .expect("the declared absence")
+        .song,
+        Some(Vec::new())
+    );
+}
+
+async fn shared_composition_catalogue(
+    pool: sqlx::PgPool,
+) -> (
+    Arc<LibraryService>,
+    Arc<DiscoveryService>,
+    Arc<CountingLibrary>,
+    SeededDiscovery,
+) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let data = seeded_discovery(&repository).await;
+    let counting = Arc::new(CountingLibrary {
+        inner: Arc::clone(&repository) as Arc<dyn LibraryRead>,
+        track_calls: AtomicU32::new(0),
+        album_calls: AtomicU32::new(0),
+        artist_calls: AtomicU32::new(0),
+        log: Mutex::new(Vec::new()),
+    });
+    let library = Arc::new(LibraryService::new(
+        Arc::clone(&repository) as Arc<dyn LibraryRead>,
+        Arc::clone(&repository) as Arc<dyn SourceLookup>,
+        Arc::clone(&repository) as Arc<dyn StateStore>,
+    ));
+    let discovery = Arc::new(DiscoveryService::new(
+        Arc::clone(&counting) as Arc<dyn LibraryRead>,
+        Arc::clone(&repository) as Arc<dyn SourceLookup>,
+        Arc::clone(&repository) as Arc<dyn StateStore>,
+        Arc::clone(&repository) as Arc<dyn ListenStore>,
+    ));
+
+    (library, discovery, counting, data)
+}
+
+fn native_json<T, E>(result: Result<Json<T>, E>) -> serde_json::Value
+where
+    T: serde::Serialize,
+    E: IntoResponse,
+{
+    match result {
+        Ok(Json(body)) => serde_json::to_value(body).expect("the native body"),
+        Err(_) => panic!("the native handler failed"),
+    }
+}
+
+fn native_item_ids(body: &serde_json::Value, member: &str) -> Vec<String> {
+    body["items"]
+        .as_array()
+        .expect("the item list")
+        .iter()
+        .map(|item| {
+            item[member]
+                .as_str()
+                .unwrap_or_else(|| panic!("the `{member}` member of {item}"))
+                .to_owned()
+        })
+        .collect()
+}
+
+#[sqlx::test]
+async fn the_native_route_and_the_subsonic_facade_observe_the_same_composed_result(
+    pool: sqlx::PgPool,
+) {
+    let (library, discovery, counting, data) = shared_composition_catalogue(pool.clone()).await;
+    let state = ArtistInfoState::with_defaults(
+        Arc::clone(&library),
+        Arc::new(crate::features::identity::credentials(
+            pool.clone(),
+            reporting_key(),
+        )),
+        MetadataProfile::artist_display(),
+        "en".to_owned(),
+        Some(Arc::clone(&discovery)),
+    );
+    let user = Uuid::now_v7();
+    let principal = Principal {
+        user_id: UserId::from_uuid(user),
+        role: UserRole::Member,
+    };
+
+    counting.clear_log();
+    let native_top = native_json(
+        top(
+            State(state.clone()),
+            Extension(context()),
+            AuthenticatedPrincipal(principal.clone()),
+            Path(data.seed.to_string()),
+            RawQuery::parse(""),
+        )
+        .await,
+    );
+    let native_top_log = counting.composition_log();
+    counting.clear_log();
+    let facade_top = top_songs(
+        &library,
+        Some(&discovery),
+        "Seed Artist",
+        Some(&user),
+        50,
+        SourceTags::Off,
+    )
+    .await
+    .expect("the facade top songs");
+    let facade_top_log = counting.composition_log();
+    let mut facade_top_ids = song_ids(&facade_top);
+    let mut native_top_ids = native_item_ids(&native_top, "track_id");
+    facade_top_ids.sort();
+    native_top_ids.sort();
+
+    assert_eq!(
+        native_top_ids, facade_top_ids,
+        "the same artist must produce the same composed set through both adapters"
+    );
+    assert!(!native_top_ids.is_empty());
+    assert_eq!(native_top_log, facade_top_log);
+    assert!(!native_top_log.is_empty(), "the shared operation ran");
+
+    counting.clear_log();
+    let native_related = native_json(
+        related(
+            State(state),
+            Extension(context()),
+            AuthenticatedPrincipal(principal),
+            Path(data.seed.to_string()),
+            RawQuery::parse(""),
+        )
+        .await,
+    );
+    let native_related_log = counting.composition_log();
+    counting.clear_log();
+    let facade_related = similar_artists(&library, &discovery, &data.seed, Some(&user), 20)
+        .await
+        .expect("the facade related artists");
+    let facade_related_log = counting.composition_log();
+
+    assert_eq!(
+        native_item_ids(&native_related, "id"),
+        facade_related
+            .iter()
+            .map(|artist| artist.id.clone())
+            .collect::<Vec<_>>(),
+        "the same artist must produce the same composed order through both adapters"
+    );
+    assert_eq!(native_related_log, facade_related_log);
+    assert!(!native_related_log.is_empty(), "the shared operation ran");
 }

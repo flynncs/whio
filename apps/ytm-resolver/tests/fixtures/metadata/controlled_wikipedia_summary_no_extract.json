@@ -1,0 +1,9 @@
+{
+  "type": "standard",
+  "title": "Coldplay",
+  "content_urls": {
+    "desktop": {
+      "page": "https://en.wikipedia.org/wiki/Coldplay"
+    }
+  }
+}

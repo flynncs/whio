@@ -13,6 +13,18 @@ use crate::{apis::ResponseContent, models};
 use reqwest;
 use serde::{de::Error as _, Deserialize, Serialize};
 
+/// struct for typed errors of method [`fetch_artist_metadata`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FetchArtistMetadataError {
+    Status400(models::ErrorResponse),
+    Status404(models::ErrorResponse),
+    Status422(models::ErrorResponse),
+    Status500(models::ErrorResponse),
+    Status503(models::ErrorResponse),
+    UnknownValue(serde_json::Value),
+}
+
 /// struct for typed errors of method [`fetch_catalogue_album`]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -70,6 +82,58 @@ pub enum SearchCatalogueError {
     Status500(models::ErrorResponse),
     Status503(models::ErrorResponse),
     UnknownValue(serde_json::Value),
+}
+
+/// One core operation per addressed source, profile and language. The resolver answers with every candidate it can produce for that address and independent per-field errors; it never merges two upstreams into one value. Each candidate names the upstream that produced it, so the core can record a per-fact licence and attribution.
+pub async fn fetch_artist_metadata(
+    configuration: &configuration::Configuration,
+    metadata_artist_document_request: models::MetadataArtistDocumentRequest,
+    x_request_id: Option<&str>,
+) -> Result<models::MetadataArtistDocumentResponse, Error<FetchArtistMetadataError>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_body_metadata_artist_document_request = metadata_artist_document_request;
+    let p_header_x_request_id = x_request_id;
+
+    let uri_str = format!("{}/v1/metadata/artist/display", configuration.base_path);
+    let mut req_builder = configuration
+        .client
+        .request(reqwest::Method::POST, &uri_str);
+
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+    if let Some(param_value) = p_header_x_request_id {
+        req_builder = req_builder.header("X-Request-ID", param_value.to_string());
+    }
+    req_builder = req_builder.json(&p_body_metadata_artist_document_request);
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_str(&content)).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::MetadataArtistDocumentResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::MetadataArtistDocumentResponse`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<FetchArtistMetadataError> = serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
 }
 
 pub async fn fetch_catalogue_album(

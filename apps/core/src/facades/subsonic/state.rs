@@ -7,6 +7,7 @@ use crate::{
         music_library::{
             artwork::ArtworkService,
             catalogue::{CompletionService, LibraryService, SearchService},
+            discovery::DiscoveryService,
             library::{LibraryRegistry, ScanService},
             library_state::LibraryStateService,
             playlists::PlaylistService,
@@ -18,7 +19,7 @@ use crate::{
 
 /// Only public application operations needed by the Subsonic protocol.
 #[derive(Clone)]
-pub(crate) struct SubsonicState {
+pub struct SubsonicState {
     pub(crate) credential: Arc<CredentialService>,
     pub(crate) search: Arc<SearchService>,
     pub(crate) library: Arc<LibraryService>,
@@ -31,6 +32,7 @@ pub(crate) struct SubsonicState {
     pub(crate) activity: Arc<PlaybackActivityService>,
     pub(crate) scanner: Arc<ScanService>,
     pub(crate) streaming: Arc<StreamingService>,
+    pub(crate) discovery: Option<Arc<DiscoveryService>>,
     pub(crate) source_tags: SourceTags,
 }
 
@@ -73,5 +75,8 @@ impl SubsonicState {
     }
     pub(crate) fn source_tags(&self) -> SourceTags {
         self.source_tags
+    }
+    pub fn discovery(&self) -> Option<&Arc<DiscoveryService>> {
+        self.discovery.as_ref()
     }
 }

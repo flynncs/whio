@@ -6,14 +6,19 @@ use md5::{Digest, Md5};
 use crate::{
     features::music_library::library::{EmbeddedPicture, read_cover_art},
     features::music_library::{
-        domain::{AlbumEntry, AlbumId, ArtistId, ProviderKind, SourceScope, TrackId},
+        domain::{
+            AlbumEntry, AlbumId, ArtistId, ProviderKind, SourceIdentity, SourceScope, TrackId,
+        },
         storage::contracts::{LibraryRead, SourceLookup, TrackRepositoryError},
     },
     platform::http::{self as media, FetchError as MediaFetchError},
     platform::source_path::local_path,
 };
 
-use super::{CoverArtTarget, remote};
+use super::{
+    ArtworkCache, ArtworkRole, CoverArtTarget, FetchedImage, PortraitGate, PromotionOutcome,
+    RefusalReason, remote,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArtworkError {
@@ -37,6 +42,7 @@ pub struct Artwork {
     content_type: String,
     bytes: Bytes,
     etag: String,
+    fallback: Option<String>,
 }
 
 impl Artwork {
@@ -45,7 +51,21 @@ impl Artwork {
             content_type,
             bytes,
             etag,
+            fallback: None,
         }
+    }
+
+    fn labelled(content_type: String, bytes: Bytes, etag: String, label: String) -> Self {
+        Self {
+            content_type,
+            bytes,
+            etag,
+            fallback: Some(label),
+        }
+    }
+
+    pub fn fallback(&self) -> Option<&str> {
+        self.fallback.as_deref()
     }
 
     pub fn into_parts(self) -> (String, Bytes, String) {
@@ -59,6 +79,17 @@ enum Resolved {
         path: std::path::PathBuf,
         picture: EmbeddedPicture,
     },
+    Ready {
+        bytes: Bytes,
+        content_type: String,
+        etag: String,
+    },
+    Fallback {
+        label: String,
+        bytes: Bytes,
+        content_type: String,
+        etag: String,
+    },
 }
 
 pub struct ArtworkService {
@@ -66,6 +97,7 @@ pub struct ArtworkService {
     sources: Option<Arc<dyn SourceLookup>>,
     client: reqwest::Client,
     host_suffixes: Vec<String>,
+    cache: Option<Arc<ArtworkCache>>,
 }
 
 impl ArtworkService {
@@ -80,6 +112,7 @@ impl ArtworkService {
             sources: Some(sources),
             client,
             host_suffixes,
+            cache: None,
         }
     }
 
@@ -91,7 +124,64 @@ impl ArtworkService {
             sources: None,
             client,
             host_suffixes,
+            cache: None,
         }
+    }
+
+    pub fn with_cache(mut self, cache: Arc<ArtworkCache>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    pub fn with_host_suffixes(mut self, host_suffixes: Vec<String>) -> Self {
+        self.client = media::client(media::artwork_redirect_policy(host_suffixes.clone()));
+        self.host_suffixes = host_suffixes;
+        self
+    }
+
+    pub async fn promote_artist_portrait(
+        &self,
+        artist_id: &ArtistId,
+        source: &SourceIdentity,
+        reference: &str,
+        gate: PortraitGate,
+    ) -> Result<PromotionOutcome, ArtworkError> {
+        if gate == PortraitGate::ReferenceOnly {
+            return Ok(PromotionOutcome::Refused(RefusalReason::NotServable));
+        }
+
+        let Some(cache) = &self.cache else {
+            return Ok(PromotionOutcome::Refused(RefusalReason::NoCacheDir));
+        };
+
+        let url = reqwest::Url::parse(reference)
+            .map_err(|_| ArtworkError::Fetch(MediaFetchError::DisallowedDestination))?;
+        if !media::is_allowed_artwork_url(&url, &self.host_suffixes) {
+            return Ok(PromotionOutcome::Refused(
+                RefusalReason::DisallowedReference,
+            ));
+        }
+
+        let (content_type, bytes) = remote::fetch_artwork(&self.client, &url)
+            .await
+            .map_err(ArtworkError::Fetch)?;
+
+        if !content_type.starts_with("image/") {
+            return Ok(PromotionOutcome::Refused(RefusalReason::Undecodable));
+        }
+
+        cache
+            .promote(
+                artist_id,
+                ArtworkRole::Portrait,
+                source,
+                reference,
+                FetchedImage {
+                    content_type,
+                    bytes,
+                },
+            )
+            .await
     }
 
     pub async fn load(
@@ -100,12 +190,29 @@ impl ArtworkService {
         if_none_match: Option<&str>,
         size: Option<u32>,
     ) -> Result<ArtworkOutcome, ArtworkError> {
-        let Some(resolved) = self.resolve(target).await? else {
+        let Some(resolved) = self.resolve_sized(target, size).await? else {
             return Ok(ArtworkOutcome::Missing);
         };
 
         match resolved {
             Resolved::Remote(reference) => self.fetch(&reference, if_none_match, size).await,
+            Resolved::Ready {
+                bytes,
+                content_type,
+                etag,
+            } => Ok(settled(content_type, bytes, etag, if_none_match, None)),
+            Resolved::Fallback {
+                label,
+                bytes,
+                content_type,
+                etag,
+            } => Ok(settled(
+                content_type,
+                bytes,
+                etag,
+                if_none_match,
+                Some(&label),
+            )),
             Resolved::Local { path, picture } => {
                 let metadata = tokio::fs::metadata(&path).await.ok();
                 let etag = sized(local_etag(&path, metadata.as_ref()), size);
@@ -125,13 +232,25 @@ impl ArtworkService {
         }
     }
 
+    #[cfg(all(test, feature = "postgres-integration"))]
     async fn resolve(&self, target: CoverArtTarget) -> Result<Option<Resolved>, ArtworkError> {
-        let (Some(library), Some(sources)) = (&self.library, &self.sources) else {
-            return Ok(None);
-        };
+        self.resolve_sized(target, None).await
+    }
 
+    async fn resolve_sized(
+        &self,
+        target: CoverArtTarget,
+        size: Option<u32>,
+    ) -> Result<Option<Resolved>, ArtworkError> {
         match target {
             CoverArtTarget::Track(track_id) => {
+                let Some(library) = &self.library else {
+                    return Ok(None);
+                };
+                let Some(sources) = &self.sources else {
+                    return Ok(None);
+                };
+
                 if let Some(resolved) = self.track_artwork(library, sources, &track_id).await? {
                     return Ok(Some(resolved));
                 }
@@ -148,12 +267,44 @@ impl ArtworkService {
                     .await
             }
             CoverArtTarget::Album(album_id) => {
+                let Some(library) = &self.library else {
+                    return Ok(None);
+                };
+                let Some(sources) = &self.sources else {
+                    return Ok(None);
+                };
+
                 self.album_artwork(library, sources, &album_id).await
             }
-            CoverArtTarget::Artist(artist_id) => {
-                self.artist_artwork(library, sources, &artist_id).await
-            }
+            CoverArtTarget::Artist(artist_id) => self.artist_resolution(&artist_id, size).await,
         }
+    }
+
+    async fn artist_resolution(
+        &self,
+        artist_id: &ArtistId,
+        size: Option<u32>,
+    ) -> Result<Option<Resolved>, ArtworkError> {
+        let (Some(library), Some(sources)) = (&self.library, &self.sources) else {
+            return Ok(None);
+        };
+
+        let Some(cache) = &self.cache else {
+            return self.artist_artwork(library, sources, artist_id).await;
+        };
+
+        if let Some(ready) =
+            cached_or_absent(cache.ready(artist_id, ArtworkRole::Portrait, size).await)
+        {
+            return Ok(Some(ready_resolved(ready)));
+        }
+        if let Some(fallback) =
+            cached_or_absent(cache.ready(artist_id, ArtworkRole::Wide, size).await)
+        {
+            return Ok(Some(fallback_resolved(fallback)));
+        }
+
+        self.artist_artwork(library, sources, artist_id).await
     }
 
     async fn fetch(
@@ -370,6 +521,57 @@ impl ArtworkService {
     }
 }
 
+fn cached_or_absent(
+    ready: Result<Option<super::ReadyAsset>, ArtworkError>,
+) -> Option<super::ReadyAsset> {
+    match ready {
+        Ok(ready) => ready,
+        Err(error) => {
+            tracing::debug!(%error, "a ready artwork asset was not served");
+            None
+        }
+    }
+}
+
+fn ready_resolved(ready: super::ReadyAsset) -> Resolved {
+    Resolved::Ready {
+        bytes: ready.bytes,
+        content_type: ready.descriptor.content_type,
+        etag: ready.etag,
+    }
+}
+
+fn fallback_resolved(ready: super::ReadyAsset) -> Resolved {
+    Resolved::Fallback {
+        label: ready.descriptor.role.as_str().to_owned(),
+        bytes: ready.bytes,
+        content_type: ready.descriptor.content_type,
+        etag: ready.etag,
+    }
+}
+
+fn settled(
+    content_type: String,
+    bytes: Bytes,
+    etag: String,
+    if_none_match: Option<&str>,
+    label: Option<&str>,
+) -> ArtworkOutcome {
+    if fresh(if_none_match, &etag) {
+        return ArtworkOutcome::NotModified(etag);
+    }
+
+    match label {
+        Some(label) => ArtworkOutcome::Found(Artwork::labelled(
+            content_type,
+            bytes,
+            etag,
+            label.to_owned(),
+        )),
+        None => ArtworkOutcome::Found(Artwork::new(content_type, bytes, etag)),
+    }
+}
+
 fn sized(etag: String, size: Option<u32>) -> String {
     let Some(size) = size else {
         return etag;
@@ -424,3 +626,7 @@ fn local_etag(path: &Path, metadata: Option<&std::fs::Metadata>) -> String {
 #[cfg(all(test, feature = "postgres-integration"))]
 #[path = "service_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "service_ready_tests.rs"]
+mod ready_tests;

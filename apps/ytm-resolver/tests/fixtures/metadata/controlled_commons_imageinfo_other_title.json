@@ -1,0 +1,42 @@
+{
+  "batchcomplete": "",
+  "query": {
+    "pages": {
+      "1": {
+        "pageid": 1,
+        "ns": 6,
+        "title": "File:ColdplayTokyo.jpg",
+        "imagerepository": "shared",
+        "imageinfo": [
+          {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/c/c3/ColdplayTokyo.jpg",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:ColdplayTokyo.jpg",
+            "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1",
+            "extmetadata": {
+              "LicenseShortName": {
+                "value": "CC BY 4.0",
+                "source": "commons",
+                "hidden": false
+              },
+              "LicenseUrl": {
+                "value": "https://creativecommons.org/licenses/by/4.0/",
+                "source": "commons",
+                "hidden": false
+              },
+              "Artist": {
+                "value": "Someone",
+                "source": "commons",
+                "hidden": false
+              },
+              "AttributionRequired": {
+                "value": "true",
+                "source": "commons",
+                "hidden": false
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

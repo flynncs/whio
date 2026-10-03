@@ -3,6 +3,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::features::music_library::{
+    delivery::{DeliveryError, ListenIdentity},
     domain::{
         ListenCount, ListenExtent, ListenOrder, ListenOrigin, ListenOutcome, ListenPage,
         ListenQuery, ListenRecord, ListenSessionId, ListenSubmission, ListenWindow, TrackId,
@@ -12,6 +13,10 @@ use crate::features::music_library::{
 
 use super::PgStore;
 use super::decode::repository_error;
+
+fn delivery_error(_: DeliveryError) -> TrackRepositoryError {
+    TrackRepositoryError::Unavailable
+}
 
 const COUNTS_AS_PLAY: &str = "COALESCE(qualified, TRUE)";
 
@@ -109,6 +114,15 @@ impl ListenStore for PgStore {
             .map_err(|_| TrackRepositoryError::InvalidData)?;
         let qualified = extent.map(|extent| extent.qualified());
 
+        let delivery = self.delivery.clone();
+        let destinations = match &delivery {
+            Some(delivery) => delivery
+                .enabled_destinations(submission.principal())
+                .await
+                .map_err(delivery_error)?,
+            None => Vec::new(),
+        };
+
         let mut transaction = self.pool.begin().await.map_err(repository_error)?;
 
         sqlx::query(
@@ -160,6 +174,14 @@ impl ListenStore for PgStore {
             .execute(&mut *transaction)
             .await
             .map_err(repository_error)?;
+        }
+
+        if let Some(delivery) = &delivery {
+            let listen = ListenIdentity::from_submission(submission);
+            delivery
+                .record_accepted(&mut transaction, &listen, &destinations)
+                .await
+                .map_err(delivery_error)?;
         }
 
         transaction.commit().await.map_err(repository_error)?;

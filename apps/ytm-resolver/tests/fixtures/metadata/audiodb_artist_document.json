@@ -1,0 +1,13 @@
+{
+  "artists": [
+    {
+      "idArtist": "111239",
+      "strArtist": "Coldplay",
+      "strMusicBrainzID": "cc197bad-dc9c-440d-a5b5-d52ba2e14234",
+      "strBiography": "Coldplay are a British rock band formed in London in 1997. They consist of vocalist and pianist Chris Martin, guitarist Jonny Buckland, bassist Guy Berryman, drummer Will Champion and manager Phil Harvey. They initially met at University College London, calling themselves Big Fat Noises and changing to Starfish, before settling on the current name.",
+      "strArtistThumb": "https://r2.theaudiodb.com/images/media/artist/thumb/uxrqxy1347913147.jpg",
+      "strArtistWideThumb": "https://r2.theaudiodb.com/images/media/artist/widethumb/sxqspt1516190718.jpg",
+      "strArtistFanart": "https://r2.theaudiodb.com/images/media/artist/fanart/spvryu1347980801.jpg"
+    }
+  ]
+}

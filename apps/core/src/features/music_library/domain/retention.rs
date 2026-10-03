@@ -1,3 +1,5 @@
+use uuid::Uuid;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RetentionReport {
     pub evictable_tracks: u64,
@@ -10,9 +12,10 @@ pub struct RetentionReport {
     pub newest_played_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EvictionReport {
     pub tracks: u64,
     pub albums: u64,
     pub artists: u64,
+    pub evicted_artist_ids: Vec<Uuid>,
 }

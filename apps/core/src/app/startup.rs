@@ -2,13 +2,15 @@ use std::{future::Future, sync::Arc};
 
 use tokio::net::TcpListener;
 
-use super::config::{Config, YoutubeResolverConfig};
+use super::config::{Config, MetadataResolverConfig, YoutubeResolverConfig};
 use crate::{
     app::AppState,
     app::{database::Database, resolver},
-    features::identity,
+    features::identity::{self, destinations::DestinationValidator},
+    features::metadata::{METADATA_ADAPTER_VERSION, storage::PostgresMetadataStore},
     features::music_library::{
-        self, catalogue::CatalogueProvider, domain::YOUTUBE_MUSIC_PROVIDER_ID,
+        self, ArtworkStore, DeliveryStore, EnrichmentGuard, PostgresTrackRepository,
+        catalogue::CatalogueProvider, domain::YOUTUBE_MUSIC_PROVIDER_ID,
         library::LibraryRegistrationError, providers::YoutubeCatalogueProvider,
     },
     features::playback::activity::PlaybackActivityService,
@@ -16,6 +18,7 @@ use crate::{
     features::playback::media::{self, HttpMediaFetcher},
     features::playback::providers::{LocalPlaybackProvider, ProviderError, YtmAdapter},
     features::playback::{PlaybackProvider, StreamingService},
+    integrations::listenbrainz::ListenBrainzAdapter,
 };
 
 pub(crate) async fn shutdown_signal() {
@@ -100,7 +103,19 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         )?),
     };
     let ytm_playback = Arc::new(YtmAdapter::new(transport.clone()));
-    let ytm_catalogue = Arc::new(YoutubeCatalogueProvider::new(transport));
+    let ytm_catalogue = Arc::new(YoutubeCatalogueProvider::new(transport.clone()));
+    let metadata_transport = match &config.metadata_resolver {
+        MetadataResolverConfig::Disabled => None,
+        MetadataResolverConfig::Enabled {
+            url,
+            connect_timeout,
+            total_timeout,
+        } => Some(resolver::client(
+            url.clone(),
+            *connect_timeout,
+            *total_timeout,
+        )?),
+    };
 
     let credential = Arc::new(identity::credentials(
         database.pool(),
@@ -116,14 +131,36 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             vec![YOUTUBE_MUSIC_PROVIDER_ID],
         ),
     };
-    let music = music_library::construct(
-        database.pool(),
-        catalogue_providers,
-        enabled_providers,
-        config.dedup_mode,
-        config.media_roots(),
-        config.artwork_host_suffixes.clone(),
+
+    let listenbrainz = Arc::new(
+        crate::integrations::listenbrainz::ListenBrainzAdapter::new()
+            .map_err(ProviderError::request)?,
     );
+    let destinations = Arc::new(identity::destinations(
+        database.pool(),
+        Some(config.credential_key.clone()),
+        destination_validator(&listenbrainz),
+    ));
+
+    let w4 = build_w4(
+        config,
+        database.pool(),
+        &transport,
+        &metadata_transport,
+        &listenbrainz,
+        &destinations,
+    )?;
+
+    let music = music_library::construct(music_library::LibraryWiring {
+        pool: database.pool(),
+        providers: catalogue_providers,
+        enabled_providers,
+        dedup_mode: config.dedup_mode,
+        media_roots: config.media_roots(),
+        artwork_host_suffixes: config.artwork_host_suffixes.clone(),
+        w4,
+    });
+
     let youtube_media_suffixes = vec![config.youtube_media_suffix.clone()];
     let fetcher = Arc::new(HttpMediaFetcher::with_allowed_host_suffixes(
         media::client(media::host_suffix_redirect_policy(
@@ -153,8 +190,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         Arc::clone(&music.listen),
         Arc::clone(&music.library),
     ));
-
-    Ok(
+    let mut state =
         AppState::with_database(credential, music.search, music.library, streaming, database)
             .with_completion(music.completion)
             .with_playlists(music.playlists)
@@ -165,8 +201,244 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             .with_library_state(music.activity)
             .with_scanner(music.scanner)
             .with_library_registry(music.library_registry)
-            .with_source_tags(config.source_tags),
-    )
+            .with_discovery(music.discovery)
+            .with_metadata_defaults(
+                config.metadata_artist_profile.clone(),
+                config.metadata_language.clone(),
+            )
+            .with_destinations(destinations)
+            .with_source_tags(config.source_tags);
+
+    if let Some(delivery) = music.delivery.as_ref() {
+        state = state.with_delivery(Arc::clone(delivery));
+    }
+    if let Some(metadata) = music.metadata.as_ref() {
+        state = state.with_metadata_service(Arc::clone(metadata));
+    }
+
+    Ok(state)
+}
+
+pub(crate) struct WorkerState {
+    pub(crate) metadata: Arc<crate::features::metadata::MetadataService>,
+    pub(crate) subjects: Option<Arc<dyn crate::features::metadata::SubjectSource>>,
+    pub(crate) delivery: Option<Arc<crate::features::music_library::delivery::DeliveryService>>,
+}
+
+pub(crate) fn worker_state(
+    config: &Config,
+    pool: sqlx::PgPool,
+) -> Result<WorkerState, ProviderError> {
+    let youtube_transport = match &config.youtube_resolver {
+        YoutubeResolverConfig::Disabled => None,
+        YoutubeResolverConfig::Enabled {
+            url,
+            connect_timeout,
+            total_timeout,
+        } => Some(resolver::client(
+            url.clone(),
+            *connect_timeout,
+            *total_timeout,
+        )?),
+    };
+    let metadata_transport = match &config.metadata_resolver {
+        MetadataResolverConfig::Disabled => None,
+        MetadataResolverConfig::Enabled {
+            url,
+            connect_timeout,
+            total_timeout,
+        } => Some(resolver::client(
+            url.clone(),
+            *connect_timeout,
+            *total_timeout,
+        )?),
+    };
+    let listenbrainz = Arc::new(ListenBrainzAdapter::new().map_err(ProviderError::request)?);
+    let destinations = Arc::new(identity::destinations(
+        pool.clone(),
+        Some(config.credential_key.clone()),
+        destination_validator(&listenbrainz),
+    ));
+    let w4 = build_w4(
+        config,
+        pool.clone(),
+        &youtube_transport,
+        &metadata_transport,
+        &listenbrainz,
+        &destinations,
+    )?;
+    let music = music_library::construct(music_library::LibraryWiring {
+        pool,
+        providers: Vec::new(),
+        enabled_providers: Vec::new(),
+        dedup_mode: config.dedup_mode,
+        media_roots: Vec::new(),
+        artwork_host_suffixes: config.artwork_host_suffixes.clone(),
+        w4,
+    });
+
+    Ok(WorkerState {
+        metadata: music.metadata.ok_or_else(missing_metadata)?,
+        subjects: Some(music.subjects),
+        delivery: music.delivery,
+    })
+}
+
+fn missing_metadata() -> ProviderError {
+    ProviderError::request(std::io::Error::other(
+        "the metadata service could not be constructed",
+    ))
+}
+
+fn destination_validator(adapter: &Arc<ListenBrainzAdapter>) -> Arc<dyn DestinationValidator> {
+    Arc::clone(adapter) as Arc<dyn DestinationValidator>
+}
+
+fn listen_sender(
+    adapter: &Arc<ListenBrainzAdapter>,
+) -> Arc<dyn crate::features::music_library::delivery::ListenSender> {
+    Arc::clone(adapter) as Arc<dyn crate::features::music_library::delivery::ListenSender>
+}
+
+fn spawn_capability_warmer(capabilities: Arc<crate::features::metadata::CapabilitySnapshot>) {
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(crate::features::metadata::capabilities::CAPABILITY_TTL / 2);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            ticker.tick().await;
+
+            if let Err(error) = capabilities.current(chrono::Utc::now()).await {
+                tracing::debug!(%error, "the metadata capability advertisement is unavailable");
+            }
+        }
+    });
+}
+
+fn build_w4(
+    config: &Config,
+    pool: sqlx::PgPool,
+    youtube_transport: &Option<Arc<whio_resolver_api::apis::configuration::Configuration>>,
+    metadata_transport: &Option<Arc<whio_resolver_api::apis::configuration::Configuration>>,
+    listenbrainz: &Arc<ListenBrainzAdapter>,
+    destinations: &Arc<identity::destinations::DestinationService>,
+) -> Result<music_library::W4Dependencies, ProviderError> {
+    let routing = Arc::new(crate::features::metadata::DocumentRouting::new(
+        youtube_transport.clone(),
+        metadata_transport.clone(),
+    ));
+    let capabilities = Arc::new(crate::features::metadata::CapabilitySnapshot::new(
+        Arc::new(crate::features::metadata::RoutingCapabilities::new(
+            youtube_transport.clone(),
+            metadata_transport.clone(),
+        )),
+        crate::features::metadata::capabilities::CAPABILITY_TTL,
+    ));
+    spawn_capability_warmer(Arc::clone(&capabilities));
+
+    let guard: Arc<dyn EnrichmentGuard> = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let metadata = {
+        let store = Arc::new(PostgresMetadataStore::new(
+            pool.clone(),
+            Arc::clone(&guard),
+            config.metadata_store_budget_bytes,
+        ));
+
+        Some(music_library::MetadataWiring {
+            store,
+            documents: routing,
+            capabilities,
+            order: config.metadata_source_order.clone(),
+            adapter_version: METADATA_ADAPTER_VERSION.to_owned(),
+            jitter: Arc::new(crate::features::metadata::freshness::SystemJitter::new()),
+        })
+    };
+
+    let artwork_store: Arc<PostgresTrackRepository> =
+        Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let artwork_cache = Some(music_library::ArtworkCacheWiring {
+        store: Arc::clone(&artwork_store) as Arc<dyn ArtworkStore>,
+        root: config.artwork_cache_dir.clone(),
+        budget_bytes: config.artwork_cache_bytes,
+    });
+
+    let delivery_store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let delivery_store: Arc<dyn DeliveryStore> = Arc::clone(&delivery_store) as Arc<_>;
+    let delivery_source: Arc<dyn crate::features::music_library::delivery::ListenSource> =
+        Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let sender: Arc<dyn crate::features::music_library::delivery::ListenSender> =
+        listen_sender(listenbrainz);
+    let delivery_destinations: Arc<
+        dyn crate::features::music_library::delivery::DeliveryDestinations,
+    > = Arc::new(IdentityDestinations::new(Arc::clone(destinations)));
+
+    Ok(music_library::W4Dependencies {
+        metadata,
+        artwork_cache,
+        delivery: Some(music_library::DeliveryWiring {
+            store: delivery_store,
+            source: delivery_source,
+            sender,
+            destinations: delivery_destinations,
+        }),
+    })
+}
+
+struct IdentityDestinations {
+    destinations: Arc<identity::destinations::DestinationService>,
+}
+
+impl IdentityDestinations {
+    fn new(destinations: Arc<identity::destinations::DestinationService>) -> Self {
+        Self { destinations }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::features::music_library::delivery::DeliveryDestinations for IdentityDestinations {
+    async fn enabled_destinations(
+        &self,
+        user_id: uuid::Uuid,
+    ) -> Result<Vec<(uuid::Uuid, String)>, crate::features::music_library::delivery::DeliveryError>
+    {
+        self.destinations
+            .enabled_destinations(user_id)
+            .await
+            .map_err(destination_failure)
+    }
+
+    async fn enabled_credential(
+        &self,
+        user_id: uuid::Uuid,
+        provider_id: &str,
+    ) -> Result<
+        Option<identity::destinations::DestinationCredential>,
+        crate::features::music_library::delivery::DeliveryError,
+    > {
+        self.destinations
+            .enabled_credential(user_id, provider_id)
+            .await
+            .map_err(destination_failure)
+    }
+}
+
+fn destination_failure(
+    error: identity::destinations::DestinationError,
+) -> crate::features::music_library::delivery::DeliveryError {
+    use crate::features::music_library::delivery::DeliveryError;
+
+    match error {
+        identity::destinations::DestinationError::Disabled => DeliveryError::Unavailable,
+        identity::destinations::DestinationError::Unavailable => DeliveryError::ProviderUnavailable,
+        identity::destinations::DestinationError::InvalidCredential => {
+            DeliveryError::CredentialRejected
+        }
+        identity::destinations::DestinationError::Repository(_)
+        | identity::destinations::DestinationError::NotFound
+        | identity::destinations::DestinationError::AlreadyConnected
+        | identity::destinations::DestinationError::Unsupported => DeliveryError::Disabled,
+    }
 }
 
 async fn register_then_scan<T>(
@@ -181,8 +453,41 @@ async fn register_then_scan<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::metadata::{CapabilityError, CapabilitySource, Snapshot};
     use crate::features::music_library::test_support::TrackRepositoryError;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct CountingCapabilities(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl CapabilitySource for CountingCapabilities {
+        async fn fetch(&self) -> Result<Snapshot, CapabilityError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+
+            Ok(Snapshot::new(Vec::new()))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_capability_warmer_holds_an_advertisement_before_any_read() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let snapshot = Arc::new(crate::features::metadata::CapabilitySnapshot::new(
+            Arc::new(CountingCapabilities(Arc::clone(&calls))),
+            crate::features::metadata::capabilities::CAPABILITY_TTL,
+        ));
+
+        spawn_capability_warmer(Arc::clone(&snapshot));
+
+        for _ in 0..10_000 {
+            if calls.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(calls.load(Ordering::SeqCst) > 0);
+        assert!(snapshot.held(chrono::Utc::now()).is_some());
+    }
 
     #[tokio::test]
     async fn a_failed_registration_stops_startup_before_the_scanner_starts() {
@@ -218,6 +523,20 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(started.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_destination_validator_and_listen_sender_share_one_adapter_allocation() {
+        let adapter = Arc::new(ListenBrainzAdapter::new().unwrap());
+        let validator = destination_validator(&adapter);
+        let sender = listen_sender(&adapter);
+
+        assert_eq!(Arc::strong_count(&adapter), 3);
+        assert_eq!(
+            Arc::as_ptr(&validator) as *const (),
+            Arc::as_ptr(&sender) as *const ()
+        );
+        assert!(Arc::ptr_eq(adapter.limiter(), adapter.limiter()));
     }
 
     #[cfg(feature = "postgres-integration")]

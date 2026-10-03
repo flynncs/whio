@@ -117,6 +117,135 @@ class MediaMetadata(BaseModel):
     duration_ms: int | None = Field(None, ge=0)
 
 
+class MetadataFieldId(RootModel[str]):
+    root: str = Field(
+        ...,
+        examples=['biography.content', 'image.portrait'],
+        max_length=64,
+        min_length=1,
+        pattern='^[a-z][a-z0-9_]*(?:\\.[a-z0-9_]+)*$',
+    )
+
+
+class MetadataLanguage(RootModel[str]):
+    root: str = Field(..., max_length=35, min_length=2)
+
+
+class MetadataArtistDocumentRequest(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    source: SourceIdentity
+    language: str | None = Field(None, max_length=35, min_length=2)
+    profile: Literal['artist-display.v1']
+    fields: list[MetadataFieldId] | None = Field(
+        None,
+        description='The requested field subset. Absent means every field the profile covers.',
+        min_length=1,
+    )
+
+
+class MatchBasis(StrEnum):
+    identifier = 'identifier'
+    established_source = 'established_source'
+
+
+class CandidateSource(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    provider_id: str = Field(
+        ...,
+        examples=['example_music'],
+        max_length=64,
+        min_length=1,
+        pattern='^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$',
+    )
+    external_id: str = Field(..., max_length=512, min_length=1)
+    source_scope: str | None = Field(
+        None,
+        description="The provider's own scope for the identity, when it has one.",
+        max_length=512,
+    )
+    url: AnyUrl | None = None
+    match_basis: MatchBasis = Field(
+        ...,
+        description="How the candidate's identity was matched. A name match is not a basis.",
+    )
+
+
+class Artist(RootModel[str]):
+    root: str = Field(..., max_length=500, min_length=1)
+
+
+class MetadataCandidate(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    source: CandidateSource
+    name: str = Field(..., max_length=500, min_length=1)
+    artists: list[Artist] | None = Field(None, max_length=20)
+    release_name: str | None = Field(None, max_length=500)
+    duration_ms: int | None = Field(None, ge=0)
+    isrc: str | None = Field(None, max_length=32)
+    recording_id: str | None = Field(None, max_length=64)
+    rank: int | None = Field(None, ge=0)
+    score: float | None = None
+
+
+class ImageDescriptor(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    role: str = Field(..., examples=['portrait', 'wide'], max_length=64, min_length=1)
+    reference: AnyUrl
+    width: int | None = Field(None, ge=1)
+    height: int | None = Field(None, ge=1)
+    content_type: str | None = Field(None, max_length=100)
+
+
+class MetricDescriptor(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    unit: str = Field(..., max_length=64, min_length=1)
+    population: str | None = Field(None, max_length=200)
+    period: str | None = Field(None, max_length=200)
+    as_of: AwareDatetime | None = None
+
+
+class LicenceDescriptor(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    id: str = Field(..., max_length=200, min_length=1)
+    name: str = Field(..., max_length=200, min_length=1)
+    url: AnyUrl
+    attribution_required: bool
+    redistribution_allowed: bool
+    cache_allowed: bool
+    share_alike: bool
+    non_commercial: bool
+    storage_cap_bytes: int | None = Field(None, ge=0)
+    terms_basis: str | None = Field(
+        None,
+        description='The terms clause or file metadata this licence was read from.',
+        max_length=500,
+    )
+    uncertainty: bool = Field(
+        False,
+        description='True when the terms do not resolve the redistribution right for this fact.',
+    )
+
+
+class Attribution(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    text: str = Field(..., max_length=1000, min_length=1)
+    url: AnyUrl | None = None
+
+
 class ErrorCode(StrEnum):
     invalid_request = 'invalid_request'
     source_not_found = 'source_not_found'
@@ -180,6 +309,55 @@ class PlaybackResolveResponse(BaseModel):
     media: MediaMetadata
 
 
+class MetadataFieldCandidate(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    field: str = Field(
+        ...,
+        examples=['biography.content', 'image.portrait'],
+        max_length=64,
+        min_length=1,
+        pattern='^[a-z][a-z0-9_]*(?:\\.[a-z0-9_]+)*$',
+    )
+    source: CandidateSource = Field(
+        ...,
+        description='The upstream that produced this value, not the addressed provider.',
+    )
+    text: str | None = Field(None, max_length=65536)
+    count: int | None = Field(None, ge=0)
+    reference: AnyUrl | None = None
+    candidates: list[MetadataCandidate] | None = Field(None, max_length=100)
+    image: ImageDescriptor | None = None
+    language: MetadataLanguage | None = None
+    rank: int | None = Field(None, ge=0)
+    score: float | None = None
+    metric: MetricDescriptor | None = None
+    ranking_scope: str | None = Field(
+        None,
+        description='The named ranking a list field came from (for example a pinned similarity algorithm id), recorded verbatim per candidate. A ranking whose basis cannot be named must not be served.',
+        max_length=200,
+    )
+    licence: LicenceDescriptor
+    attribution: Attribution | None = None
+
+
+class MetadataFieldError(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    field: str = Field(
+        ...,
+        examples=['biography.content', 'image.portrait'],
+        max_length=64,
+        min_length=1,
+        pattern='^[a-z][a-z0-9_]*(?:\\.[a-z0-9_]+)*$',
+    )
+    code: ErrorCode
+    retryable: bool
+    message: str | None = Field(None, max_length=500)
+
+
 class CatalogueSearchResponse(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -191,3 +369,21 @@ class CatalogueSearchResponse(BaseModel):
         le=1000,
     )
     results: list[CatalogueCandidate]
+
+
+class MetadataArtistDocumentResponse(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    address: SourceIdentity = Field(
+        ...,
+        description="The addressed identity. It must equal the request's source or the response is discarded.",
+    )
+    source_revision: str | None = Field(
+        None,
+        description="The producing source's own revision, when it supplies one.",
+        max_length=256,
+    )
+    retrieved_at: AwareDatetime
+    candidates: list[MetadataFieldCandidate]
+    errors: list[MetadataFieldError]

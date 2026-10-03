@@ -374,6 +374,53 @@ async fn the_retry_schedule_is_measured(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn concurrent_coalesced_enqueues_produce_one_job(pool: PgPool) {
+    Database::connect(&database_url(&pool))
+        .await
+        .expect("the worker's own migrations");
+
+    let operation_id = Uuid::now_v7();
+
+    let (first, second) = tokio::join!(
+        whio_core::jobs::probe::enqueue_coalesced(&pool, operation_id),
+        whio_core::jobs::probe::enqueue_coalesced(&pool, operation_id),
+    );
+
+    let inserted = [first.expect("an enqueue"), second.expect("an enqueue")]
+        .into_iter()
+        .filter(|enqueued| matches!(enqueued, Enqueued::Inserted { .. }))
+        .count();
+    assert_eq!(
+        inserted, 1,
+        "two concurrent identical payloads insert one job"
+    );
+    assert_eq!(
+        count_jobs(&pool, operation_id, "available").await
+            + count_jobs(&pool, operation_id, "scheduled").await,
+        1,
+        "the two calls hold one non-terminal job"
+    );
+
+    let mut worker = Worker::start(&pool, PROBE_QUEUE);
+    worker.await_health("/health/ready", 200).await;
+    await_job_state(&pool, operation_id, "completed", Duration::from_secs(60)).await;
+
+    let after_terminal = whio_core::jobs::probe::enqueue_coalesced(&pool, operation_id)
+        .await
+        .expect("a post-completion enqueue");
+    assert!(
+        matches!(after_terminal, Enqueued::Inserted { .. }),
+        "a terminal job releases the claim so a third call inserts a new one"
+    );
+    assert_eq!(
+        count_jobs(&pool, operation_id, "available").await
+            + count_jobs(&pool, operation_id, "scheduled").await,
+        1,
+        "the third call produced a second job"
+    );
+}
+
+#[sqlx::test]
 async fn a_job_enqueued_while_stopped_runs_on_start(pool: PgPool) {
     Database::connect(&database_url(&pool))
         .await

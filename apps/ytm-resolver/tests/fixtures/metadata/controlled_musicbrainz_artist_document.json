@@ -1,0 +1,81 @@
+{
+  "id": "cc197bad-dc9c-440d-a5b5-d52ba2e14234",
+  "name": "Coldplay",
+  "sort-name": "Coldplay",
+  "type": "Group",
+  "country": "GB",
+  "relations": [
+    {
+      "type": "official homepage",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://www.coldplay.com"
+      }
+    },
+    {
+      "type": "wikipedia",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://en.wikipedia.org/wiki/Coldplay"
+      }
+    },
+    {
+      "type": "wikidata",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://www.wikidata.org/wiki/Q11647"
+      }
+    },
+    {
+      "type": "image",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://commons.wikimedia.org/wiki/File:ColdplayWembley.jpg"
+      }
+    },
+    {
+      "type": "discogs",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://www.discogs.com/artist/39116"
+      }
+    },
+    {
+      "type": "last.fm",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://www.last.fm/music/Coldplay"
+      }
+    },
+    {
+      "type": "streaming",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://open.spotify.com/artist/4gzpq5DPGxSnKTe4SA8HAU"
+      }
+    }
+  ],
+  "tags": [
+    {
+      "count": 4,
+      "name": "rock"
+    },
+    {
+      "count": 2,
+      "name": "alternative rock"
+    }
+  ],
+  "genres": [
+    {
+      "count": 3,
+      "name": "pop rock"
+    }
+  ]
+}

@@ -222,6 +222,95 @@ pub(crate) fn artist_envelope(artist: models::ArtistWithAlbumsId3) -> models::Ge
     }
 }
 
+pub(crate) fn artist_info_envelope(info: models::ArtistInfo) -> models::GetArtistInfoResponse {
+    models::GetArtistInfoResponse {
+        subsonic_response: Some(Box::new(
+            models::GetArtistInfoResponseSubsonicResponse::GetArtistInfoSuccessResponse(Box::new(
+                models::GetArtistInfoSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_artist_info_success_response::Status::Ok,
+                    artist_info: Box::new(info),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn artist_info2_envelope(info: models::ArtistInfo2) -> models::GetArtistInfo2Response {
+    models::GetArtistInfo2Response {
+        subsonic_response: Some(Box::new(
+            models::GetArtistInfo2ResponseSubsonicResponse::GetArtistInfo2SuccessResponse(
+                Box::new(models::GetArtistInfo2SuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_artist_info2_success_response::Status::Ok,
+                    artist_info2: Box::new(info),
+                }),
+            ),
+        )),
+    }
+}
+
+pub(crate) fn similar_songs_envelope(
+    songs: models::SimilarSongs,
+) -> models::GetSimilarSongsResponse {
+    models::GetSimilarSongsResponse {
+        subsonic_response: Some(Box::new(
+            models::GetSimilarSongsResponseSubsonicResponse::GetSimilarSongsSuccessResponse(
+                Box::new(models::GetSimilarSongsSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_similar_songs_success_response::Status::Ok,
+                    similar_songs: Box::new(songs),
+                }),
+            ),
+        )),
+    }
+}
+
+pub(crate) fn similar_songs2_envelope(
+    songs: models::SimilarSongs2,
+) -> models::GetSimilarSongs2Response {
+    models::GetSimilarSongs2Response {
+        subsonic_response: Some(Box::new(
+            models::GetSimilarSongs2ResponseSubsonicResponse::GetSimilarSongs2SuccessResponse(
+                Box::new(models::GetSimilarSongs2SuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_similar_songs2_success_response::Status::Ok,
+                    similar_songs2: Box::new(songs),
+                }),
+            ),
+        )),
+    }
+}
+
+pub(crate) fn top_songs_envelope(songs: models::TopSongs) -> models::GetTopSongsResponse {
+    models::GetTopSongsResponse {
+        subsonic_response: Some(Box::new(
+            models::GetTopSongsResponseSubsonicResponse::GetTopSongsSuccessResponse(Box::new(
+                models::GetTopSongsSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_top_songs_success_response::Status::Ok,
+                    top_songs: Box::new(songs),
+                },
+            )),
+        )),
+    }
+}
+
 pub(crate) fn scan_status_envelope(
     status: &crate::features::music_library::library::ScanStatus,
 ) -> models::GetScanStatusResponse {

@@ -1,0 +1,20 @@
+[
+  {
+    "artist_mbid": "b7ffd2af-418f-4be2-bdd1-22f8b48613da",
+    "name": "Nine Inch Nails",
+    "score": 0.91,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "39ab1aed-75e0-4140-bd47-540276886b60",
+    "name": "Oasis",
+    "score": 0.42,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  },
+  {
+    "artist_mbid": "a74b1b7f-71a5-4011-9441-d0b5e4122711",
+    "name": "Radiohead",
+    "score": 0.87,
+    "reference_mbid": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+  }
+]

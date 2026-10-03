@@ -2,12 +2,31 @@ use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use crate::facades::SourceTags;
 use crate::features::identity::secrets;
+use crate::features::metadata::{
+    ARTIST_DISPLAY_PROFILE, MetadataProfile, domain::FieldId, selection::FieldOrder,
+};
 use reqwest::Url;
 
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:3000";
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_YOUTUBE_CONNECT_TIMEOUT_SECONDS: u64 = 2;
 const DEFAULT_YOUTUBE_TOTAL_TIMEOUT_SECONDS: u64 = 35;
+const DEFAULT_METADATA_STORE_BUDGET_BYTES: u64 = 33_554_432;
+const MIN_METADATA_STORE_BUDGET_BYTES: u64 = 1_048_576;
+const DEFAULT_METADATA_LANGUAGE: &str = "en";
+const MAX_METADATA_LANGUAGE_CHARS: usize = 35;
+const DEFAULT_ARTWORK_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+const KNOWN_METADATA_SOURCES: [&str; 8] = [
+    crate::features::metadata::selection::YOUTUBE_MUSIC,
+    crate::features::metadata::selection::THEAUDIODB,
+    crate::features::metadata::selection::MUSICBRAINZ,
+    crate::features::metadata::selection::WIKIPEDIA,
+    crate::features::metadata::selection::COMMONS,
+    crate::features::metadata::selection::LISTENBRAINZ,
+    crate::features::metadata::selection::LASTFM,
+    crate::features::metadata::selection::LOCAL,
+];
 
 const DATABASE_URL: &str = "WHIO_DATABASE_URL";
 const CREDENTIAL_KEY: &str = "WHIO_CREDENTIAL_KEY";
@@ -15,6 +34,15 @@ const YOUTUBE_ENABLED: &str = "WHIO_YOUTUBE_ENABLED";
 const YOUTUBE_RESOLVER_URL: &str = "WHIO_YOUTUBE_RESOLVER_URL";
 const YOUTUBE_RESOLVER_CONNECT_TIMEOUT: &str = "WHIO_YOUTUBE_RESOLVER_CONNECT_TIMEOUT_SECONDS";
 const YOUTUBE_RESOLVER_TOTAL_TIMEOUT: &str = "WHIO_YOUTUBE_RESOLVER_TOTAL_TIMEOUT_SECONDS";
+const METADATA_RESOLVER_URL: &str = "WHIO_METADATA_RESOLVER_URL";
+const METADATA_RESOLVER_CONNECT_TIMEOUT: &str = "WHIO_METADATA_RESOLVER_CONNECT_TIMEOUT_SECONDS";
+const METADATA_RESOLVER_TOTAL_TIMEOUT: &str = "WHIO_METADATA_RESOLVER_TOTAL_TIMEOUT_SECONDS";
+const METADATA_STORE_BUDGET_BYTES: &str = "WHIO_METADATA_STORE_BUDGET_BYTES";
+const METADATA_ARTIST_PROFILE: &str = "WHIO_METADATA_ARTIST_PROFILE";
+const METADATA_LANGUAGE: &str = "WHIO_METADATA_LANGUAGE";
+const METADATA_SOURCE_ORDER: &str = "WHIO_METADATA_SOURCE_ORDER";
+const ARTWORK_CACHE_DIR: &str = "WHIO_ARTWORK_CACHE_DIR";
+const ARTWORK_CACHE_BYTES: &str = "WHIO_ARTWORK_CACHE_BYTES";
 const PLAYBACK_MAX_SESSIONS: &str = "WHIO_PLAYBACK_MAX_SESSIONS";
 const SPOOL_DIR: &str = "WHIO_SPOOL_DIR";
 const DEFAULT_MAX_PLAYBACK_SESSIONS: usize = 16;
@@ -46,6 +74,13 @@ pub(crate) struct Config {
     pub(crate) credential_key: secrets::CredentialKey,
     pub(crate) log_level: tracing::Level,
     pub(crate) youtube_resolver: YoutubeResolverConfig,
+    pub(crate) metadata_resolver: MetadataResolverConfig,
+    pub(crate) metadata_store_budget_bytes: u64,
+    pub(crate) metadata_artist_profile: MetadataProfile,
+    pub(crate) metadata_language: String,
+    pub(crate) metadata_source_order: FieldOrder,
+    pub(crate) artwork_cache_dir: Option<std::path::PathBuf>,
+    pub(crate) artwork_cache_bytes: u64,
     pub(crate) spool_dir: std::path::PathBuf,
     pub(crate) max_playback_sessions: usize,
     pub(crate) max_spool_bytes: u64,
@@ -58,7 +93,7 @@ pub(crate) struct Config {
     pub(crate) worker: WorkerConfig,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct WorkerConfig {
     pub(crate) queues: Vec<String>,
     pub(crate) bind_address: SocketAddr,
@@ -70,6 +105,16 @@ pub(crate) struct WorkerConfig {
 
 #[derive(Debug)]
 pub(crate) enum YoutubeResolverConfig {
+    Disabled,
+    Enabled {
+        url: Url,
+        connect_timeout: Duration,
+        total_timeout: Duration,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum MetadataResolverConfig {
     Disabled,
     Enabled {
         url: Url,
@@ -216,6 +261,119 @@ impl Config {
         } else {
             YoutubeResolverConfig::Disabled
         };
+
+        let metadata_resolver = match vars.get(METADATA_RESOLVER_URL) {
+            None => MetadataResolverConfig::Disabled,
+            Some(raw_url) => {
+                let url = raw_url.parse::<Url>().map_err(|_| {
+                    invalid(
+                        METADATA_RESOLVER_URL,
+                        raw_url,
+                        "must be an absolute HTTP(S) URL",
+                    )
+                })?;
+
+                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                    return Err(invalid(
+                        METADATA_RESOLVER_URL,
+                        raw_url,
+                        "must be an absolute HTTP(S) URL",
+                    ));
+                }
+
+                let connect_timeout = parse_timeout(
+                    vars,
+                    METADATA_RESOLVER_CONNECT_TIMEOUT,
+                    DEFAULT_YOUTUBE_CONNECT_TIMEOUT_SECONDS,
+                )?;
+                let total_timeout = parse_timeout(
+                    vars,
+                    METADATA_RESOLVER_TOTAL_TIMEOUT,
+                    DEFAULT_YOUTUBE_TOTAL_TIMEOUT_SECONDS,
+                )?;
+
+                if total_timeout < Duration::from_secs(DEFAULT_YOUTUBE_TOTAL_TIMEOUT_SECONDS) {
+                    return Err(invalid(
+                        METADATA_RESOLVER_TOTAL_TIMEOUT,
+                        &total_timeout.as_secs().to_string(),
+                        "must be at least 35 seconds",
+                    ));
+                }
+                if total_timeout <= connect_timeout {
+                    return Err(invalid(
+                        METADATA_RESOLVER_TOTAL_TIMEOUT,
+                        &total_timeout.as_secs().to_string(),
+                        "must be greater than the connect timeout",
+                    ));
+                }
+
+                MetadataResolverConfig::Enabled {
+                    url,
+                    connect_timeout,
+                    total_timeout,
+                }
+            }
+        };
+
+        let metadata_store_budget_bytes = match vars.get(METADATA_STORE_BUDGET_BYTES) {
+            None => DEFAULT_METADATA_STORE_BUDGET_BYTES,
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| invalid(METADATA_STORE_BUDGET_BYTES, raw, "must be a byte count"))?,
+        };
+        if metadata_store_budget_bytes < MIN_METADATA_STORE_BUDGET_BYTES {
+            return Err(invalid(
+                METADATA_STORE_BUDGET_BYTES,
+                &metadata_store_budget_bytes.to_string(),
+                "must be at least 1 MiB",
+            ));
+        }
+
+        let profile_raw = vars
+            .get(METADATA_ARTIST_PROFILE)
+            .map(String::as_str)
+            .unwrap_or(ARTIST_DISPLAY_PROFILE);
+        let metadata_artist_profile = MetadataProfile::parse(profile_raw).ok_or_else(|| {
+            invalid(
+                METADATA_ARTIST_PROFILE,
+                profile_raw,
+                "must be a known metadata profile",
+            )
+        })?;
+
+        let metadata_language = vars
+            .get(METADATA_LANGUAGE)
+            .map(|raw| raw.trim().to_owned())
+            .unwrap_or_else(|| DEFAULT_METADATA_LANGUAGE.to_owned());
+        if metadata_language.is_empty()
+            || metadata_language.chars().count() > MAX_METADATA_LANGUAGE_CHARS
+        {
+            return Err(invalid(
+                METADATA_LANGUAGE,
+                &metadata_language,
+                "must be a language tag of at most 35 characters",
+            ));
+        }
+
+        let metadata_source_order = match vars.get(METADATA_SOURCE_ORDER) {
+            None => FieldOrder::defaults(),
+            Some(raw) => parse_source_order(raw)?,
+        };
+
+        let artwork_cache_dir = vars.get(ARTWORK_CACHE_DIR).map(std::path::PathBuf::from);
+        let artwork_cache_bytes = match vars.get(ARTWORK_CACHE_BYTES) {
+            None => DEFAULT_ARTWORK_CACHE_BYTES,
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| invalid(ARTWORK_CACHE_BYTES, raw, "must be a positive byte count"))?,
+        };
+        if artwork_cache_bytes == 0 {
+            return Err(invalid(
+                ARTWORK_CACHE_BYTES,
+                "0",
+                "must be a positive byte count",
+            ));
+        }
 
         let spool_dir = vars
             .get(SPOOL_DIR)
@@ -370,6 +528,13 @@ impl Config {
             log_level,
             credential_key,
             youtube_resolver,
+            metadata_resolver,
+            metadata_store_budget_bytes,
+            metadata_artist_profile,
+            metadata_language,
+            metadata_source_order,
+            artwork_cache_dir,
+            artwork_cache_bytes,
             spool_dir,
             max_playback_sessions,
             max_spool_bytes,
@@ -462,6 +627,87 @@ fn parse_queues(raw: &str) -> Result<Vec<String>, ConfigError> {
     }
 
     Ok(queues)
+}
+
+fn parse_source_order(raw: &str) -> Result<FieldOrder, ConfigError> {
+    let mut order = FieldOrder::new();
+    let mut fields: Vec<FieldId> = Vec::new();
+
+    for entry in raw.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+
+        let Some((field_raw, sources_raw)) = entry.split_once('=') else {
+            return Err(invalid(
+                METADATA_SOURCE_ORDER,
+                entry,
+                "must be `field=source,source`",
+            ));
+        };
+        let field_raw = field_raw.trim();
+        let field = FieldId::parse(field_raw).ok_or_else(|| {
+            invalid(
+                METADATA_SOURCE_ORDER,
+                field_raw,
+                "must name a known metadata field",
+            )
+        })?;
+
+        if fields.contains(&field) {
+            return Err(invalid(
+                METADATA_SOURCE_ORDER,
+                field_raw,
+                "must list each field once",
+            ));
+        }
+
+        let mut sources: Vec<String> = Vec::new();
+        for source in sources_raw.split(',') {
+            let source = source.trim();
+            if source.is_empty() {
+                continue;
+            }
+            if !KNOWN_METADATA_SOURCES.contains(&source) {
+                return Err(invalid(
+                    METADATA_SOURCE_ORDER,
+                    source,
+                    "must name a known metadata source",
+                ));
+            }
+            if sources.iter().any(|seen| seen == source) {
+                return Err(invalid(
+                    METADATA_SOURCE_ORDER,
+                    source,
+                    "must list each source once",
+                ));
+            }
+
+            sources.push(source.to_owned());
+        }
+
+        if sources.is_empty() {
+            return Err(invalid(
+                METADATA_SOURCE_ORDER,
+                field_raw,
+                "must list at least one source",
+            ));
+        }
+
+        fields.push(field);
+        order.set(field, sources);
+    }
+
+    if fields.is_empty() {
+        return Err(invalid(
+            METADATA_SOURCE_ORDER,
+            raw,
+            "must list at least one field",
+        ));
+    }
+
+    Ok(order)
 }
 
 fn parse_media_roots(
@@ -857,6 +1103,257 @@ mod tests {
                 "{name}={value}"
             );
         }
+    }
+
+    #[test]
+    fn metadata_resolver_defaults_to_disabled_and_ignores_inactive_values() {
+        let config = parse_config(&[
+            (METADATA_RESOLVER_URL, ""),
+            (METADATA_RESOLVER_CONNECT_TIMEOUT, "not a timeout"),
+            (METADATA_RESOLVER_TOTAL_TIMEOUT, "1"),
+        ]);
+
+        assert!(config.is_err());
+        assert!(matches!(
+            parse_config(&[]).unwrap().metadata_resolver,
+            MetadataResolverConfig::Disabled
+        ));
+    }
+
+    #[test]
+    fn an_enabled_metadata_resolver_uses_defaults_and_accepts_overrides() {
+        let config =
+            parse_config(&[(METADATA_RESOLVER_URL, "http://metadata.example.test")]).unwrap();
+        assert!(matches!(
+            config.metadata_resolver,
+            MetadataResolverConfig::Enabled {
+                connect_timeout,
+                total_timeout,
+                ..
+            } if connect_timeout == Duration::from_secs(2)
+                && total_timeout == Duration::from_secs(35)
+        ));
+
+        let config = parse_config(&[
+            (METADATA_RESOLVER_URL, "https://metadata.example.test/v1"),
+            (METADATA_RESOLVER_CONNECT_TIMEOUT, "4"),
+            (METADATA_RESOLVER_TOTAL_TIMEOUT, "45"),
+        ])
+        .unwrap();
+        assert!(matches!(
+            config.metadata_resolver,
+            MetadataResolverConfig::Enabled {
+                url,
+                connect_timeout,
+                total_timeout,
+            } if url.as_str() == "https://metadata.example.test/v1"
+                && connect_timeout == Duration::from_secs(4)
+                && total_timeout == Duration::from_secs(45)
+        ));
+    }
+
+    #[test]
+    fn an_enabled_metadata_resolver_requires_a_valid_url_and_timeouts() {
+        for url in ["metadata.example.test", "file:///tmp/resolver", "http://"] {
+            assert!(
+                matches!(
+                    parse_config(&[(METADATA_RESOLVER_URL, url)]),
+                    Err(ConfigError::Invalid {
+                        name: METADATA_RESOLVER_URL,
+                        ..
+                    })
+                ),
+                "{url}"
+            );
+        }
+
+        for (name, value) in [
+            (METADATA_RESOLVER_CONNECT_TIMEOUT, "0"),
+            (METADATA_RESOLVER_CONNECT_TIMEOUT, "many"),
+            (METADATA_RESOLVER_TOTAL_TIMEOUT, "34"),
+            (METADATA_RESOLVER_TOTAL_TIMEOUT, "0"),
+        ] {
+            assert!(
+                matches!(
+                    parse_config(&[
+                        (METADATA_RESOLVER_URL, "http://metadata.example.test"),
+                        (name, value),
+                    ]),
+                    Err(ConfigError::Invalid { .. })
+                ),
+                "{name}={value}"
+            );
+        }
+
+        assert!(
+            parse_config(&[
+                (METADATA_RESOLVER_URL, "http://metadata.example.test"),
+                (METADATA_RESOLVER_CONNECT_TIMEOUT, "40"),
+                (METADATA_RESOLVER_TOTAL_TIMEOUT, "35"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_metadata_store_budget_defaults_and_rejects_under_a_megabyte() {
+        assert_eq!(
+            parse_config(&[]).unwrap().metadata_store_budget_bytes,
+            33_554_432
+        );
+        assert_eq!(
+            parse_config(&[(METADATA_STORE_BUDGET_BYTES, "2097152")])
+                .unwrap()
+                .metadata_store_budget_bytes,
+            2_097_152
+        );
+
+        for value in ["0", "1048575", "many", "-1"] {
+            assert!(
+                matches!(
+                    parse_config(&[(METADATA_STORE_BUDGET_BYTES, value)]),
+                    Err(ConfigError::Invalid {
+                        name: METADATA_STORE_BUDGET_BYTES,
+                        ..
+                    })
+                ),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_metadata_profile_and_language_default_and_reject_unknown_values() {
+        let config = parse_config(&[]).unwrap();
+        assert_eq!(config.metadata_artist_profile.as_str(), "artist-display.v1");
+        assert_eq!(config.metadata_language, "en");
+
+        let config = parse_config(&[
+            (METADATA_ARTIST_PROFILE, "artist-display.v1"),
+            (METADATA_LANGUAGE, " de "),
+        ])
+        .unwrap();
+        assert_eq!(config.metadata_artist_profile.as_str(), "artist-display.v1");
+        assert_eq!(config.metadata_language, "de");
+
+        assert!(matches!(
+            parse_config(&[(METADATA_ARTIST_PROFILE, "artist-display.v2")]),
+            Err(ConfigError::Invalid {
+                name: METADATA_ARTIST_PROFILE,
+                ..
+            })
+        ));
+
+        for value in ["", "   ", &"a".repeat(36)] {
+            assert!(
+                matches!(
+                    parse_config(&[(METADATA_LANGUAGE, value)]),
+                    Err(ConfigError::Invalid {
+                        name: METADATA_LANGUAGE,
+                        ..
+                    })
+                ),
+                "{value}"
+            );
+        }
+    }
+
+    fn ordered(config: &Config, field: FieldId) -> Vec<String> {
+        config.metadata_source_order.sources(field).to_vec()
+    }
+
+    #[test]
+    fn the_source_order_defaults_to_the_per_field_tiers() {
+        let config = parse_config(&[]).unwrap();
+
+        assert_eq!(
+            ordered(&config, FieldId::BiographyContent),
+            vec!["youtube_music", "theaudiodb", "wikipedia", "lastfm"]
+        );
+        assert_eq!(
+            ordered(&config, FieldId::ImagePortrait),
+            vec!["theaudiodb", "commons"]
+        );
+        assert_eq!(
+            ordered(&config, FieldId::MetricListen),
+            vec!["listenbrainz"]
+        );
+        assert!(ordered(&config, FieldId::BiographyLanguage).is_empty());
+    }
+
+    #[test]
+    fn a_configured_source_order_replaces_only_the_named_fields() {
+        let config = parse_config(&[(
+            METADATA_SOURCE_ORDER,
+            " biography.content = wikipedia,theaudiodb ; tag=musicbrainz ",
+        )])
+        .unwrap();
+
+        assert_eq!(
+            ordered(&config, FieldId::BiographyContent),
+            vec!["wikipedia", "theaudiodb"]
+        );
+        assert_eq!(ordered(&config, FieldId::Tag), vec!["musicbrainz"]);
+        assert!(ordered(&config, FieldId::ImagePortrait).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_field_or_source_in_the_source_order_is_a_configuration_error() {
+        for value in [
+            "unknown.field=wikipedia",
+            "biography.content=unknown_source",
+            "biography.content",
+            "=wikipedia",
+            "biography.content=",
+            "",
+            "   ",
+            "biography.content=wikipedia;biography.content=theaudiodb",
+            "biography.content=wikipedia,wikipedia",
+        ] {
+            assert!(
+                matches!(
+                    parse_config(&[(METADATA_SOURCE_ORDER, value)]),
+                    Err(ConfigError::Invalid {
+                        name: METADATA_SOURCE_ORDER,
+                        ..
+                    })
+                ),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_artwork_cache_is_disabled_without_a_directory_and_defaults_its_budget() {
+        let config = parse_config(&[]).unwrap();
+        assert!(config.artwork_cache_dir.is_none());
+        assert_eq!(config.artwork_cache_bytes, 2 * 1024 * 1024 * 1024);
+
+        let config = parse_config(&[
+            (ARTWORK_CACHE_DIR, "/tank/whio/artwork"),
+            (ARTWORK_CACHE_BYTES, "1073741824"),
+        ])
+        .unwrap();
+        assert_eq!(
+            config.artwork_cache_dir,
+            Some(std::path::PathBuf::from("/tank/whio/artwork"))
+        );
+        assert_eq!(config.artwork_cache_bytes, 1_073_741_824);
+
+        assert!(matches!(
+            parse_config(&[(ARTWORK_CACHE_BYTES, "0")]),
+            Err(ConfigError::Invalid {
+                name: ARTWORK_CACHE_BYTES,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_config(&[(ARTWORK_CACHE_BYTES, "lots")]),
+            Err(ConfigError::Invalid {
+                name: ARTWORK_CACHE_BYTES,
+                ..
+            })
+        ));
     }
 
     #[test]

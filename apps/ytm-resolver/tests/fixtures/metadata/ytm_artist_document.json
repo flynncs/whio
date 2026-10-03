@@ -1,0 +1,138 @@
+{
+  "name": "Coldplay",
+  "channelId": "UCDPM_n1atn2ijUwHd0NNRQw",
+  "description": "Coldplay are a British rock band formed in London in 1997. They consist of vocalist and pianist Chris Martin, guitarist Jonny Buckland, bassist Guy Berryman and drummer Will Champion; manager Phil Harvey is also credited as a full member.",
+  "thumbnails": [
+    {
+      "url": "https://lh3.googleusercontent.com/IOKuXtp8PCQ_Fc-vaRKm3sKIXBxFV51gZheLTH5br-YGnWHFQf_Jywcuk7wbprYRoEbQyS_XZY6-nMJX=w540-h225-p-l90-rj",
+      "width": 540,
+      "height": 225
+    },
+    {
+      "url": "https://lh3.googleusercontent.com/IOKuXtp8PCQ_Fc-vaRKm3sKIXBxFV51gZheLTH5br-YGnWHFQf_Jywcuk7wbprYRoEbQyS_XZY6-nMJX=w2048-h853-p-l90-rj",
+      "width": 2048,
+      "height": 853
+    }
+  ],
+  "related": {
+    "browseId": null,
+    "results": [
+      {
+        "title": "M83",
+        "browseId": "UC0UUzwcmD3s1S7NYAxHfs1w"
+      },
+      {
+        "title": "Kodaline",
+        "browseId": "UC0cymQddFci7e31o7EIznYw"
+      },
+      {
+        "title": "James Blunt",
+        "browseId": "UCCEzq-Gv6gU-bdM82rtZN4g"
+      },
+      {
+        "title": "Passenger",
+        "browseId": "UCc8dIcu6C_9TcVoM--vYxYQ"
+      },
+      {
+        "title": "The Temper Trap",
+        "browseId": "UCV_2v5GO67qe4l9Nr9OWkSQ"
+      },
+      {
+        "title": "Snow Patrol",
+        "browseId": "UCqJPacofwGc9243bYPVyTcw"
+      },
+      {
+        "title": "Dido",
+        "browseId": "UC4JFSju_Y3IEF7zwYo2ychA"
+      },
+      {
+        "title": "John Mayer",
+        "browseId": "UCczZEFOQSeVjeV4nKi5kdhw"
+      },
+      {
+        "title": "Harry Styles",
+        "browseId": "UCVacQ2t5GUZ2t_J3Ia9BynA"
+      },
+      {
+        "title": "The Killers",
+        "browseId": "UCneQ7UWyu9USLDgMya6T7IA"
+      }
+    ]
+  },
+  "songs": {
+    "results": [
+      {
+        "videoId": "9qnqYL0eNNI",
+        "title": "Yellow",
+        "artists": [
+          {
+            "name": "Coldplay",
+            "id": "UCIaFw5VBEK8qaW6nRpx_qnw"
+          }
+        ],
+        "album": {
+          "name": "Parachutes",
+          "id": "MPREb_oBucXyijinj"
+        },
+        "duration_seconds": 267,
+        "isrc": "GBAYE0000001"
+      },
+      {
+        "videoId": "gm-Y9idMMQ4",
+        "title": "The Scientist",
+        "artists": [
+          {
+            "name": "Coldplay",
+            "id": "UCIaFw5VBEK8qaW6nRpx_qnw"
+          }
+        ],
+        "album": {
+          "name": "A Rush of Blood to the Head",
+          "id": "MPREb_U4m9ZEeYxdi"
+        }
+      },
+      {
+        "videoId": "H3Kzh6RrnMc",
+        "title": "Hymn for the Weekend",
+        "artists": [
+          {
+            "name": "Coldplay",
+            "id": "UCIaFw5VBEK8qaW6nRpx_qnw"
+          }
+        ],
+        "album": {
+          "name": "A Head Full of Dreams",
+          "id": "MPREb_PvMNqFUp1oW"
+        }
+      },
+      {
+        "videoId": "owTWCbq_nSk",
+        "title": "Something Just Like This",
+        "artists": [
+          {
+            "name": "The Chainsmokers",
+            "id": "UCQgUHOPJJrmzCjExg-ISupA"
+          }
+        ],
+        "album": {
+          "name": "Something Just Like This",
+          "id": "MPREb_UFVKa0Hc536"
+        }
+      },
+      {
+        "videoId": "ALsvdSA9tOU",
+        "title": "Viva La Vida",
+        "artists": [
+          {
+            "name": "Coldplay",
+            "id": "UCIaFw5VBEK8qaW6nRpx_qnw"
+          }
+        ],
+        "album": {
+          "name": "Viva La Vida",
+          "id": "MPREb_eWjia3Zrd7e"
+        }
+      }
+    ]
+  }
+}

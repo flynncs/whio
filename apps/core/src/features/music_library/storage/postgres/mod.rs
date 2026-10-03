@@ -3,9 +3,13 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use crate::features::music_library::availability::ProviderRegistry;
+use crate::features::music_library::delivery::DeliveryService;
 
+mod artwork;
 mod catalogue;
 pub(crate) mod decode;
+mod delivery;
+mod enrichment;
 mod history;
 mod libraries;
 mod library;
@@ -19,10 +23,26 @@ mod state;
 pub use libraries::PostgresLibraryStore;
 
 #[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_artist_name_read.rs"]
+mod test_artist_name_read;
+#[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_artwork.rs"]
+mod test_artwork;
+#[cfg(all(test, feature = "postgres-integration"))]
 #[path = "test_catalogue_keys.rs"]
 mod test_catalogue_keys;
 #[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_contracts.rs"]
 mod test_contracts;
+#[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_delivery.rs"]
+mod test_delivery;
+#[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_discovery.rs"]
+mod test_discovery;
+#[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_enrichment.rs"]
+mod test_enrichment;
 #[cfg(all(test, feature = "postgres-integration"))]
 #[path = "test_history.rs"]
 mod test_history;
@@ -57,6 +77,7 @@ mod test_track_repository;
 pub struct PostgresTrackRepository {
     pool: PgPool,
     providers: Arc<ProviderRegistry>,
+    delivery: Option<Arc<DeliveryService>>,
 }
 
 pub(crate) type PgStore = PostgresTrackRepository;
@@ -66,10 +87,16 @@ impl PostgresTrackRepository {
         Self {
             pool,
             providers: Arc::new(ProviderRegistry::builtin()),
+            delivery: None,
         }
     }
     pub(crate) fn with_registry(mut self, registry: ProviderRegistry) -> Self {
         self.providers = Arc::new(registry);
+        self
+    }
+
+    pub fn with_delivery(mut self, delivery: Arc<DeliveryService>) -> Self {
+        self.delivery = Some(delivery);
         self
     }
 

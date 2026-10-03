@@ -1,0 +1,33 @@
+{
+  "id": "cc197bad-dc9c-440d-a5b5-d52ba2e14234",
+  "name": "Coldplay",
+  "sort-name": "Coldplay",
+  "type": "Group",
+  "country": "GB",
+  "relations": [
+    {
+      "type": "wikipedia",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://en.wikipedia.org/wiki/Coldplay"
+      }
+    },
+    {
+      "type": "wikidata",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://www.wikidata.org/wiki/Q11647"
+      }
+    },
+    {
+      "type": "image",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://img.example/wiki/File:ColdplayPortrait.jpg"
+      }
+    }
+  ]
+}

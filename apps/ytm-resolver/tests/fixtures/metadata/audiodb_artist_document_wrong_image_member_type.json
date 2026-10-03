@@ -1,0 +1,10 @@
+{
+  "artists": [
+    {
+      "strArtist": "Controlled Artist",
+      "strBiographyEN": "a short controlled biography",
+      "strArtistThumb": 5,
+      "strMusicBrainzID": "00000000-0000-0000-0000-0000000000aa"
+    }
+  ]
+}

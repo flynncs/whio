@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use serde::Serialize;
@@ -7,9 +8,9 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 
 use crate::{
-    app::config::{Config, ConfigError, WorkerConfig},
+    app::config::{Config, ConfigError, MetadataResolverConfig, WorkerConfig},
     app::database::{Database, DatabaseError},
-    app::startup::shutdown_signal,
+    app::startup::{WorkerState, shutdown_signal},
     jobs::{self, QueueRegistration},
 };
 
@@ -26,6 +27,12 @@ pub(crate) enum WorkerError {
 
     #[error("no job handler is registered for queue `{queue}`")]
     UnregisteredQueue { queue: String },
+
+    #[error("queue `{queue}` requires {dependency}, which is not configured")]
+    UnavailableDependency {
+        queue: String,
+        dependency: &'static str,
+    },
 
     #[error(transparent)]
     Database(#[from] DatabaseError),
@@ -44,6 +51,9 @@ pub(crate) enum WorkerError {
 
     #[error("worker server task failed")]
     Join(#[source] tokio::task::JoinError),
+
+    #[error("a required worker dependency could not be constructed")]
+    Dependency(#[source] crate::features::playback::providers::ProviderError),
 }
 
 #[derive(Serialize)]
@@ -78,11 +88,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(config.log_level)
         .init();
 
-    let worker = config.worker;
+    let worker = config.worker.clone();
     let registered = jobs::queues();
     let queues = check_queues(&worker.queues, &registered)?;
+    check_queue_dependencies(&queues, &config.metadata_resolver)?;
     let database = Database::connect(&config.database_url).await?;
-    let client = build(&database.pool(), &queues, &worker)?;
+    let state =
+        super::startup::worker_state(&config, database.pool()).map_err(WorkerError::Dependency)?;
+    let client = build(&database.pool(), &queues, &worker, state)?;
 
     tracing::info!(queues = ?worker.queues, "awa worker starting");
 
@@ -120,24 +133,72 @@ fn check_queues<'a>(
         .collect()
 }
 
+fn check_queue_dependencies(
+    queues: &[&QueueRegistration],
+    metadata_resolver: &MetadataResolverConfig,
+) -> Result<(), WorkerError> {
+    if !matches!(metadata_resolver, MetadataResolverConfig::Disabled) {
+        return Ok(());
+    }
+
+    for queue in queues {
+        if queue.name == jobs::metadata_refresh::METADATA_REFRESH_QUEUE {
+            return Err(WorkerError::UnavailableDependency {
+                queue: queue.name.to_owned(),
+                dependency: "WHIO_METADATA_RESOLVER_URL",
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn queue_config(worker: &WorkerConfig, queue: &QueueRegistration) -> awa::QueueConfig {
+    awa::QueueConfig {
+        max_workers: worker.max_workers,
+        poll_interval: worker.poll_interval,
+        deadline_duration: queue_deadline(queue.name),
+        ..awa::QueueConfig::default()
+    }
+}
+
+fn queue_deadline(name: &str) -> Duration {
+    match name {
+        jobs::listening_delivery::LISTEN_DELIVERY_QUEUE => {
+            jobs::listening_delivery::LISTEN_DELIVERY_DEADLINE
+        }
+        _ => awa::QueueConfig::default().deadline_duration,
+    }
+}
+
 fn build(
     pool: &PgPool,
     queues: &[&QueueRegistration],
     worker: &WorkerConfig,
+    state: WorkerState,
 ) -> Result<awa::Client, WorkerError> {
-    let queue_config = awa::QueueConfig {
-        max_workers: worker.max_workers,
-        poll_interval: worker.poll_interval,
-        ..awa::QueueConfig::default()
-    };
+    let mut builder = awa::Client::builder(pool.clone())
+        .promote_interval(worker.promote_interval)
+        .state(Arc::clone(&state.metadata));
 
-    jobs::register(
-        awa::Client::builder(pool.clone()).promote_interval(worker.promote_interval),
-        queues,
-        &queue_config,
-    )
-    .build()
-    .map_err(WorkerError::Build)
+    if let Some(subjects) = state.subjects.as_ref() {
+        builder = builder.state(Arc::clone(subjects));
+    }
+    if let Some(delivery) = state.delivery.as_ref() {
+        builder = builder.state(Arc::clone(delivery));
+    }
+
+    queues
+        .iter()
+        .fold(builder, |builder, queue| {
+            jobs::register(
+                builder,
+                std::slice::from_ref(queue),
+                &queue_config(worker, queue),
+            )
+        })
+        .build()
+        .map_err(WorkerError::Build)
 }
 
 async fn serve_until_shutdown(
@@ -280,11 +341,89 @@ mod tests {
     }
 
     #[test]
-    fn the_registry_declares_the_probe_queue_with_a_handler() {
+    fn the_registry_declares_every_queue_with_a_handler() {
+        let queues = jobs::queues();
+        let names = queues.iter().map(|queue| queue.name).collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                jobs::probe::PROBE_QUEUE,
+                jobs::metadata_refresh::METADATA_REFRESH_QUEUE,
+                jobs::listening_delivery::LISTEN_DELIVERY_QUEUE,
+            ]
+        );
+        assert!(queues.iter().all(|queue| !queue.kinds.is_empty()));
+    }
+
+    fn registry_queue(name: &str) -> QueueRegistration {
         let queues = jobs::queues();
 
-        assert_eq!(queues.len(), 1);
-        assert_eq!(queues[0].name, jobs::probe::PROBE_QUEUE);
-        assert!(!queues[0].kinds.is_empty());
+        queues
+            .into_iter()
+            .find(|queue| queue.name == name)
+            .expect("the queue is registered")
+    }
+
+    fn enabled_metadata_resolver() -> MetadataResolverConfig {
+        MetadataResolverConfig::Enabled {
+            url: "http://metadata-resolver:8000".parse().unwrap(),
+            connect_timeout: Duration::from_secs(2),
+            total_timeout: Duration::from_secs(35),
+        }
+    }
+
+    #[test]
+    fn a_metadata_refresh_queue_without_the_resolver_is_refused_and_named() {
+        let queue = registry_queue(jobs::metadata_refresh::METADATA_REFRESH_QUEUE);
+
+        let error = check_queue_dependencies(&[&queue], &MetadataResolverConfig::Disabled)
+            .expect_err("a metadata refresh queue needs the metadata transport");
+
+        assert!(matches!(
+            &error,
+            WorkerError::UnavailableDependency { queue, dependency }
+                if queue == jobs::metadata_refresh::METADATA_REFRESH_QUEUE
+                    && *dependency == "WHIO_METADATA_RESOLVER_URL"
+        ));
+        assert!(error.to_string().contains("WHIO_METADATA_RESOLVER_URL"));
+    }
+
+    #[test]
+    fn a_metadata_refresh_queue_with_the_resolver_and_a_probe_queue_are_accepted() {
+        let metadata = registry_queue(jobs::metadata_refresh::METADATA_REFRESH_QUEUE);
+        let probe = registry_queue(jobs::probe::PROBE_QUEUE);
+
+        assert!(check_queue_dependencies(&[&metadata], &enabled_metadata_resolver()).is_ok());
+        assert!(check_queue_dependencies(&[&probe], &MetadataResolverConfig::Disabled).is_ok());
+    }
+
+    #[test]
+    fn the_listen_delivery_queue_deadline_is_explicit_and_inside_the_handler_window() {
+        let worker = WorkerConfig {
+            queues: Vec::new(),
+            bind_address: "127.0.0.1:0".parse().unwrap(),
+            max_workers: 2,
+            poll_interval: Duration::from_millis(200),
+            promote_interval: Duration::from_millis(250),
+            drain_timeout: Duration::from_secs(30),
+        };
+        let delivery = registry_queue(jobs::listening_delivery::LISTEN_DELIVERY_QUEUE);
+        let probe = registry_queue(jobs::probe::PROBE_QUEUE);
+
+        let configured = queue_config(&worker, &delivery);
+
+        assert_eq!(
+            configured.deadline_duration,
+            jobs::listening_delivery::LISTEN_DELIVERY_DEADLINE
+        );
+        assert!(
+            configured.deadline_duration
+                < crate::features::music_library::delivery::SNOOZE_DEADLINE
+        );
+        assert_eq!(
+            queue_config(&worker, &probe).deadline_duration,
+            awa::QueueConfig::default().deadline_duration
+        );
     }
 }

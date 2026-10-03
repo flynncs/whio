@@ -219,6 +219,24 @@ pub async fn enqueue(
     .await
 }
 
+pub async fn enqueue_coalesced(
+    pool: &sqlx::PgPool,
+    operation_id: Uuid,
+) -> Result<Enqueued, JobsError> {
+    crate::platform::jobs::enqueue_coalesced(
+        pool,
+        PendingJob {
+            queue: PROBE_QUEUE,
+            payload: &ProbeV1 { operation_id },
+            priority: PROBE_PRIORITY,
+            max_attempts: PROBE_MAX_ATTEMPTS,
+            operation_id,
+            coalesce: true,
+        },
+    )
+    .await
+}
+
 pub async fn enqueue_slow(
     tx: &mut sqlx::PgConnection,
     operation_id: Uuid,

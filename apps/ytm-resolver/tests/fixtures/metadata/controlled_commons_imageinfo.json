@@ -1,0 +1,47 @@
+{
+  "batchcomplete": "",
+  "query": {
+    "pages": {
+      "1": {
+        "pageid": 1,
+        "ns": 6,
+        "title": "File:ColdplayWembley.jpg",
+        "imagerepository": "shared",
+        "imageinfo": [
+          {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/a/a1/ColdplayWembley.jpg",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:ColdplayWembley.jpg",
+            "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1",
+            "extmetadata": {
+              "LicenseShortName": {
+                "value": "CC BY 4.0",
+                "source": "commons",
+                "hidden": false
+              },
+              "LicenseUrl": {
+                "value": "https://creativecommons.org/licenses/by/4.0/",
+                "source": "commons",
+                "hidden": false
+              },
+              "Artist": {
+                "value": "<a href=\"//commons.wikimedia.org/wiki/User:Ricardo\">Ricardo</a>",
+                "source": "commons",
+                "hidden": false
+              },
+              "Credit": {
+                "value": "Own work",
+                "source": "commons",
+                "hidden": false
+              },
+              "AttributionRequired": {
+                "value": "true",
+                "source": "commons",
+                "hidden": false
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

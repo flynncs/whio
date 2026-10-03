@@ -1,0 +1,16 @@
+{
+  "entities": {
+    "Q11647": {
+      "id": "Q11647",
+      "type": "item",
+      "claims": {},
+      "sitelinks": {
+        "enwiki": {
+          "site": "enwiki",
+          "title": "Coldplay",
+          "badges": []
+        }
+      }
+    }
+  }
+}

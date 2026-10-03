@@ -29,12 +29,13 @@ use crate::{
 pub(crate) use auth::SubsonicAuth;
 use auth::SubsonicError;
 use envelope::{
-    album_envelope, album_list2_envelope, artist_envelope, artists_envelope,
-    create_playlist_envelope, directory_envelope, extensions_envelope, failed_envelope,
-    genres_envelope, indexes_envelope, now_playing_envelope, ok_envelope,
-    play_queue_by_index_envelope, play_queue_envelope, playlist_envelope, playlists_envelope,
-    random_songs_envelope, scan_status_envelope, search3_envelope, songs_by_genre_envelope,
-    starred2_envelope, start_scan_envelope, user_envelope,
+    album_envelope, album_list2_envelope, artist_envelope, artist_info_envelope,
+    artist_info2_envelope, artists_envelope, create_playlist_envelope, directory_envelope,
+    extensions_envelope, failed_envelope, genres_envelope, indexes_envelope, now_playing_envelope,
+    ok_envelope, play_queue_by_index_envelope, play_queue_envelope, playlist_envelope,
+    playlists_envelope, random_songs_envelope, scan_status_envelope, search3_envelope,
+    similar_songs_envelope, similar_songs2_envelope, songs_by_genre_envelope, starred2_envelope,
+    start_scan_envelope, top_songs_envelope, user_envelope,
 };
 use state::SubsonicState;
 
@@ -64,6 +65,11 @@ where
         ("/getAlbum", get(get_album)),
         ("/getArtists", get(get_artists)),
         ("/getArtist", get(get_artist)),
+        ("/getArtistInfo", get(get_artist_info)),
+        ("/getArtistInfo2", get(get_artist_info2)),
+        ("/getTopSongs", get(get_top_songs)),
+        ("/getSimilarSongs", get(get_similar_songs)),
+        ("/getSimilarSongs2", get(get_similar_songs2)),
         ("/getStarred2", get(get_starred2).post(get_starred2)),
         ("/getGenres", get(get_genres).post(get_genres)),
         ("/getPlaylists", get(get_playlists).post(get_playlists)),
@@ -395,6 +401,171 @@ pub(crate) async fn get_artist(
 
     match service::artist_detail(state.library(), id, Some(&user)).await {
         Ok(artist) => Json(artist_envelope(artist)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_artist_info(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(id) = query.get("id") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+    if let Err(error) = service::artist_info_count(query.get("count")) {
+        return browse_failure_response(&context, error);
+    }
+    if let Err(error) = service::include_not_present(query.get("includeNotPresent")) {
+        return browse_failure_response(&context, error);
+    }
+    let user = principal.user_id.as_uuid();
+
+    match service::artist_info(state.library(), id, Some(&user)).await {
+        Ok(info) => Json(artist_info_envelope(info)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_artist_info2(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(id) = query.get("id") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+    let count = match service::artist_info_count(query.get("count")) {
+        Ok(count) => count,
+        Err(error) => return browse_failure_response(&context, error),
+    };
+    if let Err(error) = service::include_not_present(query.get("includeNotPresent")) {
+        return browse_failure_response(&context, error);
+    }
+    let user = principal.user_id.as_uuid();
+
+    match service::artist_info2(
+        state.library(),
+        state.discovery().map(|discovery| discovery.as_ref()),
+        id,
+        Some(&user),
+        count,
+    )
+    .await
+    {
+        Ok(info) => Json(artist_info2_envelope(info)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_top_songs(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(artist) = query.get("artist") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+    let count = match service::song_count(query.get("count")) {
+        Ok(count) => count,
+        Err(error) => return browse_failure_response(&context, error),
+    };
+    let user = principal.user_id.as_uuid();
+
+    match service::top_songs(
+        state.library(),
+        state.discovery().map(|discovery| discovery.as_ref()),
+        artist,
+        Some(&user),
+        count,
+        state.source_tags(),
+    )
+    .await
+    {
+        Ok(songs) => Json(top_songs_envelope(songs)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_similar_songs(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(id) = query.get("id") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+    let count = match service::song_count(query.get("count")) {
+        Ok(count) => count,
+        Err(error) => return browse_failure_response(&context, error),
+    };
+    let user = principal.user_id.as_uuid();
+
+    match service::similar_songs(
+        state.library(),
+        state.discovery().map(|discovery| discovery.as_ref()),
+        id,
+        Some(&user),
+        count,
+        state.source_tags(),
+    )
+    .await
+    {
+        Ok(songs) => Json(similar_songs_envelope(songs)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_similar_songs2(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(id) = query.get("id") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+    let count = match service::song_count(query.get("count")) {
+        Ok(count) => count,
+        Err(error) => return browse_failure_response(&context, error),
+    };
+    let user = principal.user_id.as_uuid();
+
+    match service::similar_songs2(
+        state.library(),
+        state.discovery().map(|discovery| discovery.as_ref()),
+        id,
+        Some(&user),
+        count,
+        state.source_tags(),
+    )
+    .await
+    {
+        Ok(songs) => Json(similar_songs2_envelope(songs)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
 }

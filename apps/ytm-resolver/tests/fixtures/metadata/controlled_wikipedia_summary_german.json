@@ -1,0 +1,10 @@
+{
+  "type": "standard",
+  "title": "Coldplay",
+  "extract": "Coldplay ist eine britische Rockband, die 1997 in London gegruendet wurde.",
+  "content_urls": {
+    "desktop": {
+      "page": "https://de.wikipedia.org/wiki/Coldplay"
+    }
+  }
+}

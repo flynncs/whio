@@ -1,21 +1,26 @@
 use std::sync::Arc;
 
 use axum::{
-    Extension, Json,
-    extract::{State, rejection::JsonRejection},
+    Extension, Json, Router,
+    extract::{FromRef, State, rejection::JsonRejection},
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
+    routing::get,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    features::identity::api::native::AuthenticatedPrincipal,
+    features::identity::{
+        api::native::{AuthenticatedPrincipal, NativeState},
+        service::CredentialService,
+    },
     features::music_library::{
         api::errors::ApiError,
         api::native::{offset, page_limit, page_response, reject_unknown},
         catalogue::{CatalogueError, ValidationError},
+        delivery::{DeliveryError, DeliveryService, DeliveryState},
         domain::{
             ListenCoverage, ListenExtent, ListenOrder, ListenOrigin, ListenOutcome, ListenQuery,
             ListenRecord, ListenSessionId, ListenSubmission, ListenWindow, TrackId,
@@ -38,6 +43,7 @@ pub(crate) struct HistoryState {
 const SUBMISSION_PARAMETERS: &[&str] = &[];
 const ACTIVITY_PARAMETERS: &[&str] = &[];
 const HISTORY_PARAMETERS: &[&str] = &["limit", "offset", "order", "since", "until"];
+const DELIVERY_PARAMETERS: &[&str] = &["limit", "state"];
 
 pub(crate) enum HistoryApiError {
     Native(ApiError),
@@ -462,6 +468,72 @@ pub(crate) async fn read(
     );
 
     Ok(response)
+}
+
+#[derive(Clone)]
+pub struct ListenDeliveryState {
+    pub delivery: Option<Arc<DeliveryService>>,
+    pub credential: Arc<CredentialService>,
+}
+
+impl FromRef<ListenDeliveryState> for NativeState {
+    fn from_ref(state: &ListenDeliveryState) -> Self {
+        Self(Arc::clone(&state.credential))
+    }
+}
+
+pub fn delivery_routes() -> Router<ListenDeliveryState> {
+    Router::new().route("/api/v1/library/listen-deliveries", get(delivery_status))
+}
+
+fn delivery_failure(context: &RequestContext, error: DeliveryError) -> HistoryApiError {
+    match error {
+        DeliveryError::Disabled | DeliveryError::Unavailable | DeliveryError::CredentialMissing => {
+            HistoryApiError::Unavailable(context.clone())
+        }
+        DeliveryError::Repository(error) => HistoryApiError::Native(ApiError::Catalogue {
+            context: context.clone(),
+            error: CatalogueError::Repository(error),
+        }),
+        DeliveryError::InvalidData
+        | DeliveryError::CredentialRejected
+        | DeliveryError::ProviderUnavailable
+        | DeliveryError::RateLimited { .. } => HistoryApiError::Internal(context.clone()),
+    }
+}
+
+fn delivery_state(
+    context: &RequestContext,
+    query: &RawQuery,
+) -> Result<Option<DeliveryState>, HistoryApiError> {
+    match query.get("state") {
+        Some(raw) => DeliveryState::parse(raw)
+            .map(Some)
+            .ok_or_else(|| invalid_field(context, "state")),
+        None => Ok(None),
+    }
+}
+
+pub(crate) async fn delivery_status(
+    State(state): State<ListenDeliveryState>,
+    Extension(context): Extension<RequestContext>,
+    AuthenticatedPrincipal(principal): AuthenticatedPrincipal,
+    query: RawQuery,
+) -> Result<Response, HistoryApiError> {
+    reject_unknown(&query, DELIVERY_PARAMETERS).map_err(|error| invalid(&context, error))?;
+    let delivery = state
+        .delivery
+        .as_ref()
+        .ok_or_else(|| HistoryApiError::Unavailable(context.clone()))?;
+    let selected = delivery_state(&context, &query)?;
+    let limit = page_limit(&query).map_err(|error| invalid(&context, error))?;
+    let rows = delivery
+        .status(principal.user_id.as_uuid(), selected, limit.get())
+        .await
+        .map_err(|error| delivery_failure(&context, error))?;
+    let total = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+
+    Ok(page_response(rows, total, None))
 }
 
 pub(crate) async fn activity(

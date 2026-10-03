@@ -1,0 +1,12 @@
+{
+  "artists": [
+    {
+      "idArtist": "111239",
+      "strArtist": "Coldplay",
+      "strBiographyEN": "Coldplay are a British rock band formed in London in 1997.",
+      "strBiographyDE": "Coldplay sind eine britische Rockband aus London.",
+      "strArtistThumb": "https://r2.theaudiodb.com/images/media/artist/thumb/uxrqxy1347913147.jpg",
+      "strMusicBrainzID": "cc197bad-dc9c-440d-a5b5-d52ba2e14234"
+    }
+  ]
+}

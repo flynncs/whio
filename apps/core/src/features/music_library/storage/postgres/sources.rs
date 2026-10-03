@@ -89,6 +89,27 @@ impl SourceLookup for PgStore {
             .collect()
     }
 
+    async fn find_artist_by_source(
+        &self,
+        source: &SourceIdentity,
+    ) -> Result<Option<ArtistId>, TrackRepositoryError> {
+        let row = sqlx::query_as::<_, (uuid::Uuid,)>(
+            r#"
+            SELECT artist_id
+            FROM artist_sources
+            WHERE provider_id = $1 AND source_scope = $2 AND external_id = $3
+            "#,
+        )
+        .bind(source.provider_id().as_str())
+        .bind(encode_source_scope(source.source_scope()))
+        .bind(source.external_id())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        Ok(row.map(|(artist_id,)| ArtistId::from_uuid(artist_id)))
+    }
+
     async fn find_provider_entity_state(
         &self,
         source: &SourceIdentity,

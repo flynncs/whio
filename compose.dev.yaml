@@ -38,6 +38,39 @@ services:
       timeout: 3s
       start_period: 5s
       retries: 5
+  metadata-resolver:
+    build:
+      context: .
+      dockerfile: docker/ytm-resolver.Dockerfile
+      target: dev
+    command:
+      - uv
+      - run
+      - --frozen
+      - uvicorn
+      - app.metadata_main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /workspace/apps/ytm-resolver/app
+    volumes:
+      - .:/workspace
+      - ytm-resolver-venv:/opt/venv
+      - ytm-deno-cache:/var/cache/deno
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import socket; socket.create_connection(('127.0.0.1', 8000), timeout=2).close()
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 5
+
   core:
     build:
       context: .
@@ -48,18 +81,23 @@ services:
         condition: service_healthy
       ytm-resolver:
         condition: service_healthy
+      metadata-resolver:
+        condition: service_healthy
     environment:
       WHIO_BIND_ADDRESS: 0.0.0.0:3000
       WHIO_DATABASE_URL: postgres://whio:whio-dev@postgres:5432/whio
       WHIO_CREDENTIAL_KEY: ${WHIO_CREDENTIAL_KEY:?set WHIO_CREDENTIAL_KEY in .env (openssl rand -base64 32)}
       WHIO_LOG_LEVEL: info
+      WHIO_MEDIA_ROOTS: /mnt/media/music
       WHIO_YOUTUBE_ENABLED: "true"
       WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000
+      WHIO_METADATA_RESOLVER_URL: http://metadata-resolver:8000
       WHIO_SOURCE_TAGS: artist
     volumes:
       - .:/workspace
       - cargo-registry:/usr/local/cargo/registry
       - core-target:/workspace/apps/core/target
+      - ${WHIO_MEDIA_PATH:?set WHIO_MEDIA_PATH to your music directory}:/mnt/media/music:ro
     ports:
       - 127.0.0.1:3000:3000
 
@@ -87,7 +125,10 @@ services:
     environment:
       WHIO_DATABASE_URL: postgres://whio:whio-dev@postgres:5432/whio
       WHIO_CREDENTIAL_KEY: ${WHIO_CREDENTIAL_KEY:?set WHIO_CREDENTIAL_KEY in .env (openssl rand -base64 32)}
-      WHIO_WORKER_QUEUES: whio.jobs.probe
+      WHIO_YOUTUBE_ENABLED: "true"
+      WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000
+      WHIO_METADATA_RESOLVER_URL: http://metadata-resolver:8000
+      WHIO_WORKER_QUEUES: whio.jobs.probe,whio.metadata.refresh,whio.listening.delivery
       WHIO_WORKER_DRAIN_TIMEOUT_SECONDS: "30"
       WHIO_LOG_LEVEL: info
     volumes:

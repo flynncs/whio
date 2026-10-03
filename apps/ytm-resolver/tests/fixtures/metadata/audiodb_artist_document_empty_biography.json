@@ -1,0 +1,10 @@
+{
+  "artists": [
+    {
+      "strArtist": "Controlled Artist",
+      "strMusicBrainzID": "00000000-0000-0000-0000-0000000000aa",
+      "strBiographyEN": "",
+      "strArtistThumb": "https://r2.theaudiodb.com/images/media/artist/thumb/example.jpg"
+    }
+  ]
+}

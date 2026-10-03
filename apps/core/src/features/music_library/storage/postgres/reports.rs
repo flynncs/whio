@@ -146,22 +146,27 @@ impl Retention for PgStore {
         .map_err(repository_error)?
         .rows_affected();
 
-        let artists = sqlx::query(&format!(
-            "DELETE FROM artists AS ar WHERE {}",
-            artist_unengaged(&track_engaged("ac.track_id"))
+        let artists = sqlx::query_scalar::<_, Uuid>(&format!(
+            r#"
+            WITH evicted AS (
+                DELETE FROM artists AS ar WHERE {predicate} RETURNING ar.id
+            )
+            SELECT id FROM evicted ORDER BY id
+            "#,
+            predicate = artist_unengaged(&track_engaged("ac.track_id"))
         ))
         .bind(&library_ids)
-        .execute(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await
-        .map_err(repository_error)?
-        .rows_affected();
+        .map_err(repository_error)?;
 
         transaction.commit().await.map_err(repository_error)?;
 
         Ok(EvictionReport {
             tracks,
             albums,
-            artists,
+            artists: artists.len() as u64,
+            evicted_artist_ids: artists,
         })
     }
 }

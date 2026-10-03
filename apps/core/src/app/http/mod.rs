@@ -9,9 +9,24 @@ use axum::{
 use crate::{
     app::AppState,
     facades,
+    features::identity,
     features::{music_library, playback},
 };
 use axum::middleware::from_fn;
+
+struct UnconstructedValidator;
+
+#[async_trait::async_trait]
+impl identity::destinations::DestinationValidator for UnconstructedValidator {
+    async fn validate(
+        &self,
+        _provider_id: &identity::destinations::DestinationProvider,
+        _token: &str,
+    ) -> Result<identity::destinations::ValidatedDestination, identity::destinations::ValidationError>
+    {
+        Err(identity::destinations::ValidationError::Unavailable)
+    }
+}
 
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
@@ -86,6 +101,31 @@ pub(crate) fn router(state: AppState) -> Router {
                 credential: std::sync::Arc::clone(&state.credential),
             },
         ))
+        .merge(music_library::api::artist_info::routes().with_state(
+            music_library::api::artist_info::ArtistInfoState::with_defaults(
+                std::sync::Arc::clone(&state.library),
+                std::sync::Arc::clone(&state.credential),
+                state.metadata_profile().clone(),
+                state.metadata_language().to_owned(),
+                state.discovery_service(),
+            ),
+        ))
+        .merge(
+            music_library::delivery_routes().with_state(music_library::ListenDeliveryState {
+                delivery: state.delivery(),
+                credential: std::sync::Arc::clone(&state.credential),
+            }),
+        )
+        .merge(
+            identity::destinations_router().with_state(identity::DestinationState::new(
+                state.destinations().unwrap_or_else(|| {
+                    std::sync::Arc::new(identity::disabled_destinations(std::sync::Arc::new(
+                        UnconstructedValidator,
+                    )))
+                }),
+                std::sync::Arc::clone(&state.credential),
+            )),
+        )
         .fallback(routes::not_found)
         .layer(axum::middleware::from_fn(middleware::request_id))
         .with_state(state)

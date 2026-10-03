@@ -464,3 +464,625 @@ async fn directory_is_scoped_by_role() {
     assert!(!rendered.contains(&secret));
     assert!(!rendered.contains(&credential_id.to_string()));
 }
+
+mod destination_credentials {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use crate::features::identity::destinations::{
+        DestinationError, DestinationProvider, DestinationService, DestinationValidator,
+        ValidatedDestination, ValidationError,
+    };
+    use crate::features::identity::domain::{Principal, UserId, UserRole};
+    use crate::features::identity::secrets::CredentialKey;
+    use crate::features::identity::storage::destinations::{
+        DestinationAccount, DestinationStore, DestinationStoreError,
+    };
+
+    const TOKEN: &str = "lb-token-abc";
+    const NONCE_LEN: usize = 12;
+
+    #[derive(Default)]
+    struct FakeStore {
+        accounts: Mutex<Vec<DestinationAccount>>,
+        reads: Mutex<usize>,
+        writes: Mutex<usize>,
+    }
+
+    impl FakeStore {
+        fn accounts(&self) -> Vec<DestinationAccount> {
+            self.accounts.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl DestinationStore for FakeStore {
+        async fn upsert_account(
+            &self,
+            account: &DestinationAccount,
+        ) -> Result<(), DestinationStoreError> {
+            *self.writes.lock().unwrap() += 1;
+            let mut accounts = self.accounts.lock().unwrap();
+
+            match accounts.iter_mut().find(|stored| {
+                stored.user_id == account.user_id && stored.provider_id == account.provider_id
+            }) {
+                Some(stored) => *stored = account.clone(),
+                None => accounts.push(account.clone()),
+            }
+
+            Ok(())
+        }
+
+        async fn find_account(
+            &self,
+            user_id: Uuid,
+            provider_id: &str,
+        ) -> Result<Option<DestinationAccount>, DestinationStoreError> {
+            *self.reads.lock().unwrap() += 1;
+
+            Ok(self
+                .accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|account| account.user_id == user_id && account.provider_id == provider_id)
+                .cloned())
+        }
+
+        async fn list_accounts(
+            &self,
+            user_id: Uuid,
+        ) -> Result<Vec<DestinationAccount>, DestinationStoreError> {
+            *self.reads.lock().unwrap() += 1;
+
+            Ok(self
+                .accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| account.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn set_enabled(
+            &self,
+            destination_id: Uuid,
+            enabled: bool,
+        ) -> Result<bool, DestinationStoreError> {
+            match self
+                .accounts
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|account| account.id == destination_id)
+            {
+                Some(account) => {
+                    account.enabled = enabled;
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+
+        async fn revoke(&self, destination_id: Uuid) -> Result<bool, DestinationStoreError> {
+            match self
+                .accounts
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|account| account.id == destination_id && account.revoked_at.is_none())
+            {
+                Some(account) => {
+                    account.revoked_at = Some(Utc::now());
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+
+        async fn list_enabled(
+            &self,
+            user_id: Uuid,
+        ) -> Result<Vec<DestinationAccount>, DestinationStoreError> {
+            Ok(self
+                .accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|account| {
+                    account.user_id == user_id && account.enabled && account.revoked_at.is_none()
+                })
+                .cloned()
+                .collect())
+        }
+    }
+
+    struct FakeValidator {
+        calls: Mutex<Vec<(DestinationProvider, String)>>,
+        answer: Mutex<Result<ValidatedDestination, ValidationError>>,
+    }
+
+    impl FakeValidator {
+        fn accepting(username: Option<&str>) -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                answer: Mutex::new(Ok(ValidatedDestination {
+                    provider_id: DestinationProvider::ListenBrainz,
+                    username: username.map(str::to_owned),
+                })),
+            })
+        }
+
+        fn refusing(error: ValidationError) -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                answer: Mutex::new(Err(error)),
+            })
+        }
+
+        fn answer(&self, answer: Result<ValidatedDestination, ValidationError>) {
+            *self.answer.lock().unwrap() = answer;
+        }
+
+        fn calls(&self) -> Vec<(DestinationProvider, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl DestinationValidator for FakeValidator {
+        async fn validate(
+            &self,
+            provider_id: &DestinationProvider,
+            token: &str,
+        ) -> Result<ValidatedDestination, ValidationError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((*provider_id, token.to_owned()));
+
+            self.answer.lock().unwrap().clone()
+        }
+    }
+
+    fn key() -> CredentialKey {
+        CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).expect("valid test key")
+    }
+
+    fn principal() -> Principal {
+        Principal {
+            user_id: UserId::from_uuid(Uuid::now_v7()),
+            role: UserRole::Member,
+        }
+    }
+
+    fn service(
+        validator: Arc<FakeValidator>,
+        key: Option<CredentialKey>,
+    ) -> (Arc<FakeStore>, DestinationService) {
+        let store = Arc::new(FakeStore::default());
+
+        (
+            Arc::clone(&store),
+            DestinationService::new(store, key, validator),
+        )
+    }
+
+    fn nonce(account: &DestinationAccount) -> Vec<u8> {
+        account.encrypted_secret[1..1 + NONCE_LEN].to_vec()
+    }
+
+    #[tokio::test]
+    async fn a_connected_destination_stores_ciphertext_with_a_fresh_nonce_per_account() {
+        let validator = FakeValidator::accepting(Some("flynnteh"));
+        let (store, service) = service(Arc::clone(&validator), Some(key()));
+
+        let first = service
+            .connect(&principal(), "listenbrainz", TOKEN)
+            .await
+            .expect("a valid credential connects");
+        let second = service
+            .connect(&principal(), "listenbrainz", TOKEN)
+            .await
+            .expect("a valid credential connects");
+
+        assert_eq!(first.provider_id, "listenbrainz");
+        assert_eq!(first.username.as_deref(), Some("flynnteh"));
+        assert!(!first.revoked);
+        assert!(first.last_verified_at.is_some());
+        assert_eq!(second.provider_id, "listenbrainz");
+
+        let accounts = store.accounts();
+        assert_eq!(accounts.len(), 2);
+        assert_ne!(accounts[0].id, accounts[1].id);
+        assert_eq!(store.writes.lock().unwrap().clone(), 2);
+
+        for account in &accounts {
+            assert_ne!(account.encrypted_secret, TOKEN.as_bytes());
+            assert!(
+                !account
+                    .encrypted_secret
+                    .windows(TOKEN.len())
+                    .any(|window| window == TOKEN.as_bytes()),
+                "the plaintext token must not appear in the stored blob"
+            );
+            assert_eq!(account.provider_id, "listenbrainz");
+            assert!(account.enabled);
+            assert!(account.revoked_at.is_none());
+        }
+
+        assert_ne!(nonce(&accounts[0]), nonce(&accounts[1]));
+    }
+
+    #[tokio::test]
+    async fn an_invalid_credential_stores_nothing() {
+        for answer in [
+            ValidationError::InvalidCredential,
+            ValidationError::Unavailable,
+        ] {
+            let validator = FakeValidator::refusing(answer.clone());
+            let (store, service) = service(Arc::clone(&validator), Some(key()));
+            let caller = principal();
+
+            let error = service
+                .connect(&caller, "listenbrainz", "bad-token")
+                .await
+                .expect_err("a refused credential must not connect");
+
+            let expected = match answer {
+                ValidationError::InvalidCredential => DestinationError::InvalidCredential,
+                ValidationError::Unavailable => DestinationError::Unavailable,
+            };
+
+            assert_eq!(error, expected);
+            assert!(store.accounts().is_empty());
+            assert_eq!(store.writes.lock().unwrap().clone(), 0);
+            assert_eq!(validator.calls().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_connect_never_replaces_the_verified_credential() {
+        let validator = FakeValidator::accepting(Some("flynnteh"));
+        let (store, service) = service(Arc::clone(&validator), Some(key()));
+        let caller = principal();
+
+        service
+            .connect(&caller, "listenbrainz", TOKEN)
+            .await
+            .expect("a valid credential connects");
+        let stored = store.accounts()[0].encrypted_secret.clone();
+
+        assert_eq!(
+            service
+                .connect(&caller, "listenbrainz", "other-token")
+                .await,
+            Err(DestinationError::AlreadyConnected)
+        );
+
+        assert_eq!(store.accounts()[0].encrypted_secret, stored);
+        assert_eq!(store.writes.lock().unwrap().clone(), 1);
+        assert_eq!(validator.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_status_projection_serialises_without_the_token_or_the_ciphertext() {
+        let validator = FakeValidator::accepting(Some("flynnteh"));
+        let (store, service) = service(Arc::clone(&validator), Some(key()));
+        let caller = principal();
+
+        service
+            .connect(&caller, "listenbrainz", TOKEN)
+            .await
+            .expect("a valid credential connects");
+
+        let statuses = service.status(&caller).await.expect("storage succeeds");
+        let value = serde_json::to_value(&statuses).expect("statuses serialise");
+        let mut members = value[0]
+            .as_object()
+            .expect("a status object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        members.sort_unstable();
+
+        assert_eq!(
+            members,
+            vec![
+                "connected_at",
+                "enabled",
+                "last_verified_at",
+                "provider_id",
+                "revoked",
+                "username",
+            ]
+        );
+        assert!(!value.to_string().contains(TOKEN));
+        assert!(!value.to_string().contains("token"));
+        assert!(store.accounts()[0].encrypted_secret.len() > TOKEN.len());
+    }
+
+    #[tokio::test]
+    async fn disabling_hides_the_destination_and_revoking_makes_the_credential_unusable() {
+        let validator = FakeValidator::accepting(Some("flynnteh"));
+        let (store, service) = service(Arc::clone(&validator), Some(key()));
+        let caller = principal();
+        let user_id = caller.user_id.as_uuid();
+
+        service
+            .connect(&caller, "listenbrainz", TOKEN)
+            .await
+            .expect("a valid credential connects");
+
+        let disabled = service
+            .set_enabled(&caller, "listenbrainz", false)
+            .await
+            .expect("the account is disabled");
+        assert!(!disabled.enabled);
+        assert!(
+            service
+                .enabled_destinations(user_id)
+                .await
+                .expect("storage succeeds")
+                .is_empty()
+        );
+        assert_eq!(store.accounts().len(), 1);
+
+        let enabled = service
+            .set_enabled(&caller, "listenbrainz", true)
+            .await
+            .expect("the account is enabled");
+        assert!(enabled.enabled);
+        assert_eq!(
+            service
+                .enabled_destinations(user_id)
+                .await
+                .expect("storage succeeds")
+                .len(),
+            1
+        );
+
+        service
+            .disconnect(&caller, "listenbrainz")
+            .await
+            .expect("the account is revoked");
+
+        let revoked = service.status(&caller).await.expect("storage succeeds");
+        assert!(revoked[0].revoked);
+        assert!(revoked[0].enabled);
+        assert_eq!(store.accounts().len(), 1);
+        assert!(
+            service
+                .enabled_credential(user_id, "listenbrainz")
+                .await
+                .expect("storage succeeds")
+                .is_none()
+        );
+        assert!(
+            service
+                .enabled_destinations(user_id)
+                .await
+                .expect("storage succeeds")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicts_missing_accounts_and_unknown_providers_are_typed_errors() {
+        let validator = FakeValidator::accepting(None);
+        let (store, service) = service(Arc::clone(&validator), Some(key()));
+        let caller = principal();
+
+        assert_eq!(
+            service.set_enabled(&caller, "listenbrainz", true).await,
+            Err(DestinationError::NotFound)
+        );
+        assert_eq!(
+            service.disconnect(&caller, "listenbrainz").await,
+            Err(DestinationError::NotFound)
+        );
+        assert_eq!(
+            service.connect(&caller, "lastfm", TOKEN).await,
+            Err(DestinationError::Unsupported)
+        );
+        assert_eq!(
+            service.set_enabled(&caller, "lastfm", true).await,
+            Err(DestinationError::Unsupported)
+        );
+        assert_eq!(
+            service.disconnect(&caller, "lastfm").await,
+            Err(DestinationError::Unsupported)
+        );
+        assert!(validator.calls().is_empty());
+        assert!(store.accounts().is_empty());
+
+        service
+            .connect(&caller, "listenbrainz", TOKEN)
+            .await
+            .expect("a valid credential connects");
+
+        assert_eq!(
+            service.connect(&caller, "listenbrainz", TOKEN).await,
+            Err(DestinationError::AlreadyConnected)
+        );
+        assert_eq!(validator.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn two_principals_never_see_each_others_destinations_or_credentials() {
+        let validator = FakeValidator::accepting(Some("first"));
+        let (store, service) = service(Arc::clone(&validator), Some(key()));
+        let first = principal();
+        let second = principal();
+
+        service
+            .connect(&first, "listenbrainz", "token-first")
+            .await
+            .expect("the first credential connects");
+        validator.answer(Ok(ValidatedDestination {
+            provider_id: DestinationProvider::ListenBrainz,
+            username: Some("second".to_owned()),
+        }));
+        service
+            .connect(&second, "listenbrainz", "token-second")
+            .await
+            .expect("the second credential connects");
+
+        let first_status = service.status(&first).await.expect("storage succeeds");
+        let second_status = service.status(&second).await.expect("storage succeeds");
+
+        assert_eq!(first_status.len(), 1);
+        assert_eq!(second_status.len(), 1);
+        assert_eq!(first_status[0].username.as_deref(), Some("first"));
+        assert_eq!(second_status[0].username.as_deref(), Some("second"));
+
+        let first_credential = service
+            .enabled_credential(first.user_id.as_uuid(), "listenbrainz")
+            .await
+            .expect("storage succeeds")
+            .expect("the first credential");
+        let second_credential = service
+            .enabled_credential(second.user_id.as_uuid(), "listenbrainz")
+            .await
+            .expect("storage succeeds")
+            .expect("the second credential");
+
+        assert_eq!(first_credential.token, "token-first");
+        assert_eq!(second_credential.token, "token-second");
+        assert_ne!(
+            first_credential.destination_id,
+            second_credential.destination_id
+        );
+        assert_eq!(store.accounts().len(), 2);
+        assert!(
+            service
+                .enabled_destinations(Uuid::now_v7())
+                .await
+                .expect("storage succeeds")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_stored_token_round_trips_and_a_changed_row_id_fails_closed() {
+        let validator = FakeValidator::accepting(Some("flynnteh"));
+        let (store, service) = service(Arc::clone(&validator), Some(key()));
+        let caller = principal();
+        let user_id = caller.user_id.as_uuid();
+
+        service
+            .connect(&caller, "listenbrainz", TOKEN)
+            .await
+            .expect("a valid credential connects");
+
+        let credential = service
+            .enabled_credential(user_id, "listenbrainz")
+            .await
+            .expect("storage succeeds")
+            .expect("the stored credential");
+
+        assert_eq!(credential.token, TOKEN);
+        assert_eq!(credential.provider_id, DestinationProvider::ListenBrainz);
+        assert_eq!(credential.username.as_deref(), Some("flynnteh"));
+        assert_eq!(credential.destination_id, store.accounts()[0].id);
+        assert!(!format!("{credential:?}").contains(TOKEN));
+
+        store.accounts.lock().unwrap()[0].id = Uuid::now_v7();
+
+        assert!(matches!(
+            service.enabled_credential(user_id, "listenbrainz").await,
+            Err(DestinationError::Repository(
+                DestinationStoreError::InvalidData
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_absent_credential_key_answers_disabled_without_touching_the_store() {
+        let validator = FakeValidator::accepting(Some("flynnteh"));
+        let (store, service) = service(Arc::clone(&validator), None);
+        let caller = principal();
+        let user_id = caller.user_id.as_uuid();
+
+        assert_eq!(
+            service.connect(&caller, "listenbrainz", TOKEN).await,
+            Err(DestinationError::Disabled)
+        );
+        assert_eq!(
+            service.status(&caller).await,
+            Err(DestinationError::Disabled)
+        );
+        assert_eq!(
+            service.set_enabled(&caller, "listenbrainz", true).await,
+            Err(DestinationError::Disabled)
+        );
+        assert_eq!(
+            service.disconnect(&caller, "listenbrainz").await,
+            Err(DestinationError::Disabled)
+        );
+        assert!(matches!(
+            service.enabled_credential(user_id, "listenbrainz").await,
+            Err(DestinationError::Disabled)
+        ));
+        assert_eq!(store.reads.lock().unwrap().clone(), 0);
+        assert_eq!(store.writes.lock().unwrap().clone(), 0);
+        assert!(validator.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_validator_runs_once_per_connect_and_never_for_reads_or_writes() {
+        let validator = FakeValidator::accepting(None);
+        let (_, service) = service(Arc::clone(&validator), Some(key()));
+        let caller = principal();
+        let user_id = caller.user_id.as_uuid();
+
+        service
+            .connect(&caller, "listenbrainz", TOKEN)
+            .await
+            .expect("a valid credential connects");
+
+        assert_eq!(validator.calls().len(), 1);
+        assert_eq!(validator.calls()[0].1, TOKEN);
+
+        service.status(&caller).await.expect("storage succeeds");
+        service
+            .set_enabled(&caller, "listenbrainz", false)
+            .await
+            .expect("the account is disabled");
+        service
+            .set_enabled(&caller, "listenbrainz", true)
+            .await
+            .expect("the account is enabled");
+        service
+            .enabled_credential(user_id, "listenbrainz")
+            .await
+            .expect("storage succeeds");
+        service
+            .enabled_destinations(user_id)
+            .await
+            .expect("storage succeeds");
+
+        assert_eq!(validator.calls().len(), 1);
+
+        service
+            .disconnect(&caller, "listenbrainz")
+            .await
+            .expect("the account is revoked");
+
+        assert_eq!(validator.calls().len(), 1);
+
+        service
+            .connect(&caller, "listenbrainz", TOKEN)
+            .await
+            .expect("a revoked account re-verifies before it replaces");
+
+        assert_eq!(validator.calls().len(), 2);
+    }
+}

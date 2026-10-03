@@ -1,0 +1,25 @@
+{
+  "id": "cc197bad-dc9c-440d-a5b5-d52ba2e14234",
+  "name": "Coldplay",
+  "sort-name": "Coldplay",
+  "type": "Group",
+  "country": "GB",
+  "relations": [
+    {
+      "type": "official homepage",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://www.coldplay.com"
+      }
+    },
+    {
+      "type": "image",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://commons.wikimedia.org/wiki/File:ColdplayWembley.jpg"
+      }
+    }
+  ]
+}

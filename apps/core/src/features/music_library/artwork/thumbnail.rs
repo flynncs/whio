@@ -2,9 +2,15 @@ use bytes::Bytes;
 
 pub(crate) const MIN_SIZE: u32 = 16;
 pub(crate) const MAX_SIZE: u32 = 1200;
+pub(crate) const MAX_DECODED_PIXELS: u64 = 16_000_000;
 
 pub(crate) fn fit(bytes: &[u8], size: u32) -> Option<Bytes> {
     let image = image::load_from_memory(bytes).ok()?;
+
+    fitted(&image, size).map(|(bytes, _, _)| bytes)
+}
+
+pub(crate) fn fitted(image: &image::DynamicImage, size: u32) -> Option<(Bytes, u32, u32)> {
     if image.width() <= size && image.height() <= size {
         return None;
     }
@@ -15,7 +21,11 @@ pub(crate) fn fit(bytes: &[u8], size: u32) -> Option<Bytes> {
         .write_to(&mut encoded, image::ImageFormat::Jpeg)
         .ok()?;
 
-    Some(Bytes::from(encoded.into_inner()))
+    Some((
+        Bytes::from(encoded.into_inner()),
+        thumbnail.width(),
+        thumbnail.height(),
+    ))
 }
 
 #[cfg(test)]

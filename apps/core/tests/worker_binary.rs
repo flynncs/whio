@@ -56,14 +56,17 @@ fn a_configured_queue_without_a_handler_is_a_startup_error() {
 }
 
 #[sqlx::test]
-async fn graceful_shutdown_releases_in_flight_work(pool: PgPool) {
+async fn an_idle_worker_shuts_down_cleanly(pool: PgPool) {
     let mut worker = Worker::start(&pool, PROBE_QUEUE);
     worker.await_health("/health/ready", 200).await;
 
     worker.interrupt();
 
-    worker.await_draining().await;
-
     let status = worker.await_exit(Duration::from_secs(30)).await;
     assert!(status.success(), "idle shutdown exits cleanly: {status}");
+    assert!(
+        !worker.log().contains("drain timeout exceeded"),
+        "idle shutdown needs no drain timeout:\n{}",
+        worker.log()
+    );
 }

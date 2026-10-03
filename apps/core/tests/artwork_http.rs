@@ -1,6 +1,8 @@
 #![cfg(feature = "postgres-integration")]
 
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::path::PathBuf;
 use std::sync::Arc;
 use whio_core::features::music_library::test_support::PostgresTrackRepository;
 
@@ -23,9 +25,12 @@ use whio_core::{
         secrets::CredentialKey,
         service::CredentialService,
     },
-    features::music_library::artwork::ArtworkService,
-    features::music_library::domain::{
-        ArtworkRef, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+    features::music_library::{
+        ArtworkStore,
+        artwork::{
+            ArtworkAssetDescriptor, ArtworkCache, ArtworkRole, ArtworkService, ArtworkVariant,
+        },
+        domain::{ArtistId, ArtworkRef, ProviderId, SourceIdentity, SourceScope, TrackMetadata},
     },
 };
 
@@ -239,6 +244,102 @@ fn subsonic_cover_art_request(id: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn sized_cover_art_request(id: &str, size: u32, validator: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/rest/getCoverArt.view?u=test-user&v=1.16.1&c=test&p={TEST_PASSWORD}&id={id}&size={size}"
+        ))
+        .header("x-request-id", "request-123");
+    if let Some(validator) = validator {
+        builder = builder.header(header::IF_NONE_MATCH, validator);
+    }
+
+    builder.body(Body::empty()).unwrap()
+}
+
+fn artist_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let image = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 96])
+    });
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(&mut encoded, image::ImageFormat::Jpeg)
+        .unwrap();
+
+    encoded.into_inner()
+}
+
+fn ready_asset(
+    artist: &ArtistId,
+    variant: ArtworkVariant,
+    file_name: &str,
+    bytes: &[u8],
+) -> ArtworkAssetDescriptor {
+    let size = variant.size().expect("a derived variant has a size");
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+
+    ArtworkAssetDescriptor {
+        id: Uuid::now_v7(),
+        subject: artist.clone(),
+        role: ArtworkRole::Portrait,
+        source_provider_id: "youtube_music".to_owned(),
+        source_external_id: "channel-1".to_owned(),
+        revision: 1,
+        variant,
+        content_digest: hex::encode(hasher.finalize()),
+        content_type: "image/jpeg".to_owned(),
+        width: size,
+        height: size,
+        byte_size: bytes.len() as i64,
+        file_name: file_name.to_owned(),
+    }
+}
+
+async fn ready_artist_app(pool: PgPool) -> (axum::Router, String, PathBuf) {
+    let (credential, _user, _key) = credentials();
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let artist = ArtistId::new();
+    let root = std::env::temp_dir().join(format!("whio-http-ready-art-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let px256 = artist_jpeg(256, 256);
+    let px1600 = artist_jpeg(1600, 1600);
+    std::fs::write(root.join("px256.jpg"), &px256).unwrap();
+    std::fs::write(root.join("px1600.jpg"), &px1600).unwrap();
+
+    let assets = Arc::clone(&repository) as Arc<dyn ArtworkStore>;
+    assets
+        .record_assets(&[
+            ready_asset(&artist, ArtworkVariant::Px256, "px256.jpg", &px256),
+            ready_asset(&artist, ArtworkVariant::Px1600, "px1600.jpg", &px1600),
+        ])
+        .await
+        .unwrap();
+
+    let ports = StorePorts { store: repository };
+    let (search, library) = ports.bare_catalogue();
+    let artwork = Arc::new(
+        ArtworkService::new(
+            ports.library(),
+            ports.sources(),
+            whio_core::features::music_library::artwork::default_host_suffixes(),
+        )
+        .with_cache(Arc::new(ArtworkCache::new(
+            assets,
+            Some(root.clone()),
+            u64::MAX,
+        ))),
+    );
+    let playback = ports.streaming(Vec::new());
+
+    (
+        router_with_artwork(credential, search, library, playback, artwork),
+        format!("ar-{}", artist.as_uuid()),
+        root,
+    )
+}
+
 #[sqlx::test]
 async fn album_and_artist_ids_serve_embedded_art_with_validators(pool: PgPool) {
     let (app, album_id, artist_id, track_id) = pictured_app(pool.clone()).await;
@@ -304,4 +405,72 @@ async fn unknown_albums_and_malformed_ids_do_not_serve_artwork(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test]
+async fn a_sized_artist_portrait_is_served_from_ready_bytes_with_its_own_validator(pool: PgPool) {
+    let (app, artist, root) = ready_artist_app(pool).await;
+    let px256 = std::fs::read(root.join("px256.jpg")).unwrap();
+    let px1600 = std::fs::read(root.join("px1600.jpg")).unwrap();
+
+    let large = app
+        .clone()
+        .oneshot(sized_cover_art_request(&artist, 1200, None))
+        .await
+        .unwrap();
+    let large_etag = large
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let large_bytes = axum::body::to_bytes(large.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    let small = app
+        .clone()
+        .oneshot(sized_cover_art_request(&artist, 64, Some(&large_etag)))
+        .await
+        .unwrap();
+    assert_eq!(
+        small.status(),
+        StatusCode::OK,
+        "a 64px request revalidated against the 1200px etag {large_etag}"
+    );
+    let small_etag = small
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let small_bytes = axum::body::to_bytes(small.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    assert_eq!(small_bytes.as_ref(), px256.as_slice());
+    assert!(small_etag.ends_with("-w64\""), "{small_etag}");
+    assert_ne!(large_etag, small_etag);
+
+    assert_eq!(large_bytes.as_ref(), px1600.as_slice());
+    assert!(large_etag.ends_with("-w1200\""), "{large_etag}");
+
+    let revalidated = app
+        .clone()
+        .oneshot(sized_cover_art_request(&artist, 64, Some(&small_etag)))
+        .await
+        .unwrap();
+    assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        revalidated.headers().get(header::ETAG).unwrap(),
+        small_etag.as_str()
+    );
+
+    let large_revalidated = app
+        .oneshot(sized_cover_art_request(&artist, 1200, Some(&large_etag)))
+        .await
+        .unwrap();
+    assert_eq!(large_revalidated.status(), StatusCode::NOT_MODIFIED);
 }

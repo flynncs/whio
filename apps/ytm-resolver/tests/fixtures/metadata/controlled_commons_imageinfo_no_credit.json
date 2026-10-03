@@ -1,0 +1,37 @@
+{
+  "batchcomplete": "",
+  "query": {
+    "pages": {
+      "1": {
+        "pageid": 1,
+        "ns": 6,
+        "title": "File:ColdplayWembley.jpg",
+        "imagerepository": "shared",
+        "imageinfo": [
+          {
+            "url": "https://upload.wikimedia.org/wikipedia/commons/a/a1/ColdplayWembley.jpg",
+            "descriptionurl": "https://commons.wikimedia.org/wiki/File:ColdplayWembley.jpg",
+            "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1",
+            "extmetadata": {
+              "LicenseShortName": {
+                "value": "CC BY-SA 4.0",
+                "source": "commons",
+                "hidden": false
+              },
+              "LicenseUrl": {
+                "value": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "source": "commons",
+                "hidden": false
+              },
+              "AttributionRequired": {
+                "value": "true",
+                "source": "commons",
+                "hidden": false
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

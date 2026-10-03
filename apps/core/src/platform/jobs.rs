@@ -1,5 +1,5 @@
 use awa::{AwaError, InsertOpts, JobArgs, UniqueOpts, insert_with};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -12,6 +12,36 @@ pub enum JobsError {
 
     #[error("enqueue savepoint failed")]
     Savepoint(#[source] sqlx::Error),
+
+    #[error("enqueue transaction failed")]
+    Transaction(#[source] sqlx::Error),
+
+    #[error("job phase read failed")]
+    Query(#[source] sqlx::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobPhase {
+    Scheduled,
+    Available,
+    Running,
+}
+
+impl JobPhase {
+    fn parse(state: &str) -> Option<Self> {
+        match state {
+            "scheduled" => Some(Self::Scheduled),
+            "available" => Some(Self::Available),
+            "running" => Some(Self::Running),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservedJob {
+    pub job_id: i64,
+    pub phase: JobPhase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,10 +99,45 @@ pub async fn enqueue<T: JobArgs>(
     }
 }
 
+pub async fn enqueue_coalesced<T: JobArgs>(
+    pool: &PgPool,
+    job: PendingJob<'_, T>,
+) -> Result<Enqueued, JobsError> {
+    let mut tx = pool.begin().await.map_err(JobsError::Transaction)?;
+    let enqueued = enqueue(&mut tx, job).await?;
+    tx.commit().await.map_err(JobsError::Transaction)?;
+
+    Ok(enqueued)
+}
+
 async fn savepoint(tx: &mut PgConnection, statement: &'static str) -> Result<(), JobsError> {
     sqlx::query(&format!("{statement} {COALESCE_SAVEPOINT}"))
         .execute(&mut *tx)
         .await
         .map_err(JobsError::Savepoint)?;
     Ok(())
+}
+
+pub async fn phase(
+    pool: &PgPool,
+    queue: &str,
+    kind: &str,
+    operation_id: Uuid,
+) -> Result<Option<ObservedJob>, JobsError> {
+    let row = sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, state::text FROM awa.jobs \
+         WHERE queue = $1 AND kind = $2 AND args->>'operation_id' = $3 \
+           AND state::text IN ('scheduled', 'available', 'running') \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(queue)
+    .bind(kind)
+    .bind(operation_id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(JobsError::Query)?;
+
+    Ok(row.and_then(|(job_id, state)| {
+        JobPhase::parse(&state).map(|phase| ObservedJob { job_id, phase })
+    }))
 }

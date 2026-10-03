@@ -1,0 +1,17 @@
+{
+  "id": "a74b1b7f-71a5-4011-9441-d0b5e4122711",
+  "name": "Coldplay",
+  "sort-name": "Coldplay",
+  "type": "Group",
+  "country": "GB",
+  "relations": [
+    {
+      "type": "official homepage",
+      "direction": "forward",
+      "ended": false,
+      "url": {
+        "resource": "https://www.coldplay.com"
+      }
+    }
+  ]
+}

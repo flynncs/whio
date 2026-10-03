@@ -137,6 +137,7 @@ mod persistence {
                 test_support::{CredentialRepository, CredentialStoreError},
             },
             music_library::{
+                LibraryWiring, W4Dependencies,
                 catalogue::DedupMode,
                 construct,
                 domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
@@ -226,14 +227,19 @@ mod persistence {
 
     fn fixture(pool: PgPool, principals: Vec<(UserId, Uuid)>) -> Fixture {
         let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
-        let music = construct(
+        let music = construct(LibraryWiring {
             pool,
-            Vec::new(),
-            Vec::new(),
-            DedupMode::Off,
-            Vec::new(),
-            Vec::new(),
-        );
+            providers: Vec::new(),
+            enabled_providers: Vec::new(),
+            dedup_mode: DedupMode::Off,
+            media_roots: Vec::new(),
+            artwork_host_suffixes: Vec::new(),
+            w4: W4Dependencies {
+                metadata: None,
+                artwork_cache: None,
+                delivery: None,
+            },
+        });
         let key = key();
         let tokens = principals
             .iter()

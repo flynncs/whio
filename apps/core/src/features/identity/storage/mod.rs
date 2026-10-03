@@ -1,3 +1,4 @@
+pub mod destinations;
 mod postgres;
 mod provisioning;
 pub mod repository;
@@ -9,6 +10,7 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use super::destinations::{DestinationService, DestinationValidator};
 use super::provisioning::ProvisioningService;
 use super::secrets::CredentialKey;
 use super::service::CredentialService;
@@ -17,6 +19,28 @@ pub use postgres::PostgresCredentialRepository;
 
 pub(super) fn credentials(pool: PgPool, key: CredentialKey) -> CredentialService {
     CredentialService::new(Arc::new(PostgresCredentialRepository::new(pool)), key)
+}
+
+pub(super) fn disabled_destination_service(
+    validator: Arc<dyn DestinationValidator>,
+) -> DestinationService {
+    DestinationService::new(
+        Arc::new(self::destinations::UnavailableDestinationStore),
+        None,
+        validator,
+    )
+}
+
+pub(super) fn destination_service(
+    pool: PgPool,
+    key: Option<CredentialKey>,
+    validator: Arc<dyn DestinationValidator>,
+) -> DestinationService {
+    DestinationService::new(
+        Arc::new(self::destinations::PostgresDestinationStore::new(pool)),
+        key,
+        validator,
+    )
 }
 
 pub(super) fn provisioning_service(pool: PgPool) -> ProvisioningService {
