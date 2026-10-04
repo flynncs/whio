@@ -488,9 +488,6 @@ async fn a_graceful_stop_drains_or_releases(pool: PgPool) {
 
     worker.interrupt();
 
-    worker.await_draining().await;
-    await_runtime_shutting_down(&pool, Duration::from_secs(10)).await;
-
     let status = worker.await_exit(Duration::from_secs(30)).await;
     assert!(
         status.success(),
@@ -548,6 +545,9 @@ async fn a_graceful_stop_releases_a_job_that_outlasts_the_drain(pool: PgPool) {
     await_progress_flushed(&pool, operation_id, Duration::from_secs(30)).await;
 
     worker.interrupt();
+
+    worker.await_draining().await;
+    await_runtime_shutting_down(&pool, Duration::from_secs(10)).await;
 
     let status = worker.await_exit(Duration::from_secs(60)).await;
     assert!(
