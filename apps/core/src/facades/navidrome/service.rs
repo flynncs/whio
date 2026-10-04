@@ -9,11 +9,11 @@ use crate::{
     features::music_library::artwork::CoverArtTarget,
     features::music_library::catalogue::{CatalogueError, CompletionService, LibraryService},
     features::music_library::domain::{
-        AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistListFilter,
-        ArtistSort, ArtistSummary, CommentPatch, GenreSummary, IdSet, MAX_PAGE_LIMIT, MoveTarget,
+        AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistListFilter, ArtistSort,
+        ArtistSummary, CommentPatch, GenreSummary, IdSet, MAX_PAGE_LIMIT, MoveTarget,
         OccurrenceSelector, PageLimit, Playlist as PlaylistRecord, PlaylistEntryChange, PlaylistId,
-        PlaylistMetadataPatch, PlaylistOrder, RestoreQueueSnapshot, SelectorText, SortDirection,
-        TrackId, TrackListFilter, TrackOrder, TrackView,
+        PlaylistMetadataPatch, PlaylistOrder, RestoreQueueSnapshot, SortDirection, TrackId,
+        TrackListFilter, TrackOrder, TrackView,
     },
     features::music_library::library::{LibraryId, LibraryRegistrationError, LibraryRegistry},
     features::music_library::playlists::{
@@ -23,9 +23,7 @@ use crate::{
 };
 
 use super::{
-    dto::{
-        Album, Artist, Genre, Playlist, PlaylistSong, Queue, QueueSaveBody, Song, SongListQuery,
-    },
+    dto::{Album, Artist, Genre, Playlist, PlaylistSong, Queue, QueueSaveBody, Song},
     session,
 };
 
@@ -105,10 +103,6 @@ fn song_from_playlist_entry(entry: &PlaylistEntry, item_id: u32, tags: SourceTag
     song
 }
 
-fn song_from_entry(entry: &AlbumEntry, album: &AlbumSummary, tags: SourceTags) -> Song {
-    song_from_view(&entry.track_view(album), tags)
-}
-
 fn album_from_summary(summary: &AlbumSummary) -> Album {
     let album = summary.album();
     let artist = summary.album_artist();
@@ -161,22 +155,62 @@ fn genre_from_summary(summary: &GenreSummary) -> Genre {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct SongListRequest {
+    pub(crate) filter: TrackListFilter,
+    pub(crate) order: TrackOrder,
+    pub(crate) offset: u32,
+    pub(crate) limit: PageLimit,
+}
+
 pub(crate) async fn song_list(
     library: &LibraryService,
+    completion: &CompletionService,
     credential: &CredentialService,
     token: &str,
-    query: &SongListQuery,
+    request: SongListRequest,
     tags: SourceTags,
 ) -> Result<(Vec<Song>, u32), SongError> {
     let user = authorize(credential, token).await?;
-    let (offset, limit) = song_window(query)?;
-    let title = SelectorText::new(query.title.as_deref().unwrap_or_default())
-        .map_err(|_| SongError::InvalidSearch)?;
-    let filter = TrackListFilter::new().with_title(title);
-    let page = library
-        .track_page(offset, limit, TrackOrder::Title, &filter, Some(&user))
-        .await
-        .map_err(SongError::Catalogue)?;
+    let album_id = request
+        .filter
+        .album_id()
+        .filter(|ids| ids.len() == 1)
+        .and_then(|ids| ids.iter().next());
+    if let Some(album_id) = album_id {
+        completion
+            .album_detail(album_id, Some(&user))
+            .await
+            .map_err(SongError::Catalogue)?
+            .ok_or(SongError::NotFound)?;
+    }
+
+    let page = match album_id {
+        Some(album_id) => {
+            library
+                .album_track_page(
+                    album_id,
+                    request.offset,
+                    request.limit,
+                    request.order,
+                    &request.filter,
+                    Some(&user),
+                )
+                .await
+        }
+        None => {
+            library
+                .track_page(
+                    request.offset,
+                    request.limit,
+                    request.order,
+                    &request.filter,
+                    Some(&user),
+                )
+                .await
+        }
+    }
+    .map_err(SongError::Catalogue)?;
     let (views, total) = page.into_parts();
 
     Ok((
@@ -186,20 +220,6 @@ pub(crate) async fn song_list(
             .collect(),
         total,
     ))
-}
-
-fn song_window(query: &SongListQuery) -> Result<(u32, PageLimit), SongError> {
-    let start = query.start.unwrap_or(0);
-    let end = u32::try_from(query.end.unwrap_or(0).max(0)).unwrap_or(u32::MAX);
-    let bound = end.saturating_sub(start);
-    let window = if bound == 0 {
-        MAX_PAGE_LIMIT
-    } else {
-        bound.min(MAX_PAGE_LIMIT)
-    };
-    let limit = PageLimit::new(window).map_err(|_| SongError::InvalidSearch)?;
-
-    Ok((start, limit))
 }
 
 pub(crate) async fn song_detail(
@@ -222,28 +242,6 @@ pub(crate) async fn song_detail(
 }
 
 const DEFAULT_PAGE_SIZE: u32 = 500;
-
-pub(crate) async fn album_songs(
-    completion: &CompletionService,
-    credential: &CredentialService,
-    token: &str,
-    raw_album_id: &str,
-    tags: SourceTags,
-) -> Result<Vec<Song>, SongError> {
-    let user = authorize(credential, token).await?;
-    let album_id: AlbumId = raw_album_id.parse().map_err(|_| SongError::NotFound)?;
-    let detail = completion
-        .album_detail(&album_id, Some(&user))
-        .await
-        .map_err(SongError::Catalogue)?
-        .ok_or(SongError::NotFound)?;
-
-    Ok(detail
-        .entries
-        .iter()
-        .map(|entry| song_from_entry(entry, &detail.album, tags))
-        .collect())
-}
 
 pub(crate) async fn album_list(
     library: &LibraryService,
@@ -640,6 +638,24 @@ pub(crate) async fn artist_detail(
         .ok_or(SongError::NotFound)?;
 
     Ok(artist_from_summary(&detail.artist))
+}
+
+pub(crate) fn song_order(sort: Option<&str>) -> Result<Option<TrackOrder>, SongError> {
+    let Some(sort) = sort else {
+        return Ok(None);
+    };
+    let canonical = match sort {
+        "order_album_artist_name" => "album_artist",
+        "releaseYear" => "release_year",
+        "createdAt" => "date_added",
+        "playCount" => "play_count",
+        "playDate" => "play_date",
+        value => value,
+    };
+
+    TrackOrder::parse(canonical)
+        .map(Some)
+        .ok_or(SongError::InvalidSearch)
 }
 
 pub(crate) fn album_order(sort: Option<&str>) -> Result<AlbumOrder, SongError> {

@@ -1,8 +1,8 @@
 use super::*;
 use crate::features::identity::{domain::UserId, secrets::CredentialKey};
 use crate::features::music_library::domain::{
-    AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope, Track,
-    TrackMetadata,
+    AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SelectorText, SourceIdentity, SourceScope,
+    Track, TrackMetadata,
 };
 use crate::features::music_library::test_support::{
     CatalogueWrite, LibraryRead, PostgresTrackRepository, SourceLookup, StateStore,
@@ -106,14 +106,14 @@ fn auth() -> TestAuth {
     TestAuth { service, token }
 }
 
-fn library(pool: sqlx::PgPool) -> LibraryService {
+fn library(pool: sqlx::PgPool) -> Arc<LibraryService> {
     let store = Arc::new(PostgresTrackRepository::new(pool));
 
-    LibraryService::new(
+    Arc::new(LibraryService::new(
         Arc::clone(&store) as Arc<dyn LibraryRead>,
         Arc::clone(&store) as Arc<dyn SourceLookup>,
         Arc::clone(&store) as Arc<dyn StateStore>,
-    )
+    ))
 }
 
 async fn add_track(store: &PostgresTrackRepository, external_id: &str, title: &str) -> TrackId {
@@ -166,23 +166,36 @@ async fn add_album(
         .clone()
 }
 
-fn query(title: Option<&str>, start: Option<u32>, end: Option<i64>) -> SongListQuery {
-    SongListQuery {
-        title: title.map(str::to_owned),
-        album_id: None,
-        start,
-        end,
+fn query(title: Option<&str>, start: Option<u32>, end: Option<i64>) -> SongListRequest {
+    let offset = start.unwrap_or(0);
+    let end = u32::try_from(end.unwrap_or(0).max(0)).unwrap_or(u32::MAX);
+    let span = end.saturating_sub(offset).min(MAX_PAGE_LIMIT);
+    SongListRequest {
+        filter: TrackListFilter::new().with_title(
+            SelectorText::new(title.unwrap_or_default()).expect("valid title selector"),
+        ),
+        order: TrackOrder::Title,
+        offset,
+        limit: PageLimit::new(if span == 0 { MAX_PAGE_LIMIT } else { span })
+            .expect("valid page limit"),
     }
 }
 
 async fn song_page(
-    library: &LibraryService,
+    library: &Arc<LibraryService>,
     auth: &TestAuth,
-    query: &SongListQuery,
+    request: &SongListRequest,
 ) -> (Vec<Song>, u32) {
-    song_list(library, &auth.service, &auth.token, query, SourceTags::Off)
-        .await
-        .expect("song list succeeds")
+    song_list(
+        library,
+        &CompletionService::disabled(Arc::clone(library)),
+        &auth.service,
+        &auth.token,
+        request.clone(),
+        SourceTags::Off,
+    )
+    .await
+    .expect("song list succeeds")
 }
 
 #[sqlx::test]
@@ -192,9 +205,10 @@ async fn auth_gates_the_song_list_and_detail(pool: sqlx::PgPool) {
 
     let result = song_list(
         &library,
+        &CompletionService::disabled(Arc::clone(&library)),
         &auth.service,
         "forged",
-        &query(None, None, None),
+        query(None, None, None),
         SourceTags::Off,
     )
     .await;
@@ -213,9 +227,10 @@ async fn auth_gates_the_song_list_and_detail(pool: sqlx::PgPool) {
     let dead = session::mint(UserId::from_uuid(Uuid::now_v7()), Uuid::now_v7(), &key());
     let result = song_list(
         &library,
+        &CompletionService::disabled(Arc::clone(&library)),
         &auth.service,
         &dead,
-        &query(Some("song"), None, None),
+        query(Some("song"), None, None),
         SourceTags::Off,
     )
     .await;

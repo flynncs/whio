@@ -2,9 +2,12 @@
 
 mod support;
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use axum::{
@@ -22,15 +25,22 @@ use whio_core::features::music_library::{
         AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, ProviderKind, SourceIdentity,
         SourceScope, StateTarget, TrackId, TrackMetadata,
     },
-    test_support::{CatalogueWrite, PostgresTrackRepository, SourceFileFacts, StateStore},
+    library::{LibraryRegistration, LibraryRegistry},
+    test_support::{
+        CatalogueWrite, LibraryRead, PostgresLibraryStore, PostgresTrackRepository,
+        SourceFileFacts, StateStore,
+    },
 };
 use whio_core::{
+    app::AppState,
     features::playback::providers::ProviderError,
     features::playback::{PlaybackProvider, PlaybackSource, ResolvedPlayback},
     platform::request::RequestContext,
 };
 
-use support::{StorePorts, credentials::database_credential_service, router, services};
+use support::{
+    StorePorts, credentials::database_credential_service, router, router_with_completion, services,
+};
 
 const API: &str = "/compat/navidrome/api/song";
 
@@ -570,6 +580,477 @@ async fn album_id_keeps_the_collection_read(pool: PgPool) {
     assert_eq!(total(&headers), "2");
     assert_eq!(body[0]["trackNumber"], json!(1));
     assert_eq!(body[0]["albumId"], json!(album.to_string()));
+}
+
+#[sqlx::test]
+async fn song_query_rejects_unknown_selectors_malformed_values_and_duplicate_scalars(pool: PgPool) {
+    let fixture = api_fixture(pool).await;
+    add_track(&fixture.store, "path-a", "First").await;
+
+    for query in [
+        "?unknown=1",
+        "?title[]=First",
+        "?title[0]=First",
+        "?_sort=bpm",
+        "?_sort=comment",
+        "?_sort=explicitStatus",
+        "?_sort=unknown",
+        "?album_id=",
+        "?album_id=not-a-uuid",
+        "?album_artist_id=not-a-uuid",
+        "?artists_id=not-a-uuid",
+        "?genre_id=",
+        "?library_id=invalid",
+        "?year=not-a-year",
+        "?starred=1",
+        "?has_rating=yes",
+        "?missing=yes",
+        "?compilation=yes",
+        "?recently_played=yes",
+        "?role=unknown",
+        "?role=&role=artist",
+        "?_start=0&_start=1",
+        "?_end=1&_end=2",
+        "?_sort=title&_sort=album",
+        "?_order=asc&_order=desc",
+        "?title=First&title=First",
+        "?year=2000&year=2001",
+        "?starred=true&starred=false",
+        "?has_rating=true&has_rating=false",
+        "?missing=true&missing=false",
+        "?compilation=true&compilation=false",
+        "?recently_played=true&recently_played=false",
+    ] {
+        let (status, _, body) = get(fixture.app.clone(), &fixture.token, query).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+        assert_eq!(
+            body,
+            json!({"error": "Invalid search parameters."}),
+            "{query}"
+        );
+    }
+}
+
+#[sqlx::test]
+async fn song_list_applies_registered_library_selector(pool: PgPool) {
+    let (credential, secret) = database_credential_service(pool.clone()).await;
+    let (search, library, playback) = services(pool.clone(), Vec::new());
+    let registry = Arc::new(LibraryRegistry::new(Arc::new(PostgresLibraryStore::new(
+        pool.clone(),
+    ))));
+    registry
+        .register(&[
+            LibraryRegistration::new("music".to_owned(), vec![PathBuf::from("/music")]),
+            LibraryRegistration::new("elsewhere".to_owned(), vec![PathBuf::from("/elsewhere")]),
+        ])
+        .await
+        .unwrap();
+    let app = whio_core::app::router(
+        AppState::new(credential, search, library, playback).with_library_registry(registry),
+    );
+    let login = post_login(app.clone(), "flynn", &secret).await;
+    let token = login["token"].as_str().unwrap().to_owned();
+    let store = PostgresTrackRepository::new(pool);
+    for (root, external_id, title) in [
+        ("/music", "main", "Main Track"),
+        ("/elsewhere", "other", "Other Track"),
+    ] {
+        let source = SourceIdentity::new(
+            ProviderId::new("local".to_owned()).unwrap(),
+            SourceScope::Named(root.to_owned()),
+            external_id.to_owned(),
+        )
+        .unwrap();
+        store
+            .get_or_create(
+                source,
+                TrackMetadata::from_names(title.to_owned(), vec!["Artist".to_owned()], Some(1_000))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    for (query, expected) in [
+        ("?library_id=1", "Main Track"),
+        ("?library_id=2", "Other Track"),
+    ] {
+        let (status, headers, body) = get(app.clone(), &token, query).await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        assert_eq!(total(&headers), "1", "{query}");
+        assert_eq!(titles(&body), [expected], "{query}");
+    }
+}
+
+#[sqlx::test]
+async fn invalid_song_queries_do_not_complete_provider_albums(pool: PgPool) {
+    use whio_core::features::music_library::{
+        availability::ProviderRegistry,
+        catalogue::{
+            CatalogueProvider, CatalogueSearch, CompletionService, FetchedAlbum, LibraryService,
+            SearchService,
+        },
+    };
+
+    struct CountingAlbumProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CatalogueProvider for CountingAlbumProvider {
+        async fn search(
+            &self,
+            _search: &CatalogueSearch,
+            _user: Option<&Uuid>,
+            _context: &RequestContext,
+        ) -> Result<Vec<CatalogueCandidate>, CatalogueProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_album(
+            &self,
+            _source: &SourceIdentity,
+            _context: &RequestContext,
+        ) -> Result<FetchedAlbum, CatalogueProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(FetchedAlbum::new(Vec::new(), Some(2)))
+        }
+    }
+
+    let (credential, secret) = database_credential_service(pool.clone()).await;
+    let ports = StorePorts::new(pool.clone());
+    let library = Arc::new(LibraryService::new(
+        ports.library(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let search = Arc::new(SearchService::new(
+        ports.library(),
+        ports.catalogue(),
+        ports.sources(),
+        ports.state(),
+    ));
+    let album_source = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        "provider-album".to_owned(),
+    )
+    .unwrap();
+    let album = ports
+        .store
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Provider Album".to_owned())
+                .unwrap()
+                .with_provider(Some(album_source.clone())),
+        )
+        .await
+        .unwrap();
+    let partial = ports
+        .store
+        .get_or_create(
+            SourceIdentity::new(
+                ProviderId::new("youtube_music".to_owned()).unwrap(),
+                SourceScope::Global,
+                "partial-track".to_owned(),
+            )
+            .unwrap(),
+            TrackMetadata::from_names("Partial".to_owned(), vec!["Artist".to_owned()], Some(1_000))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_album_source(album.id(), &album_source)
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_album_track(album.id(), partial.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let completion = Arc::new(
+        CompletionService::new(
+            Arc::clone(&library),
+            ports.catalogue(),
+            ports.sources(),
+            vec![Arc::new(CountingAlbumProvider {
+                calls: Arc::clone(&calls),
+            })],
+        )
+        .with_registry(ProviderRegistry::with_enabled(["youtube_music"])),
+    );
+    let app = router_with_completion(
+        credential,
+        search,
+        library,
+        completion,
+        ports.streaming(Vec::new()),
+    );
+    let login = post_login(app.clone(), "flynn", &secret).await;
+    let token = login["token"].as_str().unwrap();
+
+    for query in [
+        format!("?album_id={}&_sort=unknown", album.id()),
+        format!("?album_id={}&unknown=1", album.id()),
+    ] {
+        let (status, _, body) = get(app.clone(), token, &query).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+        assert_eq!(body, json!({"error": "Invalid search parameters."}));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[sqlx::test]
+async fn song_sort_aliases_match_their_canonical_orders(pool: PgPool) {
+    let fixture = api_fixture(pool).await;
+    for (index, album_title, album_artist, title) in [
+        ("a", "Zulu Album", "Beta Artist", "Track A"),
+        ("b", "Alpha Album", "Zulu Artist", "Track B"),
+        ("c", "Beta Album", "Alpha Artist", "Track C"),
+    ] {
+        let album = add_album(&fixture.store, album_title, Some(album_artist)).await;
+        let track = add_track(&fixture.store, &format!("path-{index}"), title).await;
+        fixture
+            .store
+            .set_album_track(&album, &track, &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+    }
+
+    for (alias, canonical) in [
+        ("order_album_artist_name", "album_artist"),
+        ("releaseYear", "release_year"),
+        ("createdAt", "date_added"),
+        ("playCount", "play_count"),
+        ("playDate", "play_date"),
+    ] {
+        let (_, _, aliased) = get(
+            fixture.app.clone(),
+            &fixture.token,
+            &format!("?_sort={alias}"),
+        )
+        .await;
+        let (_, _, canonical) = get(
+            fixture.app.clone(),
+            &fixture.token,
+            &format!("?_sort={canonical}"),
+        )
+        .await;
+        assert_eq!(titles(&aliased), titles(&canonical), "{alias}");
+    }
+
+    let (_, _, descending) = get(
+        fixture.app.clone(),
+        &fixture.token,
+        "?_sort=album&_order=desc",
+    )
+    .await;
+    let (_, _, ascending) = get(fixture.app, &fixture.token, "?_sort=album&_order=asc").await;
+    assert_ne!(titles(&descending), titles(&ascending));
+}
+
+#[sqlx::test]
+async fn song_list_applies_available_library_selectors_and_combinations(pool: PgPool) {
+    use whio_core::features::music_library::library_state::test_support::seed_play;
+
+    let fixture = api_fixture(pool.clone()).await;
+    let first_metadata = AlbumMetadata::new("First Album".to_owned())
+        .unwrap()
+        .with_album_artist(ArtistCredit::new("First Artist".to_owned(), None).unwrap())
+        .with_year(Some(1994))
+        .unwrap()
+        .with_compilation(Some(true));
+    let second_metadata = AlbumMetadata::new("Second Album".to_owned())
+        .unwrap()
+        .with_album_artist(ArtistCredit::new("Second Artist".to_owned(), None).unwrap())
+        .with_year(Some(2000))
+        .unwrap()
+        .with_compilation(Some(false));
+    let first_album = fixture
+        .store
+        .resolve_or_create_album(&first_metadata)
+        .await
+        .unwrap();
+    let second_album = fixture
+        .store
+        .resolve_or_create_album(&second_metadata)
+        .await
+        .unwrap();
+    let first_source = local_source("first");
+    let second_source = local_source("second");
+    let first = fixture
+        .store
+        .get_or_create(
+            first_source.clone(),
+            TrackMetadata::from_names(
+                "First".to_owned(),
+                vec!["First Artist".to_owned()],
+                Some(1_000),
+            )
+            .unwrap()
+            .with_genres(vec!["Rock".to_owned()]),
+        )
+        .await
+        .unwrap();
+    let second = fixture
+        .store
+        .get_or_create(
+            second_source.clone(),
+            TrackMetadata::from_names(
+                "Second".to_owned(),
+                vec!["Second Artist".to_owned()],
+                Some(1_000),
+            )
+            .unwrap()
+            .with_genres(vec!["Pop".to_owned()]),
+        )
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_album_track(first_album.id(), first.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_album_track(second_album.id(), second.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_starred(fixture.user, StateTarget::Track(first.id()), true)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_rating(fixture.user, StateTarget::Track(first.id()), Some(5))
+        .await
+        .unwrap();
+    seed_play(&pool, fixture.user, first.id(), chrono::Utc::now()).await;
+
+    let first_artist = fixture
+        .store
+        .find_artist_by_exact_name("First Artist")
+        .await
+        .unwrap()
+        .unwrap();
+    let second_artist = fixture
+        .store
+        .find_artist_by_exact_name("Second Artist")
+        .await
+        .unwrap()
+        .unwrap();
+
+    for (query, expected) in [
+        ("?genre_id=Rock", vec!["First"]),
+        ("?year=1994", vec!["First"]),
+        ("?compilation=true", vec!["First"]),
+        ("?compilation=false", vec!["Second"]),
+        ("?starred=true", vec!["First"]),
+        ("?starred=false", vec!["Second"]),
+        ("?has_rating=true", vec!["First"]),
+        ("?has_rating=false", vec!["Second"]),
+        ("?recently_played=true", vec!["First"]),
+        ("?recently_played=false", vec!["Second"]),
+        ("?missing=false&genre_id=Rock", vec!["First"]),
+        ("?role=artist&role=artist", vec!["First", "Second"]),
+        (
+            "?genre_id=Rock&year=1994&starred=true&has_rating=true&compilation=true",
+            vec!["First"],
+        ),
+    ] {
+        let (status, headers, body) = get(fixture.app.clone(), &fixture.token, query).await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        assert_eq!(
+            total(&headers).parse::<usize>().unwrap(),
+            expected.len(),
+            "{query}"
+        );
+        assert_eq!(titles(&body), expected, "{query}");
+    }
+
+    for (query, expected) in [
+        (format!("?album_artist_id={first_artist}"), vec!["First"]),
+        (format!("?artists_id={first_artist}"), vec!["First"]),
+        (format!("?artists_id={second_artist}"), vec!["Second"]),
+    ] {
+        let (status, headers, body) = get(fixture.app.clone(), &fixture.token, &query).await;
+        assert_eq!(status, StatusCode::OK, "{query}");
+        assert_eq!(total(&headers), expected.len().to_string(), "{query}");
+        assert_eq!(titles(&body), expected, "{query}");
+    }
+
+    let (status, _, body) = get(fixture.app, &fixture.token, "?library_id=1").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body, json!({"error": "Invalid search parameters."}));
+}
+
+#[sqlx::test]
+async fn album_song_query_keeps_context_filters_window_and_page_total(pool: PgPool) {
+    let fixture = api_fixture(pool).await;
+    let album = add_album(&fixture.store, "Discovery", Some("Daft Punk")).await;
+    let first = add_track(&fixture.store, "path-a", "First").await;
+    let second = add_track(&fixture.store, "path-b", "Second").await;
+    for (position, track) in [(1, &first), (2, &second)] {
+        fixture
+            .store
+            .set_album_track(
+                &album,
+                track,
+                &AlbumTrack::new(Some(1), Some(position), u32::from(position - 1)).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let (status, headers, body) = get(
+        fixture.app,
+        &fixture.token,
+        &format!("?album_id={album}&missing=false&_start=1&_end=2"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(total(&headers), "2");
+    assert_eq!(titles(&body), ["Second"]);
+    assert_eq!(body[0]["albumId"], json!(album.to_string()));
+    assert_eq!(body[0]["trackNumber"], json!(2));
+}
+
+#[sqlx::test]
+async fn repeated_album_selectors_dedupe_and_bound_the_id_set(pool: PgPool) {
+    let fixture = api_fixture(pool).await;
+    let first_album = add_album(&fixture.store, "First Album", Some("Artist")).await;
+    let second_album = add_album(&fixture.store, "Second Album", Some("Artist")).await;
+    let first = add_track(&fixture.store, "path-a", "First").await;
+    let second = add_track(&fixture.store, "path-b", "Second").await;
+    for (album, track) in [(&first_album, &first), (&second_album, &second)] {
+        fixture
+            .store
+            .set_album_track(album, track, &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+    }
+
+    let repeated =
+        format!("?album_id={first_album}&album_id={second_album}&album_id={first_album}");
+    let comma = format!("?album_id={first_album},{second_album}");
+    let (_, repeated_headers, repeated_body) =
+        get(fixture.app.clone(), &fixture.token, &repeated).await;
+    let (_, comma_headers, comma_body) = get(fixture.app.clone(), &fixture.token, &comma).await;
+    assert_eq!(total(&repeated_headers), "2");
+    assert_eq!(total(&comma_headers), "2");
+    assert_eq!(titles(&repeated_body), ["First", "Second"]);
+    assert_eq!(titles(&repeated_body), titles(&comma_body));
+
+    let too_many = (0..=100)
+        .map(|_| format!("album_id={}", Uuid::now_v7()))
+        .collect::<Vec<_>>()
+        .join("&");
+    let (status, _, body) = get(fixture.app, &fixture.token, &format!("?{too_many}")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body, json!({"error": "Invalid search parameters."}));
 }
 
 #[sqlx::test]

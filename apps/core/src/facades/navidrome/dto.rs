@@ -30,16 +30,6 @@ pub(crate) struct AuthPayload {
     pub(crate) subsonic_token: String,
 }
 
-#[derive(Deserialize)]
-pub(crate) struct SongListQuery {
-    pub(crate) title: Option<String>,
-    pub(crate) album_id: Option<String>,
-    #[serde(rename = "_start")]
-    pub(crate) start: Option<u32>,
-    #[serde(rename = "_end")]
-    pub(crate) end: Option<i64>,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Song {

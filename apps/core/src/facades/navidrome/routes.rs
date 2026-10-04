@@ -1,6 +1,6 @@
 use axum::{
     Extension, Json,
-    extract::{Path, Query, State, rejection::JsonRejection},
+    extract::{Path, State, rejection::JsonRejection},
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -10,9 +10,10 @@ use uuid::Uuid;
 use crate::{
     facades::navidrome::state::{NavidromeQueueState, NavidromeState},
     features::music_library::domain::{
-        AlbumListFilter, ArtistId, ArtistListFilter, CommentPatch, IdSet, OccurrenceSelector,
-        Playlist, PlaylistEntryChange, PlaylistEntryError, PlaylistMetadataPatch, PlaylistOrder,
-        Range, RoleSelector, RoleSet, SelectorText, SortDirection, TrackId,
+        AlbumId, AlbumListFilter, ArtistId, ArtistListFilter, CommentPatch, IdSet, MAX_PAGE_LIMIT,
+        OccurrenceSelector, PageLimit, Playlist, PlaylistEntryChange, PlaylistEntryError,
+        PlaylistMetadataPatch, PlaylistOrder, Range, RoleSelector, RoleSet, SelectorText,
+        SortDirection, TrackId, TrackListFilter, TrackOrder,
     },
     features::music_library::library::{LibraryId, LibraryRegistry},
     features::music_library::playlists::PlaylistError,
@@ -25,7 +26,7 @@ use super::{
     auth::NdToken,
     dto::{
         PlaylistAdded, PlaylistCreateBody, PlaylistCreated, PlaylistMoveBody, PlaylistMoved,
-        PlaylistRemoved, PlaylistTracksBody, PlaylistUpdateBody, QueueSaveBody, SongListQuery,
+        PlaylistRemoved, PlaylistTracksBody, PlaylistUpdateBody, QueueSaveBody,
     },
     errors,
     service::{self, SongError},
@@ -35,38 +36,19 @@ pub(crate) async fn song_list(
     State(state): State<NavidromeState>,
     Extension(context): Extension<RequestContext>,
     token: NdToken,
-    query: Result<Query<SongListQuery>, axum::extract::rejection::QueryRejection>,
+    query: RawQuery,
 ) -> Response {
-    let Query(query) = match query {
-        Ok(query) => query,
-        Err(_) => {
-            return errors::error(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Invalid search parameters.",
-            );
-        }
+    let request = match song_list_query(&state, &query).await {
+        Ok(request) => request,
+        Err(error) => return song_error(error, &context),
     };
-
-    if let Some(album_id) = query.album_id.as_deref() {
-        return match service::album_songs(
-            state.completion(),
-            state.credential(),
-            &token.0,
-            album_id,
-            state.source_tags(),
-        )
-        .await
-        {
-            Ok(songs) => list_response(&songs, songs.len() as u32),
-            Err(error) => song_error(error, &context),
-        };
-    }
 
     match service::song_list(
         state.library(),
+        state.completion(),
         state.credential(),
         &token.0,
-        &query,
+        request,
         state.source_tags(),
     )
     .await
@@ -124,6 +106,96 @@ const ARTIST_LIST_PARAMETERS: &[&str] = &[
     "role",
     "missing",
 ];
+
+const SONG_LIST_PARAMETERS: &[&str] = &[
+    "_start",
+    "_end",
+    "_sort",
+    "_order",
+    "title",
+    "album_id",
+    "album_artist_id",
+    "artists_id",
+    "genre_id",
+    "library_id",
+    "year",
+    "starred",
+    "has_rating",
+    "missing",
+    "compilation",
+    "recently_played",
+    "role",
+];
+
+async fn song_list_query(
+    state: &NavidromeState,
+    query: &RawQuery,
+) -> Result<service::SongListRequest, SongError> {
+    reject_unknown(query, SONG_LIST_PARAMETERS)?;
+    for name in [
+        "_start",
+        "_end",
+        "_sort",
+        "_order",
+        "title",
+        "year",
+        "starred",
+        "has_rating",
+        "missing",
+        "compilation",
+        "recently_played",
+    ] {
+        scalar(query, name)?;
+    }
+
+    let direction = service::sort_direction(query.get("_order"))?;
+    let order = service::song_order(query.get("_sort"))?;
+    let album_id = id_set(query, "album_id", |raw| raw.parse::<AlbumId>().ok())?;
+    let album_artist_id = id_set(query, "album_artist_id", |raw| raw.parse::<ArtistId>().ok())?;
+    let artists_id = id_set(query, "artists_id", |raw| raw.parse::<ArtistId>().ok())?;
+    let genre = id_set(query, "genre_id", |raw| {
+        SelectorText::new(raw).ok().flatten()
+    })?;
+    let library_id = library_id(state.libraries(), query).await?;
+    let filter = TrackListFilter::new()
+        .with_title(selector_text(query, "title")?)
+        .with_album_id(album_id)
+        .with_album_artist_id(album_artist_id)
+        .with_artists_id(artists_id)
+        .with_genre(genre)
+        .with_library_id(library_id)
+        .with_year(single_year(query)?)
+        .with_starred(flag(query, "starred")?)
+        .with_has_rating(flag(query, "has_rating")?)
+        .with_missing(flag(query, "missing")?)
+        .with_compilation(flag(query, "compilation")?)
+        .with_recently_played(flag(query, "recently_played")?)
+        .with_role(role_set(query, "role")?)
+        .with_sort_direction(direction);
+    let album_context = filter.album_id().is_some_and(|ids| ids.len() == 1);
+    let order = order.unwrap_or(if album_context {
+        TrackOrder::Album
+    } else {
+        TrackOrder::Title
+    });
+    let (offset, limit) = song_window(query)?;
+
+    Ok(service::SongListRequest {
+        filter,
+        order,
+        offset,
+        limit,
+    })
+}
+
+fn scalar<'a>(query: &'a RawQuery, name: &str) -> Result<Option<&'a str>, SongError> {
+    let values = query.all(name);
+    if values.len() > 1 {
+        return Err(SongError::InvalidSearch);
+    }
+
+    Ok(values.first().copied())
+}
 
 fn reject_unknown(query: &RawQuery, allowed: &[&str]) -> Result<(), SongError> {
     for name in query.names() {
@@ -197,21 +269,19 @@ fn flag(query: &RawQuery, name: &str) -> Result<Option<bool>, SongError> {
 }
 
 fn role_set(query: &RawQuery, name: &str) -> Result<Option<RoleSet>, SongError> {
-    match query.get(name) {
-        Some(raw) if raw.trim().is_empty() => Ok(None),
-        Some(_) => {
-            let mut roles = Vec::new();
-
-            for element in elements(query, name) {
-                roles.push(RoleSelector::parse(element).ok_or(SongError::InvalidSearch)?);
-            }
-
-            RoleSet::new(roles)
-                .map(Some)
-                .map_err(|_| SongError::InvalidSearch)
-        }
-        None => Ok(None),
+    let values = query.all(name);
+    if values.is_empty() || values.iter().all(|raw| raw.trim().is_empty()) {
+        return Ok(None);
     }
+
+    let mut roles = Vec::new();
+    for element in elements(query, name) {
+        roles.push(RoleSelector::parse(element).ok_or(SongError::InvalidSearch)?);
+    }
+
+    RoleSet::new(roles)
+        .map(Some)
+        .map_err(|_| SongError::InvalidSearch)
 }
 
 fn single_year(query: &RawQuery) -> Result<Option<Range<i32>>, SongError> {
@@ -387,6 +457,16 @@ pub(crate) async fn genre_list(
         Ok(genres) => Json(genres).into_response(),
         Err(error) => song_error(error, &context),
     }
+}
+
+fn song_window(query: &RawQuery) -> Result<(u32, PageLimit), SongError> {
+    let start = page_start(query)?;
+    let end = page_end(query)?;
+    let span = end.saturating_sub(start).min(MAX_PAGE_LIMIT);
+    let limit = PageLimit::new(if span == 0 { MAX_PAGE_LIMIT } else { span })
+        .map_err(|_| SongError::InvalidSearch)?;
+
+    Ok((start, limit))
 }
 
 fn window(query: &RawQuery) -> Result<(u32, u32), SongError> {
