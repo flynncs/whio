@@ -388,7 +388,7 @@ async fn native_playlist_detail_carries_entries_and_owner(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn native_playlist_entry_membership_is_not_emitted_by_the_facades(pool: PgPool) {
+async fn native_playlist_membership_reaches_both_facades(pool: PgPool) {
     let fixture = fixture(pool.clone()).await;
     let ports = StorePorts::new(pool.clone());
     let filed = track(&ports, "path-filed", "Filed").await;
@@ -443,14 +443,10 @@ async fn native_playlist_entry_membership_is_not_emitted_by_the_facades(pool: Pg
         json!("Discovery"),
         "the subsonic entry keeps the album context"
     );
-    assert!(
-        entry.get("track").is_none(),
-        "the subsonic entry carries no track number"
-    );
-    assert!(
-        entry.get("discNumber").is_none(),
-        "the subsonic entry carries no disc number"
-    );
+    assert_eq!(entry["id"], json!(filed.to_string()));
+    assert_eq!(entry["albumId"], json!(album.id().to_string()));
+    assert_eq!(entry["track"], json!(3));
+    assert_eq!(entry["discNumber"], json!(1));
 
     let login = login(&fixture.app, "flynn", &fixture.owner_secret).await;
     let token = login["token"].as_str().unwrap();
@@ -464,18 +460,10 @@ async fn native_playlist_entry_membership_is_not_emitted_by_the_facades(pool: Pg
     assert_eq!(song["title"], json!("Filed"));
     assert_eq!(song["album"], json!("Discovery"));
     assert_eq!(song["albumId"], json!(album.id().to_string()));
-    assert!(
-        song.get("albumArtist").is_none(),
-        "the navidrome song carries no album artist"
-    );
-    assert!(
-        song.get("trackNumber").is_none(),
-        "the navidrome song carries no track number"
-    );
-    assert!(
-        song.get("discNumber").is_none(),
-        "the navidrome song carries no disc number"
-    );
+    assert_eq!(song["mediaFileId"], json!(filed.to_string()));
+    assert_eq!(song["albumArtist"], json!("Daft Punk"));
+    assert_eq!(song["trackNumber"], json!(3));
+    assert_eq!(song["discNumber"], json!(1));
 }
 
 #[sqlx::test]
