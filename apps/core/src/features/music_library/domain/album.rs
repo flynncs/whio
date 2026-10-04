@@ -892,7 +892,7 @@ impl AlbumEntry {
         TrackView::new(
             self.track.clone(),
             Some(album.album().clone()),
-            Some(self.membership.clone()),
+            Some(self.membership),
             album.album_artist().map(|artist| artist.name().to_owned()),
             self.state,
             self.sources.clone(),
