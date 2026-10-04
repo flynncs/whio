@@ -84,7 +84,7 @@ jobs:
         run: >-
           cargo test --locked --manifest-path apps/core/Cargo.toml
           --features postgres-integration
-          --test worker_binary --test worker_job --test worker_jobs
+          --test integration worker_
 
       - name: Test PostgreSQL integration suites
         env:

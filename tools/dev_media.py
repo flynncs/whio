@@ -51,7 +51,7 @@ def mount(root):
     if mounted(root):
         return root / 'music'
     if not (root / 'media-manifest.json').is_file():
-        raise RuntimeError('music has not been imported; run just media-import first')
+        raise RuntimeError('music has not been imported; run just media import first')
     point = root / 'music'
     point.mkdir(exist_ok=True)
     if any(point.iterdir()):

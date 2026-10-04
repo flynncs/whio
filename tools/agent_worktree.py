@@ -47,9 +47,8 @@ def context_files(packet):
     if not packet.is_relative_to(dev.REPO) or not packet.is_file():
         raise ValueError('packet must be an existing file in this checkout')
     files = [dev.REPO / 'AGENTS.md', packet]
-    for path in (dev.REPO / 'docs').rglob('*'):
-        if path.is_file() and path.suffix in ('.md', '.json', '.yaml', '.yml', '.txt'):
-            files.append(path)
+    for directory in ('docs/agents', 'docs/areas'):
+        files.extend(path for path in (dev.REPO / directory).rglob('*') if path.is_file())
     unique = sorted(set(files))
     for path in unique:
         if path.is_symlink() or any(part in ('.env', 'credentials', 'secrets') for part in path.relative_to(dev.REPO).parts):

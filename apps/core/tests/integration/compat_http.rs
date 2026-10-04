@@ -1,5 +1,4 @@
-#![cfg(feature = "postgres-integration")]
-
+use crate::support;
 use sqlx::PgPool;
 use whio_core::features::music_library::domain::{
     AlbumMetadata, AlbumTrack, ArtistCredit, ArtistListFilter, ArtistSort, ProviderId,
@@ -10,10 +9,9 @@ use whio_core::features::music_library::test_support::{
     CatalogueWrite, LibraryRead, ListenStore, PlaylistStore, PostgresTrackRepository,
     RestoreQueueStore, SourceFileFacts, StateStore,
 };
-mod support;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::{
@@ -22,6 +20,7 @@ use axum::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
+use chrono::DateTime;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -36,7 +35,7 @@ use whio_core::{
     features::music_library::queue::{RestoreQueueSave, RestoreQueueService},
     features::playback::providers::{ProviderError, YtmAdapter},
     features::playback::{
-        PlaybackActivityService, PlaybackProvider, PlaybackSource, ResolvedPlayback,
+        Clock, PlaybackActivityService, PlaybackProvider, PlaybackSource, ResolvedPlayback,
         StreamingService,
     },
     platform::request::RequestContext,
@@ -3444,7 +3443,33 @@ fn reporting_metadata(title: &str, duration_ms: u64) -> TrackMetadata {
     .unwrap()
 }
 
+#[derive(Clone)]
+struct ReportingClock(Arc<AtomicI64>);
+
+impl ReportingClock {
+    fn at(millis: i64) -> Self {
+        Self(Arc::new(AtomicI64::new(millis)))
+    }
+
+    fn advance(&self, millis: i64) {
+        self.0.fetch_add(millis, Ordering::SeqCst);
+    }
+
+    fn clock(&self) -> Clock {
+        let millis = Arc::clone(&self.0);
+
+        Clock::from_fn(move || {
+            DateTime::from_timestamp_millis(millis.load(Ordering::SeqCst))
+                .expect("the reporting clock holds a valid instant")
+        })
+    }
+}
+
 async fn reporting_fixture(pool: PgPool) -> ReportingFixture {
+    reporting_fixture_with_clock(pool, Clock::system()).await
+}
+
+async fn reporting_fixture_with_clock(pool: PgPool, clock: Clock) -> ReportingFixture {
     let ports = StorePorts::new(pool.clone());
     let album = ports
         .store
@@ -3490,7 +3515,8 @@ async fn reporting_fixture(pool: PgPool) -> ReportingFixture {
         Arc::clone(&ports.store) as Arc<dyn ListenStore>,
         Arc::clone(&ports.store) as Arc<dyn LibraryRead>,
     ));
-    let activity = Arc::new(PlaybackActivityService::new(listens, Arc::clone(&library)));
+    let activity =
+        Arc::new(PlaybackActivityService::new(listens, Arc::clone(&library)).with_clock(clock));
     let key = CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).expect("valid key");
     let provisioning = whio_core::features::identity::provision(pool.clone());
     provisioning.create_user("flynn", "Flynn").await.unwrap();
@@ -3648,7 +3674,8 @@ async fn subsonic_scrobble_without_submission_is_now_playing_only(pool: PgPool) 
 
 #[sqlx::test]
 async fn subsonic_report_playback_records_one_play_for_a_qualified_sequence(pool: PgPool) {
-    let fixture = reporting_fixture(pool).await;
+    let clock = ReportingClock::at(1_700_000_000_000);
+    let fixture = reporting_fixture_with_clock(pool, clock.clock()).await;
     let auth = auth_query("flynn", &fixture.secret);
 
     for (state, position_ms) in [
@@ -3657,6 +3684,8 @@ async fn subsonic_report_playback_records_one_play_for_a_qualified_sequence(pool
         ("paused", 1_000),
         ("stopped", 1_000),
     ] {
+        clock.advance(1_000);
+
         let body = get(
             fixture.app.clone(),
             &subsonic_report(

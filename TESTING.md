@@ -5,14 +5,14 @@ run the affected module or integration target during development:
 ```sh
 just test features::music_library::domain
 just test-db features::music_library::storage::postgres::test_delivery
-just test-target native_artist_info_http
+just test-it native_artist_info_http
 ```
 
 | location | coverage | runner |
 | --- | --- | --- |
 | `apps/core/src/` test modules | Rust domain/service/storage behaviour | unit or Postgres, depending on feature |
-| `apps/core/tests/` | HTTP, playback, wiring and spawned-worker integration | named Rust target |
-| `apps/core/tests/support/` | shared credentials, media and worker fixtures | imported by integration tests |
+| `apps/core/tests/integration/` | HTTP, playback, wiring and spawned-worker integration | the `integration` target, filtered by module |
+| `apps/core/tests/integration/support/` | shared credentials, media and worker fixtures | imported by integration tests |
 | `apps/ytm-resolver/tests/` | resolver/provider contracts and controlled responses | pytest |
 | `apps/ytm-resolver/tests/fixtures/metadata/` | provider response fixtures, including malformed/absent fields | consumed by provider tests |
 | `tools/tests/` | dev lifecycle, watching, Docker ownership, worktrees and check admission | unittest |
@@ -21,10 +21,10 @@ Rust unit checks need no database. Postgres checks enable `postgres-integration`
 and create a disposable server per run, with full migrations and SQLx database
 isolation. they never select personal/dev databases. fixtures cover malformed provider data and retry/failure paths.
 
-multiple targets and runner options are available directly:
+target filters and runner options are available directly:
 
 ```sh
-python3 tools/test-postgres.py --docker -- --test native_artist_info_http --test subsonic_artist_info_http
+python3 tools/test-postgres.py --docker -- --test integration artist_info_http
 python3 tools/test-core.py --docker -- --lib features::metadata::freshness
 ```
 

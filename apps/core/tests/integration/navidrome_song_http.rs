@@ -1,6 +1,4 @@
-#![cfg(feature = "postgres-integration")]
-
-mod support;
+use crate::support;
 
 use std::{
     path::PathBuf,

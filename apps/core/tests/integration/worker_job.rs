@@ -1,5 +1,3 @@
-#![cfg(feature = "postgres-integration")]
-
 use std::time::Duration;
 
 use sqlx::{Acquire, PgPool};
@@ -10,7 +8,7 @@ use whio_core::{
     platform::jobs::Enqueued,
 };
 
-mod support;
+use crate::support;
 
 use support::worker::{Worker, database_url};
 

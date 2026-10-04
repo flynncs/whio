@@ -1,5 +1,3 @@
-from contextlib import contextmanager
-import json
 import os
 import plistlib
 from pathlib import Path
@@ -12,7 +10,6 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import dev
-import dev_checks
 import dev_media
 
 
@@ -90,29 +87,6 @@ class StateTests(unittest.TestCase):
                 dev.owned('container', 'unrelated', {'name': 'personal'})
             mutation.assert_not_called()
 
-    def test_build_failure_keeps_installed_profile(self):
-        root = dev.state_root()
-        path = root / 'profiles/personal'
-        path.mkdir()
-        profile = {'name': 'personal', 'build': 'old'}
-        dev.write_json(path / 'profile.json', profile)
-        cache = self.root / 'cache'
-        for directory in ('locks', 'targets', 'logs'):
-            (cache / directory).mkdir(parents=True, exist_ok=True)
-        @contextmanager
-        def admission(*args):
-            yield 0, ()
-        with patch.object(dev, 'source_identity', return_value='a' * 64), \
-             patch.object(dev_checks, 'runtime_root', return_value=cache), \
-             patch.object(dev_checks, 'admission', admission), \
-             patch.object(dev_checks, 'prune_caches'), \
-             patch.object(dev_checks, 'check_storage'), \
-             patch.object(dev_checks, 'run_tests', return_value=(1, 0, 0.1)):
-            with self.assertRaisesRegex(RuntimeError, 'previous installed build retained'):
-                dev.build(path, profile)
-        self.assertEqual(profile['build'], 'old')
-        self.assertEqual(json.loads((path / 'profile.json').read_text())['build'], 'old')
-
     def test_media_traversal_is_rejected(self):
         for value in ('../track.flac', '/track.flac', 'artist/../../track.flac', 'a\0b'):
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -151,20 +125,23 @@ class StateTests(unittest.TestCase):
         profile = root / 'profiles/personal'
         profile.mkdir()
         current, saved, obsolete, unknown = (character * 64 for character in 'abcd')
-        dev.write_json(profile / 'profile.json', {'build': current})
+        shape = {'runtime': 'docker', 'architecture': 'arm64'}
+        dev.write_json(profile / 'profile.json', dict(shape, build=current))
         backup = profile / 'backups/fixture'
         backup.mkdir(parents=True)
         dev.write_json(backup / 'backup.json', {'build': saved})
+        dev.write_json(backup / 'profile.json', dict(shape, build=saved))
+        base = root / 'container-builds' / 'arm64'
         for identity in (current, saved, obsolete, unknown):
-            directory = root / 'builds' / identity
-            directory.mkdir()
+            directory = base / identity
+            directory.mkdir(parents=True)
             (directory / 'keep.bin').write_bytes(b'important')
             if identity != unknown:
                 dev.write_json(directory / 'build.json', {'source_sha256': identity})
         dev.prune_installed_builds(root)
-        self.assertFalse((root / 'builds' / obsolete).exists())
+        self.assertFalse((base / obsolete).exists())
         for identity in (current, saved, unknown):
-            self.assertTrue((root / 'builds' / identity / 'keep.bin').is_file())
+            self.assertTrue((base / identity / 'keep.bin').is_file())
 
     def test_import_cannot_silently_change_existing_source(self):
         root = dev.state_root()
@@ -173,21 +150,6 @@ class StateTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'another source'):
                 dev_media.import_media(root, 'new@host', '/music', root / 'unused.json')
             verify.assert_not_called()
-
-    def test_missing_persistent_volume_never_becomes_an_empty_replacement(self):
-        root = dev.state_root()
-        path = root / 'profiles/personal'
-        path.mkdir()
-        profile = {'name': 'personal', 'database_initialized': True}
-        with patch.object(dev, 'owned', return_value=None), patch.object(dev, 'docker_operation') as mutation:
-            with self.assertRaisesRegex(RuntimeError, 'no empty replacement'):
-                dev.start_db(path, profile)
-            mutation.assert_not_called()
-            profile.pop('database_initialized')
-            (path / 'client-login.json').write_text('{}')
-            with self.assertRaisesRegex(RuntimeError, 'no empty replacement'):
-                dev.start_db(path, profile)
-            mutation.assert_not_called()
 
 
 if __name__ == '__main__':

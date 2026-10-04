@@ -1,10 +1,8 @@
-#![cfg(feature = "postgres-integration")]
-
 use sqlx::PgPool;
 use std::sync::Arc;
 use whio_core::features::music_library::test_support::PostgresTrackRepository;
 
-mod support;
+use crate::support;
 
 use support::{NATIVE_AUTH_QUERY, StorePorts, credential_service, router};
 

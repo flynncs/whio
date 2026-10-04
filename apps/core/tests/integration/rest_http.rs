@@ -1,9 +1,7 @@
-#![cfg(feature = "postgres-integration")]
-
 use sqlx::PgPool;
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
-mod support;
+use crate::support;
 
 use support::{
     StorePorts, credential_service_with_known_api_key, credential_service_with_known_app_password,

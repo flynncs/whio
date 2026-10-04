@@ -1,6 +1,9 @@
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -29,21 +32,9 @@ class DockerTests(unittest.TestCase):
             override.stop()
         self.temporary.cleanup()
 
-    def test_new_profile_and_artifacts_are_separate_from_native(self):
-        self.assertEqual(self.profile['runtime'], 'docker')
-        self.assertNotEqual(dev.builds_root(self.profile), dev.builds_root(dict(self.profile, runtime='native')))
+    def test_profile_artifacts_live_in_the_container_build_root(self):
+        self.assertEqual(dev.builds_root(self.profile), dev.state_root() / 'container-builds' / 'arm64')
         self.assertEqual(dev.docker_args(self.profile), ['docker', '--context', 'fixture'])
-
-    def test_runtime_handoff_requires_explicit_owned_previous_target(self):
-        old = dict(self.profile, runtime='native', build='a' * 64)
-        new = dict(self.profile, build='b' * 64)
-        directory = dev.builds_root(old) / old['build']
-        (directory / 'resolver').mkdir(parents=True)
-        dev.runtime_links(self.path, old)
-        with self.assertRaisesRegex(RuntimeError, 'another owner'):
-            dev.runtime_links(self.path, new)
-        dev.runtime_links(self.path, new, previous=old)
-        self.assertEqual((self.path / 'current-rust').resolve(), dev.builds_root(new) / new['build'])
 
     def test_unconfigured_profile_does_not_break_build_retention(self):
         dev.load_profile('preview-unconfigured', create=True)
@@ -66,6 +57,64 @@ class DockerTests(unittest.TestCase):
             docker.build(self.path, self.profile, persist=False)
         install.assert_called_once()
         self.assertEqual(self.profile['build'], identity)
+
+    def test_new_target_volume_clones_the_main_checkout_cache(self):
+        main_key = 'a' * 16
+        source = f'lumen-build-{os.getuid()}-{docker.context_key(self.profile)}-arm64-{main_key}'
+        def inspect(kind, name, profile=None):
+            return {'Labels': {}} if kind == 'volume' and name == source else None
+        completed = subprocess.CompletedProcess([], 0)
+        with patch.object(dev, 'inspect', side_effect=inspect), \
+             patch.object(docker, 'main_checkout_key', return_value=main_key), \
+             patch.object(docker, 'command') as mutation, \
+             patch.object(subprocess, 'run', return_value=completed) as run:
+            name = docker.cache_volume(self.profile, 'target', 'b' * 16)
+        mutation.assert_called_once()
+        self.assertEqual(mutation.call_args.args[1:3], ('volume', 'create'))
+        self.assertIn('dev.lumen.checkout=' + 'b' * 16, mutation.call_args.args)
+        arguments = run.call_args.args[0]
+        self.assertIn(f'type=volume,source={source},target=/from', arguments)
+        self.assertIn(f'type=volume,source={name},target=/to', arguments)
+        self.assertEqual(arguments[-4:], ['-a', '--reflink=always', '/from/.', '/to/'])
+
+    def test_main_checkout_target_volume_is_not_cloned(self):
+        key = 'a' * 16
+        with patch.object(dev, 'inspect', return_value=None), \
+             patch.object(docker, 'main_checkout_key', return_value=key), \
+             patch.object(docker, 'command') as mutation, \
+             patch.object(subprocess, 'run') as run:
+            docker.cache_volume(self.profile, 'target', key)
+        mutation.assert_called_once()
+        run.assert_not_called()
+
+    def test_existing_target_volume_is_not_cloned(self):
+        labels = {docker.OWNER: str(os.getuid()), docker.KIND: 'target', 'dev.lumen.checkout': 'b' * 16}
+        with patch.object(dev, 'inspect', return_value={'Labels': labels}), \
+             patch.object(docker, 'main_checkout_key', return_value='a' * 16), \
+             patch.object(docker, 'command') as mutation, \
+             patch.object(subprocess, 'run') as run:
+            docker.cache_volume(self.profile, 'target', 'b' * 16)
+        mutation.assert_not_called()
+        run.assert_not_called()
+
+    def test_failed_clone_keeps_the_volume_and_reports(self):
+        main_key = 'a' * 16
+        source = f'lumen-build-{os.getuid()}-{docker.context_key(self.profile)}-arm64-{main_key}'
+        def inspect(kind, name, profile=None):
+            return {'Labels': {}} if kind == 'volume' and name == source else None
+        failures = (patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)),
+                    patch.object(subprocess, 'run', side_effect=subprocess.TimeoutExpired('docker', 300)))
+        for index, run in enumerate(failures):
+            with self.subTest(failure=index):
+                output = io.StringIO()
+                with patch.object(dev, 'inspect', side_effect=inspect), \
+                     patch.object(docker, 'main_checkout_key', return_value=main_key), \
+                     patch.object(docker, 'command') as mutation, run, \
+                     contextlib.redirect_stdout(output):
+                    docker.cache_volume(self.profile, 'target', 'b' * 16)
+                self.assertIn('not cloned', output.getvalue())
+                mutation.assert_called_once()
+                self.assertEqual(mutation.call_args.args[1:3], ('volume', 'create'))
 
     def test_unowned_cache_cannot_be_adopted(self):
         with patch.object(dev, 'inspect', return_value={'Labels': {docker.OWNER: '-1'}}), patch.object(docker, 'command') as mutation:

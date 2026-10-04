@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shlex
 import shutil
 import signal
 import socket
@@ -17,7 +16,6 @@ import sys
 import tempfile
 import time
 import urllib.request
-import urllib.parse
 import uuid
 
 import dev_checks as checks
@@ -112,9 +110,11 @@ def load_profile(name, create=False):
         value = json.loads(file.read_text())
         if value['name'] != name or value['uid'] != os.getuid():
             raise RuntimeError('profile owner differs')
+        if value.get('runtime') == 'native':
+            raise RuntimeError('native profiles are no longer supported; recreate it')
         return path, value
     if not create:
-        raise RuntimeError(f'{name} is not set up; run just setup {name}')
+        raise RuntimeError(f'{name} is not set up; run just up {name}')
     if path.exists() and any(path.iterdir()):
         raise RuntimeError('refusing to adopt a nonempty profile directory')
     path.mkdir(mode=0o700, exist_ok=True)
@@ -133,10 +133,15 @@ def load_profile(name, create=False):
     return path, value
 
 
-def source_files():
+def source_root(root=None):
+    return REPO if root is None else root
+
+
+def source_files(root=None):
+    root = source_root(root)
     files = []
     for directory in ('core', 'resolver-client-generated', 'subsonic-types-generated', 'ytm-resolver'):
-        base = REPO / 'apps' / directory
+        base = root / 'apps' / directory
         for parent, directories, names in os.walk(base):
             directories[:] = [name for name in directories if name not in
                               ('target', '.venv', '__pycache__', '.pytest_cache', '.ruff_cache')]
@@ -146,7 +151,7 @@ def source_files():
                     if path.is_symlink():
                         raise RuntimeError('build source must not be a symlink')
                     files.append(path)
-    for path in (REPO / 'rust-toolchain.toml', REPO / '.cargo/config.toml', REPO / '.cargo/config'):
+    for path in (root / 'rust-toolchain.toml', root / '.cargo/config.toml', root / '.cargo/config'):
         if path.exists():
             if path.is_symlink():
                 raise RuntimeError('build source must not be a symlink')
@@ -154,18 +159,17 @@ def source_files():
     return sorted(files)
 
 
-def source_identity():
+def source_identity(root=None):
+    root = source_root(root)
     digest = hashlib.sha256()
-    for path in source_files():
-        digest.update(str(path.relative_to(REPO)).encode() + b'\0')
+    for path in source_files(root):
+        digest.update(str(path.relative_to(root)).encode() + b'\0')
         digest.update(path.read_bytes())
         digest.update(b'\0')
     return digest.hexdigest()
 
 
 def builds_root(profile):
-    if profile.get('runtime') != 'docker':
-        return state_root() / 'builds'
     directory = state_root() / 'container-builds' / profile['architecture']
     if directory.is_symlink() or directory.parent.is_symlink():
         raise RuntimeError('container build directory must not be a symlink')
@@ -174,17 +178,13 @@ def builds_root(profile):
 
 
 def current_identity(profile):
-    if profile.get('runtime') == 'docker':
-        import dev_docker
-        return dev_docker.identity(profile)
-    return source_identity()
+    import dev_docker
+    return dev_docker.identity(profile)
 
 
 def running(path, profile):
-    if profile.get('runtime') == 'docker':
-        import dev_docker
-        return dev_docker.running(path, profile)
-    return socket_path(profile).exists()
+    import dev_docker
+    return dev_docker.running(path, profile)
 
 
 def docker_args(profile=None):
@@ -196,7 +196,7 @@ def prune_installed_builds(root):
     referenced = set()
     for file in (root / 'profiles').glob('*/profile.json'):
         value = json.loads(file.read_text())
-        if not value.get('build'):
+        if value.get('runtime') != 'docker' or not value.get('architecture') or not value.get('build'):
             continue
         base = builds_root(value)
         referenced.update(base / identity for identity in (value['build'], value.get('rust_build')) if identity)
@@ -204,6 +204,8 @@ def prune_installed_builds(root):
         value = json.loads(file.read_text())
         saved_file = file.parent / 'profile.json'
         saved = json.loads(saved_file.read_text()) if saved_file.exists() else {}
+        if saved.get('runtime') != 'docker' or not saved.get('architecture'):
+            continue
         base = builds_root(saved)
         referenced.update(base / identity for identity in (value['build'], value.get('rust_build')) if identity)
     directories = list((root / 'builds').iterdir())
@@ -220,82 +222,9 @@ def prune_installed_builds(root):
             print(f'removed unused installed build {directory.name[:12]}')
 
 
-def build(path, profile, persist=True):
-    if profile.get('runtime') == 'docker':
-        import dev_docker
-        return dev_docker.build(path, profile, persist)
-    import dev_watch
-    identity = source_identity()
-    components = dev_watch.components()
-    root = state_root()
-    destination = root / 'builds' / identity
-    if not (destination / 'build.json').is_file():
-        cache = checks.runtime_root()
-        key = checks.cache_key(REPO)
-        with checks.admission(cache, key, 60) as (_, descriptors):
-            checks.prune_caches(cache)
-            checks.check_storage(cache)
-            target = cache / 'targets' / key
-            target.mkdir(exist_ok=True)
-            environment = os.environ.copy()
-            environment.update({'CARGO_TARGET_DIR': str(target), 'CARGO_BUILD_JOBS': '2',
-                                'CARGO_INCREMENTAL': '0', 'CARGO_PROFILE_DEV_DEBUG': '0',
-                                'CARGO_PROFILE_DEV_STRIP': 'none'})
-            for name in ('DATABASE_URL', 'WHIO_DATABASE_URL', 'RUSTC_WRAPPER'):
-                environment.pop(name, None)
-            log = cache / 'logs' / f'{key}-build-{uuid.uuid4().hex[:8]}.log'
-            command = ['cargo', 'build', '--locked', '--color', 'never', '--manifest-path',
-                       str(REPO / 'apps/core/Cargo.toml')]
-            for name in BINARIES:
-                command.extend(('--bin', name))
-            previous = root / 'builds' / (profile.get('build') or 'absent')
-            previous_manifest = previous / 'build.json'
-            reuse = previous_manifest.is_file() and json.loads(previous_manifest.read_text()).get('components', {}).get('rust') == components['rust']
-            if reuse:
-                print('Rust source unchanged; reusing installed binaries', flush=True)
-                code, elapsed = 0, 0
-            else:
-                print(f'building current source {identity[:12]}; two compiler jobs; log {log}', flush=True)
-                code, _, elapsed = checks.run_tests(command, environment, log, 900,
-                                                    lambda: checks.check_storage(cache), pass_fds=descriptors)
-            os.utime(target)
-            if code:
-                raise RuntimeError(f'build failed ({code}); previous installed build retained')
-            if source_identity() != identity:
-                raise RuntimeError('source changed while building; previous installed build retained; retry')
-            staging = root / 'builds' / f'pending-{uuid.uuid4().hex}'
-            staging.mkdir(mode=0o700)
-            try:
-                for name in BINARIES:
-                    shutil.copy2(previous / name if reuse else target / 'debug' / name, staging / name)
-                python = staging / 'resolver'
-                python.mkdir()
-                source = REPO / 'apps/ytm-resolver'
-                for name in ('pyproject.toml', 'uv.lock', 'README.md'):
-                    shutil.copy2(source / name, python / name)
-                shutil.copytree(source / 'app', python / 'app', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-                if source_identity() != identity:
-                    raise RuntimeError('source changed while installing; previous installed build retained; retry')
-                write_json(staging / 'build.json', {'source_sha256': identity,
-                           'head': subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip(),
-                           'created': time.time(), 'seconds': elapsed, 'source_checkout': str(REPO),
-                           'components': components})
-                staging.rename(destination)
-            finally:
-                if staging.exists():
-                    shutil.rmtree(staging)
-    profile['build'] = identity
-    manifest = destination / 'build.json'
-    document = json.loads(manifest.read_text())
-    if not document.get('components'):
-        if source_identity() != identity:
-            raise RuntimeError('source changed while inspecting installed build; retry')
-        document['components'] = components
-        write_json(manifest, document)
-    if persist:
-        write_json(path / 'profile.json', profile)
-        prune_installed_builds(root)
-    print(f'installed build {identity[:12]} for {profile["name"]}', flush=True)
+def build(path, profile, persist=True, root=None, commit=None):
+    import dev_docker
+    return dev_docker.build(path, profile, persist, root=root, commit=commit)
 
 
 def label(profile):
@@ -336,49 +265,8 @@ def docker_operation(*arguments, profile=None):
 
 
 def start_db(path, profile):
-    if profile.get('runtime') == 'docker':
-        import dev_docker
-        return dev_docker.start_db(path, profile)
-    name, volume = db_names(profile)
-    if not owned('volume', volume, profile):
-        if profile.get('database_initialized') or (path / 'client-login.json').exists():
-            raise RuntimeError('persistent database volume is missing; restore a backup before restarting; no empty replacement created')
-        docker_operation('volume', 'create', '--label', f'dev.lumen.local-profile={label(profile)}', volume)
-    previous = owned('container', name, profile)
-    if previous and previous['State']['Running']:
-        bindings = previous['HostConfig'].get('PortBindings', {}).get('5432/tcp')
-        expected = [{'HostIp': '127.0.0.1', 'HostPort': str(profile['ports']['postgres'])}]
-        mounts = previous.get('Mounts', [])
-        if bindings != expected or not any(item.get('Name') == volume and item.get('Destination') == '/var/lib/postgresql' for item in mounts):
-            raise RuntimeError('owned database configuration differs from its profile; left running')
-        if not profile.get('database_initialized'):
-            profile['database_initialized'] = True
-            write_json(path / 'profile.json', profile)
-        return
-    check_ports({'postgres': profile['ports']['postgres']})
-    if previous:
-        docker_operation('rm', name)
-    env = path / 'postgres.env'
-    env.write_text(f'POSTGRES_USER=whio\nPOSTGRES_DB=whio\nPOSTGRES_PASSWORD={profile["postgres_password"]}\n')
-    env.chmod(0o600)
-    docker_operation('run', '--detach', '--name', name, '--pull=never',
-                     '--label', f'dev.lumen.local-profile={label(profile)}',
-                     '--memory', '512m', '--memory-swap', '512m', '--cpus', '1',
-                     '--log-driver', 'local', '--log-opt', 'max-size=8m', '--log-opt', 'max-file=2',
-                     '--publish', f'127.0.0.1:{profile["ports"]["postgres"]}:5432',
-                     '--volume', f'{volume}:/var/lib/postgresql', '--env-file', str(env),
-                     'postgres:18-alpine', '-c', 'shared_buffers=32MB', '-c', 'max_connections=40',
-                     '-c', 'max_wal_size=128MB', '-c', 'min_wal_size=32MB')
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        result = subprocess.run(['docker', 'exec', name, 'pg_isready', '-h', '127.0.0.1',
-                                 '-U', 'whio', '-d', 'whio'], capture_output=True, timeout=5)
-        if result.returncode == 0:
-            profile['database_initialized'] = True
-            write_json(path / 'profile.json', profile)
-            return
-        time.sleep(0.2)
-    raise RuntimeError('profile Postgres did not become ready within 30 seconds')
+    import dev_docker
+    return dev_docker.start_db(path, profile)
 
 
 def environment(path, profile, full):
@@ -405,21 +293,6 @@ def clean_environment():
     return {key: value for key, value in os.environ.items() if key in allowed}
 
 
-def socket_path(profile):
-    root = checks.runtime_root()
-    return root / f'local-{profile["name"]}.sock'
-
-
-def supervisor(path, profile, *arguments):
-    log = 'supervisor.log' if arguments[0] == 'up' else 'supervisor-client.log'
-    command = ['process-compose', *arguments, '--use-uds', '--unix-socket', str(socket_path(profile)),
-               '--log-file', str(path / 'logs' / log)]
-    result = subprocess.run(command, cwd=path, env=clean_environment(), capture_output=True, text=True, timeout=55)
-    if result.returncode:
-        raise RuntimeError('profile supervisor command failed; inspect its logs')
-    return result.stdout
-
-
 def ready(port):
     try:
         with urllib.request.urlopen(f'http://127.0.0.1:{port}/health/ready', timeout=1) as response:
@@ -428,32 +301,9 @@ def ready(port):
         return False
 
 
-def process_alive(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-
-
 def stop(path, profile, database=True):
-    if profile.get('runtime') == 'docker':
-        import dev_docker
-        return dev_docker.stop(path, profile, database)
-    if socket_path(profile).exists():
-        states = json.loads(supervisor(path, profile, 'process', 'list', '--output', 'json'))
-        pids = [item['pid'] for item in states if item.get('is_running') and item.get('pid', 0) > 0]
-        supervisor(path, profile, 'down')
-        deadline = time.monotonic() + 50
-        while (socket_path(profile).exists() or any(process_alive(pid) for pid in pids)) and time.monotonic() < deadline:
-            time.sleep(0.2)
-        if socket_path(profile).exists() or any(process_alive(pid) for pid in pids):
-            raise RuntimeError('owned server processes did not finish shutdown; database left running')
-    name, _ = db_names(profile)
-    container = owned('container', name, profile)
-    if database and container and container['State']['Running']:
-        docker_operation('stop', '--time', '10', name)
-    print(f'{profile["name"]} stopped; database and music retained', flush=True)
+    import dev_docker
+    return dev_docker.stop(path, profile, database)
 
 
 def runtime_links(path, profile, previous=None):
@@ -474,147 +324,18 @@ def runtime_links(path, profile, previous=None):
 
 
 def config(path, profile, full):
-    if profile.get('runtime') == 'docker':
-        import dev_docker
-        return dev_docker.config(path, profile, full)
-    installed = state_root() / 'builds' / profile['build']
-    rust = state_root() / 'builds' / profile.get('rust_build', profile['build'])
-    python = installed / 'resolver'
-    if profile['name'] != 'personal':
-        runtime_links(path, profile)
-        rust = path / 'current-rust'
-        python = path / 'current-resolver'
-    if full:
-        venv = state_root() / 'resolver-venv' / hashlib.sha256((python / 'uv.lock').read_bytes()).hexdigest()[:16]
-        env = clean_environment()
-        env['UV_PROJECT_ENVIRONMENT'] = str(venv)
-        subprocess.run(['uv', 'sync', '--frozen', '--no-dev', '--python', '3.14'], cwd=python, env=env, check=True, timeout=180)
-    else:
-        venv = None
-    common = environment(path, profile, full)
-    env_file = path / 'server.env'
-    env_file.write_text(''.join(f'{key}={value}\n' for key, value in common.items()))
-    env_file.chmod(0o600)
-    rotation = {'rotation': {'max_size_mb': 8, 'max_age_days': 3, 'max_backups': 2, 'compress': True}}
-    processes = {}
-    def process(name, command, port, cwd):
-        return {'command': shlex.join(command), 'working_dir': str(cwd),
-                'environment': [f'{key}={value}' for key, value in common.items()],
-                'log_location': str(path / 'logs' / f'{name}.log'), 'log_configuration': rotation,
-                'shutdown': {'signal': 15, 'timeout_seconds': 45},
-                'readiness_probe': {'http_get': {'host': '127.0.0.1', 'port': port, 'path': '/health/ready'},
-                                    'period_seconds': 1, 'timeout_seconds': 2, 'failure_threshold': 30}}
-    if full:
-        provider_values = {}
-        provider_file = path / 'providers.env'
-        if not provider_file.exists():
-            provider_file.touch(mode=0o600)
-        if provider_file.is_symlink() or provider_file.stat().st_mode & 0o077:
-            raise RuntimeError('providers.env must be a regular mode-0600 file')
-        for line in provider_file.read_text().splitlines():
-            if not line.strip() or line.lstrip().startswith('#'):
-                continue
-            key, separator, value = line.partition('=')
-            key = key.strip()
-            if not separator or not re.fullmatch(r'WHIO_RESOLVER_[A-Z0-9_]+', key):
-                raise RuntimeError('providers.env accepts only WHIO_RESOLVER_ settings')
-            value = value.strip()
-            if value.startswith(('"', "'")):
-                words = shlex.split(value)
-                if len(words) != 1:
-                    raise RuntimeError('provider value must be a single string')
-                value = words[0]
-            provider_values[key] = value
-        for name, module, port in (('youtube', 'app.main:app', profile['ports']['youtube']),
-                                   ('metadata', 'app.metadata_main:app', profile['ports']['metadata'])):
-            processes[name] = process(name, [str(venv / 'bin/python'), '-m', 'uvicorn', module,
-                                             '--host', '127.0.0.1', '--port', str(port)], port, python)
-            processes[name]['environment'] = [f'DENO_DIR={common["DENO_DIR"]}',
-                                              *(f'{key}={value}' for key, value in provider_values.items())]
-        processes['worker'] = process('worker', [str(rust / 'whio-worker')], profile['ports']['worker'], path)
-        processes['worker']['depends_on'] = {name: {'condition': 'process_healthy'} for name in ('youtube', 'metadata')}
-    processes['api'] = process('api', [str(rust / 'whio-api')], profile['ports']['api'], path)
-    if full:
-        processes['api']['depends_on'] = {name: {'condition': 'process_healthy'} for name in ('youtube', 'metadata')}
-    write_json(path / 'process-compose.json', {'version': '0.5', 'log_level': 'info', 'processes': processes})
+    import dev_docker
+    return dev_docker.config(path, profile, full)
 
 
-def start(path, profile, full, preserve_database=False):
-    if profile.get('runtime') == 'docker':
-        import dev_docker
-        return dev_docker.start(path, profile, full)
-    if not profile['build']:
-        raise RuntimeError('profile has no installed build; run just setup first')
-    if socket_path(profile).exists():
-        if profile['full'] != full:
-            raise RuntimeError('profile is already running in another mode; stop it first')
-        if ready(profile['ports']['api']):
-            print(f'{profile["name"]} already running at http://127.0.0.1:{profile["ports"]["api"]}')
-            return
-        raise RuntimeError('supervisor exists but API is not ready; inspect status/logs before restarting')
-    checks.check_storage(checks.runtime_root())
-    if profile['name'].startswith('preview-'):
-        running = docker_operation('ps', '--filter', 'label=dev.lumen.local-profile', '--format', '{{.Names}}')
-        prefix = f'lumen-local-{os.getuid()}-preview-'
-        own_name, _ = db_names(profile)
-        if any(name.startswith(prefix) and name != own_name for name in running.splitlines()):
-            raise RuntimeError('one preview is already active; stop it before starting another')
-    dev_media.mount(state_root())
-    names = ('api', 'worker', 'youtube', 'metadata') if full else ('api',)
-    check_ports({name: profile['ports'][name] for name in names})
-    config(path, profile, full)
-    start_db(path, profile)
-    try:
-        supervisor(path, profile, 'up', '--config', str(path / 'process-compose.json'), '--detached',
-                   '--tui=false', '--disable-dotenv', '--ordered-shutdown',
-                   '--log-file', str(path / 'logs' / 'supervisor.log'))
-        deadline = time.monotonic() + 45
-        while time.monotonic() < deadline:
-            if all(ready(profile['ports'][name]) for name in names):
-                profile['full'] = full
-                if profile['name'].startswith('preview-'):
-                    profile['expires'] = time.time() + 86400
-                write_json(path / 'profile.json', profile)
-                print(f'{profile["name"]} ready at http://127.0.0.1:{profile["ports"]["api"]}; mode={"full" if full else "local"}', flush=True)
-                return
-            time.sleep(0.2)
-        raise RuntimeError('profile did not become ready within 45 seconds; inspect logs')
-    except BaseException:
-        stop(path, profile, database=not preserve_database)
-        raise
+def start(path, profile, full):
+    import dev_docker
+    return dev_docker.start(path, profile, full)
 
 
 def create_user(path, profile):
-    if profile.get('runtime') == 'docker':
-        import dev_docker
-        return dev_docker.create_user(path, profile)
-    credentials = path / 'client-login.json'
-    if credentials.exists():
-        print(f'client login: {credentials}')
-        return
-    installed = state_root() / 'builds' / profile['build']
-    env = clean_environment()
-    env.update(environment(path, profile, profile['full']))
-    cli = str(installed / 'whio-cli')
-    name, _ = db_names(profile)
-    exists = docker_operation('exec', name, 'psql', '-U', 'whio', '-d', 'whio', '-tAc',
-                              "select exists(select 1 from users where username='local')")
-    actions = [] if exists == 't' else [['create-user', 'local', 'local']]
-    actions.append(['assign-admin', 'local'])
-    for arguments in actions:
-        result = subprocess.run([cli, *arguments], cwd=path, env=env, capture_output=True, timeout=15)
-        if result.returncode:
-            raise RuntimeError('local user creation failed; existing users were retained')
-    result = subprocess.run([cli, 'mint-app-password', 'local', 'laptop'], cwd=path, env=env,
-                            capture_output=True, text=True, timeout=15)
-    if result.returncode:
-        raise RuntimeError('local app-password creation failed')
-    password = next((line.removeprefix('password: ') for line in result.stdout.splitlines() if line.startswith('password: ')), None)
-    if not password:
-        raise RuntimeError('CLI did not return an app password')
-    write_json(credentials, {'server': f'http://127.0.0.1:{profile["ports"]["api"]}',
-                            'username': 'local', 'password': password})
-    print(f'client login: {credentials}', flush=True)
+    import dev_docker
+    return dev_docker.create_user(path, profile)
 
 
 def backup(path, profile):
@@ -643,119 +364,68 @@ def backup(path, profile):
 
 
 def backup_check(path, profile):
-    if profile.get('runtime') == 'docker':
-        import dev_docker
-        return dev_docker.backup_check(path, profile)
-    backups = sorted(item for item in (path / 'backups').iterdir() if (item / 'backup.json').is_file())
-    if not backups:
-        raise RuntimeError('no completed backup exists; run just backup first')
-    directory = backups[-1]
-    document = json.loads((directory / 'backup.json').read_text())
-    dump = directory / 'database.dump'
-    if dev_media.digest(dump) != document['dump_sha256']:
-        raise RuntimeError('backup hash differs; existing databases left untouched')
-    saved = json.loads((directory / 'profile.json').read_text())
-    name = f'lumen-test-{uuid.uuid4().hex[:12]}'
-    process = None
-    root = checks.runtime_root()
-    with checks.admission(root, checks.cache_key(REPO), 60) as (slot, descriptors):
-        try:
-            database = checks.start_postgres(name, slot)
-            with dump.open('rb') as stream:
-                result = subprocess.run(['docker', 'exec', '-i', name, 'pg_restore', '--exit-on-error',
-                                         '--no-owner', '-U', 'whio', '-d', 'whio'], stdin=stream,
-                                        capture_output=True, timeout=60)
-            if result.returncode:
-                raise RuntimeError('backup restore failed in disposable database')
-            port = free_port()
-            env = clean_environment()
-            env.update(environment(path, saved, False))
-            env.update({'WHIO_DATABASE_URL': database, 'WHIO_BIND_ADDRESS': f'127.0.0.1:{port}'})
-            with tempfile.TemporaryDirectory(prefix='lumen-backup-check-') as temporary:
-                env['WHIO_ARTWORK_CACHE_DIR'] = str(Path(temporary) / 'artwork')
-                env['WHIO_SPOOL_DIR'] = str(Path(temporary) / 'spool')
-                with (Path(temporary) / 'api.log').open('wb') as log:
-                    binary = state_root() / 'builds' / document['build'] / 'whio-api'
-                    process = subprocess.Popen([str(binary)], cwd=temporary, env=env, stdout=log,
-                                               stderr=subprocess.STDOUT, start_new_session=True, pass_fds=descriptors)
-                    deadline = time.monotonic() + 30
-                    while not ready(port) and time.monotonic() < deadline and process.poll() is None:
-                        time.sleep(0.2)
-                    if not ready(port):
-                        raise RuntimeError('restored app did not become ready')
-                    login = json.loads((directory / 'client-login.json').read_text())
-                    salt = secrets.token_hex(8)
-                    query = urllib.parse.urlencode({'u': login['username'], 's': salt,
-                            't': hashlib.md5((login['password'] + salt).encode()).hexdigest(),
-                            'v': '1.16.1', 'c': 'backup-check', 'f': 'json'})
-                    with urllib.request.urlopen(f'http://127.0.0.1:{port}/rest/ping?{query}', timeout=5) as response:
-                        if json.load(response)['subsonic-response']['status'] != 'ok':
-                            raise RuntimeError('saved client credential cannot authenticate after restore')
-                    counts = checks.docker('exec', name, 'psql', '-U', 'whio', '-d', 'whio', '-tAc',
-                             "select json_build_object('users',(select count(*) from users),'tracks',(select count(*) from tracks),'playlists',(select count(*) from playlists),'listens',(select count(*) from listens))")
-                    print(f'backup restored to disposable Postgres; saved key/login authenticated; {counts}', flush=True)
-                    checks.stop_process_group(process)
-                    process = None
-        finally:
-            if process:
-                checks.stop_process_group(process)
-            checks.cleanup_postgres(name)
+    import dev_docker
+    return dev_docker.backup_check(path, profile)
 
 
 def status(path, profile):
-    if profile.get('runtime') == 'docker':
-        import dev_docker
-        return dev_docker.status(path, profile)
-    name, volume = db_names(profile)
-    container = owned('container', name, profile)
-    print(f'{profile["name"]}: API {"ready" if ready(profile["ports"]["api"]) else "stopped"}; '
-          f'Postgres {"running" if container and container["State"]["Running"] else "stopped"}; '
-          f'build={(profile["build"] or "none")[:12]}; mode={"full" if profile["full"] else "local"}')
-    print(f'url: http://127.0.0.1:{profile["ports"]["api"]}\nstate: {path}\nvolume: {volume}')
-    if (path / 'client-login.json').exists():
-        print(f'client login: {path / "client-login.json"}')
-    if container and container['State']['Running']:
-        size = docker_operation('exec', name, 'du', '-sk', '/var/lib/postgresql').split()[0]
-        print(f'postgres allocated: {int(size) / 1024:.1f} MiB; memory cap: 512 MiB')
-    result = subprocess.run(['du', '-skx', str(state_root())], capture_output=True, text=True, check=True)
-    print(f'host state allocated: {int(result.stdout.split()[0]) / 1024:.1f} MiB; '
-          f'free disk: {shutil.disk_usage(STATE).free / 1024 ** 3:.1f} GiB')
+    import dev_docker
+    return dev_docker.status(path, profile)
 
 
-def observe(path, profile, action, service):
-    if profile.get('runtime') == 'docker':
+def overview():
+    root = state_root()
+    for file in sorted((root / 'profiles').glob('*/profile.json')):
+        profile = json.loads(file.read_text())
+        state = 'ready' if ready(profile['ports']['api']) else (
+            'running' if running(file.parent, profile) else 'stopped')
+        print(f'{profile["name"]}  http://127.0.0.1:{profile["ports"]["api"]}  '
+              f'{(profile["build"] or "none")[:12]}  {state}')
+    return 0
+
+
+def up(path, profile):
+    cleanup()
+    if not profile['build']:
         import dev_docker
-        return dev_docker.observe(path, profile, action, service)
-    if action == 'services':
-        if socket_path(profile).exists():
-            print(supervisor(path, profile, 'process', 'list', '--output', 'wide'), end='')
-        else:
-            print('app supervisor stopped')
-        name, _ = db_names(profile)
-        container = owned('container', name, profile)
-        print(f'postgres: {"running" if container and container["State"]["Running"] else "stopped"}')
-        return 0
-    if action == 'logs' and service == 'postgres':
-        name, _ = db_names(profile)
-        if not owned('container', name, profile):
-            raise RuntimeError('profile Postgres container does not exist')
-        command = ['docker', 'logs', '--tail', '200', '--follow', name]
-    else:
-        if not socket_path(profile).exists():
-            raise RuntimeError('app supervisor stopped; start the profile first or inspect its saved log files')
-        command = ['process-compose', 'attach', '--read-only'] if action == 'monitor' else [
-            'process-compose', 'process', 'logs', service, '--tail', '200', '--follow']
-        command.extend(('--use-uds', '--unix-socket', str(socket_path(profile)),
-                        '--log-file', str(path / 'logs' / 'viewer-client.log')))
-    environment = clean_environment()
-    if action == 'monitor':
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            raise RuntimeError('monitor needs an interactive terminal; use just services for a text listing')
-        terminal = os.environ.get('TERM', '')
-        environment['TERM'] = terminal if terminal and terminal != 'dumb' else 'xterm-256color'
-        if os.environ.get('COLORTERM'):
-            environment['COLORTERM'] = os.environ['COLORTERM']
-    return subprocess.run(command, cwd=path, env=environment).returncode
+        dev_docker.configure_profile(path, profile)
+        build(path, profile)
+    start(path, profile, True)
+    create_user(path, profile)
+
+
+@contextmanager
+def main_snapshot():
+    revision = subprocess.run(['git', '-C', str(REPO), 'rev-parse', '--verify', 'refs/heads/main^{commit}'],
+                              capture_output=True, text=True)
+    if revision.returncode:
+        raise RuntimeError('no main branch')
+    root = Path(tempfile.mkdtemp(prefix='lumen-main-'))
+    try:
+        archive = subprocess.Popen(['git', '-C', str(REPO), 'archive', 'refs/heads/main'],
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        extract = subprocess.run(['tar', '-x', '-C', str(root)], stdin=archive.stdout,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        archive.stdout.close()
+        if archive.wait() or extract.returncode:
+            raise RuntimeError('main export failed')
+        yield root, revision.stdout.strip()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def deploy(path, profile):
+    if profile['name'] != 'personal':
+        raise RuntimeError('deploy updates personal only')
+    with main_snapshot() as (root, commit):
+        print(f'deploying main {commit[:12]}', flush=True)
+        import dev_docker
+        return dev_docker.upgrade(path, profile, root=root, commit=commit)
+
+
+def logs(path, profile, service):
+    import dev_docker
+    return dev_docker.observe(path, profile, 'logs', service)
 
 
 def cleanup():
@@ -767,12 +437,10 @@ def cleanup():
         if profile.get('expires') is None or profile['expires'] > time.time():
             continue
         if running(path, profile):
-            print(f'retaining running preview {profile["name"]}')
             continue
         name, volume = db_names(profile)
         container = owned('container', name, profile)
         if container and container['State']['Running']:
-            print(f'retaining running database {name}')
             continue
         if container:
             docker_operation('rm', name, profile=profile)
@@ -783,113 +451,83 @@ def cleanup():
     prune_installed_builds(root)
     checks.prune_caches(checks.runtime_root())
     checks.check_storage(checks.runtime_root())
-    print('managed cache retention checked; warm caches within the budget retained')
+
+
+def clean():
+    cleanup()
+    print('clean complete; expired previews and idle caches reclaimed', flush=True)
+
+
+COMMANDS = ('status', 'up', 'down', 'logs', 'deploy', 'dev', 'migrations', 'backup',
+            'clean', 'media-import', 'media-verify')
+INTERNAL_COMMANDS = ('watch-step',)
 
 
 def main():
     parser = argparse.ArgumentParser(description='bounded laptop development stack')
-    parser.add_argument('command', choices=('setup', 'start', 'stop', 'status', 'reload', 'upgrade', 'backup', 'backup-check', 'login', 'cleanup', 'media-import', 'media-verify', 'watch', 'watch-step', 'migrate', 'migrations', 'monitor', 'services', 'logs', 'containerize', 'resources'))
-    parser.add_argument('profile', nargs='?', default='personal', type=profile_name)
-    parser.add_argument('--service', choices=('api', 'worker', 'youtube', 'metadata', 'postgres'), default='api')
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--full', action='store_true')
-    mode.add_argument('--local', action='store_true')
+    parser.add_argument('command', metavar='{' + ','.join(COMMANDS) + '}')
+    parser.add_argument('profile', nargs='?', type=profile_name)
+    parser.add_argument('--service', choices=('api', 'worker', 'youtube', 'metadata', 'postgres'))
     parser.add_argument('--watch-token')
-    parser.add_argument('--runtime', choices=('docker', 'native'))
     parser.add_argument('--remote')
     parser.add_argument('--source')
     parser.add_argument('--manifest', type=Path)
     args = parser.parse_args()
-    if (args.full or args.local) and args.command != 'start':
-        parser.error('--full/--local apply only to start')
+    if args.command not in COMMANDS + INTERNAL_COMMANDS:
+        parser.error(f'unknown command {args.command!r}; choose from {", ".join(COMMANDS)}')
+    if args.service is not None and args.command != 'logs':
+        parser.error('--service applies only to logs')
+    if args.watch_token is not None and args.command != 'watch-step':
+        parser.error('--watch-token applies only to watch-step')
     if (args.remote or args.source or args.manifest) and args.command != 'media-import':
         parser.error('--remote/--source/--manifest apply only to media-import')
     if args.command == 'media-import' and args.manifest is None:
         parser.error('media-import requires --manifest with the selected album directories')
-    if args.runtime and args.command != 'setup':
-        parser.error('--runtime applies only to setup')
+    if args.profile is None and args.command != 'status':
+        args.profile = 'personal'
     signal.signal(signal.SIGTERM, checks.interrupt)
     try:
-        if args.command in ('monitor', 'services', 'logs'):
-            path, profile = load_profile(args.profile)
-            return observe(path, profile, args.command, args.service)
-        if args.command == 'watch':
+        if args.command == 'status' and args.profile is None:
+            return overview()
+        if args.command == 'dev':
             import dev_watch
             return dev_watch.watch(args.profile)
+        if args.command == 'logs':
+            path, profile = load_profile(args.profile)
+            return logs(path, profile, args.service)
         with state_lock():
             if args.command == 'media-import':
                 dev_media.import_media(state_root(), args.remote, args.source, args.manifest)
             elif args.command == 'media-verify':
                 dev_media.verify(state_root())
-            elif args.command == 'cleanup':
-                cleanup()
+            elif args.command == 'clean':
+                clean()
             else:
-                path, profile = load_profile(args.profile, create=args.command == 'setup')
-                if args.command == 'setup':
-                    cleanup()
-                    if args.runtime:
-                        if profile['build'] and profile.get('runtime', 'native') != args.runtime:
-                            raise RuntimeError('existing runtime changes require just containerize')
-                        profile['runtime'] = args.runtime
-                    if profile.get('runtime') == 'docker':
-                        import dev_docker
-                        dev_docker.configure_profile(path, profile)
-                    if profile['build'] and profile['build'] != current_identity(profile):
-                        action = 'upgrade' if args.profile == 'personal' else 'reload'
-                        raise RuntimeError(f'profile already has an installed build; use just {action} {args.profile} to change source')
-                    build(path, profile)
-                elif args.command == 'containerize':
-                    import dev_docker
-                    dev_docker.convert(path, profile)
-                elif args.command == 'resources':
-                    import dev_docker
-                    dev_docker.resources(profile)
-                elif args.command == 'start':
-                    cleanup()
-                    start(path, profile, False if args.local else args.full or profile['full'])
-                    create_user(path, profile)
-                elif args.command == 'stop':
+                path, profile = load_profile(args.profile, create=args.command == 'up')
+                if args.command == 'up':
+                    up(path, profile)
+                elif args.command == 'down':
                     stop(path, profile)
                 elif args.command == 'status':
                     status(path, profile)
-                elif args.command == 'login':
-                    create_user(path, profile)
+                elif args.command == 'deploy':
+                    deploy(path, profile)
                 elif args.command == 'backup':
                     backup(path, profile)
-                elif args.command == 'backup-check':
                     backup_check(path, profile)
-                elif args.command in ('watch-step', 'migrate', 'migrations'):
+                elif args.command == 'migrations':
                     import dev_watch
-                    if args.command == 'watch-step':
-                        dev_watch.watch_step(path, profile, args.watch_token)
-                    elif args.command == 'migrations':
-                        dev_watch.migration_status(path, profile)
-                    else:
-                        dev_watch.reload(path, profile, migrations=True)
-                elif args.command in ('reload', 'upgrade'):
-                    if args.profile == 'personal' and args.command != 'upgrade':
-                        raise RuntimeError('personal source changes require just upgrade personal, which backs up first')
-                    if args.command == 'reload':
-                        import dev_watch
-                        dev_watch.reload(path, profile, migrations=True)
-                    elif profile.get('runtime') == 'docker':
-                        import dev_docker
-                        dev_docker.upgrade(path, profile)
-                    else:
-                        backup(path, profile)
-                        old = dict(profile)
-                        profile.pop('rust_build', None)
-                        build(path, profile)
-                        stop(path, old)
-                        start(path, profile, old['full'])
-                        create_user(path, profile)
+                    dev_watch.migration_status(path, profile)
+                elif args.command == 'watch-step':
+                    import dev_watch
+                    dev_watch.watch_step(path, profile, args.watch_token)
         return 0
     except KeyboardInterrupt:
         return 130
     except checks.Interrupted as error:
         return 128 + error.signum
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
-        print(f'dev setup failed: {error}', file=sys.stderr)
+        print(f'{args.command} failed: {error}', file=sys.stderr)
         return 1
 
 

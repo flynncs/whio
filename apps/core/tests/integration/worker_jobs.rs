@@ -1,5 +1,3 @@
-#![cfg(feature = "postgres-integration")]
-
 use std::{
     net::{SocketAddr, TcpListener},
     path::PathBuf,
@@ -15,7 +13,7 @@ use whio_core::{
     platform::jobs::Enqueued,
 };
 
-mod support;
+use crate::support;
 
 use support::worker::{CREDENTIAL_KEY, Worker, database_url};
 

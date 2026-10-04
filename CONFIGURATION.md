@@ -25,7 +25,7 @@ docker compose exec core whio-cli mint-app-password listener feishin
 
 use that username and the printed password in a Subsonic client at
 `http://localhost:3000`. the CLI also supports `revoke <credential-id>` and
-`assign-admin <username>`. for native use, install it with
+`assign-admin <username>`. to run the CLI on the host instead, install it with
 `cargo install --path apps/core --bin whio-cli`; it reads the repository `.env`.
 `--database-url` and `--credential-key` override those values.
 

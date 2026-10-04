@@ -1,10 +1,8 @@
 use std::{collections::HashMap, env, fs};
 
+use crate::dedup_fixture::from_ytm;
 use serde_json::Value;
 use whio_core::features::music_library::domain::{MatchRecord, RecordingIndex};
-#[path = "support/dedup.rs"]
-mod dedup_fixture;
-use dedup_fixture::from_ytm;
 
 #[test]
 fn fixture_parser_preserves_clock_duration_and_provider_evidence() {

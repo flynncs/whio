@@ -1,5 +1,3 @@
-#![cfg(feature = "postgres-integration")]
-
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
@@ -21,7 +19,7 @@ use whio_core::features::music_library::test_support::{
 };
 use whio_core::platform::request::{RequestContext, RequestId};
 
-mod support;
+use crate::support;
 
 use support::{credential_service_with_known_app_password, router, services};
 

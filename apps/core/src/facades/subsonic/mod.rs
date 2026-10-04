@@ -1382,7 +1382,7 @@ pub(crate) async fn scrobble(
         &ids,
         &times,
         submission,
-        chrono::Utc::now(),
+        state.activity().now(),
     )
     .await
     {
@@ -1407,7 +1407,7 @@ pub(crate) async fn get_now_playing(
         state.credential(),
         &principal,
         state.source_tags(),
-        chrono::Utc::now(),
+        state.activity().now(),
     )
     .await
     {
@@ -1436,7 +1436,7 @@ pub(crate) async fn report_playback(
         principal.user_id.as_uuid(),
         query.get("c").unwrap_or_default(),
         &request,
-        chrono::Utc::now(),
+        state.activity().now(),
     )
     .await
     {

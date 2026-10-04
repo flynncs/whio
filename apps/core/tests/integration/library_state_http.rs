@@ -1,8 +1,6 @@
-#![cfg(feature = "postgres-integration")]
-
+use crate::support;
 use sqlx::PgPool;
 use whio_core::features::music_library::test_support::PostgresTrackRepository;
-mod support;
 
 use std::sync::Arc;
 

@@ -42,6 +42,20 @@ class WorktreeTests(unittest.TestCase):
     def git(self, *args, cwd=None):
         return subprocess.check_output(['git', *args], cwd=cwd or self.repo)
 
+    def test_context_files_include_only_instructions_packet_agents_and_areas(self):
+        (self.repo / 'docs/agents').mkdir()
+        (self.repo / 'docs/agents/review-brief.md').write_text('review')
+        (self.repo / 'docs/agents/dispatch.sh').write_text('#!/bin/sh\n')
+        (self.repo / 'docs/areas').mkdir()
+        (self.repo / 'docs/areas/dev-tooling.md').write_text('area')
+        (self.repo / 'docs/implementation').mkdir()
+        (self.repo / 'docs/implementation/other.md').write_text('other')
+        (self.repo / 'docs/ROADMAP.md').write_text('roadmap')
+        self.assertEqual(agent_worktree.context_files(self.packet), sorted([
+            self.repo / 'AGENTS.md', self.packet,
+            self.repo / 'docs/agents/review-brief.md', self.repo / 'docs/agents/dispatch.sh',
+            self.repo / 'docs/areas/dev-tooling.md']))
+
     def test_current_snapshot_preserves_index_and_hands_off_untracked_source(self):
         (self.repo / 'source.rs').write_text('staged')
         self.git('add', 'source.rs')

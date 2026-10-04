@@ -263,7 +263,7 @@ def check_storage(root):
     used = sum(cache_size(path) for path in cache_entries(root)) + docker_cache_size(root)
     free = shutil.disk_usage(root).free
     if used > CACHE_BUDGET:
-        raise RuntimeError('aggregate managed build caches exceeded 16 GiB; run just cleanup when idle')
+        raise RuntimeError('aggregate managed build caches exceeded 16 GiB; run just clean when idle')
     if free < FREE_RESERVE:
         raise RuntimeError('less than 10 GiB free; reclaim build/storage space before continuing')
 

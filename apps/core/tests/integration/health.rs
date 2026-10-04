@@ -1,5 +1,3 @@
-#![cfg(feature = "postgres-integration")]
-
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
@@ -8,7 +6,7 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-mod support;
+use crate::support;
 
 use support::app;
 

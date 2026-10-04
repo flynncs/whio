@@ -438,7 +438,7 @@ fn the_two_owner_ports_are_one_adapter_allocation() {
 }
 
 #[cfg(feature = "postgres-integration")]
-mod support;
+use crate::support;
 
 #[cfg(feature = "postgres-integration")]
 mod routes {

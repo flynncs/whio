@@ -1,5 +1,3 @@
-#![cfg(feature = "postgres-integration")]
-
 use sqlx::PgPool;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uuid::Uuid;

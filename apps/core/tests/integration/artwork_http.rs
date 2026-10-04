@@ -1,12 +1,10 @@
-#![cfg(feature = "postgres-integration")]
-
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::path::PathBuf;
 use std::sync::Arc;
 use whio_core::features::music_library::test_support::PostgresTrackRepository;
 
-mod support;
+use crate::support;
 
 use axum::{
     body::Body,

@@ -37,6 +37,15 @@ def command(profile, *arguments, timeout=30):
     return result.stdout.strip()
 
 
+def remove_container(profile, name):
+    remaining = dev.inspect('container', name, profile)
+    if not remaining:
+        return
+    if (remaining['Config'].get('Labels') or {}).get('dev.lumen.local-profile') != dev.label(profile):
+        raise RuntimeError('throwaway container owner differs')
+    command(profile, 'rm', '--force', name)
+
+
 def configure_profile(path, profile, persist=True):
     if not profile.get('docker_context'):
         profile['docker_context'] = command({}, 'context', 'show')
@@ -60,7 +69,8 @@ def configure_profile(path, profile, persist=True):
         dev.write_json(path / 'profile.json', profile)
 
 
-def image_names(profile):
+def image_names(profile, root=None):
+    root = dev.source_root(root)
     values = {}
     for name, paths in {
         'compiler': ('docker/local.Dockerfile', 'rust-toolchain.toml'),
@@ -69,13 +79,14 @@ def image_names(profile):
     }.items():
         digest = hashlib.sha256()
         for path in paths:
-            digest.update(path.encode() + b'\0' + (dev.REPO / path).read_bytes())
+            digest.update(path.encode() + b'\0' + (root / path).read_bytes())
         values[name] = f'lumen-dev-{os.getuid()}/{name}:{digest.hexdigest()[:20]}-{profile["architecture"]}'
     return values
 
 
-def identity(profile):
-    return hashlib.sha256((dev.source_identity() + json.dumps(image_names(profile), sort_keys=True)).encode()).hexdigest()
+def identity(profile, root=None):
+    root = dev.source_root(root)
+    return hashlib.sha256((dev.source_identity(root) + json.dumps(image_names(profile, root), sort_keys=True)).encode()).hexdigest()
 
 
 def project(profile):
@@ -87,9 +98,42 @@ def context_key(profile):
     return hashlib.sha256(profile['docker_context'].encode()).hexdigest()[:12]
 
 
+def main_checkout_key():
+    result = subprocess.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                            cwd=dev.REPO, capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        return None
+    return checks.cache_key(Path(result.stdout.strip()).parent)
+
+
+def clone_target_cache(profile, target, main_key):
+    source = build_volume_name(profile, main_key)
+    if not dev.inspect('volume', source, profile):
+        return
+    name = project(profile) + '-clone-' + uuid.uuid4().hex[:8]
+    try:
+        arguments = [*dev.docker_args(profile), 'run', '--rm', '--name', name,
+                     '--label', f'dev.lumen.local-profile={dev.label(profile)}',
+                     '--mount', f'type=volume,source={source},target=/from',
+                     '--mount', f'type=volume,source={target},target=/to',
+                     '--entrypoint', 'cp', profile['images']['compiler'],
+                     '-a', '--reflink=always', '/from/.', '/to/']
+        try:
+            result = subprocess.run(arguments, capture_output=True, timeout=300)
+        except (subprocess.TimeoutExpired, OSError):
+            result = subprocess.CompletedProcess([], 1)
+        if result.returncode:
+            print('target cache was not cloned; build starts from an empty target', flush=True)
+    finally:
+        remove_container(profile, name)
+
+
+def build_volume_name(profile, suffix):
+    return f'lumen-build-{os.getuid()}-{context_key(profile)}-{profile["architecture"]}-{suffix}'
+
+
 def cache_volume(profile, kind, key=None):
-    suffix = key if kind == 'target' else kind
-    name = f'lumen-build-{os.getuid()}-{context_key(profile)}-{profile["architecture"]}-{suffix}'
+    name = build_volume_name(profile, key if kind == 'target' else kind)
     value = dev.inspect('volume', name, profile)
     expected = {OWNER: str(os.getuid()), KIND: kind}
     if key:
@@ -102,6 +146,9 @@ def cache_volume(profile, kind, key=None):
         for label, text in expected.items():
             arguments.extend(('--label', f'{label}={text}'))
         command(profile, *arguments, name)
+        main_key = main_checkout_key() if kind == 'target' else None
+        if main_key and key and key != main_key:
+            clone_target_cache(profile, name, main_key)
     return name
 
 
@@ -216,23 +263,24 @@ def compose(path, profile, *arguments, builder=False, timeout=55):
     return command(profile, 'compose', '-f', str(file), '--profile', 'full', '--profile', 'build', *arguments, timeout=timeout)
 
 
-def copy_source(destination):
-    expected = dev.source_identity()
-    for file in dev.source_files():
-        output = destination / file.relative_to(dev.REPO)
+def copy_source(destination, root=None):
+    root = dev.source_root(root)
+    expected = dev.source_identity(root)
+    for file in dev.source_files(root):
+        output = destination / file.relative_to(root)
         output.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(file, output)
     (destination / 'docker').mkdir(exist_ok=True)
     for name in ('local.Dockerfile', 'ytm-resolver.Dockerfile'):
-        shutil.copy2(dev.REPO / 'docker' / name, destination / 'docker' / name)
+        shutil.copy2(root / 'docker' / name, destination / 'docker' / name)
     (destination / '.dockerignore').write_text('.git\n**/target\n**/__pycache__\n')
-    if expected != dev.source_identity():
+    if expected != dev.source_identity(root):
         raise RuntimeError('source changed while copying; current server retained; retry')
     return expected
 
 
-def ensure_images(path, profile, source, descriptors):
-    names = image_names(profile)
+def ensure_images(path, profile, source, descriptors, root=None):
+    names = image_names(profile, root)
     missing = []
     for kind, name in names.items():
         value = dev.inspect('image', name, profile)
@@ -241,8 +289,8 @@ def ensure_images(path, profile, source, descriptors):
         if not value:
             missing.append(kind)
     if missing:
-        root = checks.runtime_root()
-        handle = checks.try_lock(root / 'locks' / ('images-' + context_key(profile) + '.lock'))
+        cache = checks.runtime_root()
+        handle = checks.try_lock(cache / 'locks' / ('images-' + context_key(profile) + '.lock'))
         if handle is None:
             raise RuntimeError('shared image builder is busy; retry after its active build')
         name = 'lumen-dev-' + str(os.getuid()) + '-' + context_key(profile)
@@ -285,19 +333,20 @@ def ensure_images(path, profile, source, descriptors):
     profile['images'] = names
 
 
-def build(path, profile, persist=True):
+def build(path, profile, persist=True, root=None, commit=None):
     import dev_watch
+    root = dev.source_root(root)
     configure_profile(path, profile, persist=False)
-    expected = identity(profile)
+    expected = identity(profile, root)
     destination = dev.builds_root(profile) / expected
-    components = dev_watch.components(profile)
+    components = dev_watch.components(root)
     if not (destination / 'build.json').is_file():
-        root = checks.runtime_root()
+        cache = checks.runtime_root()
         key = checks.cache_key(dev.REPO)
-        with checks.admission(root, key, 60) as (_, descriptors), tempfile.TemporaryDirectory(prefix='lumen-build-source-') as temporary:
+        with checks.admission(cache, key, 60) as (_, descriptors), tempfile.TemporaryDirectory(prefix='lumen-build-source-') as temporary:
             source = Path(temporary)
-            source_sha = copy_source(source)
-            ensure_images(path, profile, source, descriptors)
+            source_sha = copy_source(source, root)
+            ensure_images(path, profile, source, descriptors, root)
             cleanup_caches(profile)
             guard(profile)
             config(path, profile, profile['full'], source)
@@ -325,11 +374,12 @@ def build(path, profile, persist=True):
                         command(profile, 'cp', container + ':/target/debug/' + name, str(staging / name))
                 resolver = staging / 'resolver'
                 shutil.copytree(source / 'apps/ytm-resolver', resolver, ignore=shutil.ignore_patterns('tests'))
-                if expected != identity(profile):
+                if expected != identity(profile, root):
                     raise RuntimeError('source changed while building; previous installed build retained; retry')
-                dev.write_json(staging / 'build.json', {'identity': expected, 'source_sha256': source_sha,
+                document = {'identity': expected, 'source_sha256': source_sha,
                             'components': components, 'images': profile['images'], 'architecture': profile['architecture'],
-                            'created': time.time(), 'seconds': elapsed, 'source_checkout': str(dev.REPO)})
+                            'created': time.time(), 'seconds': elapsed, 'source_checkout': str(dev.REPO)}
+                dev.write_json(staging / 'build.json', document)
                 staging.rename(destination)
             finally:
                 compose(path, profile, 'rm', '--stop', '--force', 'builder', builder=True)
@@ -348,8 +398,11 @@ def build(path, profile, persist=True):
     if any(not dev.inspect('image', name, profile) for name in document['images'].values()):
         with checks.admission(checks.runtime_root(), checks.cache_key(dev.REPO), 60) as (_, descriptors), tempfile.TemporaryDirectory(prefix='lumen-image-source-') as temporary:
             source = Path(temporary)
-            copy_source(source)
-            ensure_images(path, profile, source, descriptors)
+            copy_source(source, root)
+            ensure_images(path, profile, source, descriptors, root)
+    if commit and document.get('head') != commit:
+        document['head'] = commit
+        dev.write_json(destination / 'build.json', document)
     profile.update(build=expected, images=document['images'], resolver_snapshot=True, source_checkout=str(dev.REPO))
     if persist:
         dev.write_json(path / 'profile.json', profile)
@@ -371,12 +424,8 @@ def start_db(path, profile):
         if bindings != expected or not mounted:
             raise RuntimeError('database configuration differs; existing container left untouched')
         if previous['Config']['Labels'].get('com.docker.compose.project') != project(profile):
-            if not profile.get('adopt_database'):
-                raise RuntimeError('database is managed by the native lifecycle; use just containerize first')
-            if previous['State']['Running']:
-                command(profile, 'stop', '--time', '10', name)
-            command(profile, 'rm', name)
-        elif previous['State']['Running']:
+            raise RuntimeError('database is not managed by this profile; remove it explicitly before starting')
+        if previous['State']['Running']:
             return
     dev.check_ports({'postgres': profile['ports']['postgres']})
     config(path, profile, profile['full'])
@@ -425,7 +474,7 @@ def wait_ready(profile):
 
 def start(path, profile, full):
     if not profile['build']:
-        raise RuntimeError('profile has no build; run just setup first')
+        raise RuntimeError('profile has no build; run just up first')
     active = running(path, profile)
     if active:
         if profile['full'] != full:
@@ -437,10 +486,6 @@ def start(path, profile, full):
         active = command(profile, 'ps', '--filter', 'label=com.docker.compose.service=api', '--format', '{{.Label "dev.lumen.local-profile"}}')
         if any(value.startswith(f'{os.getuid()}-preview-') and value != dev.label(profile) for value in active.splitlines()):
             raise RuntimeError('one full preview is already active; stop it first')
-        for file in (dev.state_root() / 'profiles').glob('preview-*/profile.json'):
-            previous = json.loads(file.read_text())
-            if previous['name'] != profile['name'] and previous.get('runtime', 'native') == 'native' and dev.socket_path(previous).exists():
-                raise RuntimeError('a native preview is already active; stop it first')
     media(profile)
     guard(profile)
     names = ('api', 'worker', 'youtube', 'metadata') if full else ('api',)
@@ -459,7 +504,6 @@ def start(path, profile, full):
         raise
     if profile['name'].startswith('preview-'):
         profile['expires'] = time.time() + 86400
-    profile.pop('adopt_database', None)
     dev.write_json(path / 'profile.json', profile)
     print(f'{profile["name"]} ready at http://127.0.0.1:{profile["ports"]["api"]}; Docker Compose', flush=True)
 
@@ -490,11 +534,7 @@ def validate_resolvers(path, profile):
                 if result.returncode:
                     raise RuntimeError('resolver import failed; previous server retained; inspect profile import log')
             finally:
-                remaining = dev.inspect('container', name, profile)
-                if remaining:
-                    if (remaining['Config'].get('Labels') or {}).get('dev.lumen.local-profile') != dev.label(profile):
-                        raise RuntimeError('import container owner differs')
-                    command(profile, 'rm', '--force', name)
+                remove_container(profile, name)
 
 
 def replace(path, previous, candidate, schema_changed=False):
@@ -632,49 +672,7 @@ def backup_check(path, profile):
     directories = sorted(item for item in (path / 'backups').iterdir() if (item / 'backup.json').exists())
     if not directories:
         raise RuntimeError('no completed backup; run just backup first')
-    saved = json.loads((directories[-1] / 'profile.json').read_text())
-    if saved.get('runtime') != 'docker':
-        return dev.backup_check(path, dict(profile, runtime='native'))
     restored_preview(path, profile, directories[-1])
-
-
-def convert(path, previous):
-    if previous.get('runtime') == 'docker':
-        print('profile already uses Docker Compose')
-        return
-    import dev_watch
-    dev_watch.owner(path)
-    original = dict(previous)
-    candidate = dict(previous, runtime='docker', adopt_database=True)
-    candidate.pop('rust_build', None)
-    configure_profile(path, candidate, persist=False)
-    build(path, candidate, persist=False)
-    directory = dev.backup(path, previous)
-    counts = restored_preview(path, previous, directory, candidate)
-    active = dev.running(path, previous)
-    try:
-        dev.stop(path, previous, database=False)
-        dev.runtime_links(path, candidate, previous=previous)
-        start(path, candidate, previous['full'])
-        if (path / 'client-login.json').exists():
-            ping(candidate, json.loads((path / 'client-login.json').read_text()))
-        if database_counts(candidate) != counts:
-            raise RuntimeError('live library/user counts differ after conversion')
-        dev.write_json(path / 'profile.json', candidate)
-    except BaseException:
-        stop(path, candidate, database=False)
-        old_manifest = json.loads((dev.builds_root(original) / original['build'] / 'build.json').read_text())
-        new_manifest = json.loads((dev.builds_root(candidate) / candidate['build'] / 'build.json').read_text())
-        if old_manifest.get('components', {}).get('migrations') != new_manifest['components']['migrations']:
-            dev.write_json(path / 'profile.json', candidate)
-            raise RuntimeError(f'conversion/startup failed after schema change; backup retained at {directory}; recover explicitly')
-        dev.write_json(path / 'profile.json', original)
-        dev.runtime_links(path, original, previous=candidate)
-        if active:
-            dev.start(path, original, original['full'], preserve_database=True)
-        raise
-    dev.prune_installed_builds(dev.state_root())
-    print(f'{candidate["name"]} converted; database/key/login/media retained; backup {directory}', flush=True)
 
 
 def destroy(path, profile):
@@ -696,7 +694,9 @@ def observe(path, profile, action, service):
         print(compose(path, profile, 'ps', '--all'))
         return 0
     if action == 'logs':
-        arguments = [*dev.docker_args(profile), 'compose', '-f', str(path / 'compose.json'), 'logs', '--tail', '200', '--follow', service]
+        arguments = [*dev.docker_args(profile), 'compose', '-f', str(path / 'compose.json'), 'logs', '--tail', '200', '--follow']
+        if service:
+            arguments.append(service)
     else:
         ids = compose(path, profile, 'ps', '-q').splitlines()
         if not ids:
@@ -848,14 +848,15 @@ def cleanup():
         cleanup_caches(profile)
 
 
-def upgrade(path, previous):
+def upgrade(path, previous, root=None, commit=None):
     import dev_watch
+    root = dev.source_root(root)
     dev_watch.owner(path)
     dev.start_db(path, previous)
-    if dev_watch.migration_status(path, previous, display=False):
+    if dev_watch.migration_status(path, previous, display=False, root=root):
         raise RuntimeError('applied migration differs; restore its original source')
     candidate = dict(previous)
-    build(path, candidate, persist=False)
+    build(path, candidate, persist=False, root=root, commit=commit)
     directory = dev.backup(path, previous)
     restored_preview(path, previous, directory, candidate)
     old = json.loads((dev.builds_root(previous) / previous['build'] / 'build.json').read_text())['components']

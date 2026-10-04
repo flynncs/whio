@@ -1,6 +1,4 @@
-#![cfg(feature = "postgres-integration")]
-
-mod support;
+use crate::support;
 
 use support::{
     NATIVE_AUTH_QUERY, StorePorts, app, credentials::database_credential_service, router, services,

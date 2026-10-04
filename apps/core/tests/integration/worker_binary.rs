@@ -1,10 +1,8 @@
-#![cfg(feature = "postgres-integration")]
-
 use std::{process::Command, time::Duration};
 
 use sqlx::PgPool;
 
-mod support;
+use crate::support;
 
 use support::worker::{CREDENTIAL_KEY, Worker};
 

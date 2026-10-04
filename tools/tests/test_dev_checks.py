@@ -8,6 +8,8 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -144,6 +146,13 @@ class DevChecksTest(unittest.TestCase):
             checks.prune_caches(self.root)
         self.assertFalse(old.exists())
         self.assertTrue(recent.exists())
+
+    def test_prune_is_silent_when_no_cache_is_removed(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            checks.prune_caches(self.root)
+        self.assertEqual(output.getvalue(), '')
+        self.assertEqual(list((self.root / 'targets').iterdir()), [])
 
     def test_budget_and_disk_reserve_fail(self):
         cache = self.root / 'targets' / ('a' * 16)

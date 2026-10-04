@@ -1,12 +1,10 @@
-#![cfg(feature = "postgres-integration")]
-
 use sqlx::PgPool;
 use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::Mutex;
 
+use crate::support;
 use async_trait::async_trait;
-mod support;
 
 use axum::{
     Router,

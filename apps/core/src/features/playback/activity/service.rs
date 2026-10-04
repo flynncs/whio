@@ -34,9 +34,27 @@ pub enum ActivityError {
     Submission(#[source] ListenError),
 }
 
+#[derive(Clone)]
+pub struct Clock(Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>);
+
+impl Clock {
+    pub fn system() -> Self {
+        Self(Arc::new(Utc::now))
+    }
+
+    pub fn from_fn(now: impl Fn() -> DateTime<Utc> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(now))
+    }
+
+    pub(crate) fn now(&self) -> DateTime<Utc> {
+        (self.0)()
+    }
+}
+
 pub struct PlaybackActivityService {
     listens: Arc<ListenService>,
     library: Arc<LibraryService>,
+    clock: Clock,
     sessions: Mutex<LiveSessions>,
 }
 
@@ -45,6 +63,7 @@ impl PlaybackActivityService {
         Self {
             listens,
             library,
+            clock: Clock::system(),
             sessions: Mutex::new(LiveSessions::default()),
         }
     }
@@ -53,8 +72,18 @@ impl PlaybackActivityService {
         Self {
             listens: Arc::new(ListenService::disabled()),
             library,
+            clock: Clock::system(),
             sessions: Mutex::new(LiveSessions::default()),
         }
+    }
+
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    pub(crate) fn now(&self) -> DateTime<Utc> {
+        self.clock.now()
     }
 
     pub async fn report(&self, report: &PlaybackReport) -> Result<ActivitySession, ActivityError> {
