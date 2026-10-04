@@ -70,4 +70,4 @@ pub use state::{
     GenreSummary, LibraryState, MAX_RATING, MIN_RATING, Starred, StateTarget, checked_rating,
 };
 pub(crate) use text::normalize_for_matching;
-pub use track::{Track, TrackHit, TrackId, TrackView};
+pub use track::{SourceRepresentationFacts, Track, TrackHit, TrackId, TrackView};

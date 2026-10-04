@@ -9,8 +9,8 @@ use crate::features::music_library::{
     domain::{
         AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ArtistId, CreditRole, IdSet, ProviderId,
         RandomSeed, Range, RoleSelector, RoleSet, SelectorText, SortDirection, SourceIdentity,
-        SourceScope, StateTarget, TrackId, TrackListFilter, TrackListScope, TrackMetadata,
-        TrackOrder, ValidationError,
+        SourceRepresentationFacts, SourceScope, StateTarget, TrackId, TrackListFilter,
+        TrackListScope, TrackMetadata, TrackOrder, ValidationError,
     },
     library::LibraryId,
     library_state::test_support::seed_play,
@@ -193,6 +193,42 @@ fn encoded(source: &SourceIdentity) -> String {
         SourceScope::Global => "global".to_owned(),
         SourceScope::Named(root) => format!("named:{root}"),
     }
+}
+
+async fn add_local_source(pool: &PgPool, track: &TrackId, external_id: &str) {
+    sqlx::query(
+        "INSERT INTO track_sources (id, track_id, provider_id, source_scope, external_id, created_at) \
+         VALUES ($1, $2, 'local', $3, $4, CURRENT_TIMESTAMP)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(track.as_uuid())
+    .bind(encoded(&source("local", external_id)))
+    .bind(external_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn attach_album_track(
+    pool: &PgPool,
+    album: &AlbumId,
+    track: &TrackId,
+    disc_number: i16,
+    track_number: i16,
+    position: i32,
+) {
+    sqlx::query(
+        "INSERT INTO album_tracks (album_id, track_id, disc_number, track_number, position) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(album.as_uuid())
+    .bind(track.as_uuid())
+    .bind(disc_number)
+    .bind(track_number)
+    .bind(position)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn set_missing(pool: &PgPool, source: &SourceIdentity, missing: bool) {
@@ -1834,4 +1870,339 @@ fn unknown_values_and_bad_ranges_are_explicit_errors() {
             field: "random_seed"
         })
     );
+}
+
+#[sqlx::test]
+async fn selected_source_facts_are_not_mixed(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let track = repository
+        .get_or_create(source("local", "a-selected.flac"), metadata("mixed facts"))
+        .await
+        .unwrap();
+    let id = track.id().clone();
+
+    add_local_source(&pool, &id, "b-other.flac").await;
+
+    let mut selected = local_facts(Some(2), Some(100));
+    selected.content_type = None;
+    selected.codec = Some("aac".to_owned());
+    selected.size_bytes = 0;
+    repository
+        .set_source_file_facts(&source("local", "a-selected.flac"), &selected)
+        .await
+        .unwrap();
+    repository
+        .set_source_file_facts(
+            &source("local", "b-other.flac"),
+            &local_facts(Some(6), Some(900)),
+        )
+        .await
+        .unwrap();
+
+    let expected = SourceRepresentationFacts {
+        source: source("local", "a-selected.flac"),
+        content_type: None,
+        suffix: Some("flac".to_owned()),
+        container: Some("flac".to_owned()),
+        codec: Some("aac".to_owned()),
+        size_bytes: Some(0),
+        bitrate_kbps: Some(100),
+        sample_rate_hz: Some(44_100),
+        bit_depth: Some(16),
+        channels: Some(2),
+    };
+
+    let page = repository
+        .page_tracks(0, 500, TrackOrder::Id, &TrackListFilter::new(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(page.items().len(), 1);
+    assert_eq!(page.items()[0].representation(), Some(&expected));
+
+    let views = repository.track_views(&[id], None).await.unwrap();
+
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].representation(), Some(&expected));
+}
+
+#[sqlx::test]
+async fn selected_source_facts_break_equal_external_ids_by_scope(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let elsewhere = source_in("local", OTHER_ROOT, "same.flac");
+    let track = repository
+        .get_or_create(elsewhere.clone(), metadata("scoped tie"))
+        .await
+        .unwrap();
+    let id = track.id().clone();
+
+    add_local_source(&pool, &id, "same.flac").await;
+
+    repository
+        .set_source_file_facts(&elsewhere, &local_facts(Some(2), Some(100)))
+        .await
+        .unwrap();
+    repository
+        .set_source_file_facts(
+            &source_in("local", LOCAL_ROOT, "same.flac"),
+            &local_facts(Some(6), Some(900)),
+        )
+        .await
+        .unwrap();
+
+    let page = repository
+        .page_tracks(0, 500, TrackOrder::Id, &TrackListFilter::new(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(page.items().len(), 1);
+    let representation = page.items()[0].representation().unwrap();
+
+    assert_eq!(representation.source, elsewhere);
+    assert_eq!(representation.channels, Some(2));
+    assert_eq!(representation.bitrate_kbps, Some(100));
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_channels(Some(range(Some(2), Some(2)))),
+            None
+        )
+        .await,
+        1,
+        "the selector picks the same scope the projection does"
+    );
+    assert_eq!(
+        total(
+            &repository,
+            &TrackListFilter::new().with_channels(Some(range(Some(6), Some(6)))),
+            None
+        )
+        .await,
+        0,
+        "the losing scope's channels are not the selected representation's"
+    );
+}
+
+#[sqlx::test]
+async fn provider_only_projection_has_no_representation(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("provider-only-facts", "Provider Only Facts")
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(
+            source("youtube_music", "vid-facts"),
+            metadata("provider only facts"),
+        )
+        .await
+        .unwrap();
+    let id = track.id().clone();
+
+    repository
+        .set_starred(user, StateTarget::Track(&id), true)
+        .await
+        .unwrap();
+
+    let page = repository
+        .page_tracks(0, 500, TrackOrder::Id, &TrackListFilter::new(), Some(user))
+        .await
+        .unwrap();
+
+    assert_eq!(page.items().len(), 1);
+    assert_eq!(page.items()[0].track().id(), &id);
+    assert_eq!(page.items()[0].representation(), None);
+
+    let views = repository.track_views(&[id], Some(user)).await.unwrap();
+
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].representation(), None);
+}
+
+#[sqlx::test]
+async fn local_projection_preserves_nullable_and_zero_size(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let zero = repository
+        .get_or_create(source("local", "zero-size.flac"), metadata("zero size"))
+        .await
+        .unwrap();
+    let absent = repository
+        .get_or_create(source("local", "absent-size.flac"), metadata("absent size"))
+        .await
+        .unwrap();
+    let zero_id = zero.id().clone();
+    let absent_id = absent.id().clone();
+
+    let mut zero_facts = local_facts(Some(2), Some(100));
+    zero_facts.size_bytes = 0;
+    repository
+        .set_source_file_facts(&source("local", "zero-size.flac"), &zero_facts)
+        .await
+        .unwrap();
+    repository
+        .set_source_file_facts(
+            &source("local", "absent-size.flac"),
+            &local_facts(Some(2), Some(100)),
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE track_sources SET size_bytes = NULL \
+         WHERE provider_id = 'local' AND source_scope = $1 AND external_id = 'absent-size.flac'",
+    )
+    .bind(encoded(&source("local", "absent-size.flac")))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let views = repository
+        .track_views(&[zero_id.clone(), absent_id.clone()], None)
+        .await
+        .unwrap();
+    let zero_view = views
+        .iter()
+        .find(|view| view.track().id() == &zero_id)
+        .unwrap();
+    let absent_view = views
+        .iter()
+        .find(|view| view.track().id() == &absent_id)
+        .unwrap();
+
+    assert_eq!(zero_view.representation().unwrap().size_bytes, Some(0));
+    assert_eq!(absent_view.representation().unwrap().size_bytes, None);
+}
+
+#[sqlx::test]
+async fn track_projection_preserves_order_and_repeats(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let first = repository
+        .get_or_create(source("local", "order-first.flac"), metadata("order first"))
+        .await
+        .unwrap();
+    let second = repository
+        .get_or_create(
+            source("local", "order-second.flac"),
+            metadata("order second"),
+        )
+        .await
+        .unwrap();
+    let third = repository
+        .get_or_create(source("local", "order-third.flac"), metadata("order third"))
+        .await
+        .unwrap();
+    let first_id = first.id().clone();
+    let second_id = second.id().clone();
+    let third_id = third.id().clone();
+
+    let requested = vec![
+        third_id.clone(),
+        first_id.clone(),
+        third_id.clone(),
+        TrackId::new(),
+        second_id.clone(),
+    ];
+    let views = repository.track_views(&requested, None).await.unwrap();
+    let ids = views
+        .iter()
+        .map(|view| view.track().id().clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ids,
+        vec![third_id.clone(), first_id.clone(), third_id, second_id]
+    );
+    assert!(repository.track_views(&[], None).await.unwrap().is_empty());
+}
+
+#[sqlx::test]
+async fn album_projection_preserves_its_membership_context(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let first_album = repository
+        .resolve_or_create_album(
+            &album("Context A").with_album_artist(credit("Context Artist", None)),
+        )
+        .await
+        .unwrap();
+    let second_album = repository
+        .resolve_or_create_album(
+            &album("Context B").with_album_artist(credit("Context Artist", None)),
+        )
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(source("local", "context.flac"), metadata("context"))
+        .await
+        .unwrap();
+    let id = track.id().clone();
+
+    repository
+        .set_source_file_facts(
+            &source("local", "context.flac"),
+            &local_facts(Some(2), Some(320)),
+        )
+        .await
+        .unwrap();
+    attach_album_track(&pool, first_album.id(), &id, 1, 2, 1).await;
+    attach_album_track(&pool, second_album.id(), &id, 2, 7, 5).await;
+
+    let first_entries = repository
+        .find_album_entries(first_album.id(), None)
+        .await
+        .unwrap();
+    let second_entries = repository
+        .find_album_entries(second_album.id(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(first_entries.len(), 1);
+    assert_eq!(second_entries.len(), 1);
+    assert_eq!(first_entries[0].membership().disc_number(), Some(1));
+    assert_eq!(first_entries[0].membership().track_number(), Some(2));
+    assert_eq!(second_entries[0].membership().disc_number(), Some(2));
+    assert_eq!(second_entries[0].membership().track_number(), Some(7));
+    assert_eq!(first_entries[0].representation().unwrap().channels, Some(2));
+    assert_eq!(
+        second_entries[0].representation().unwrap().channels,
+        Some(2)
+    );
+}
+
+#[sqlx::test]
+async fn invalid_representation_numeric_data_fails(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let track = repository
+        .get_or_create(
+            source("local", "invalid-channels.flac"),
+            metadata("invalid channels"),
+        )
+        .await
+        .unwrap();
+    let id = track.id().clone();
+
+    repository
+        .set_source_file_facts(
+            &source("local", "invalid-channels.flac"),
+            &local_facts(Some(2), Some(320)),
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE track_sources SET channels = 300 \
+         WHERE provider_id = 'local' AND source_scope = $1 AND external_id = 'invalid-channels.flac'",
+    )
+    .bind(encoded(&source("local", "invalid-channels.flac")))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        repository
+            .page_tracks(0, 500, TrackOrder::Id, &TrackListFilter::new(), None)
+            .await,
+        Err(TrackRepositoryError::InvalidData)
+    ));
+    assert!(matches!(
+        repository.track_views(&[id], None).await,
+        Err(TrackRepositoryError::InvalidData)
+    ));
 }

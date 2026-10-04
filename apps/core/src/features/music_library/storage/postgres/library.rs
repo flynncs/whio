@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use sqlx::PgPool;
 
@@ -7,9 +7,10 @@ use uuid::Uuid;
 
 use crate::features::music_library::{
     domain::{
-        Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, Artist, ArtistId,
-        ArtistListFilter, ArtistSort, ArtistSummary, GenreSummary, LOCAL_PROVIDER_ID, RandomSeed,
-        Range, Resource, RoleSelector, RoleSet, SearchTerms, SortDirection, Track, TrackHit,
+        Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, AlbumTrack, Artist,
+        ArtistCredit, ArtistId, ArtistListFilter, ArtistSort, ArtistSummary, GenreSummary,
+        LOCAL_PROVIDER_ID, LibraryState, RandomSeed, Range, Resource, RoleSelector, RoleSet,
+        SearchTerms, SortDirection, SourceIdentity, SourceRepresentationFacts, Track, TrackHit,
         TrackId, TrackListFilter, TrackListScope, TrackOrder, TrackPage, TrackView,
         YOUTUBE_MUSIC_PROVIDER_ID,
     },
@@ -24,8 +25,9 @@ use super::PostgresLibraryStore;
 use super::decode::{
     album_states, albums_for_tracks, artist_count_expressions, attach_album_state,
     attach_album_states, attach_artist_states, credits_for_tracks, decode_album,
-    decode_album_summary, decode_artist, decode_artist_summary, decode_membership, decode_track,
-    genres_for_tracks, hits_from_rows, repository_error, sources_for_tracks, track_states,
+    decode_album_summary, decode_artist, decode_artist_summary, decode_byte, decode_integer,
+    decode_membership, decode_source, decode_track, genres_for_tracks, hits_from_rows,
+    repository_error, sources_for_tracks, track_states,
 };
 use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS,
@@ -128,6 +130,7 @@ impl LibraryRead for PgStore {
         album_id: &AlbumId,
         user: Option<Uuid>,
     ) -> Result<Vec<AlbumEntry>, TrackRepositoryError> {
+        let library_ids = self.library_provider_ids();
         let rows = sqlx::query_as::<_, AlbumEntryRow>(&format!(
             r#"
             SELECT {TRACK_COLUMNS},
@@ -149,6 +152,8 @@ impl LibraryRead for PgStore {
         let mut genres = genres_for_tracks(&self.pool, &track_ids).await?;
         let mut sources = sources_for_tracks(&self.pool, &track_ids).await?;
         let states = track_states(&self.pool, user, &track_ids).await?;
+        let mut representations =
+            selected_representations_for_tracks(&self.pool, &library_ids, &track_ids).await?;
         let mut entries = Vec::with_capacity(rows.len());
 
         for row in rows {
@@ -171,7 +176,8 @@ impl LibraryRead for PgStore {
             entries.push(
                 AlbumEntry::new(track, membership)
                     .with_state(state)
-                    .with_sources(sources),
+                    .with_sources(sources)
+                    .with_representation(representations.remove(&id)),
             );
         }
 
@@ -473,19 +479,21 @@ impl LibraryRead for PgStore {
         }
 
         let ids = rows.iter().filter_map(|row| row.id).collect::<Vec<_>>();
-        let mut credits = credits_for_tracks(&self.pool, &ids).await?;
-        let mut genres = genres_for_tracks(&self.pool, &ids).await?;
-        let mut sources = sources_for_tracks(&self.pool, &ids).await?;
+        let credits = credits_for_tracks(&self.pool, &ids).await?;
+        let genres = genres_for_tracks(&self.pool, &ids).await?;
+        let sources = sources_for_tracks(&self.pool, &ids).await?;
         let states = track_states(&self.pool, user, &ids).await?;
-        let mut albums = albums_for_tracks(&self.pool, &ids).await?;
-        let mut items = Vec::with_capacity(ids.len());
+        let albums = albums_for_tracks(&self.pool, &ids).await?;
+        let representations =
+            selected_representations_for_tracks(&self.pool, &library_ids, &ids).await?;
+        let records = rows
+            .into_iter()
+            .map(|row| {
+                let (Some(id), Some(title)) = (row.id, row.title) else {
+                    return Err(TrackRepositoryError::InvalidData);
+                };
 
-        for row in rows {
-            let (Some(id), Some(title)) = (row.id, row.title) else {
-                return Err(TrackRepositoryError::InvalidData);
-            };
-            let track = decode_track(
-                TrackRecord {
+                Ok(TrackRecord {
                     id,
                     title,
                     duration_ms: row.duration_ms,
@@ -495,28 +503,18 @@ impl LibraryRead for PgStore {
                     recording_date_precision: row.recording_date_precision,
                     original_date: row.original_date,
                     original_date_precision: row.original_date_precision,
-                },
-                genres.remove(&id).unwrap_or_default(),
-                credits.remove(&id).unwrap_or_default(),
-            )?;
-            let (album, membership, album_artist) = match albums.remove(&id) {
-                Some((album, membership, album_artist)) => {
-                    (Some(album), Some(membership), album_artist)
-                }
-                None => (None, None, None),
-            };
-            let state = states.get(&id).copied().unwrap_or_default();
-            let sources = sources.remove(&id).unwrap_or_default();
-
-            items.push(TrackView::new(
-                track,
-                album,
-                membership,
-                album_artist,
-                state,
-                sources,
-            ));
-        }
+                })
+            })
+            .collect::<Result<Vec<_>, TrackRepositoryError>>()?;
+        let items = assemble_track_views(
+            records,
+            credits,
+            genres,
+            sources,
+            states,
+            albums,
+            representations,
+        )?;
 
         Ok(TrackPage::new(items, total))
     }
@@ -530,10 +528,13 @@ impl LibraryRead for PgStore {
             return Ok(Vec::new());
         }
 
-        let ids = track_ids
+        let library_ids = self.library_provider_ids();
+        let mut ids = track_ids
             .iter()
             .map(|track_id| *track_id.as_uuid())
             .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
         let rows = sqlx::query_as::<_, TrackRecord>(&format!(
             "SELECT {TRACK_COLUMNS} FROM tracks AS t WHERE t.id = ANY($1)"
         ))
@@ -542,40 +543,31 @@ impl LibraryRead for PgStore {
         .await
         .map_err(repository_error)?;
 
-        let mut credits = credits_for_tracks(&self.pool, &ids).await?;
-        let mut genres = genres_for_tracks(&self.pool, &ids).await?;
-        let mut sources = sources_for_tracks(&self.pool, &ids).await?;
+        let credits = credits_for_tracks(&self.pool, &ids).await?;
+        let genres = genres_for_tracks(&self.pool, &ids).await?;
+        let sources = sources_for_tracks(&self.pool, &ids).await?;
         let states = track_states(&self.pool, user, &ids).await?;
-        let mut albums = albums_for_tracks(&self.pool, &ids).await?;
-        let mut views = Vec::with_capacity(rows.len());
+        let albums = albums_for_tracks(&self.pool, &ids).await?;
+        let representations =
+            selected_representations_for_tracks(&self.pool, &library_ids, &ids).await?;
+        let views = assemble_track_views(
+            rows,
+            credits,
+            genres,
+            sources,
+            states,
+            albums,
+            representations,
+        )?;
+        let by_id = views
+            .into_iter()
+            .map(|view| (*view.track().id().as_uuid(), view))
+            .collect::<HashMap<_, _>>();
 
-        for row in rows {
-            let id = row.id;
-            let track = decode_track(
-                row,
-                genres.remove(&id).unwrap_or_default(),
-                credits.remove(&id).unwrap_or_default(),
-            )?;
-            let (album, membership, album_artist) = match albums.remove(&id) {
-                Some((album, membership, album_artist)) => {
-                    (Some(album), Some(membership), album_artist)
-                }
-                None => (None, None, None),
-            };
-            let state = states.get(&id).copied().unwrap_or_default();
-            let sources = sources.remove(&id).unwrap_or_default();
-
-            views.push(TrackView::new(
-                track,
-                album,
-                membership,
-                album_artist,
-                state,
-                sources,
-            ));
-        }
-
-        Ok(views)
+        Ok(track_ids
+            .iter()
+            .filter_map(|track_id| by_id.get(track_id.as_uuid()).cloned())
+            .collect())
     }
 
     async fn tracks_credited_to(
@@ -926,6 +918,114 @@ impl LibraryRead for PgStore {
     }
 }
 
+fn assemble_track_views(
+    rows: Vec<TrackRecord>,
+    mut credits: HashMap<Uuid, Vec<ArtistCredit>>,
+    mut genres: HashMap<Uuid, Vec<String>>,
+    mut sources: HashMap<Uuid, Vec<SourceIdentity>>,
+    states: HashMap<Uuid, LibraryState>,
+    mut albums: HashMap<Uuid, (Album, AlbumTrack, Option<String>)>,
+    mut representations: HashMap<Uuid, SourceRepresentationFacts>,
+) -> Result<Vec<TrackView>, TrackRepositoryError> {
+    let mut views = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let id = row.id;
+        let track = decode_track(
+            row,
+            genres.remove(&id).unwrap_or_default(),
+            credits.remove(&id).unwrap_or_default(),
+        )?;
+        let (album, membership, album_artist) = match albums.remove(&id) {
+            Some((album, membership, album_artist)) => {
+                (Some(album), Some(membership), album_artist)
+            }
+            None => (None, None, None),
+        };
+        let state = states.get(&id).copied().unwrap_or_default();
+        let sources = sources.remove(&id).unwrap_or_default();
+        let representation = representations.remove(&id);
+
+        views.push(
+            TrackView::new(track, album, membership, album_artist, state, sources)
+                .with_representation(representation),
+        );
+    }
+
+    Ok(views)
+}
+
+#[derive(sqlx::FromRow)]
+struct SelectedRepresentationRow {
+    track_id: Uuid,
+    provider_id: String,
+    source_scope: String,
+    external_id: String,
+    content_type: Option<String>,
+    suffix: Option<String>,
+    container: Option<String>,
+    codec: Option<String>,
+    size_bytes: Option<i64>,
+    bitrate_kbps: Option<i32>,
+    sample_rate_hz: Option<i32>,
+    bit_depth: Option<i16>,
+    channels: Option<i16>,
+}
+
+async fn selected_representations_for_tracks(
+    pool: &PgPool,
+    library_ids: &[String],
+    track_ids: &[Uuid],
+) -> Result<HashMap<Uuid, SourceRepresentationFacts>, TrackRepositoryError> {
+    if track_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query_as::<_, SelectedRepresentationRow>(&format!(
+        r#"
+        SELECT DISTINCT ON (rep.track_id)
+               rep.track_id, rep.provider_id, rep.source_scope, rep.external_id,
+               rep.content_type, rep.suffix, rep.container, rep.codec,
+               rep.size_bytes, rep.bitrate_kbps, rep.sample_rate_hz,
+               rep.bit_depth, rep.channels
+        FROM track_sources AS rep
+        WHERE rep.track_id = ANY($1)
+          AND rep.provider_id = ANY($2::TEXT[])
+        ORDER BY rep.track_id, {key}
+        "#,
+        key = source_selection_key("rep"),
+    ))
+    .bind(track_ids)
+    .bind(library_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(repository_error)?;
+
+    rows.into_iter()
+        .map(|row| {
+            let size_bytes = row
+                .size_bytes
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| TrackRepositoryError::InvalidData)?;
+            let facts = SourceRepresentationFacts {
+                source: decode_source(row.provider_id, row.source_scope, row.external_id)?,
+                content_type: row.content_type,
+                suffix: row.suffix,
+                container: row.container,
+                codec: row.codec,
+                size_bytes,
+                bitrate_kbps: decode_integer(row.bitrate_kbps)?,
+                sample_rate_hz: decode_integer(row.sample_rate_hz)?,
+                bit_depth: decode_byte(row.bit_depth)?,
+                channels: decode_byte(row.channels)?,
+            };
+
+            Ok((row.track_id, facts))
+        })
+        .collect()
+}
+
 struct SearchMatch {
     exact: String,
     prefix: String,
@@ -1036,16 +1136,22 @@ fn primary_membership_row(column: &str) -> String {
     )
 }
 
-fn selected_representation(alias: &str) -> String {
-    let closer = source_precedence("nearer");
-    let selected = source_precedence(alias);
+fn source_selection_key(alias: &str) -> String {
+    format!(
+        "({}, {alias}.external_id, {alias}.source_scope)",
+        source_precedence(alias)
+    )
+}
 
+fn selected_representation(alias: &str) -> String {
     format!(
         "{alias}.track_id = t.id AND {alias}.provider_id = ANY($2::TEXT[]) \
          AND NOT EXISTS (SELECT 1 FROM track_sources AS nearer \
                          WHERE nearer.track_id = t.id \
                            AND nearer.provider_id = ANY($2::TEXT[]) \
-                           AND ({closer}, nearer.external_id) < ({selected}, {alias}.external_id))"
+                           AND {nearer} < {selected})",
+        nearer = source_selection_key("nearer"),
+        selected = source_selection_key(alias),
     )
 }
 

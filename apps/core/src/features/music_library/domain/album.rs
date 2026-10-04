@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::{
     Artist, ArtistCredit, ArtistId, IdSet, LibraryState, MatchQuality, RandomSeed, Range, RoleSet,
-    SelectorText, SortDirection, SourceIdentity, Track, ValidationError,
+    SelectorText, SortDirection, SourceIdentity, SourceRepresentationFacts, Track, ValidationError,
     text::{optional, required},
 };
 use crate::features::music_library::library::LibraryId;
@@ -843,6 +843,7 @@ pub struct AlbumEntry {
     membership: AlbumTrack,
     state: LibraryState,
     sources: Vec<SourceIdentity>,
+    representation: Option<SourceRepresentationFacts>,
 }
 
 impl AlbumEntry {
@@ -852,6 +853,7 @@ impl AlbumEntry {
             membership,
             state: LibraryState::default(),
             sources: Vec::new(),
+            representation: None,
         }
     }
 
@@ -865,12 +867,24 @@ impl AlbumEntry {
         self
     }
 
+    pub fn with_representation(
+        mut self,
+        representation: Option<SourceRepresentationFacts>,
+    ) -> Self {
+        self.representation = representation;
+        self
+    }
+
     pub fn state(&self) -> LibraryState {
         self.state
     }
 
     pub fn sources(&self) -> &[SourceIdentity] {
         &self.sources
+    }
+
+    pub fn representation(&self) -> Option<&SourceRepresentationFacts> {
+        self.representation.as_ref()
     }
 
     pub fn track(&self) -> &Track {

@@ -161,6 +161,20 @@ impl TrackHit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRepresentationFacts {
+    pub source: SourceIdentity,
+    pub content_type: Option<String>,
+    pub suffix: Option<String>,
+    pub container: Option<String>,
+    pub codec: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub bitrate_kbps: Option<u32>,
+    pub sample_rate_hz: Option<u32>,
+    pub bit_depth: Option<u8>,
+    pub channels: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackView {
     track: Track,
     album: Option<Album>,
@@ -168,6 +182,7 @@ pub struct TrackView {
     album_artist: Option<String>,
     state: LibraryState,
     sources: Vec<SourceIdentity>,
+    representation: Option<SourceRepresentationFacts>,
 }
 
 impl TrackView {
@@ -186,7 +201,20 @@ impl TrackView {
             album_artist,
             state,
             sources,
+            representation: None,
         }
+    }
+
+    pub fn with_representation(
+        mut self,
+        representation: Option<SourceRepresentationFacts>,
+    ) -> Self {
+        self.representation = representation;
+        self
+    }
+
+    pub fn representation(&self) -> Option<&SourceRepresentationFacts> {
+        self.representation.as_ref()
     }
 
     pub fn track(&self) -> &Track {
