@@ -372,6 +372,21 @@ impl LibraryService {
             .map_err(catalogue_error)
     }
 
+    pub async fn album_track_page(
+        &self,
+        album_id: &AlbumId,
+        offset: u32,
+        limit: PageLimit,
+        order: TrackOrder,
+        filter: &TrackListFilter,
+        user: Option<&Uuid>,
+    ) -> Result<TrackPage, CatalogueError> {
+        self.library
+            .page_album_tracks(album_id, offset, limit.get(), order, filter, user.copied())
+            .await
+            .map_err(catalogue_error)
+    }
+
     pub async fn track_views(
         &self,
         track_ids: &[TrackId],

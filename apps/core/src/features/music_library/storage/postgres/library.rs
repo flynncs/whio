@@ -410,113 +410,35 @@ impl LibraryRead for PgStore {
         filter: &TrackListFilter,
         user: Option<Uuid>,
     ) -> Result<TrackPage, TrackRepositoryError> {
-        let library_ids = self.library_provider_ids();
-        let scope = match filter.scope() {
-            TrackListScope::Engaged => TRACK_ENGAGED,
-            TrackListScope::Owned => TRACK_OWNED,
-        };
-        let direction = filter.resolved_direction(order);
-        let seed = match filter.resolved_seed(order) {
-            Ok(seed) => seed,
-            Err(_) => return Err(TrackRepositoryError::InvalidData),
-        };
-        let seed = match (order, seed) {
-            (TrackOrder::Random, Some(seed)) => Some(seed),
-            (TrackOrder::Random, None) => Some(RandomSeed::for_request(
-                user,
-                Resource::Track,
-                chrono::Utc::now().date_naive(),
-            )),
-            _ => None,
-        };
-        let mut predicates = TrackPredicates::new(5);
-        track_selector_clauses(&self.pool, filter, &mut predicates).await?;
-        let order_clause = track_order_clause(order, direction, seed, &mut predicates);
-        let selectors = predicates.where_clause();
-        let statement = format!(
-            r#"
-            SELECT page.id, page.title, page.duration_ms, page.musicbrainz_recording_id,
-                   page.isrc, page.recording_date, page.recording_date_precision,
-                   page.original_date, page.original_date_precision, totals.n AS total
-            FROM (
-                SELECT COUNT(*)::BIGINT AS n
-                FROM tracks AS t
-                WHERE {scope}
-                  {selectors}
-            ) AS totals
-            LEFT JOIN LATERAL (
-                SELECT {TRACK_COLUMNS}
-                FROM tracks AS t
-                WHERE {scope}
-                  {selectors}
-                ORDER BY {order_clause}
-                LIMIT $3 OFFSET $4
-            ) AS page ON TRUE
-            "#
-        );
-        let mut query = sqlx::query_as::<_, TrackPageRow>(&statement)
-            .bind(user)
-            .bind(&library_ids)
-            .bind(i64::from(limit))
-            .bind(i64::from(offset));
+        self.track_page(TrackPageRequest {
+            offset,
+            limit,
+            order,
+            filter,
+            user,
+            album: None,
+        })
+        .await
+    }
 
-        for value in predicates.values() {
-            query = value.bind(query);
-        }
-
-        let rows = query
-            .fetch_all(&self.pool)
-            .await
-            .map_err(repository_error)?;
-
-        let Some(first) = rows.first() else {
-            return Err(TrackRepositoryError::InvalidData);
-        };
-        let total = u32::try_from(first.total).map_err(|_| TrackRepositoryError::InvalidData)?;
-
-        if rows.len() == 1 && first.id.is_none() {
-            return Ok(TrackPage::new(Vec::new(), total));
-        }
-
-        let ids = rows.iter().filter_map(|row| row.id).collect::<Vec<_>>();
-        let credits = credits_for_tracks(&self.pool, &ids).await?;
-        let genres = genres_for_tracks(&self.pool, &ids).await?;
-        let sources = sources_for_tracks(&self.pool, &ids).await?;
-        let states = track_states(&self.pool, user, &ids).await?;
-        let albums = albums_for_tracks(&self.pool, &ids).await?;
-        let representations =
-            selected_representations_for_tracks(&self.pool, &library_ids, &ids).await?;
-        let records = rows
-            .into_iter()
-            .map(|row| {
-                let (Some(id), Some(title)) = (row.id, row.title) else {
-                    return Err(TrackRepositoryError::InvalidData);
-                };
-
-                Ok(TrackRecord {
-                    id,
-                    title,
-                    duration_ms: row.duration_ms,
-                    musicbrainz_recording_id: row.musicbrainz_recording_id,
-                    isrc: row.isrc,
-                    recording_date: row.recording_date,
-                    recording_date_precision: row.recording_date_precision,
-                    original_date: row.original_date,
-                    original_date_precision: row.original_date_precision,
-                })
-            })
-            .collect::<Result<Vec<_>, TrackRepositoryError>>()?;
-        let items = assemble_track_views(
-            records,
-            credits,
-            genres,
-            sources,
-            states,
-            albums,
-            representations,
-        )?;
-
-        Ok(TrackPage::new(items, total))
+    async fn page_album_tracks(
+        &self,
+        album_id: &AlbumId,
+        offset: u32,
+        limit: u32,
+        order: TrackOrder,
+        filter: &TrackListFilter,
+        user: Option<Uuid>,
+    ) -> Result<TrackPage, TrackRepositoryError> {
+        self.track_page(TrackPageRequest {
+            offset,
+            limit,
+            order,
+            filter,
+            user,
+            album: Some(album_id),
+        })
+        .await
     }
 
     async fn track_views(
@@ -547,7 +469,7 @@ impl LibraryRead for PgStore {
         let genres = genres_for_tracks(&self.pool, &ids).await?;
         let sources = sources_for_tracks(&self.pool, &ids).await?;
         let states = track_states(&self.pool, user, &ids).await?;
-        let albums = albums_for_tracks(&self.pool, &ids).await?;
+        let albums = albums_for_tracks(&self.pool, &ids, None).await?;
         let representations =
             selected_representations_for_tracks(&self.pool, &library_ids, &ids).await?;
         let views = assemble_track_views(
@@ -918,6 +840,146 @@ impl LibraryRead for PgStore {
     }
 }
 
+struct TrackPageRequest<'a> {
+    offset: u32,
+    limit: u32,
+    order: TrackOrder,
+    filter: &'a TrackListFilter,
+    user: Option<Uuid>,
+    album: Option<&'a AlbumId>,
+}
+
+impl PgStore {
+    async fn track_page(
+        &self,
+        request: TrackPageRequest<'_>,
+    ) -> Result<TrackPage, TrackRepositoryError> {
+        let TrackPageRequest {
+            offset,
+            limit,
+            order,
+            filter,
+            user,
+            album,
+        } = request;
+        let library_ids = self.library_provider_ids();
+        let direction = filter.resolved_direction(order);
+        let seed = match filter.resolved_seed(order) {
+            Ok(seed) => seed,
+            Err(_) => return Err(TrackRepositoryError::InvalidData),
+        };
+        let seed = match (order, seed) {
+            (TrackOrder::Random, Some(seed)) => Some(seed),
+            (TrackOrder::Random, None) => Some(RandomSeed::for_request(
+                user,
+                Resource::Track,
+                chrono::Utc::now().date_naive(),
+            )),
+            _ => None,
+        };
+        let mut predicates = TrackPredicates::new(5);
+        let album_placeholder = album.map(|album| predicates.uuids(vec![*album.as_uuid()]));
+        let membership = album_placeholder.as_deref();
+        track_selector_clauses(&self.pool, filter, membership, &mut predicates).await?;
+        let order_clause = track_order_clause(order, direction, seed, membership, &mut predicates);
+        let scope = match album_placeholder.as_deref() {
+            Some(album) => format!(
+                "EXISTS (SELECT 1 FROM album_tracks AS mt \
+                 WHERE mt.track_id = t.id AND mt.album_id = ANY({album}))"
+            ),
+            None => match filter.scope() {
+                TrackListScope::Engaged => TRACK_ENGAGED.to_owned(),
+                TrackListScope::Owned => TRACK_OWNED.to_owned(),
+            },
+        };
+        let selectors = predicates.where_clause();
+        let statement = format!(
+            r#"
+            SELECT page.id, page.title, page.duration_ms, page.musicbrainz_recording_id,
+                   page.isrc, page.recording_date, page.recording_date_precision,
+                   page.original_date, page.original_date_precision, totals.n AS total
+            FROM (
+                SELECT COUNT(*)::BIGINT AS n
+                FROM tracks AS t
+                WHERE {scope}
+                  {selectors}
+            ) AS totals
+            LEFT JOIN LATERAL (
+                SELECT {TRACK_COLUMNS}
+                FROM tracks AS t
+                WHERE {scope}
+                  {selectors}
+                ORDER BY {order_clause}
+                LIMIT $3 OFFSET $4
+            ) AS page ON TRUE
+            "#
+        );
+        let mut query = sqlx::query_as::<_, TrackPageRow>(&statement)
+            .bind(user)
+            .bind(&library_ids)
+            .bind(i64::from(limit))
+            .bind(i64::from(offset));
+
+        for value in predicates.values() {
+            query = value.bind(query);
+        }
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(repository_error)?;
+
+        let Some(first) = rows.first() else {
+            return Err(TrackRepositoryError::InvalidData);
+        };
+        let total = u32::try_from(first.total).map_err(|_| TrackRepositoryError::InvalidData)?;
+
+        if rows.len() == 1 && first.id.is_none() {
+            return Ok(TrackPage::new(Vec::new(), total));
+        }
+
+        let ids = rows.iter().filter_map(|row| row.id).collect::<Vec<_>>();
+        let credits = credits_for_tracks(&self.pool, &ids).await?;
+        let genres = genres_for_tracks(&self.pool, &ids).await?;
+        let sources = sources_for_tracks(&self.pool, &ids).await?;
+        let states = track_states(&self.pool, user, &ids).await?;
+        let albums = albums_for_tracks(&self.pool, &ids, album).await?;
+        let representations =
+            selected_representations_for_tracks(&self.pool, &library_ids, &ids).await?;
+        let records = rows
+            .into_iter()
+            .map(|row| {
+                let (Some(id), Some(title)) = (row.id, row.title) else {
+                    return Err(TrackRepositoryError::InvalidData);
+                };
+
+                Ok(TrackRecord {
+                    id,
+                    title,
+                    duration_ms: row.duration_ms,
+                    musicbrainz_recording_id: row.musicbrainz_recording_id,
+                    isrc: row.isrc,
+                    recording_date: row.recording_date,
+                    recording_date_precision: row.recording_date_precision,
+                    original_date: row.original_date,
+                    original_date_precision: row.original_date_precision,
+                })
+            })
+            .collect::<Result<Vec<_>, TrackRepositoryError>>()?;
+        let items = assemble_track_views(
+            records,
+            credits,
+            genres,
+            sources,
+            states,
+            albums,
+            representations,
+        )?;
+
+        Ok(TrackPage::new(items, total))
+    }
+}
+
 fn assemble_track_views(
     rows: Vec<TrackRecord>,
     mut credits: HashMap<Uuid, Vec<ArtistCredit>>,
@@ -1113,26 +1175,39 @@ fn source_precedence(alias: &str) -> String {
     )
 }
 
-fn primary_membership(fact: &str) -> String {
+fn album_membership_restriction(album: Option<&str>) -> String {
+    album.map_or_else(String::new, |album| {
+        format!(" AND member.album_id = ANY({album})")
+    })
+}
+
+fn primary_membership(album: Option<&str>, fact: &str) -> String {
+    let restriction = if album.is_some() {
+        album_membership_restriction(album)
+    } else {
+        " AND NOT EXISTS (SELECT 1 FROM album_tracks AS nearer \
+         JOIN albums AS nearer_album ON nearer_album.id = nearer.album_id \
+         WHERE nearer.track_id = t.id \
+           AND (nearer_album.title_normalized, nearer_album.id) \
+               < (member_album.title_normalized, member_album.id))"
+            .to_owned()
+    };
+
     format!(
         "EXISTS (SELECT 1 FROM album_tracks AS member \
          JOIN albums AS member_album ON member_album.id = member.album_id \
-         WHERE member.track_id = t.id AND ({fact}) \
-           AND NOT EXISTS (SELECT 1 FROM album_tracks AS nearer \
-                           JOIN albums AS nearer_album ON nearer_album.id = nearer.album_id \
-                           WHERE nearer.track_id = t.id \
-                             AND (nearer_album.title_normalized, nearer_album.id) \
-                                 < (member_album.title_normalized, member_album.id)))"
+         WHERE member.track_id = t.id AND ({fact}){restriction})"
     )
 }
 
-fn primary_membership_row(column: &str) -> String {
+fn primary_membership_row(album: Option<&str>, column: &str) -> String {
     format!(
         "(SELECT {column} FROM album_tracks AS member \
          JOIN albums AS member_album ON member_album.id = member.album_id \
-         WHERE member.track_id = t.id \
+         WHERE member.track_id = t.id{} \
          ORDER BY member_album.title_normalized, member_album.id, member.position \
-         LIMIT 1)"
+         LIMIT 1)",
+        album_membership_restriction(album)
     )
 }
 
@@ -1165,6 +1240,7 @@ fn selected_representation_scalar(column: &str) -> String {
 fn role_clause(
     role: RoleSelector,
     artists: Option<&str>,
+    album: Option<&str>,
     predicates: &mut TrackPredicates,
 ) -> String {
     let artist_term = artists.map_or_else(String::new, |placeholder| {
@@ -1191,12 +1267,15 @@ fn role_clause(
                     format!(" AND sel_album_artist_album.album_artist_id = ANY({placeholder})")
                 },
             );
+            let album_membership = album.map_or_else(String::new, |placeholder| {
+                format!(" AND sel_album_artist_member.album_id = ANY({placeholder})")
+            });
 
             format!(
                 "EXISTS (SELECT 1 FROM album_tracks AS sel_album_artist_member \
                  JOIN albums AS sel_album_artist_album \
                    ON sel_album_artist_album.id = sel_album_artist_member.album_id \
-                 WHERE sel_album_artist_member.track_id = t.id{album_artist_term})"
+                 WHERE sel_album_artist_member.track_id = t.id{album_artist_term}{album_membership})"
             )
         }
     }
@@ -1217,6 +1296,7 @@ fn library_selector_error(error: LibraryRegistrationError) -> TrackRepositoryErr
 async fn track_selector_clauses(
     pool: &PgPool,
     filter: &TrackListFilter,
+    album: Option<&str>,
     predicates: &mut TrackPredicates,
 ) -> Result<(), TrackRepositoryError> {
     if let Some(title) = filter.title() {
@@ -1251,16 +1331,17 @@ async fn track_selector_clauses(
             .collect::<Vec<_>>();
         let placeholder = predicates.uuids(ids);
 
-        predicates.push(primary_membership(&format!(
-            "member_album.album_artist_id = ANY({placeholder})"
-        )));
+        predicates.push(primary_membership(
+            album,
+            &format!("member_album.album_artist_id = ANY({placeholder})"),
+        ));
     }
 
     if let Some(roles) = filter.role() {
         let mut terms = Vec::new();
 
         for role in roles.iter() {
-            terms.push(role_clause(*role, artists.as_deref(), predicates));
+            terms.push(role_clause(*role, artists.as_deref(), album, predicates));
         }
 
         predicates.push(format!("({})", terms.join(" OR ")));
@@ -1287,15 +1368,16 @@ async fn track_selector_clauses(
     if let Some(year) = filter.year() {
         let range = predicates.i32_range("member_album.year", year);
 
-        predicates.push(primary_membership(&range));
+        predicates.push(primary_membership(album, &range));
     }
 
     if let Some(compilation) = filter.compilation() {
         let placeholder = predicates.boolean(compilation);
 
-        predicates.push(primary_membership(&format!(
-            "member_album.compilation = {placeholder}"
-        )));
+        predicates.push(primary_membership(
+            album,
+            &format!("member_album.compilation = {placeholder}"),
+        ));
     }
 
     if let Some(starred) = filter.starred() {
@@ -1400,7 +1482,7 @@ async fn track_selector_clauses(
         if let Some(range) = selector {
             let range = predicates.u16_range(column, range);
 
-            predicates.push(primary_membership(&range));
+            predicates.push(primary_membership(album, &range));
         }
     }
 
@@ -1666,6 +1748,7 @@ fn track_order_clause(
     order: TrackOrder,
     direction: SortDirection,
     seed: Option<RandomSeed>,
+    album: Option<&str>,
     predicates: &mut TrackPredicates,
 ) -> String {
     let dir = direction.sql();
@@ -1676,16 +1759,16 @@ fn track_order_clause(
         TrackOrder::Album => format!(
             "{} {dir} NULLS LAST, {} {dir} NULLS LAST, {} {dir} NULLS LAST, \
              {} {dir} NULLS LAST, t.id",
-            primary_membership_row("member_album.title_normalized"),
-            primary_membership_row("member.disc_number"),
-            primary_membership_row("member.track_number"),
-            primary_membership_row("member.position"),
+            primary_membership_row(album, "member_album.title_normalized"),
+            primary_membership_row(album, "member.disc_number"),
+            primary_membership_row(album, "member.track_number"),
+            primary_membership_row(album, "member.position"),
         ),
         TrackOrder::Track => format!(
             "{} {dir} NULLS LAST, {} {dir} NULLS LAST, {} {dir} NULLS LAST, t.id",
-            primary_membership_row("member.disc_number"),
-            primary_membership_row("member.track_number"),
-            primary_membership_row("member.position"),
+            primary_membership_row(album, "member.disc_number"),
+            primary_membership_row(album, "member.track_number"),
+            primary_membership_row(album, "member.position"),
         ),
         TrackOrder::Artist => format!(
             "(SELECT artist.name_normalized FROM track_artist_credits AS credited \
@@ -1697,9 +1780,10 @@ fn track_order_clause(
             "(SELECT album_artist.name_normalized FROM album_tracks AS member \
               JOIN albums AS member_album ON member_album.id = member.album_id \
               JOIN artists AS album_artist ON album_artist.id = member_album.album_artist_id \
-              WHERE member.track_id = t.id \
+              WHERE member.track_id = t.id{} \
               ORDER BY member_album.title_normalized, member_album.id, member.position \
-              LIMIT 1) {dir} NULLS LAST, t.id"
+              LIMIT 1) {dir} NULLS LAST, t.id",
+            album_membership_restriction(album)
         ),
         TrackOrder::Duration => format!("t.duration_ms {dir} NULLS LAST, t.id"),
         TrackOrder::Genre => format!(
@@ -1709,7 +1793,7 @@ fn track_order_clause(
         ),
         TrackOrder::Year | TrackOrder::ReleaseYear => format!(
             "{} {dir} NULLS LAST, t.id",
-            primary_membership_row("member_album.year")
+            primary_membership_row(album, "member_album.year")
         ),
         TrackOrder::DateAdded => format!(
             "(SELECT MIN(added.created_at) FROM track_sources AS added \

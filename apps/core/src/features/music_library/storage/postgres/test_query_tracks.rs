@@ -145,6 +145,39 @@ async fn list(
     page_at(repository, 0, 500, TrackOrder::Id, filter, user).await
 }
 
+async fn album_page_at(
+    repository: &PostgresTrackRepository,
+    album: &AlbumId,
+    offset: u32,
+    limit: u32,
+    order: TrackOrder,
+    filter: &TrackListFilter,
+    user: Option<&Uuid>,
+) -> Vec<TrackId> {
+    repository
+        .page_album_tracks(album, offset, limit, order, filter, user.copied())
+        .await
+        .unwrap()
+        .into_parts()
+        .0
+        .iter()
+        .map(|item| item.track().id().clone())
+        .collect()
+}
+
+async fn album_total(
+    repository: &PostgresTrackRepository,
+    album: &AlbumId,
+    filter: &TrackListFilter,
+    user: Option<&Uuid>,
+) -> u32 {
+    repository
+        .page_album_tracks(album, 0, 500, TrackOrder::Id, filter, user.copied())
+        .await
+        .unwrap()
+        .total()
+}
+
 async fn credit_artist(pool: &PgPool, track: &TrackId, name: &str) -> ArtistId {
     let id: Uuid = sqlx::query_scalar(
         "SELECT artist_id FROM track_artist_credits \
@@ -2205,4 +2238,647 @@ async fn invalid_representation_numeric_data_fails(pool: PgPool) {
         repository.track_views(&[id], None).await,
         Err(TrackRepositoryError::InvalidData)
     ));
+}
+
+#[sqlx::test]
+async fn album_track_page_preserves_unengaged_provider_members(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album = repository
+        .resolve_or_create_album(
+            &album("Provider Members").with_album_artist(credit("Narrator", None)),
+        )
+        .await
+        .unwrap();
+    let owned = repository
+        .get_or_create(
+            source("local", "member-owned.flac"),
+            metadata("owned member"),
+        )
+        .await
+        .unwrap();
+    let provider_only = repository
+        .get_or_create(
+            source("youtube_music", "vid-member"),
+            metadata("provider member"),
+        )
+        .await
+        .unwrap();
+    let owned_id = owned.id().clone();
+    let provider_id = provider_only.id().clone();
+
+    repository
+        .set_album_track(
+            album.id(),
+            &owned_id,
+            &AlbumTrack::new(Some(1), Some(1), 1).unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            album.id(),
+            &provider_id,
+            &AlbumTrack::new(Some(1), Some(2), 2).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let contextual = TrackListFilter::new().with_album_id(Some(album_id_set(&[album.id()])));
+
+    assert_eq!(
+        list(&repository, &contextual, None).await,
+        vec![owned_id.clone()],
+        "a generic engaged page excludes the unengaged provider member"
+    );
+    assert_eq!(
+        album_page_at(
+            &repository,
+            album.id(),
+            0,
+            500,
+            TrackOrder::Id,
+            &TrackListFilter::new(),
+            None,
+        )
+        .await,
+        sorted(&[&owned_id, &provider_id]),
+        "the explicit album page carries every recorded member without provider activity"
+    );
+    assert_eq!(
+        album_total(&repository, album.id(), &TrackListFilter::new(), None).await,
+        2
+    );
+}
+
+#[sqlx::test]
+async fn album_track_page_uses_requested_membership_for_projection_filter_and_order(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let requested = repository
+        .resolve_or_create_album(
+            &album("Bravo")
+                .with_album_artist(credit("Anna", None))
+                .with_year(Some(2020))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let first_primary = repository
+        .resolve_or_create_album(
+            &album("Alpha")
+                .with_album_artist(credit("Zed", None))
+                .with_year(Some(1990))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let second_primary = repository
+        .resolve_or_create_album(
+            &album("Aardvark")
+                .with_album_artist(credit("Aaa", None))
+                .with_year(Some(1985))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let first = repository
+        .get_or_create(
+            source("local", "context-first.flac"),
+            metadata("context first"),
+        )
+        .await
+        .unwrap();
+    let second = repository
+        .get_or_create(
+            source("local", "context-second.flac"),
+            metadata("context second"),
+        )
+        .await
+        .unwrap();
+    let first_id = first.id().clone();
+    let second_id = second.id().clone();
+
+    repository
+        .set_album_track(
+            first_primary.id(),
+            &first_id,
+            &AlbumTrack::new(Some(1), Some(1), 1).unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            second_primary.id(),
+            &second_id,
+            &AlbumTrack::new(Some(2), Some(2), 2).unwrap(),
+        )
+        .await
+        .unwrap();
+    attach_album_track(&pool, requested.id(), &first_id, 2, 2, 2).await;
+    attach_album_track(&pool, requested.id(), &second_id, 1, 1, 1).await;
+
+    let all = TrackListFilter::new();
+    let page = repository
+        .page_album_tracks(requested.id(), 0, 500, TrackOrder::Track, &all, None)
+        .await
+        .unwrap();
+
+    assert_eq!(page.items().len(), 2);
+    assert_eq!(page.items()[0].track().id(), &second_id);
+    assert_eq!(
+        page.items()[0].album().map(|album| album.title()),
+        Some("Bravo")
+    );
+    assert_eq!(
+        page.items()[0].album().and_then(|album| album.year()),
+        Some(2020)
+    );
+    assert_eq!(page.items()[0].album_artist(), Some("Anna"));
+    assert_eq!(page.items()[0].membership().unwrap().disc_number(), Some(1));
+    assert_eq!(
+        page.items()[0].membership().unwrap().track_number(),
+        Some(1)
+    );
+    assert_eq!(page.items()[1].track().id(), &first_id);
+    assert_eq!(
+        page.items()[1].album().map(|album| album.title()),
+        Some("Bravo")
+    );
+    assert_eq!(page.items()[1].album_artist(), Some("Anna"));
+    assert_eq!(page.items()[1].membership().unwrap().disc_number(), Some(2));
+    assert_eq!(
+        page.items()[1].membership().unwrap().track_number(),
+        Some(2)
+    );
+
+    let descending = all
+        .clone()
+        .with_sort_direction(Some(SortDirection::Descending));
+
+    assert_eq!(
+        album_page_at(
+            &repository,
+            requested.id(),
+            0,
+            500,
+            TrackOrder::Track,
+            &all,
+            None,
+        )
+        .await,
+        vec![second_id.clone(), first_id.clone()],
+        "track order reads the requested membership"
+    );
+    assert_eq!(
+        album_page_at(
+            &repository,
+            requested.id(),
+            0,
+            500,
+            TrackOrder::Track,
+            &descending,
+            None,
+        )
+        .await,
+        vec![first_id.clone(), second_id.clone()]
+    );
+    assert_eq!(
+        album_page_at(
+            &repository,
+            requested.id(),
+            0,
+            500,
+            TrackOrder::Album,
+            &all,
+            None,
+        )
+        .await,
+        vec![second_id.clone(), first_id.clone()]
+    );
+    assert_eq!(
+        album_page_at(
+            &repository,
+            requested.id(),
+            0,
+            500,
+            TrackOrder::Album,
+            &descending,
+            None,
+        )
+        .await,
+        vec![first_id.clone(), second_id.clone()]
+    );
+    assert_eq!(
+        album_page_at(
+            &repository,
+            requested.id(),
+            0,
+            500,
+            TrackOrder::AlbumArtist,
+            &all,
+            None,
+        )
+        .await,
+        vec![first_id.clone(), second_id.clone()],
+        "album-artist order reads the requested album's artist, not the primary one"
+    );
+
+    let in_range = all.clone().with_year(Some(range(Some(2015), Some(2025))));
+    let outside_range = all.clone().with_year(Some(range(Some(1980), Some(1999))));
+
+    assert_eq!(
+        album_page_at(
+            &repository,
+            requested.id(),
+            0,
+            500,
+            TrackOrder::Id,
+            &in_range,
+            None,
+        )
+        .await,
+        sorted(&[&first_id, &second_id]),
+        "the year selector reads the requested album's year"
+    );
+    assert!(
+        album_page_at(
+            &repository,
+            requested.id(),
+            0,
+            500,
+            TrackOrder::Id,
+            &outside_range,
+            None,
+        )
+        .await
+        .is_empty(),
+        "primary years do not leak into the requested album page"
+    );
+    assert_eq!(
+        album_page_at(
+            &repository,
+            requested.id(),
+            0,
+            500,
+            TrackOrder::Id,
+            &all.clone().with_track_number(Some(range(Some(1), Some(1)))),
+            None,
+        )
+        .await,
+        vec![second_id.clone()]
+    );
+    assert_eq!(
+        album_page_at(
+            &repository,
+            requested.id(),
+            0,
+            500,
+            TrackOrder::Id,
+            &all.clone().with_disc_number(Some(range(Some(2), Some(2)))),
+            None,
+        )
+        .await,
+        vec![first_id.clone()]
+    );
+}
+
+#[sqlx::test]
+async fn album_artist_role_respects_explicit_album_context(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let primary = repository
+        .resolve_or_create_album(&album("Alpha").with_album_artist(credit("Zed", None)))
+        .await
+        .unwrap();
+    let requested = repository
+        .resolve_or_create_album(&album("Bravo").with_album_artist(credit("Anna", None)))
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(
+            source("local", "album-role-context.flac"),
+            metadata("context"),
+        )
+        .await
+        .unwrap();
+    let track_id = track.id().clone();
+    let zed = album_artist_of(&pool, primary.id()).await;
+    let anna = album_artist_of(&pool, requested.id()).await;
+
+    repository
+        .set_album_track(primary.id(), &track_id, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    attach_album_track(&pool, requested.id(), &track_id, 1, 1, 0).await;
+
+    let album_artist_role =
+        TrackListFilter::new().with_role(Some(role_set(&[RoleSelector::AlbumArtist])));
+    let zed_filter = album_artist_role
+        .clone()
+        .with_artists_id(Some(artist_id_set(&[&zed])));
+    let anna_filter = album_artist_role.with_artists_id(Some(artist_id_set(&[&anna])));
+    let zed_page = repository
+        .page_album_tracks(requested.id(), 0, 500, TrackOrder::Id, &zed_filter, None)
+        .await
+        .unwrap();
+    let anna_page = repository
+        .page_album_tracks(requested.id(), 0, 500, TrackOrder::Id, &anna_filter, None)
+        .await
+        .unwrap();
+
+    assert!(zed_page.items().is_empty());
+    assert_eq!(zed_page.total(), 0);
+    assert_eq!(page_ids(&anna_page), vec![track_id.clone()]);
+    assert_eq!(anna_page.total(), 1);
+    assert_eq!(
+        list(&repository, &zed_filter, None).await,
+        vec![track_id],
+        "ordinary pages retain any-album membership semantics"
+    );
+}
+
+#[sqlx::test]
+async fn album_track_page_applies_filters_before_window_and_reports_total(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("album-page-user", "Album Page User")
+        .await
+        .unwrap();
+    let album = repository
+        .resolve_or_create_album(&album("Windowed").with_album_artist(credit("Narrator", None)))
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+
+    for index in 0..5u32 {
+        let track = repository
+            .get_or_create(
+                source("local", &format!("window-{index}.flac")),
+                metadata(&format!("window {index}")).with_genres(vec![if index == 2 {
+                    "Pop".to_owned()
+                } else {
+                    "Rock".to_owned()
+                }]),
+            )
+            .await
+            .unwrap();
+        let id = track.id().clone();
+
+        repository
+            .set_album_track(
+                album.id(),
+                &id,
+                &AlbumTrack::new(Some(1), Some(u16::try_from(index).unwrap() + 1), index + 1)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+
+    set_missing(&pool, &source("local", "window-1.flac"), true).await;
+    repository
+        .set_starred(user, StateTarget::Track(&ids[0]), true)
+        .await
+        .unwrap();
+    repository
+        .set_rating(user, StateTarget::Track(&ids[2]), Some(4))
+        .await
+        .unwrap();
+
+    let all = TrackListFilter::new();
+
+    assert_eq!(album_total(&repository, album.id(), &all, None).await, 5);
+    assert_eq!(
+        album_page_at(&repository, album.id(), 0, 2, TrackOrder::Track, &all, None,).await,
+        ids[0..2].to_vec()
+    );
+    assert_eq!(
+        album_page_at(&repository, album.id(), 2, 2, TrackOrder::Track, &all, None,).await,
+        ids[2..4].to_vec()
+    );
+    assert_eq!(
+        album_page_at(&repository, album.id(), 4, 2, TrackOrder::Track, &all, None,).await,
+        vec![ids[4].clone()]
+    );
+    assert!(
+        album_page_at(
+            &repository,
+            album.id(),
+            40,
+            2,
+            TrackOrder::Track,
+            &all,
+            None,
+        )
+        .await
+        .is_empty(),
+        "a deep window past the album is empty"
+    );
+
+    let without_missing = all.clone().with_missing(Some(false));
+
+    assert_eq!(
+        album_total(&repository, album.id(), &without_missing, None).await,
+        4
+    );
+    assert_eq!(
+        album_page_at(
+            &repository,
+            album.id(),
+            0,
+            3,
+            TrackOrder::Track,
+            &without_missing,
+            None,
+        )
+        .await,
+        vec![ids[0].clone(), ids[2].clone(), ids[3].clone()],
+        "the filter is applied before the window"
+    );
+    assert_eq!(
+        album_page_at(
+            &repository,
+            album.id(),
+            3,
+            3,
+            TrackOrder::Track,
+            &without_missing,
+            None,
+        )
+        .await,
+        vec![ids[4].clone()]
+    );
+    assert!(
+        album_page_at(
+            &repository,
+            album.id(),
+            9,
+            3,
+            TrackOrder::Track,
+            &without_missing,
+            None,
+        )
+        .await
+        .is_empty()
+    );
+    assert_eq!(
+        album_total(&repository, album.id(), &without_missing, None).await,
+        4,
+        "the filtered total is reported for an empty window"
+    );
+
+    let only_missing = all.clone().with_missing(Some(true));
+
+    assert_eq!(
+        album_page_at(
+            &repository,
+            album.id(),
+            0,
+            500,
+            TrackOrder::Id,
+            &only_missing,
+            None,
+        )
+        .await,
+        vec![ids[1].clone()]
+    );
+    assert_eq!(
+        album_total(&repository, album.id(), &only_missing, None).await,
+        1
+    );
+
+    let rock = all.clone().with_genre(Some(text_set(&["rock"])));
+
+    assert_eq!(
+        album_page_at(&repository, album.id(), 0, 500, TrackOrder::Id, &rock, None,).await,
+        sorted(&[&ids[0], &ids[1], &ids[3], &ids[4]])
+    );
+
+    let starred = all.clone().with_starred(Some(true));
+
+    assert_eq!(
+        album_page_at(
+            &repository,
+            album.id(),
+            0,
+            500,
+            TrackOrder::Id,
+            &starred,
+            Some(&user),
+        )
+        .await,
+        vec![ids[0].clone()]
+    );
+
+    let rated = all.with_rating(Some(range(Some(4), Some(4))));
+
+    assert_eq!(
+        album_page_at(
+            &repository,
+            album.id(),
+            0,
+            500,
+            TrackOrder::Id,
+            &rated,
+            Some(&user),
+        )
+        .await,
+        vec![ids[2].clone()]
+    );
+
+    let tied = album_page_at(
+        &repository,
+        album.id(),
+        0,
+        3,
+        TrackOrder::Genre,
+        &TrackListFilter::new(),
+        None,
+    )
+    .await;
+    let tied_next = album_page_at(
+        &repository,
+        album.id(),
+        3,
+        3,
+        TrackOrder::Genre,
+        &TrackListFilter::new(),
+        None,
+    )
+    .await;
+    let mut tied = [tied, tied_next].concat();
+
+    tied.sort_by(|left, right| left.as_uuid().cmp(right.as_uuid()));
+    assert_eq!(
+        tied,
+        sorted(&ids.iter().collect::<Vec<_>>()),
+        "genre ties page without duplicates or gaps"
+    );
+}
+
+#[sqlx::test]
+async fn album_track_page_has_no_per_row_projection_reads(pool: PgPool) {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album = repository
+        .resolve_or_create_album(&album("Batched").with_album_artist(credit("Narrator", None)))
+        .await
+        .unwrap();
+
+    for index in 0..8u32 {
+        let track = repository
+            .get_or_create(
+                source("local", &format!("album-batch-{index}.flac")),
+                metadata(&format!("album batch {index}"))
+                    .with_genres(vec!["Rock".to_owned()])
+                    .with_credits(vec![credit("Player", Some(CreditRole::Performer))]),
+            )
+            .await
+            .unwrap();
+        let id = track.id().clone();
+
+        repository
+            .set_album_track(
+                album.id(),
+                &id,
+                &AlbumTrack::new(Some(1), Some(u16::try_from(index).unwrap() + 1), index + 1)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let filter = TrackListFilter::new();
+    let mut measured = Vec::new();
+
+    for limit in [2u32, 8] {
+        let genres = settled_table_scans(&pool, "track_genres").await;
+        let credits = settled_table_scans(&pool, "track_artist_credits").await;
+        let sources = settled_table_scans(&pool, "track_sources").await;
+        let memberships = settled_table_scans(&pool, "album_tracks").await;
+        let observed = repository
+            .page_album_tracks(album.id(), 0, limit, TrackOrder::Track, &filter, None)
+            .await
+            .unwrap();
+
+        measured.push((
+            limit,
+            observed.items().len(),
+            settled_table_scans(&pool, "track_genres").await - genres,
+            settled_table_scans(&pool, "track_artist_credits").await - credits,
+            settled_table_scans(&pool, "track_sources").await - sources,
+            settled_table_scans(&pool, "album_tracks").await - memberships,
+        ));
+    }
+
+    assert_eq!(measured[0].1, 2);
+    assert_eq!(measured[1].1, 8);
+    assert_eq!(
+        (measured[1].2, measured[1].3, measured[1].4, measured[1].5),
+        (measured[0].2, measured[0].3, measured[0].4, measured[0].5),
+        "an explicit album page reads its batch sets once regardless of page size"
+    );
 }

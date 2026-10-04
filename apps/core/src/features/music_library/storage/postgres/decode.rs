@@ -839,6 +839,7 @@ pub(crate) async fn sources_for_tracks(
 pub(crate) async fn albums_for_tracks(
     pool: &PgPool,
     track_ids: &[Uuid],
+    requested_album: Option<&AlbumId>,
 ) -> Result<HashMap<Uuid, (Album, AlbumTrack, Option<String>)>, TrackRepositoryError> {
     if track_ids.is_empty() {
         return Ok(HashMap::new());
@@ -873,10 +874,12 @@ pub(crate) async fn albums_for_tracks(
         JOIN albums AS a ON a.id = mt.album_id
         LEFT JOIN artists AS album_artist ON album_artist.id = a.album_artist_id
         WHERE mt.track_id = ANY($1)
+          AND ($2::UUID IS NULL OR mt.album_id = $2)
         ORDER BY mt.track_id, a.title_normalized, a.id
         "#,
     )
     .bind(track_ids)
+    .bind(requested_album.map(|album_id| *album_id.as_uuid()))
     .fetch_all(pool)
     .await
     .map_err(repository_error)?;

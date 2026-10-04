@@ -103,6 +103,18 @@ pub trait LibraryRead: Send + Sync {
         user: Option<Uuid>,
     ) -> Result<TrackPage, TrackRepositoryError>;
 
+    async fn page_album_tracks(
+        &self,
+        _album_id: &AlbumId,
+        _offset: u32,
+        _limit: u32,
+        _order: TrackOrder,
+        _filter: &TrackListFilter,
+        _user: Option<Uuid>,
+    ) -> Result<TrackPage, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
     async fn track_views(
         &self,
         track_ids: &[TrackId],
