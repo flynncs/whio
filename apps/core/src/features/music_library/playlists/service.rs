@@ -10,7 +10,7 @@ use crate::features::music_library::{
     domain::{
         CommentPatch, MoveTarget, OccurrenceSelector, Playlist, PlaylistEntryChange,
         PlaylistEntryError, PlaylistEntryId, PlaylistId, PlaylistMetadataPatch, PlaylistOccurrence,
-        PlaylistWrite, PlaylistWriteOutcome, TrackId, TrackView,
+        PlaylistOrder, PlaylistWrite, PlaylistWriteOutcome, SortDirection, TrackId, TrackView,
     },
     storage::contracts::{PlaylistStore, TrackRepositoryError},
 };
@@ -119,10 +119,24 @@ impl PlaylistService {
     }
 
     pub async fn list(&self, principal: Uuid) -> Result<Vec<Playlist>, PlaylistError> {
-        self.store()?
+        self.list_ordered(principal, PlaylistOrder::Name, SortDirection::Ascending)
+            .await
+    }
+
+    pub async fn list_ordered(
+        &self,
+        principal: Uuid,
+        order: PlaylistOrder,
+        direction: SortDirection,
+    ) -> Result<Vec<Playlist>, PlaylistError> {
+        let mut playlists = self
+            .store()?
             .list_playlists(principal)
             .await
-            .map_err(PlaylistError::Repository)
+            .map_err(PlaylistError::Repository)?;
+        playlists.sort_by(|left, right| compare_playlists(left, right, order, direction));
+
+        Ok(playlists)
     }
 
     pub async fn detail(
@@ -496,6 +510,31 @@ impl PlaylistService {
     fn store(&self) -> Result<&Arc<dyn PlaylistStore>, PlaylistError> {
         self.store.as_ref().ok_or(PlaylistError::Disabled)
     }
+}
+
+fn compare_playlists(
+    left: &Playlist,
+    right: &Playlist,
+    order: PlaylistOrder,
+    direction: SortDirection,
+) -> std::cmp::Ordering {
+    let primary = match order {
+        PlaylistOrder::Name => left.name().to_lowercase().cmp(&right.name().to_lowercase()),
+        PlaylistOrder::UpdatedAt => left.updated_at().cmp(&right.updated_at()),
+        PlaylistOrder::Duration => left.duration_ms().cmp(&right.duration_ms()),
+        PlaylistOrder::Owner => left
+            .owner_username()
+            .to_lowercase()
+            .cmp(&right.owner_username().to_lowercase()),
+        PlaylistOrder::Public => left.is_public().cmp(&right.is_public()),
+        PlaylistOrder::TrackCount => left.track_count().cmp(&right.track_count()),
+    };
+    let primary = match direction {
+        SortDirection::Ascending => primary,
+        SortDirection::Descending => primary.reverse(),
+    };
+
+    primary.then_with(|| left.id().as_uuid().cmp(right.id().as_uuid()))
 }
 
 fn applied(outcome: PlaylistWriteOutcome) -> Result<Option<Playlist>, PlaylistError> {

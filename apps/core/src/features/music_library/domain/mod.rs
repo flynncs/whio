@@ -47,7 +47,7 @@ pub use page::{MAX_PAGE_LIMIT, PageLimit, TrackListFilter, TrackListScope, Track
 pub use playlist::{
     CommentPatch, MoveTarget, OccurrenceSelector, Playlist, PlaylistEntryChange,
     PlaylistEntryError, PlaylistEntryId, PlaylistId, PlaylistMetadataPatch, PlaylistOccurrence,
-    PlaylistWrite, PlaylistWriteOutcome,
+    PlaylistOrder, PlaylistWrite, PlaylistWriteOutcome,
 };
 pub use provider_state::ProviderEntityState;
 pub use query::{

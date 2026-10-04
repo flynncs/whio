@@ -14,8 +14,8 @@ use crate::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistListFilter,
         ArtistSort, ArtistSummary, CommentPatch, GenreSummary, IdSet, MAX_PAGE_LIMIT, MoveTarget,
         OccurrenceSelector, PageLimit, Playlist as PlaylistRecord, PlaylistEntryChange, PlaylistId,
-        PlaylistMetadataPatch, RestoreQueueSnapshot, SelectorText, SortDirection, TrackId,
-        TrackListFilter, TrackOrder, TrackView,
+        PlaylistMetadataPatch, PlaylistOrder, RestoreQueueSnapshot, SelectorText, SortDirection,
+        TrackId, TrackListFilter, TrackOrder, TrackView,
     },
     features::music_library::library::{LibraryId, LibraryRegistrationError, LibraryRegistry},
     features::music_library::playlists::{
@@ -441,18 +441,27 @@ fn owner_claim(user: Uuid, owner_id: Option<Uuid>) -> Result<(), SongError> {
     }
 }
 
+pub(crate) struct PlaylistListQuery {
+    pub order: PlaylistOrder,
+    pub direction: SortDirection,
+    pub start: u32,
+    pub end: u32,
+}
+
 pub(crate) async fn playlist_list(
     playlists: &PlaylistService,
     credential: &CredentialService,
     token: &str,
-    start: u32,
-    end: u32,
+    query: PlaylistListQuery,
     tags: SourceTags,
 ) -> Result<(Vec<Playlist>, u32), SongError> {
     let user = authorize(credential, token).await?;
-    let summaries = playlists.list(user).await.map_err(SongError::Playlist)?;
+    let summaries = playlists
+        .list_ordered(user, query.order, query.direction)
+        .await
+        .map_err(SongError::Playlist)?;
     let total = u32::try_from(summaries.len()).unwrap_or(u32::MAX);
-    let (offset, limit) = page(start, end)?;
+    let (offset, limit) = page(query.start, query.end)?;
     let mut result = Vec::new();
 
     for summary in summaries.iter().skip(offset as usize).take(limit as usize) {

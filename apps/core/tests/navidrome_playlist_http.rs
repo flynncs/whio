@@ -156,18 +156,7 @@ async fn ok_body(response: Response) -> Value {
 }
 
 async fn list(app: &Router, token: &str) -> (HeaderMap, Value) {
-    let response = send(
-        app,
-        "GET",
-        &format!("{API}?_start=0&_end=0&_sort=name&_order=ASC"),
-        token,
-        None,
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let headers = response.headers().clone();
-
-    (headers, body_of(response).await)
+    sorted_list(app, token, "name", "ASC", 0, 0).await
 }
 
 async fn detail(app: &Router, token: &str, id: &str) -> Value {
@@ -306,17 +295,61 @@ fn native_entry_ids(body: &Value) -> Vec<String> {
 }
 
 async fn track(ports: &StorePorts, external_id: &str, title: &str) -> TrackId {
+    track_of_duration(ports, external_id, title, 1_000).await
+}
+
+async fn track_of_duration(
+    ports: &StorePorts,
+    external_id: &str,
+    title: &str,
+    duration_ms: u64,
+) -> TrackId {
     ports
         .catalogue()
         .get_or_create(
             source(external_id),
-            TrackMetadata::from_names(title.to_owned(), vec!["Artist".to_owned()], Some(1_000))
-                .unwrap(),
+            TrackMetadata::from_names(
+                title.to_owned(),
+                vec!["Artist".to_owned()],
+                Some(duration_ms),
+            )
+            .unwrap(),
         )
         .await
         .unwrap()
         .id()
         .clone()
+}
+
+async fn sorted_list(
+    app: &Router,
+    token: &str,
+    sort: &str,
+    order: &str,
+    start: u32,
+    end: u32,
+) -> (HeaderMap, Value) {
+    let response = send(
+        app,
+        "GET",
+        &format!("{API}?_start={start}&_end={end}&_sort={sort}&_order={order}"),
+        token,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+
+    (headers, body_of(response).await)
+}
+
+fn ids_of(playlists: &Value) -> Vec<String> {
+    playlists
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|playlist| playlist["id"].as_str().unwrap().to_owned())
+        .collect()
 }
 
 async fn four_tracks(ports: &StorePorts) -> Vec<TrackId> {
@@ -964,4 +997,238 @@ async fn existing_navidrome_cases_still_pass(pool: PgPool) {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_of(response).await["title"], json!("First"));
+}
+
+#[sqlx::test]
+async fn playlist_list_accepts_the_clients_default_sort_and_order(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let bravo = create(&fixture.app, &fixture.owner, json!({ "name": "Bravo" })).await;
+    let alpha = create(&fixture.app, &fixture.owner, json!({ "name": "Alpha" })).await;
+    let charlie = create(&fixture.app, &fixture.owner, json!({ "name": "Charlie" })).await;
+
+    let (headers, body) =
+        sorted_list(&fixture.app, &fixture.owner, "updatedAt", "DESC", 0, 20).await;
+    assert_eq!(headers["x-total-count"], "3");
+    assert_eq!(
+        ids_of(&body),
+        vec![charlie.clone(), alpha.clone(), bravo.clone()],
+        "the client's updatedAt DESC returns the most recently changed playlist first"
+    );
+
+    let (_, by_name) = sorted_list(&fixture.app, &fixture.owner, "name", "ASC", 0, 20).await;
+    assert_eq!(
+        ids_of(&by_name),
+        vec![alpha, bravo, charlie],
+        "the timestamp order differs from the name order"
+    );
+}
+
+#[sqlx::test]
+async fn playlist_sorts_are_applied_before_the_window(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let mut created = Vec::new();
+    for name in ["Echo", "Delta", "Charlie", "Bravo", "Alpha"] {
+        created.push(create(&fixture.app, &fixture.owner, json!({ "name": name })).await);
+    }
+    let mut by_uuid = created.clone();
+    by_uuid.sort();
+
+    let (headers, first) =
+        sorted_list(&fixture.app, &fixture.owner, "songCount", "ASC", 0, 3).await;
+    assert_eq!(headers["x-total-count"], "5");
+    assert_eq!(
+        ids_of(&first),
+        by_uuid[..3].to_vec(),
+        "equal track counts fall back to ascending uuid, sorted before the window"
+    );
+
+    let (_, second) = sorted_list(&fixture.app, &fixture.owner, "songCount", "ASC", 3, 5).await;
+    assert_eq!(ids_of(&second), by_uuid[3..].to_vec());
+
+    let (_, descending) =
+        sorted_list(&fixture.app, &fixture.owner, "songCount", "DESC", 0, 3).await;
+    assert_eq!(
+        ids_of(&descending),
+        by_uuid[..3].to_vec(),
+        "the uuid tie stays ascending in both directions"
+    );
+}
+
+#[sqlx::test]
+async fn playlist_list_supports_all_consumed_sort_fields(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let charlie = create(
+        &fixture.app,
+        &fixture.owner,
+        json!({ "name": "Charlie", "public": true }),
+    )
+    .await;
+    let bravo = create(
+        &fixture.app,
+        &fixture.owner,
+        json!({ "name": "Bravo", "public": false }),
+    )
+    .await;
+    let alpha = create(
+        &fixture.app,
+        &fixture.stranger,
+        json!({ "name": "alpha", "public": true }),
+    )
+    .await;
+    let hidden = create(
+        &fixture.app,
+        &fixture.stranger,
+        json!({ "name": "aaa", "public": false }),
+    )
+    .await;
+
+    let charlie_track = track_of_duration(&fixture.ports, "charlie", "Charlie song", 900).await;
+    let bravo_first = track_of_duration(&fixture.ports, "bravo-1", "Bravo one", 4_500).await;
+    let bravo_second = track_of_duration(&fixture.ports, "bravo-2", "Bravo two", 4_500).await;
+    let alpha_track = track_of_duration(&fixture.ports, "alpha", "alpha song", 10).await;
+    let hidden_track = track_of_duration(&fixture.ports, "hidden", "hidden song", 1).await;
+
+    for (token, playlist, tracks) in [
+        (&fixture.owner, &bravo, vec![&bravo_first, &bravo_second]),
+        (&fixture.stranger, &alpha, vec![&alpha_track]),
+        (&fixture.owner, &charlie, vec![&charlie_track]),
+        (&fixture.stranger, &hidden, vec![&hidden_track]),
+    ] {
+        assert_eq!(
+            add(&fixture.app, token, playlist, &tracks).await.status(),
+            StatusCode::OK
+        );
+    }
+
+    let mut owned_by_uuid = [charlie.clone(), bravo.clone()];
+    owned_by_uuid.sort();
+    let mut one_track_by_uuid = [charlie.clone(), alpha.clone()];
+    one_track_by_uuid.sort();
+
+    let expected_ascending = [
+        ("name", vec![alpha.clone(), bravo.clone(), charlie.clone()]),
+        (
+            "updatedAt",
+            vec![bravo.clone(), alpha.clone(), charlie.clone()],
+        ),
+        (
+            "duration",
+            vec![alpha.clone(), charlie.clone(), bravo.clone()],
+        ),
+        (
+            "owner_name",
+            vec![
+                owned_by_uuid[0].clone(),
+                owned_by_uuid[1].clone(),
+                alpha.clone(),
+            ],
+        ),
+        (
+            "public",
+            vec![
+                bravo.clone(),
+                one_track_by_uuid[0].clone(),
+                one_track_by_uuid[1].clone(),
+            ],
+        ),
+        (
+            "songCount",
+            vec![
+                one_track_by_uuid[0].clone(),
+                one_track_by_uuid[1].clone(),
+                bravo.clone(),
+            ],
+        ),
+    ];
+    let expected_descending = [
+        ("name", vec![charlie.clone(), bravo.clone(), alpha.clone()]),
+        (
+            "updatedAt",
+            vec![charlie.clone(), alpha.clone(), bravo.clone()],
+        ),
+        (
+            "duration",
+            vec![bravo.clone(), charlie.clone(), alpha.clone()],
+        ),
+        (
+            "owner_name",
+            vec![
+                alpha.clone(),
+                owned_by_uuid[0].clone(),
+                owned_by_uuid[1].clone(),
+            ],
+        ),
+        (
+            "public",
+            vec![
+                one_track_by_uuid[0].clone(),
+                one_track_by_uuid[1].clone(),
+                bravo.clone(),
+            ],
+        ),
+        (
+            "songCount",
+            vec![
+                bravo.clone(),
+                one_track_by_uuid[0].clone(),
+                one_track_by_uuid[1].clone(),
+            ],
+        ),
+    ];
+
+    for (sort, expected) in expected_ascending {
+        let (headers, body) = sorted_list(&fixture.app, &fixture.owner, sort, "ASC", 0, 50).await;
+        assert_eq!(headers["x-total-count"], "3", "sort {sort}");
+        assert_eq!(ids_of(&body), expected, "sort {sort} ASC");
+    }
+    for (sort, expected) in expected_descending {
+        let (headers, body) = sorted_list(&fixture.app, &fixture.owner, sort, "DESC", 0, 50).await;
+        assert_eq!(headers["x-total-count"], "3", "sort {sort}");
+        assert_eq!(ids_of(&body), expected, "sort {sort} DESC");
+    }
+
+    let (_, by_count) = sorted_list(&fixture.app, &fixture.owner, "songCount", "ASC", 0, 50).await;
+    let counts = by_count
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|playlist| playlist["songCount"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(counts, vec![1, 1, 2], "the reported counts are real");
+    assert!(
+        !ids_of(&by_count).contains(&hidden),
+        "an invisible private playlist is excluded"
+    );
+}
+
+#[sqlx::test]
+async fn an_unsupported_playlist_sort_is_refused_not_defaulted(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let id = create(&fixture.app, &fixture.owner, json!({ "name": "Sorted" })).await;
+
+    for query in [
+        "_sort=bogus",
+        "_sort=updated_at",
+        "_order=SIDEWAYS",
+        "_sort=name&_order=descending",
+        "smart=true",
+    ] {
+        let response = send(
+            &fixture.app,
+            "GET",
+            &format!("{API}?{query}"),
+            &fixture.owner,
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "query {query}"
+        );
+    }
+
+    let (headers, body) = list(&fixture.app, &fixture.owner).await;
+    assert_eq!(headers["x-total-count"], "1");
+    assert_eq!(ids_of(&body), vec![id]);
 }

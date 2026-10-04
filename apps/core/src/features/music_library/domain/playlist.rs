@@ -190,6 +190,17 @@ impl Playlist {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlaylistOrder {
+    #[default]
+    Name,
+    UpdatedAt,
+    Duration,
+    Owner,
+    Public,
+    TrackCount,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaylistOccurrence {
     entry_id: PlaylistEntryId,

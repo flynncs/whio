@@ -11,8 +11,8 @@ use crate::{
     facades::navidrome::state::{NavidromeQueueState, NavidromeState},
     features::music_library::domain::{
         AlbumListFilter, ArtistId, ArtistListFilter, CommentPatch, IdSet, OccurrenceSelector,
-        Playlist, PlaylistEntryChange, PlaylistEntryError, PlaylistMetadataPatch, Range,
-        RoleSelector, RoleSet, SelectorText, SortDirection, TrackId,
+        Playlist, PlaylistEntryChange, PlaylistEntryError, PlaylistMetadataPatch, PlaylistOrder,
+        Range, RoleSelector, RoleSet, SelectorText, SortDirection, TrackId,
     },
     features::music_library::library::{LibraryId, LibraryRegistry},
     features::music_library::playlists::PlaylistError,
@@ -423,6 +423,14 @@ fn list_response<T: serde::Serialize>(items: &[T], total: u32) -> Response {
 const PLAYLIST_LIST_PARAMETERS: &[&str] = &["_start", "_end", "_sort", "_order", "smart"];
 const PLAYLIST_TRACK_PARAMETERS: &[&str] = &["_start", "_end", "_sort", "_order", "missing"];
 const PLAYLIST_ITEM_SORTS: &[&str] = &["id"];
+const PLAYLIST_LIST_SORTS: &[(&str, PlaylistOrder)] = &[
+    ("name", PlaylistOrder::Name),
+    ("updatedAt", PlaylistOrder::UpdatedAt),
+    ("duration", PlaylistOrder::Duration),
+    ("owner_name", PlaylistOrder::Owner),
+    ("public", PlaylistOrder::Public),
+    ("songCount", PlaylistOrder::TrackCount),
+];
 
 fn ascending(query: &RawQuery) -> Result<(), SongError> {
     match service::sort_direction(query.get("_order"))? {
@@ -431,16 +439,26 @@ fn ascending(query: &RawQuery) -> Result<(), SongError> {
     }
 }
 
-fn playlist_list_query(query: &RawQuery) -> Result<(), SongError> {
+fn playlist_order(sort: Option<&str>) -> Result<PlaylistOrder, SongError> {
+    match sort {
+        None => Ok(PlaylistOrder::Name),
+        Some(sort) => PLAYLIST_LIST_SORTS
+            .iter()
+            .find(|(name, _)| *name == sort)
+            .map(|(_, order)| *order)
+            .ok_or(SongError::InvalidRequest),
+    }
+}
+
+fn playlist_list_query(query: &RawQuery) -> Result<(PlaylistOrder, SortDirection), SongError> {
     reject_unknown(query, PLAYLIST_LIST_PARAMETERS)?;
 
-    if query.get("_sort").is_some_and(|sort| sort != "name") {
-        return Err(SongError::InvalidRequest);
-    }
-    ascending(query)?;
+    let order = playlist_order(query.get("_sort"))?;
+    let direction =
+        service::sort_direction(query.get("_order"))?.unwrap_or(SortDirection::Ascending);
 
     match query.get("smart") {
-        None | Some("false") => Ok(()),
+        None | Some("false") => Ok((order, direction)),
         Some(_) => Err(SongError::InvalidRequest),
     }
 }
@@ -573,9 +591,10 @@ pub(crate) async fn playlist_list(
     token: NdToken,
     query: RawQuery,
 ) -> Response {
-    if let Err(error) = playlist_list_query(&query) {
-        return song_error(error, &context);
-    }
+    let (order, direction) = match playlist_list_query(&query) {
+        Ok(parsed) => parsed,
+        Err(error) => return song_error(error, &context),
+    };
     let (start, end) = match window(&query) {
         Ok(window) => window,
         Err(error) => return song_error(error, &context),
@@ -585,8 +604,12 @@ pub(crate) async fn playlist_list(
         state.playlists(),
         state.credential(),
         &token.0,
-        start,
-        end,
+        service::PlaylistListQuery {
+            order,
+            direction,
+            start,
+            end,
+        },
         state.source_tags(),
     )
     .await
