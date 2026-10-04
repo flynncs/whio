@@ -3,17 +3,19 @@
 use sqlx::PgPool;
 use whio_core::features::music_library::domain::{
     AlbumMetadata, AlbumTrack, ArtistCredit, ArtistListFilter, ArtistSort, ProviderId,
-    SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
+    ProviderKind, SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
 };
 use whio_core::features::music_library::history::ListenService;
 use whio_core::features::music_library::test_support::{
     CatalogueWrite, LibraryRead, ListenStore, PlaylistStore, PostgresTrackRepository,
-    RestoreQueueStore, StateStore,
+    RestoreQueueStore, SourceFileFacts, StateStore,
 };
 mod support;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
@@ -29,11 +31,15 @@ use whio_core::{
     features::identity::secrets::CredentialKey,
     features::identity::service::CredentialService,
     features::music_library::catalogue::{LibraryService, SearchService},
+    features::music_library::library_state::LibraryStateService,
     features::music_library::playlists::PlaylistService,
     features::music_library::queue::{RestoreQueueSave, RestoreQueueService},
-    features::playback::StreamingService,
-    features::playback::providers::YtmAdapter,
-    features::playback::{PlaybackActivityService, PlaybackProvider},
+    features::playback::providers::{ProviderError, YtmAdapter},
+    features::playback::{
+        PlaybackActivityService, PlaybackProvider, PlaybackSource, ResolvedPlayback,
+        StreamingService,
+    },
+    platform::request::RequestContext,
 };
 
 use support::credentials::credential_service_with_roles;
@@ -426,12 +432,13 @@ async fn navidrome_browse_lists_albums_artists_and_songs(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["x-total-count"], "1");
+    assert_eq!(headers["access-control-expose-headers"], "x-total-count");
     assert_eq!(body[0]["name"], json!("Discovery"));
     assert_eq!(body[0]["albumArtist"], json!("Daft Punk"));
     assert_eq!(body[0]["songCount"], json!(2));
     assert!(body[0]["createdAt"].as_str().is_some_and(|v| !v.is_empty()));
     let album_id = body[0]["id"].as_str().unwrap();
-    assert_eq!(body[0]["coverArt"], json!(format!("al-{album_id}")));
+    assert_eq!(body[0]["coverArtId"], json!(format!("al-{album_id}")));
 
     let (status, _, body) = get_authed(
         app.clone(),
@@ -3913,4 +3920,402 @@ async fn subsonic_advertises_only_the_extensions_it_serves(pool: PgPool) {
             "the advertised state {state} is served"
         );
     }
+}
+
+fn selected_facts() -> SourceFileFacts {
+    SourceFileFacts {
+        path: Some("Library/selected.flac".to_owned()),
+        size_bytes: 4_000,
+        modified_at: None,
+        missing_at: None,
+        content_type: Some("audio/flac".to_owned()),
+        suffix: Some("flac".to_owned()),
+        container: Some("flac".to_owned()),
+        codec: Some("flac".to_owned()),
+        bitrate_kbps: Some(900),
+        sample_rate_hz: Some(44_100),
+        bit_depth: Some(16),
+        channels: Some(2),
+        facts_version: 1,
+        acoustid_fingerprint: None,
+    }
+}
+
+fn representation_song(body: &Value, surface: &str, track: &str) -> Value {
+    if surface == "getSong" || surface == "getSongPost" {
+        return body["subsonic-response"]["song"].clone();
+    }
+
+    let songs = match surface {
+        "search" | "searchQuery" => body["subsonic-response"]["searchResult3"]["song"].as_array(),
+        "album" => body["subsonic-response"]["album"]["song"].as_array(),
+        "directory" => body["subsonic-response"]["directory"]["child"].as_array(),
+        "starred" => body["subsonic-response"]["starred2"]["song"].as_array(),
+        "playlist" => body["subsonic-response"]["playlist"]["entry"].as_array(),
+        "queue" => body["subsonic-response"]["playQueue"]["entry"].as_array(),
+        "nowPlaying" => body["subsonic-response"]["nowPlaying"]["entry"].as_array(),
+        other => panic!("unknown surface {other}"),
+    };
+
+    songs
+        .and_then(|songs| songs.iter().find(|song| song["id"] == json!(track)))
+        .cloned()
+        .unwrap_or_else(|| panic!("{surface} does not serve the track"))
+}
+
+struct PayloadFixture {
+    app: axum::Router,
+    auth: String,
+    track: TrackId,
+    album: String,
+}
+
+async fn payload_fixture(pool: PgPool) -> PayloadFixture {
+    let (service, secret) = support::credentials::database_credential_service(pool.clone()).await;
+    let ports = StorePorts::new(pool.clone());
+    let album = ports
+        .store
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Discovery".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let source = local_source("payload.flac");
+    let track = ports
+        .store
+        .get_or_create(source.clone(), reporting_metadata("Selected", 200_000))
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_source_file_facts(&source, &selected_facts())
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_album_track(
+            album.id(),
+            track.id(),
+            &AlbumTrack::new(Some(1), Some(2), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = 'flynn'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_starred(user_id, StateTarget::Track(track.id()), true)
+        .await
+        .unwrap();
+
+    let (search, library) = ports.bare_catalogue();
+    let playlists = Arc::new(PlaylistService::new(
+        Arc::clone(&ports.store) as Arc<dyn PlaylistStore>,
+        Arc::clone(&library),
+    ));
+    let queue = Arc::new(RestoreQueueService::new(
+        Arc::clone(&ports.store) as Arc<dyn RestoreQueueStore>
+    ));
+    let listens = Arc::new(ListenService::new(
+        Arc::clone(&ports.store) as Arc<dyn ListenStore>,
+        Arc::clone(&ports.store) as Arc<dyn LibraryRead>,
+    ));
+    let activity = Arc::new(PlaybackActivityService::new(listens, Arc::clone(&library)));
+    let library_state = Arc::new(LibraryStateService::new(ports.state(), ports.library()));
+    let playback = ports.streaming(vec![]);
+    let app = whio_core::app::router(
+        AppState::new(service, search, library, playback)
+            .with_playlists(playlists)
+            .with_queue(queue)
+            .with_playback_activity(activity)
+            .with_library_state(library_state),
+    );
+
+    PayloadFixture {
+        app,
+        auth: auth_query("flynn", &secret),
+        track: track.id().clone(),
+        album: album.id().to_string(),
+    }
+}
+
+#[sqlx::test]
+async fn subsonic_song_surfaces_share_representation_facts(pool: PgPool) {
+    let fixture = payload_fixture(pool).await;
+    let auth = &fixture.auth;
+    let track = fixture.track.to_string();
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            auth,
+            &format!("name=Facts&songId={track}"),
+        ),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let playlist_id = playlist_id_of(&body);
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueue",
+            auth,
+            &format!("id={track}&current={track}"),
+        ),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route("scrobble", auth, &format!("id={track}&submission=false")),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+
+    let (post_status, post_song) = post_status(
+        fixture.app.clone(),
+        &format!("/compat/subsonic/rest/getSong.view?{auth}&id={track}"),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(post_status, StatusCode::OK);
+
+    let surfaces = [
+        ("getSongPost", post_song),
+        (
+            "search",
+            get(fixture.app.clone(), &subsonic_search3("query=", auth)).await,
+        ),
+        (
+            "searchQuery",
+            get(
+                fixture.app.clone(),
+                &subsonic_search3("query=Selected", auth),
+            )
+            .await,
+        ),
+        (
+            "getSong",
+            get(
+                fixture.app.clone(),
+                &format!("/compat/subsonic/rest/getSong.view?{auth}&id={track}"),
+            )
+            .await,
+        ),
+        (
+            "album",
+            get(
+                fixture.app.clone(),
+                &format!(
+                    "/compat/subsonic/rest/getAlbum.view?{auth}&id={}",
+                    fixture.album
+                ),
+            )
+            .await,
+        ),
+        (
+            "directory",
+            get(
+                fixture.app.clone(),
+                &format!(
+                    "/compat/subsonic/rest/getMusicDirectory.view?{auth}&id={}",
+                    fixture.album
+                ),
+            )
+            .await,
+        ),
+        (
+            "starred",
+            get(
+                fixture.app.clone(),
+                &format!("/compat/subsonic/rest/getStarred2.view?{auth}"),
+            )
+            .await,
+        ),
+        (
+            "playlist",
+            get(
+                fixture.app.clone(),
+                &playlist_route("getPlaylist", auth, &format!("id={playlist_id}")),
+            )
+            .await,
+        ),
+        (
+            "queue",
+            get(
+                fixture.app.clone(),
+                &format!("/compat/subsonic/rest/getPlayQueue.view?{auth}"),
+            )
+            .await,
+        ),
+        (
+            "nowPlaying",
+            get(
+                fixture.app.clone(),
+                &format!("/compat/subsonic/rest/getNowPlaying.view?{auth}"),
+            )
+            .await,
+        ),
+    ];
+
+    for (surface, body) in &surfaces {
+        let song = representation_song(body, surface, &track);
+        assert_eq!(song["contentType"], json!("audio/flac"), "{surface}");
+        assert_eq!(song["suffix"], json!("flac"), "{surface}");
+        assert_eq!(song["size"], json!(4_000), "{surface}");
+        assert_eq!(song["bitRate"], json!(900), "{surface}");
+        assert_eq!(song["samplingRate"], json!(44_100), "{surface}");
+        assert_eq!(song["bitDepth"], json!(16), "{surface}");
+        assert_eq!(song["channelCount"], json!(2), "{surface}");
+    }
+}
+
+#[sqlx::test]
+async fn subsonic_get_song_errors_follow_entity_shapes(pool: PgPool) {
+    let fixture = payload_fixture(pool).await;
+    let path = "/compat/subsonic/rest/getSong.view";
+
+    let (status, body) = get_status(fixture.app.clone(), &format!("{path}?{}", fixture.auth)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(10));
+
+    let missing_track_id = Uuid::now_v7().to_string();
+    for id in ["not-a-track", missing_track_id.as_str()] {
+        let (status, body) = get_status(
+            fixture.app.clone(),
+            &format!("{path}?{}&id={id}", fixture.auth),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
+        assert_eq!(body["subsonic-response"]["error"]["code"], json!(70));
+    }
+
+    let (status, body) = get_status(
+        fixture.app,
+        &format!(
+            "{path}?u=flynn&v=1.16.1&c=test-client&p=forged&id={}",
+            fixture.track
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(40));
+}
+
+struct CountingPlayback {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl PlaybackProvider for CountingPlayback {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::YoutubeMusic
+    }
+
+    async fn resolve(
+        &self,
+        _source: &PlaybackSource,
+        _user: Option<&Uuid>,
+        _context: &RequestContext,
+    ) -> Result<Option<ResolvedPlayback>, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+}
+
+#[sqlx::test]
+async fn provider_only_subsonic_songs_use_an_unknown_representation(pool: PgPool) {
+    let (service, secret) = support::credentials::database_credential_service(pool.clone()).await;
+    let ports = StorePorts::new(pool.clone());
+    let album = ports
+        .store
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Discovery".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let track = ports
+        .store
+        .get_or_create(
+            SourceIdentity::new(
+                ProviderId::new("youtube_music".to_owned()).unwrap(),
+                SourceScope::Global,
+                "vid-provider".to_owned(),
+            )
+            .unwrap(),
+            reporting_metadata("Provider Only", 200_000),
+        )
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (search, library) = ports.bare_catalogue();
+    let playback = ports.streaming(vec![Arc::new(CountingPlayback {
+        calls: Arc::clone(&calls),
+    }) as Arc<dyn PlaybackProvider>]);
+    let app = whio_core::app::router(AppState::new(service, search, library, playback));
+    let auth = auth_query("flynn", &secret);
+    let track_id = track.id().to_string();
+
+    let surfaces = [
+        (
+            "search",
+            get(app.clone(), &subsonic_search3("query=Provider", &auth)).await,
+        ),
+        (
+            "getSong",
+            get(
+                app.clone(),
+                &format!("/compat/subsonic/rest/getSong.view?{auth}&id={track_id}"),
+            )
+            .await,
+        ),
+        (
+            "album",
+            get(
+                app.clone(),
+                &format!(
+                    "/compat/subsonic/rest/getAlbum.view?{auth}&id={}",
+                    album.id()
+                ),
+            )
+            .await,
+        ),
+    ];
+
+    for (surface, body) in &surfaces {
+        let song = representation_song(body, surface, &track_id);
+        assert_eq!(
+            song["contentType"],
+            json!("application/octet-stream"),
+            "{surface}"
+        );
+        assert!(song.get("suffix").is_none(), "{surface}");
+        assert!(song.get("size").is_none(), "{surface}");
+        assert!(song.get("bitRate").is_none(), "{surface}");
+        assert!(song.get("samplingRate").is_none(), "{surface}");
+        assert!(song.get("bitDepth").is_none(), "{surface}");
+        assert!(song.get("channelCount").is_none(), "{surface}");
+    }
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "listing a provider-only song never resolves its media"
+    );
 }

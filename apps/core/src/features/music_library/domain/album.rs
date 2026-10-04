@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use super::{
     Artist, ArtistCredit, ArtistId, IdSet, LibraryState, MatchQuality, RandomSeed, Range, RoleSet,
-    SelectorText, SortDirection, SourceIdentity, SourceRepresentationFacts, Track, ValidationError,
+    SelectorText, SortDirection, SourceIdentity, SourceRepresentationFacts, Track, TrackView,
+    ValidationError,
     text::{optional, required},
 };
 use crate::features::music_library::library::LibraryId;
@@ -887,6 +888,18 @@ impl AlbumEntry {
         self.representation.as_ref()
     }
 
+    pub fn track_view(&self, album: &AlbumSummary) -> TrackView {
+        TrackView::new(
+            self.track.clone(),
+            Some(album.album().clone()),
+            Some(self.membership.clone()),
+            album.album_artist().map(|artist| artist.name().to_owned()),
+            self.state,
+            self.sources.clone(),
+        )
+        .with_representation(self.representation.clone())
+    }
+
     pub fn track(&self) -> &Track {
         &self.track
     }
@@ -917,6 +930,7 @@ fn checked_year(year: Option<i32>) -> Result<Option<i32>, ValidationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::music_library::domain::{ProviderId, SourceScope, TrackId, TrackMetadata};
 
     #[test]
     fn album_identity_round_trips() {
@@ -1093,6 +1107,68 @@ mod tests {
             .with_totals(Some(0), Some(0));
         assert_eq!(zero.disc_total(), None);
         assert_eq!(zero.track_total(), None);
+    }
+
+    #[test]
+    fn an_album_entry_view_takes_the_supplied_album_and_its_membership() {
+        let track = Track::new(
+            TrackId::new(),
+            TrackMetadata::from_names(
+                "Instant Crush".to_owned(),
+                vec!["Daft Punk".to_owned()],
+                Some(337_000),
+            )
+            .unwrap(),
+        );
+        let source = SourceIdentity::new(
+            ProviderId::new("local".to_owned()).unwrap(),
+            SourceScope::Named("/music".to_owned()),
+            "instant-crush.flac".to_owned(),
+        )
+        .unwrap();
+        let facts = SourceRepresentationFacts {
+            source: source.clone(),
+            content_type: Some("audio/flac".to_owned()),
+            suffix: Some("flac".to_owned()),
+            container: None,
+            codec: None,
+            size_bytes: Some(4_000),
+            bitrate_kbps: None,
+            sample_rate_hz: None,
+            bit_depth: None,
+            channels: None,
+        };
+        let entry = AlbumEntry::new(track.clone(), AlbumTrack::new(Some(1), Some(3), 2).unwrap())
+            .with_sources(vec![source.clone()])
+            .with_representation(Some(facts.clone()));
+        let album = Album::new(
+            AlbumId::new(),
+            "Discovery".to_owned(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let summary = AlbumSummary::new(
+            album.clone(),
+            Some(Artist::new(ArtistId::new(), "Daft Punk".to_owned(), None, None).unwrap()),
+            1,
+            337_000,
+            chrono::Utc::now(),
+        );
+
+        let view = entry.track_view(&summary);
+
+        assert_eq!(view.track().id(), track.id());
+        assert_eq!(view.album(), Some(&album));
+        assert_eq!(view.album_artist(), Some("Daft Punk"));
+        assert_eq!(view.membership().unwrap().disc_number(), Some(1));
+        assert_eq!(view.membership().unwrap().track_number(), Some(3));
+        assert_eq!(view.sources(), &[source]);
+        assert_eq!(view.representation(), Some(&facts));
     }
 
     #[test]

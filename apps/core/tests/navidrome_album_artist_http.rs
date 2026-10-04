@@ -822,7 +822,7 @@ async fn navidrome_album_and_artist_facts_are_sourced(pool: PgPool) {
     assert!(album["starredAt"].as_str().is_some(), "a real star time");
     assert_eq!(album["albumArtist"], json!("Daft Punk"));
     assert_eq!(album["albumArtistId"], json!(seed.daft_punk.to_string()));
-    assert_eq!(album["coverArt"], json!(format!("al-{}", seed.kept)));
+    assert_eq!(album["coverArtId"], json!(format!("al-{}", seed.kept)));
     assert_eq!(
         album["createdAt"],
         json!(created.to_rfc3339()),
@@ -913,7 +913,7 @@ async fn navidrome_album_detail_and_artist_detail_keep_their_contract(pool: PgPo
     assert_eq!(body["name"], json!("Kept"));
     assert_eq!(body["albumArtist"], json!("Daft Punk"));
     assert_eq!(body["songCount"], json!(1));
-    assert_eq!(body["coverArt"], json!(format!("al-{}", seed.kept)));
+    assert_eq!(body["coverArtId"], json!(format!("al-{}", seed.kept)));
     assert!(
         body["createdAt"]
             .as_str()

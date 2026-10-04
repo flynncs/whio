@@ -57,6 +57,20 @@ pub(crate) struct Song {
     pub(crate) cover_art: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) duration: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) suffix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bit_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sample_rate: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bit_depth: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) channels: Option<u8>,
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) starred: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,7 +94,7 @@ pub(crate) struct Album {
     pub(crate) album_artist_id: Option<String>,
     pub(crate) song_count: u32,
     pub(crate) duration: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "coverArtId", skip_serializing_if = "Option::is_none")]
     pub(crate) cover_art: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) year: Option<i32>,

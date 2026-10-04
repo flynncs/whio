@@ -2,7 +2,10 @@
 
 mod support;
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use axum::{
     body::{Body, to_bytes},
@@ -16,13 +19,18 @@ use uuid::Uuid;
 use whio_core::features::music_library::{
     catalogue::{CatalogueCandidate, ProviderError as CatalogueProviderError},
     domain::{
-        AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
-        StateTarget, TrackId, TrackMetadata,
+        AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, ProviderKind, SourceIdentity,
+        SourceScope, StateTarget, TrackId, TrackMetadata,
     },
-    test_support::{CatalogueWrite, PostgresTrackRepository, StateStore},
+    test_support::{CatalogueWrite, PostgresTrackRepository, SourceFileFacts, StateStore},
+};
+use whio_core::{
+    features::playback::providers::ProviderError,
+    features::playback::{PlaybackProvider, PlaybackSource, ResolvedPlayback},
+    platform::request::RequestContext,
 };
 
-use support::{credentials::database_credential_service, router, services};
+use support::{StorePorts, credentials::database_credential_service, router, services};
 
 const API: &str = "/compat/navidrome/api/song";
 
@@ -32,6 +40,27 @@ struct Fixture {
     secret: String,
     user: Uuid,
     store: Arc<PostgresTrackRepository>,
+}
+
+struct CountingPlayback {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl PlaybackProvider for CountingPlayback {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::YoutubeMusic
+    }
+
+    async fn resolve(
+        &self,
+        _source: &PlaybackSource,
+        _user: Option<&Uuid>,
+        _context: &RequestContext,
+    ) -> Result<Option<ResolvedPlayback>, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
 }
 
 async fn fixture(
@@ -176,6 +205,180 @@ async fn add_album(
         .unwrap()
         .id()
         .clone()
+}
+
+fn selected_facts() -> SourceFileFacts {
+    SourceFileFacts {
+        path: Some("/music/song.ogg".to_owned()),
+        size_bytes: 0,
+        modified_at: None,
+        missing_at: None,
+        content_type: Some("audio/ogg".to_owned()),
+        suffix: Some("ogg".to_owned()),
+        container: Some("ogg".to_owned()),
+        codec: Some("vorbis".to_owned()),
+        bitrate_kbps: Some(900),
+        sample_rate_hz: Some(48_000),
+        bit_depth: Some(24),
+        channels: Some(2),
+        facts_version: 1,
+        acoustid_fingerprint: None,
+    }
+}
+
+#[sqlx::test]
+async fn navidrome_song_surfaces_share_representation_facts(pool: PgPool) {
+    let fixture = api_fixture(pool).await;
+    let album = add_album(&fixture.store, "Discovery", Some("Daft Punk")).await;
+    let source = local_source("song.ogg");
+    let track = fixture
+        .store
+        .get_or_create(
+            source.clone(),
+            TrackMetadata::from_names(
+                "Selected".to_owned(),
+                vec!["Daft Punk".to_owned()],
+                Some(200_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_source_file_facts(&source, &selected_facts())
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_album_track(
+            &album,
+            track.id(),
+            &AlbumTrack::new(Some(1), Some(2), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+    let id = track.id().to_string();
+    let expected = [
+        ("suffix", json!("ogg")),
+        ("codec", json!("vorbis")),
+        ("size", json!(0)),
+        ("bitRate", json!(900)),
+        ("sampleRate", json!(48_000)),
+        ("bitDepth", json!(24)),
+        ("channels", json!(2)),
+    ];
+
+    let (_, _, list) = get(fixture.app.clone(), &fixture.token, "?title=Selected").await;
+    let (_, _, detail) = get(fixture.app.clone(), &fixture.token, &format!("/{id}")).await;
+    let (_, _, contextual) = get(fixture.app, &fixture.token, &format!("?album_id={album}")).await;
+    for song in [&list[0], &detail, &contextual[0]] {
+        for (field, value) in &expected {
+            assert_eq!(song[*field], *value, "{field}");
+        }
+    }
+}
+
+#[sqlx::test]
+async fn navidrome_provider_only_song_omits_unknown_media_measurements(pool: PgPool) {
+    let (credential, secret) = database_credential_service(pool.clone()).await;
+    let ports = StorePorts::new(pool);
+    let (search, library) = ports.bare_catalogue();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let playback = ports.streaming(vec![Arc::new(CountingPlayback {
+        calls: Arc::clone(&calls),
+    }) as Arc<dyn PlaybackProvider>]);
+    let app = router(credential, search, library, playback);
+    let login = post_login(app.clone(), "flynn", &secret).await;
+    let token = login["token"].as_str().unwrap().to_owned();
+    let store = Arc::clone(&ports.store);
+    let album = add_album(&store, "Discovery", Some("Daft Punk")).await;
+    let source = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        "provider-only".to_owned(),
+    )
+    .unwrap();
+    let track = store
+        .get_or_create(
+            source,
+            TrackMetadata::from_names(
+                "Provider Only".to_owned(),
+                vec!["Daft Punk".to_owned()],
+                Some(200_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    store
+        .set_album_track(&album, track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    let id = track.id().to_string();
+
+    let (_, _, detail) = get(app.clone(), &token, &format!("/{id}")).await;
+    let (_, _, contextual) = get(app, &token, &format!("?album_id={album}")).await;
+    for song in [&detail, &contextual[0]] {
+        for field in [
+            "suffix",
+            "codec",
+            "size",
+            "bitRate",
+            "sampleRate",
+            "bitDepth",
+            "channels",
+        ] {
+            assert!(song.get(field).is_none(), "{field} stays absent");
+        }
+        assert_eq!(song["title"], json!("Provider Only"));
+        assert_eq!(song["id"], json!(id));
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "song reads do not resolve media"
+    );
+}
+
+#[sqlx::test]
+async fn navidrome_album_song_uses_requested_membership_and_art_target(pool: PgPool) {
+    let fixture = api_fixture(pool).await;
+    let earlier = add_album(&fixture.store, "Aardvark", Some("Earlier Artist")).await;
+    let requested = add_album(&fixture.store, "Discovery", Some("Requested Artist")).await;
+    let track = add_track(&fixture.store, "multi-album", "Shared Track").await;
+    fixture
+        .store
+        .set_album_track(
+            &earlier,
+            &track,
+            &AlbumTrack::new(Some(1), Some(1), 0).unwrap(),
+        )
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_album_track(
+            &requested,
+            &track,
+            &AlbumTrack::new(Some(2), Some(7), 6).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let (_, _, songs) = get(
+        fixture.app,
+        &fixture.token,
+        &format!("?album_id={requested}"),
+    )
+    .await;
+
+    assert_eq!(songs.as_array().unwrap().len(), 1);
+    assert_eq!(songs[0]["albumId"], json!(requested.to_string()));
+    assert_eq!(songs[0]["albumArtist"], json!("Requested Artist"));
+    assert_eq!(songs[0]["discNumber"], json!(2));
+    assert_eq!(songs[0]["trackNumber"], json!(7));
+    assert_eq!(songs[0]["coverArt"], json!(track.to_string()));
 }
 
 #[sqlx::test]

@@ -74,6 +74,7 @@ impl PlaybackProvider for StubProvider {
 
 struct StubMediaFetcher {
     bytes: Vec<u8>,
+    content_type: &'static str,
 }
 
 #[async_trait]
@@ -82,7 +83,7 @@ impl MediaFetcher for StubMediaFetcher {
         Ok(MediaInfo {
             content_length: self.bytes.len() as u64,
             supports_ranges: true,
-            content_type: Some("audio/mpeg".to_owned()),
+            content_type: Some(self.content_type.to_owned()),
         })
     }
 
@@ -142,6 +143,14 @@ fn app(pool: PgPool) -> (Router, Arc<StubProvider>) {
 }
 
 fn app_with_media_bytes(pool: PgPool, bytes: Vec<u8>) -> (Router, Arc<StubProvider>) {
+    app_with_upstream_media(pool, bytes, "audio/mpeg")
+}
+
+fn app_with_upstream_media(
+    pool: PgPool,
+    bytes: Vec<u8>,
+    content_type: &'static str,
+) -> (Router, Arc<StubProvider>) {
     let source = source();
     let provider = Arc::new(StubProvider {
         candidate: candidate(source),
@@ -155,7 +164,10 @@ fn app_with_media_bytes(pool: PgPool, bytes: Vec<u8>) -> (Router, Arc<StubProvid
         ports.source_queries(),
         vec![provider.clone() as Arc<dyn PlaybackProvider>],
         Arc::new(StreamDelivery::new(
-            Arc::new(StubMediaFetcher { bytes }),
+            Arc::new(StubMediaFetcher {
+                bytes,
+                content_type,
+            }),
             std::env::temp_dir(),
             whio_core::features::playback::delivery::DEFAULT_MAX_SESSIONS,
         )),
@@ -413,4 +425,76 @@ async fn stream_rejects_unsatisfiable_ranges(pool: PgPool) {
             "request_id": "request-123"
         })
     );
+}
+
+#[sqlx::test]
+async fn provider_song_sentinel_does_not_replace_delivered_media_type(pool: PgPool) {
+    for content_type in ["audio/webm", "audio/mp4"] {
+        let (app, resolver) =
+            app_with_upstream_media(pool.clone(), b"controlled media".to_vec(), content_type);
+        let track_id = searched_track_id(&app).await;
+        let detail_uri =
+            format!("/compat/subsonic/rest/getSong.view{NATIVE_AUTH_QUERY}&id={track_id}");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&detail_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS],
+            "x-total-count"
+        );
+        let detail = response_body(response).await;
+        let song = &detail["subsonic-response"]["song"];
+        assert_eq!(song["contentType"], "application/octet-stream");
+        for field in [
+            "suffix",
+            "size",
+            "bitRate",
+            "samplingRate",
+            "bitDepth",
+            "channelCount",
+        ] {
+            assert!(song.get(field).is_none(), "unexpected {field}");
+        }
+        assert!(resolver.resolved_source.lock().is_none());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/compat/subsonic/rest/stream.view{NATIVE_AUTH_QUERY}&id={track_id}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await.unwrap(),
+            "controlled media"
+        );
+        assert!(resolver.resolved_source.lock().is_some());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&detail_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response_body(response).await["subsonic-response"]["song"]["contentType"],
+            "application/octet-stream"
+        );
+    }
 }

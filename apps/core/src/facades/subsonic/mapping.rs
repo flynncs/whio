@@ -4,10 +4,10 @@ use crate::{
     facades::SourceTags,
     features::metadata::domain::{Attribution, FieldEntry, FieldId, FieldValue, Presence},
     features::music_library::artwork::CoverArtTarget,
-    features::music_library::catalogue::{AlbumDetail, ArtistDetail, SearchHit},
+    features::music_library::catalogue::{AlbumDetail, ArtistDetail},
     features::music_library::domain::{
-        Album, AlbumEntry, AlbumId, AlbumSummary, AlbumTrack, Artist, ArtistInformation,
-        ArtistSummary, GenreSummary, LibraryState, Playlist, SourceIdentity, Track, TrackView,
+        AlbumEntry, AlbumSummary, AlbumTrack, Artist, ArtistInformation, ArtistSummary,
+        GenreSummary, LibraryState, Playlist, TrackView,
     },
     features::music_library::playlists::{PlaylistDetail, PlaylistEntry},
     features::playback::{ActivitySession, PlaybackState},
@@ -15,102 +15,75 @@ use crate::{
 
 use super::service::PlayQueueView;
 
-pub(crate) fn child_from_hit(hit: &SearchHit, tags: SourceTags) -> models::Child {
-    child_from_track(
-        hit.track(),
-        hit.album().map(Album::id),
-        hit.album().map(Album::title),
-        hit.sources(),
-        tags,
-        None,
-        hit.state(),
-    )
-}
+const UNKNOWN_CONTENT_TYPE: &str = "application/octet-stream";
 
 pub(crate) fn child_from_playlist_entry(entry: &PlaylistEntry, tags: SourceTags) -> models::Child {
-    let view = entry.track();
-
-    child_from_track(
-        view.track(),
-        view.album().map(Album::id),
-        view.album().map(Album::title),
-        view.sources(),
-        tags,
-        None,
-        *view.state(),
-    )
+    child_from_view(entry.track(), tags)
 }
 
 pub(crate) fn child_from_view(view: &TrackView, tags: SourceTags) -> models::Child {
-    child_from_track(
-        view.track(),
-        view.album().map(Album::id),
-        view.album().map(Album::title),
-        view.sources(),
-        tags,
-        view.membership(),
-        *view.state(),
-    )
-}
+    let track = view.track();
+    let representation = view.representation();
 
-pub(crate) fn child_from_entry(
-    entry: &AlbumEntry,
-    album_id: &AlbumId,
-    album_title: &str,
-    tags: SourceTags,
-) -> models::Child {
-    child_from_track(
-        entry.track(),
-        Some(album_id),
-        Some(album_title),
-        entry.sources(),
-        tags,
-        Some(entry.membership()),
-        entry.state(),
-    )
-}
-
-fn child_from_track(
-    track: &Track,
-    album_id: Option<&AlbumId>,
-    album_title: Option<&str>,
-    sources: &[SourceIdentity],
-    tags: SourceTags,
-    membership: Option<&AlbumTrack>,
-    state: LibraryState,
-) -> models::Child {
     models::Child {
         id: track.id().to_string(),
         is_dir: false,
         title: track.title().to_owned(),
-        album: album_title.map(str::to_owned),
-        artist: (!track.artists().is_empty()).then(|| tags.artist(track.artists(), sources)),
-        track: membership.and_then(AlbumTrack::track_number).map(i32::from),
+        album: view.album().map(|album| album.title().to_owned()),
+        artist: (!track.artists().is_empty()).then(|| tags.artist(track.artists(), view.sources())),
+        track: view
+            .membership()
+            .and_then(AlbumTrack::track_number)
+            .map(i32::from),
         cover_art: Some(CoverArtTarget::song(track.id()).encode()),
-        duration: track.duration_ms().map(|ms| (ms / 1000) as i32),
-        disc_number: membership.and_then(AlbumTrack::disc_number).map(i32::from),
-        album_id: album_id.map(AlbumId::to_string),
+        duration: wire_integer(track.duration_ms().map(|ms| ms / 1000)),
+        disc_number: view
+            .membership()
+            .and_then(AlbumTrack::disc_number)
+            .map(i32::from),
+        album_id: view.album().map(|album| album.id().to_string()),
         genre: track.metadata().primary_genre().map(str::to_owned),
-        user_rating: state.rating().map(i32::from),
-        play_count: i32::try_from(state.play_count())
-            .ok()
-            .filter(|count| *count > 0),
-        starred: state.starred_at().map(|at| at.fixed_offset()),
-        played: state.last_played_at().map(|at| at.fixed_offset()),
+        user_rating: view.state().rating().map(i32::from),
+        play_count: wire_integer(Some(view.state().play_count())).filter(|count| *count > 0),
+        starred: view.state().starred_at().map(|at| at.fixed_offset()),
+        played: view.state().last_played_at().map(|at| at.fixed_offset()),
+        size: wire_integer(representation.and_then(|facts| facts.size_bytes)),
+        content_type: Some(
+            representation
+                .and_then(|facts| facts.content_type.clone())
+                .unwrap_or_else(|| UNKNOWN_CONTENT_TYPE.to_owned()),
+        ),
+        suffix: representation.and_then(|facts| facts.suffix.clone()),
+        bit_rate: wire_integer(representation.and_then(|facts| facts.bitrate_kbps)),
+        sampling_rate: wire_integer(representation.and_then(|facts| facts.sample_rate_hz)),
+        bit_depth: wire_integer(representation.and_then(|facts| facts.bit_depth)),
+        channel_count: wire_integer(representation.and_then(|facts| facts.channels)),
         media_type: Some(models::MediaType::Song),
         r#type: Some(models::GenericMediaType::Music),
         ..Default::default()
     }
 }
 
+pub(crate) fn child_from_entry(
+    entry: &AlbumEntry,
+    album: &AlbumSummary,
+    tags: SourceTags,
+) -> models::Child {
+    child_from_view(&entry.track_view(album), tags)
+}
+
+fn wire_integer(value: Option<impl TryInto<i32>>) -> Option<i32> {
+    value.and_then(|number| number.try_into().ok())
+}
+
 pub(crate) fn now_playing_entry(
-    hit: &SearchHit,
+    view: &TrackView,
     session: &ActivitySession,
     username: &str,
     tags: SourceTags,
     at: chrono::DateTime<chrono::Utc>,
 ) -> models::NowPlayingEntry {
-    let child = child_from_hit(hit, tags);
+    let child = child_from_view(view, tags);
     let minutes = (at - session.last_event_at()).num_minutes().max(0);
 
     models::NowPlayingEntry {
@@ -335,11 +308,10 @@ pub(crate) fn album_detail_with_songs(
     detail: &AlbumDetail,
     tags: SourceTags,
 ) -> models::AlbumId3WithSongs {
-    let album = detail.album.album();
     let songs = detail
         .entries
         .iter()
-        .map(|entry| child_from_entry(entry, album.id(), album.title(), tags))
+        .map(|entry| child_from_entry(entry, &detail.album, tags))
         .collect();
 
     album_with_songs(&detail.album, songs)
@@ -634,7 +606,7 @@ pub(crate) fn music_directory(target: DirectoryTarget<'_>, tags: SourceTags) -> 
                     detail
                         .entries
                         .iter()
-                        .map(|entry| child_from_entry(entry, album.id(), album.title(), tags))
+                        .map(|entry| child_from_entry(entry, &detail.album, tags))
                         .collect(),
                 ),
             }
@@ -754,7 +726,8 @@ mod tests {
     };
     use crate::features::metadata::licences::{LicenceTerms, licence_terms};
     use crate::features::music_library::domain::{
-        Artist, ArtistId, ProviderId, RefreshStatus, SourceScope, TrackId, TrackMetadata,
+        Album, AlbumId, Artist, ArtistId, PlaylistEntryId, ProviderId, RefreshStatus,
+        SourceIdentity, SourceRepresentationFacts, SourceScope, Track, TrackId, TrackMetadata,
     };
     use crate::features::music_library::queue::MAX_RESTORE_QUEUE_ENTRIES;
 
@@ -793,13 +766,32 @@ mod tests {
         .expect("valid source")
     }
 
+    fn track_view(track: Track, album: Option<Album>, sources: Vec<SourceIdentity>) -> TrackView {
+        TrackView::new(track, album, None, None, LibraryState::default(), sources)
+    }
+
+    fn representation() -> SourceRepresentationFacts {
+        SourceRepresentationFacts {
+            source: source(),
+            content_type: Some("audio/flac".to_owned()),
+            suffix: Some("flac".to_owned()),
+            container: Some("flac".to_owned()),
+            codec: Some("flac".to_owned()),
+            size_bytes: Some(4_000),
+            bitrate_kbps: Some(900),
+            sample_rate_hz: Some(44_100),
+            bit_depth: Some(16),
+            channels: Some(2),
+        }
+    }
+
     #[test]
-    fn a_hit_carries_its_album_and_cover_art() {
+    fn a_view_carries_its_album_and_cover_art() {
         let track = track(&["artist"]);
         let id = track.id().to_string();
-        let hit = SearchHit::new(track, Some(album()), vec![source()]);
+        let view = track_view(track, Some(album()), vec![source()]);
 
-        let child = child_from_hit(&hit, SourceTags::Off);
+        let child = child_from_view(&view, SourceTags::Off);
 
         assert_eq!(child.album.as_deref(), Some("album"));
         assert_eq!(child.cover_art.as_deref(), Some(id.as_str()));
@@ -807,19 +799,19 @@ mod tests {
     }
 
     #[test]
-    fn a_hit_tags_the_artist_only_when_configured() {
-        let hit = SearchHit::new(
+    fn a_view_tags_the_artist_only_when_configured() {
+        let view = track_view(
             track(&["artist", "featured"]),
             Some(album()),
             vec![source()],
         );
 
         assert_eq!(
-            child_from_hit(&hit, SourceTags::Off).artist.as_deref(),
+            child_from_view(&view, SourceTags::Off).artist.as_deref(),
             Some("artist, featured")
         );
         assert_eq!(
-            child_from_hit(&hit, SourceTags::ArtistPrefix)
+            child_from_view(&view, SourceTags::ArtistPrefix)
                 .artist
                 .as_deref(),
             Some("[YTM] artist, featured")
@@ -833,8 +825,9 @@ mod tests {
             track(&["artist"]),
             AlbumTrack::new(Some(1), Some(3), 2).expect("valid membership"),
         );
+        let summary = AlbumSummary::new(album.clone(), None, 1, 200_000, chrono::Utc::now());
 
-        let child = child_from_entry(&entry, album.id(), album.title(), SourceTags::Off);
+        let child = child_from_entry(&entry, &summary, SourceTags::Off);
 
         assert_eq!(child.album.as_deref(), Some("album"));
         assert_eq!(
@@ -843,6 +836,96 @@ mod tests {
         );
         assert_eq!(child.track, Some(3));
         assert_eq!(child.disc_number, Some(1));
+    }
+
+    #[test]
+    fn child_carries_the_selected_sources_representation_facts() {
+        let view = track_view(track(&["artist"]), Some(album()), vec![source()])
+            .with_representation(Some(representation()));
+
+        let child = child_from_view(&view, SourceTags::Off);
+
+        assert_eq!(child.content_type.as_deref(), Some("audio/flac"));
+        assert_eq!(child.suffix.as_deref(), Some("flac"));
+        assert_eq!(child.size, Some(4_000));
+        assert_eq!(child.bit_rate, Some(900));
+        assert_eq!(child.sampling_rate, Some(44_100));
+        assert_eq!(child.bit_depth, Some(16));
+        assert_eq!(child.channel_count, Some(2));
+    }
+
+    #[test]
+    fn provider_only_track_uses_an_unknown_representation_until_delivery() {
+        let view = track_view(track(&["artist"]), Some(album()), vec![source()]);
+
+        let child = child_from_view(&view, SourceTags::Off);
+
+        assert_eq!(
+            child.content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(child.suffix, None);
+        assert_eq!(child.size, None);
+        assert_eq!(child.bit_rate, None);
+        assert_eq!(child.sampling_rate, None);
+        assert_eq!(child.bit_depth, None);
+        assert_eq!(child.channel_count, None);
+
+        let mut unrecorded = representation();
+        unrecorded.content_type = None;
+        let selected = view.with_representation(Some(unrecorded));
+
+        let child = child_from_view(&selected, SourceTags::Off);
+
+        assert_eq!(
+            child.content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(child.size, Some(4_000));
+    }
+
+    #[test]
+    fn representation_zero_and_protocol_integer_overflow_are_distinct() {
+        let mut zero = representation();
+        zero.size_bytes = Some(0);
+        zero.bitrate_kbps = Some(0);
+        let view = track_view(track(&["artist"]), Some(album()), vec![source()])
+            .with_representation(Some(zero));
+
+        let child = child_from_view(&view, SourceTags::Off);
+
+        assert_eq!(child.size, Some(0));
+        assert_eq!(child.bit_rate, Some(0));
+
+        let mut overflow = representation();
+        overflow.size_bytes = Some(u64::try_from(i32::MAX).unwrap() + 1);
+        overflow.bitrate_kbps = Some(u32::try_from(i32::MAX).unwrap() + 1);
+        let view = track_view(track(&["artist"]), Some(album()), vec![source()])
+            .with_representation(Some(overflow));
+
+        let child = child_from_view(&view, SourceTags::Off);
+
+        assert_eq!(child.size, None);
+        assert_eq!(child.bit_rate, None);
+    }
+
+    #[test]
+    fn playlist_children_preserve_the_shared_album_membership() {
+        let view = TrackView::new(
+            track(&["artist"]),
+            Some(album()),
+            Some(AlbumTrack::new(Some(2), Some(4), 3).expect("valid membership")),
+            None,
+            LibraryState::default(),
+            vec![source()],
+        );
+        let entry = PlaylistEntry::new(PlaylistEntryId::new(), 0, view);
+
+        let child = child_from_playlist_entry(&entry, SourceTags::Off);
+
+        assert_eq!(child.track, Some(4));
+        assert_eq!(child.disc_number, Some(2));
+        assert_eq!(child.album.as_deref(), Some("album"));
     }
 
     #[test]

@@ -12,8 +12,8 @@ use crate::{
     features::metadata::MetadataProfile,
     features::music_library::catalogue::{
         CatalogueError, CompletionService, LibraryService, MAX_PAGE_LIMIT, PageLimit,
-        ProviderError, SearchQuery, SearchRequest, SearchService, SearchWindows, TrackListFilter,
-        TrackOrder,
+        ProviderError, SearchHit, SearchQuery, SearchRequest, SearchService, SearchWindows,
+        TrackListFilter, TrackOrder,
     },
     features::music_library::discovery::{
         DiscoveryBasis, DiscoveryError, DiscoverySeed, DiscoveryService, RelatedRequest,
@@ -60,6 +60,7 @@ pub(crate) struct SearchResult {
 
 pub(crate) async fn search(
     search_service: &SearchService,
+    library: &LibraryService,
     context: &RequestContext,
     user: Option<&uuid::Uuid>,
     query: &str,
@@ -72,27 +73,43 @@ pub(crate) async fn search(
         album_artist_filter().map_err(|_| SearchError::InvalidSearch)?,
     );
 
-    search_service
+    let outcome = search_service
         .search(&request, user, context)
         .await
-        .map(|outcome| SearchResult {
-            songs: outcome
-                .tracks
-                .iter()
-                .map(|hit| mapping::child_from_hit(hit, tags))
-                .collect(),
-            albums: outcome
-                .albums
-                .iter()
-                .map(mapping::album_from_summary)
-                .collect(),
-            artists: outcome
-                .artists
-                .iter()
-                .map(mapping::artist_from_summary)
-                .collect(),
-        })
-        .map_err(SearchError::Catalogue)
+        .map_err(SearchError::Catalogue)?;
+    let views = views_for_hits(library, &outcome.tracks, user)
+        .await
+        .map_err(SearchError::Catalogue)?;
+
+    Ok(SearchResult {
+        songs: views
+            .iter()
+            .map(|view| mapping::child_from_view(view, tags))
+            .collect(),
+        albums: outcome
+            .albums
+            .iter()
+            .map(mapping::album_from_summary)
+            .collect(),
+        artists: outcome
+            .artists
+            .iter()
+            .map(mapping::artist_from_summary)
+            .collect(),
+    })
+}
+
+async fn views_for_hits(
+    library: &LibraryService,
+    hits: &[SearchHit],
+    user: Option<&Uuid>,
+) -> Result<Vec<TrackView>, CatalogueError> {
+    let track_ids = hits
+        .iter()
+        .map(|hit| hit.track().id().clone())
+        .collect::<Vec<_>>();
+
+    library.track_views(&track_ids, user).await
 }
 
 pub(crate) struct EnumerationWindow {
@@ -208,6 +225,9 @@ pub(crate) enum BrowseError {
     #[error("artist not found")]
     ArtistNotFound,
 
+    #[error("song not found")]
+    SongNotFound,
+
     #[error("library registry read failed")]
     Registry(#[source] LibraryRegistrationError),
 
@@ -225,6 +245,9 @@ pub(crate) enum StateError {
 
     #[error("state target not found")]
     NotFound,
+
+    #[error("catalogue read failed")]
+    Catalogue(#[source] CatalogueError),
 
     #[error("library state write failed")]
     State(#[source] LibraryStateError),
@@ -383,16 +406,19 @@ pub(crate) async fn genres(library: &LibraryService) -> Result<Vec<models::Genre
 
 pub(crate) async fn starred(
     state: &LibraryStateService,
+    library: &LibraryService,
     user: Uuid,
     tags: SourceTags,
 ) -> Result<StarredResult, StateError> {
     let starred = state.starred(user).await.map_err(StateError::State)?;
+    let views = views_for_hits(library, starred.tracks(), Some(&user))
+        .await
+        .map_err(StateError::Catalogue)?;
 
     Ok(StarredResult {
-        songs: starred
-            .tracks()
+        songs: views
             .iter()
-            .map(|hit| mapping::child_from_hit(hit, tags))
+            .map(|view| mapping::child_from_view(view, tags))
             .collect(),
         albums: starred
             .albums()
@@ -729,19 +755,28 @@ pub(crate) async fn now_playing(
     at: DateTime<Utc>,
 ) -> Result<Vec<models::NowPlayingEntry>, ReportingError> {
     let username = reporting_username(credential, principal).await?;
+    let sessions = activity.now_playing(principal.user_id.as_uuid(), at);
+    let track_ids = sessions
+        .iter()
+        .map(|session| session.track_id().clone())
+        .collect::<Vec<_>>();
+    let views = library
+        .track_views(&track_ids, Some(&principal.user_id.as_uuid()))
+        .await
+        .map_err(ReportingError::Catalogue)?;
+    let by_id = views
+        .into_iter()
+        .map(|view| (view.track().id().clone(), view))
+        .collect::<HashMap<TrackId, TrackView>>();
     let mut entries = Vec::new();
 
-    for session in activity.now_playing(principal.user_id.as_uuid(), at) {
-        let Some(hit) = library
-            .track_detail(session.track_id(), Some(&principal.user_id.as_uuid()))
-            .await
-            .map_err(ReportingError::Catalogue)?
-        else {
+    for session in sessions {
+        let Some(view) = by_id.get(session.track_id()) else {
             continue;
         };
 
         entries.push(mapping::now_playing_entry(
-            &hit, &session, &username, tags, at,
+            view, &session, &username, tags, at,
         ));
     }
 
@@ -795,6 +830,22 @@ pub(crate) async fn artists(
         .await
         .map(|artists| artists.iter().map(mapping::artist_from_summary).collect())
         .map_err(BrowseError::Catalogue)
+}
+
+pub(crate) async fn song_detail(
+    library: &LibraryService,
+    raw_id: &str,
+    user: Option<&Uuid>,
+    tags: SourceTags,
+) -> Result<models::Child, BrowseError> {
+    let track_id: TrackId = raw_id.parse().map_err(|_| BrowseError::SongNotFound)?;
+    let mut views = library
+        .track_views(&[track_id], user)
+        .await
+        .map_err(BrowseError::Catalogue)?;
+    let view = views.pop().ok_or(BrowseError::SongNotFound)?;
+
+    Ok(mapping::child_from_view(&view, tags))
 }
 
 pub(crate) async fn artist_detail(

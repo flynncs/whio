@@ -19,9 +19,12 @@ use whio_core::{
     features::identity::secrets::CredentialKey,
     features::music_library::{
         catalogue::{LibraryService, SearchService},
-        domain::{ProviderId, SourceIdentity, SourceScope, TrackId, TrackMetadata},
+        domain::{
+            AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
+            TrackId, TrackMetadata,
+        },
         playlists::PlaylistService,
-        test_support::PlaylistStore,
+        test_support::{CatalogueWrite, PlaylistStore},
     },
 };
 
@@ -614,6 +617,80 @@ async fn navidrome_playlist_create_replaces_and_preserves_metadata(pool: PgPool)
         titles(&detail(&fixture.app, &fixture.owner, &id).await["songs"]),
         vec!["Fourth"]
     );
+}
+
+#[sqlx::test]
+async fn navidrome_playlist_songs_preserve_known_album_membership(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let source_id = source("membership-track");
+    let track = fixture
+        .ports
+        .catalogue()
+        .get_or_create(
+            source_id,
+            TrackMetadata::from_names(
+                "Membership Track".to_owned(),
+                vec!["Track Artist".to_owned()],
+                Some(1_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .id()
+        .clone();
+    let album = fixture
+        .ports
+        .store
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Album Context".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Album Artist".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    fixture
+        .ports
+        .store
+        .set_album_track(
+            album.id(),
+            &track,
+            &AlbumTrack::new(Some(2), Some(7), 6).unwrap(),
+        )
+        .await
+        .unwrap();
+    let playlist = create(
+        &fixture.app,
+        &fixture.owner,
+        json!({ "name": "Membership" }),
+    )
+    .await;
+    assert_eq!(
+        add(&fixture.app, &fixture.owner, &playlist, &[&track, &track])
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    let (_, listing) = sorted_list(&fixture.app, &fixture.owner, "name", "ASC", 0, 0).await;
+    let listed = listing
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == json!(playlist))
+        .unwrap();
+    let detail = detail(&fixture.app, &fixture.owner, &playlist).await;
+    let (_, tracks) = read_tracks(&fixture.app, &fixture.owner, &playlist).await;
+    for songs in [&listed["songs"], &detail["songs"], &tracks] {
+        assert_eq!(songs.as_array().unwrap().len(), 2);
+        for (index, song) in songs.as_array().unwrap().iter().enumerate() {
+            assert_eq!(song["id"], json!((index + 1).to_string()));
+            assert_eq!(song["mediaFileId"], json!(track.to_string()));
+            assert_eq!(song["albumArtist"], json!("Album Artist"));
+            assert_eq!(song["trackNumber"], json!(7));
+            assert_eq!(song["discNumber"], json!(2));
+        }
+    }
 }
 
 #[sqlx::test]

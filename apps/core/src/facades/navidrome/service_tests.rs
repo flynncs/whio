@@ -427,8 +427,15 @@ fn track_maps_to_song() {
     .expect("valid album");
     let id = track.id().to_string();
 
-    let song = song_from(
-        &SearchHit::new(track, Some(album), Vec::new()),
+    let song = song_from_view(
+        &TrackView::new(
+            track,
+            Some(album),
+            None,
+            None,
+            crate::features::music_library::domain::LibraryState::default(),
+            Vec::new(),
+        ),
         SourceTags::Off,
     );
 

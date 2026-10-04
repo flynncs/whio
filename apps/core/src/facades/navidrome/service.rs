@@ -7,9 +7,7 @@ use crate::{
     facades::SourceTags,
     features::identity::service::{AuthError, CredentialService},
     features::music_library::artwork::CoverArtTarget,
-    features::music_library::catalogue::{
-        CatalogueError, CompletionService, LibraryService, SearchHit,
-    },
+    features::music_library::catalogue::{CatalogueError, CompletionService, LibraryService},
     features::music_library::domain::{
         AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId, ArtistListFilter,
         ArtistSort, ArtistSummary, CommentPatch, GenreSummary, IdSet, MAX_PAGE_LIMIT, MoveTarget,
@@ -64,30 +62,6 @@ pub(crate) enum SongError {
     Queue(#[source] RestoreQueueError),
 }
 
-fn song_from(hit: &SearchHit, tags: SourceTags) -> Song {
-    let track = hit.track();
-    let album = hit.album();
-    let state = hit.state();
-
-    Song {
-        id: track.id().to_string(),
-        title: track.title().to_owned(),
-        artist: tags.artist(track.artists(), hit.sources()),
-        album: album.map(|album| album.title().to_owned()),
-        album_id: album.map(|album| album.id().to_string()),
-        album_artist: None,
-        track_number: None,
-        disc_number: None,
-        cover_art: Some(CoverArtTarget::song(track.id()).encode()),
-        duration: track.duration_ms().map(|ms| ms as f32 / 1000.0),
-        starred: state.is_starred(),
-        starred_at: state.starred_at().map(|at| at.to_rfc3339()),
-        rating: state.rating().unwrap_or(0),
-        play_count: u64::from(state.play_count()),
-        play_date: state.last_played_at().map(|at| at.to_rfc3339()),
-    }
-}
-
 fn song_from_view(view: &TrackView, tags: SourceTags) -> Song {
     let track = view.track();
     let album = view.album();
@@ -109,6 +83,13 @@ fn song_from_view(view: &TrackView, tags: SourceTags) -> Song {
             .map(i32::from),
         cover_art: Some(CoverArtTarget::song(track.id()).encode()),
         duration: track.duration_ms().map(|ms| ms as f32 / 1000.0),
+        suffix: view.representation().and_then(|facts| facts.suffix.clone()),
+        codec: view.representation().and_then(|facts| facts.codec.clone()),
+        size: view.representation().and_then(|facts| facts.size_bytes),
+        bit_rate: view.representation().and_then(|facts| facts.bitrate_kbps),
+        sample_rate: view.representation().and_then(|facts| facts.sample_rate_hz),
+        bit_depth: view.representation().and_then(|facts| facts.bit_depth),
+        channels: view.representation().and_then(|facts| facts.channels),
         starred: state.is_starred(),
         starred_at: state.starred_at().map(|at| at.to_rfc3339()),
         rating: state.rating().unwrap_or(0),
@@ -120,35 +101,12 @@ fn song_from_view(view: &TrackView, tags: SourceTags) -> Song {
 fn song_from_playlist_entry(entry: &PlaylistEntry, item_id: u32, tags: SourceTags) -> Song {
     let mut song = song_from_view(entry.track(), tags);
     song.id = item_id.to_string();
-    song.album_artist = None;
-    song.track_number = None;
-    song.disc_number = None;
 
     song
 }
 
 fn song_from_entry(entry: &AlbumEntry, album: &AlbumSummary, tags: SourceTags) -> Song {
-    let track = entry.track();
-    let membership = entry.membership();
-    let state = entry.state();
-
-    Song {
-        id: track.id().to_string(),
-        title: track.title().to_owned(),
-        artist: tags.artist(track.artists(), entry.sources()),
-        album: Some(album.album().title().to_owned()),
-        album_id: Some(album.album().id().to_string()),
-        album_artist: album.album_artist().map(|artist| artist.name().to_owned()),
-        track_number: membership.track_number().map(i32::from),
-        disc_number: membership.disc_number().map(i32::from),
-        cover_art: Some(track.id().to_string()),
-        duration: track.duration_ms().map(|ms| ms as f32 / 1000.0),
-        starred: state.is_starred(),
-        starred_at: state.starred_at().map(|at| at.to_rfc3339()),
-        rating: state.rating().unwrap_or(0),
-        play_count: u64::from(state.play_count()),
-        play_date: state.last_played_at().map(|at| at.to_rfc3339()),
-    }
+    song_from_view(&entry.track_view(album), tags)
 }
 
 fn album_from_summary(summary: &AlbumSummary) -> Album {
@@ -254,13 +212,13 @@ pub(crate) async fn song_detail(
     let user = authorize(credential, token).await?;
 
     let track_id: TrackId = raw_id.parse().map_err(|_| SongError::NotFound)?;
-    let hit = library
-        .track_detail(&track_id, Some(&user))
+    let mut views = library
+        .track_views(&[track_id], Some(&user))
         .await
-        .map_err(SongError::Catalogue)?
-        .ok_or(SongError::NotFound)?;
+        .map_err(SongError::Catalogue)?;
+    let view = views.pop().ok_or(SongError::NotFound)?;
 
-    Ok(song_from(&hit, tags))
+    Ok(song_from_view(&view, tags))
 }
 
 const DEFAULT_PAGE_SIZE: u32 = 500;

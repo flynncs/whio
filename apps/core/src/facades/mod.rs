@@ -31,6 +31,10 @@ pub(crate) async fn cors(request: Request<Body>, next: Next) -> Response {
         header::HeaderValue::from_static("*"),
     );
     headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        header::HeaderValue::from_static("x-total-count"),
+    );
+    headers.insert(
         header::ACCESS_CONTROL_MAX_AGE,
         header::HeaderValue::from_static("86400"),
     );

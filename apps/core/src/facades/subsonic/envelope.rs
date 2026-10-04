@@ -185,6 +185,23 @@ pub(crate) fn album_envelope(album: models::AlbumId3WithSongs) -> models::GetAlb
     }
 }
 
+pub(crate) fn song_envelope(song: models::Child) -> models::GetSongResponse {
+    models::GetSongResponse {
+        subsonic_response: Some(Box::new(
+            models::GetSongResponseSubsonicResponse::GetSongSuccessResponse(Box::new(
+                models::GetSongSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_song_success_response::Status::Ok,
+                    song: Box::new(song),
+                },
+            )),
+        )),
+    }
+}
+
 pub(crate) fn artists_envelope(indexes: Vec<models::IndexId3>) -> models::GetArtistsResponse {
     models::GetArtistsResponse {
         subsonic_response: Some(Box::new(

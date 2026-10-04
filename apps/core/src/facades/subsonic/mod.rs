@@ -34,8 +34,8 @@ use envelope::{
     extensions_envelope, failed_envelope, genres_envelope, indexes_envelope, now_playing_envelope,
     ok_envelope, play_queue_by_index_envelope, play_queue_envelope, playlist_envelope,
     playlists_envelope, random_songs_envelope, scan_status_envelope, search3_envelope,
-    similar_songs_envelope, similar_songs2_envelope, songs_by_genre_envelope, starred2_envelope,
-    start_scan_envelope, top_songs_envelope, user_envelope,
+    similar_songs_envelope, similar_songs2_envelope, song_envelope, songs_by_genre_envelope,
+    starred2_envelope, start_scan_envelope, top_songs_envelope, user_envelope,
 };
 use state::SubsonicState;
 
@@ -63,6 +63,7 @@ where
         ),
         ("/getAlbumList2", get(get_album_list2)),
         ("/getAlbum", get(get_album)),
+        ("/getSong", get(get_song).post(get_song)),
         ("/getArtists", get(get_artists)),
         ("/getArtist", get(get_artist)),
         ("/getArtistInfo", get(get_artist_info)),
@@ -207,6 +208,7 @@ pub(crate) async fn search3(
             Ok(windows) => {
                 service::search(
                     state.search(),
+                    state.library(),
                     &context,
                     Some(&user_uuid),
                     q,
@@ -366,6 +368,27 @@ pub(crate) async fn get_album(
 
     match service::album_detail(state.completion(), id, Some(&user), state.source_tags()).await {
         Ok(album) => Json(album_envelope(album)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_song(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(id) = query.get("id") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+    let user = principal.user_id.as_uuid();
+
+    match service::song_detail(state.library(), id, Some(&user), state.source_tags()).await {
+        Ok(song) => Json(song_envelope(song)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
 }
@@ -698,7 +721,9 @@ fn browse_failure_response(context: &RequestContext, error: service::BrowseError
             models::error::Code::Variant10,
             "Unsupported album list type.",
         ),
-        service::BrowseError::AlbumNotFound | service::BrowseError::ArtistNotFound => (
+        service::BrowseError::AlbumNotFound
+        | service::BrowseError::ArtistNotFound
+        | service::BrowseError::SongNotFound => (
             StatusCode::NOT_FOUND,
             models::error::Code::Variant70,
             "Not found.",
@@ -965,7 +990,14 @@ pub(crate) async fn get_starred2(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::starred(state.library_state(), user, state.source_tags()).await {
+    match service::starred(
+        state.library_state(),
+        state.library(),
+        user,
+        state.source_tags(),
+    )
+    .await
+    {
         Ok(result) => Json(starred2_envelope(result)).into_response(),
         Err(error) => state_failure_response(&context, error),
     }
@@ -1638,6 +1670,18 @@ fn state_failure_response(context: &RequestContext, error: service::StateError) 
             models::error::Code::Variant70,
             "Not found.",
         ),
+        service::StateError::Catalogue(error) => {
+            tracing::error!(
+                error = %error,
+                request_id = context.request_id().as_str(),
+                "catalogue read failed"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                models::error::Code::Variant0,
+                "Internal error.",
+            )
+        }
         service::StateError::State(error) => {
             tracing::error!(
                 error = %error,

@@ -162,6 +162,16 @@ fn candidate_with_index(index: u32) -> CatalogueCandidate {
     )
 }
 
+fn library_for_pool(pool: sqlx::PgPool) -> Arc<LibraryService> {
+    let store = Arc::new(PostgresTrackRepository::new(pool));
+
+    Arc::new(LibraryService::new(
+        Arc::clone(&store) as Arc<dyn LibraryRead>,
+        Arc::clone(&store) as Arc<dyn SourceLookup>,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+    ))
+}
+
 fn windows(count: Option<&str>, offset: Option<&str>) -> SearchWindows {
     SearchWindows::uniform(
         search_window(count, offset)
@@ -173,8 +183,10 @@ fn windows(count: Option<&str>, offset: Option<&str>) -> SearchWindows {
 #[sqlx::test]
 async fn search_maps_tracks_and_short_circuits_empty(pool: sqlx::PgPool) {
     let service = catalogue(pool.clone(), vec![Ok(vec![candidate()])]);
+    let library = library_for_pool(pool.clone());
     let result = search(
         &service,
+        &library,
         &context(),
         None,
         "song",
@@ -230,14 +242,17 @@ async fn paging_caps_slices_and_rejects(pool: sqlx::PgPool) {
     ));
 
     let service = paged_catalogue(pool.clone(), 25);
+    let library = library_for_pool(pool.clone());
     async fn songs(
         catalogue: &SearchService,
+        library: &LibraryService,
         context: &RequestContext,
         count: &str,
         offset: &str,
     ) -> Vec<whio_subsonic_api::models::Child> {
         search(
             catalogue,
+            library,
             context,
             None,
             "song",
@@ -249,10 +264,10 @@ async fn paging_caps_slices_and_rejects(pool: sqlx::PgPool) {
         .songs
     }
     let context = context();
-    let first = songs(&service, &context, "10", "0").await;
-    let second = songs(&service, &context, "10", "10").await;
-    let third = songs(&service, &context, "10", "20").await;
-    let bounded = songs(&service, &context, "10", "25").await;
+    let first = songs(&service, &library, &context, "10", "0").await;
+    let second = songs(&service, &library, &context, "10", "10").await;
+    let third = songs(&service, &library, &context, "10", "20").await;
+    let bounded = songs(&service, &library, &context, "10", "25").await;
     assert_eq!(first.len(), 10);
     assert_eq!(first[0].title, "song-0");
     assert_eq!(second[0].title, "song-10");
@@ -260,8 +275,10 @@ async fn paging_caps_slices_and_rejects(pool: sqlx::PgPool) {
     assert!(bounded.is_empty());
 
     let service = paged_catalogue(pool.clone(), 25);
+    let library = library_for_pool(pool.clone());
     let songs = search(
         &service,
+        &library,
         &context,
         None,
         "song",
