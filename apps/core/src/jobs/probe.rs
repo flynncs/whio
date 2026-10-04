@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 use crate::platform::jobs::{Enqueued, JobsError, PendingJob};
 
+use super::retry::{RetryPolicy, RetryableWorker};
+
 pub const PROBE_QUEUE: &str = "whio.jobs.probe";
 pub const PROBE_KIND: &str = "whio.jobs.probe.v1";
 pub const PROBE_SLOW_KIND: &str = "whio.jobs.probe.slow.v1";
@@ -34,8 +36,6 @@ impl JobArgs for ProbeV1 {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SlowProbeV1 {
     pub(crate) operation_id: Uuid,
-    #[serde(default)]
-    pub(crate) sleep_ms: u64,
     #[serde(default)]
     pub(crate) ignore_cancel: bool,
 }
@@ -131,14 +131,18 @@ impl Worker for SlowProbeWorker {
             "probe job applied"
         );
 
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_millis(args.sleep_ms);
         loop {
-            let released = ctx.is_cancelled() && !args.ignore_cancel;
-            if released || tokio::time::Instant::now() >= deadline {
+            let released: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM public.probe_releases WHERE operation_id = $1)",
+            )
+            .bind(args.operation_id)
+            .fetch_one(ctx.pool())
+            .await
+            .map_err(JobError::retryable)?;
+            if released || ctx.is_cancelled() && !args.ignore_cancel {
                 return Ok(JobResult::Completed);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     }
 }
@@ -152,9 +156,10 @@ impl Worker for FailProbeWorker {
     }
 
     async fn perform(&self, ctx: &JobContext) -> Result<JobResult, JobError> {
-        let _args: FailProbeV1 = serde_json::from_value(ctx.job.args.clone()).map_err(|error| {
+        let args: FailProbeV1 = serde_json::from_value(ctx.job.args.clone()).map_err(|error| {
             JobError::Terminal(format!("failing probe payload is not applicable: {error}"))
         })?;
+        record_retry_attempt(ctx, args.operation_id).await?;
 
         Err(JobError::retryable_msg("failing probe always fails"))
     }
@@ -179,6 +184,26 @@ fn applied_operation(progress: Option<&serde_json::Value>) -> Option<Uuid> {
         .ok()
 }
 
+async fn record_retry_attempt(ctx: &JobContext, operation_id: Uuid) -> Result<(), JobError> {
+    let mut attempts = ctx
+        .job
+        .progress
+        .as_ref()
+        .and_then(|progress| progress.get("metadata"))
+        .and_then(|metadata| metadata.get("probe_retry_attempts"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    attempts.push(serde_json::json!({
+        "operation_id": operation_id,
+        "attempt": ctx.job.attempt,
+        "at": chrono::Utc::now(),
+    }));
+    ctx.update_metadata(serde_json::json!({ "probe_retry_attempts": attempts }))
+        .map_err(JobError::retryable)?;
+    ctx.flush_progress().await.map_err(JobError::retryable)
+}
+
 async fn apply_effect(pool: &sqlx::PgPool, operation_id: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS public.probe_effects (
@@ -188,6 +213,9 @@ async fn apply_effect(pool: &sqlx::PgPool, operation_id: Uuid) -> Result<(), sql
     )
     .execute(pool)
     .await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS public.probe_releases (operation_id UUID PRIMARY KEY)")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "INSERT INTO public.probe_effects (operation_id, transitions) VALUES ($1, 1)
@@ -240,7 +268,6 @@ pub async fn enqueue_coalesced(
 pub async fn enqueue_slow(
     tx: &mut sqlx::PgConnection,
     operation_id: Uuid,
-    sleep_ms: u64,
     ignore_cancel: bool,
 ) -> Result<Enqueued, JobsError> {
     crate::platform::jobs::enqueue(
@@ -249,7 +276,6 @@ pub async fn enqueue_slow(
             queue: PROBE_QUEUE,
             payload: &SlowProbeV1 {
                 operation_id,
-                sleep_ms,
                 ignore_cancel,
             },
             priority: PROBE_PRIORITY,
@@ -279,7 +305,7 @@ pub async fn enqueue_failing(
     .await
 }
 
-pub(crate) fn register(builder: ClientBuilder) -> ClientBuilder {
+pub(crate) fn register(builder: ClientBuilder, retry_policy: RetryPolicy) -> ClientBuilder {
     builder
         .queue_descriptor(
             PROBE_QUEUE,
@@ -299,7 +325,7 @@ pub(crate) fn register(builder: ClientBuilder) -> ClientBuilder {
                 ..JobKindDescriptor::default()
             },
         )
-        .register_worker(ProbeWorker)
+        .register_worker(RetryableWorker::new(ProbeWorker, retry_policy))
         .job_kind_descriptor_kind(
             PROBE_SLOW_KIND,
             JobKindDescriptor {
@@ -309,7 +335,7 @@ pub(crate) fn register(builder: ClientBuilder) -> ClientBuilder {
                 ..JobKindDescriptor::default()
             },
         )
-        .register_worker(SlowProbeWorker)
+        .register_worker(RetryableWorker::new(SlowProbeWorker, retry_policy))
         .job_kind_descriptor_kind(
             PROBE_FAILING_KIND,
             JobKindDescriptor {
@@ -319,7 +345,7 @@ pub(crate) fn register(builder: ClientBuilder) -> ClientBuilder {
                 ..JobKindDescriptor::default()
             },
         )
-        .register_worker(FailProbeWorker)
+        .register_worker(RetryableWorker::new(FailProbeWorker, retry_policy))
 }
 
 #[cfg(test)]

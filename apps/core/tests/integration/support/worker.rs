@@ -52,6 +52,20 @@ impl Worker {
                 .as_nanos()
         ));
         let output = std::fs::File::create(&log).expect("a worker log file");
+        let production_intervals =
+            std::env::var_os("WHIO_TEST_WORKER_PRODUCTION_INTERVALS").is_some();
+        let (
+            poll_interval,
+            promote_interval,
+            drain_timeout,
+            rescue_interval,
+            heartbeat_interval,
+            heartbeat_staleness,
+        ) = if production_intervals {
+            ("200", "250", "30000", "30000", "30000", "90000")
+        } else {
+            ("2", "2", "250", "2", "50", "500")
+        };
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_whio-worker"));
         command
@@ -59,6 +73,26 @@ impl Worker {
             .env("WHIO_CREDENTIAL_KEY", CREDENTIAL_KEY)
             .env("WHIO_WORKER_QUEUES", queues)
             .env("WHIO_WORKER_BIND_ADDRESS", address.to_string())
+            .env("WHIO_WORKER_POLL_INTERVAL_MILLISECONDS", poll_interval)
+            .env(
+                "WHIO_WORKER_PROMOTE_INTERVAL_MILLISECONDS",
+                promote_interval,
+            )
+            .env("WHIO_WORKER_DRAIN_TIMEOUT_MILLISECONDS", drain_timeout)
+            .env(
+                "WHIO_WORKER_HEARTBEAT_RESCUE_INTERVAL_MILLISECONDS",
+                rescue_interval,
+            )
+            .env(
+                "WHIO_WORKER_HEARTBEAT_INTERVAL_MILLISECONDS",
+                heartbeat_interval,
+            )
+            .env(
+                "WHIO_WORKER_HEARTBEAT_STALENESS_MILLISECONDS",
+                heartbeat_staleness,
+            )
+            .env("WHIO_WORKER_RETRY_BASE_DELAY_MILLISECONDS", "10")
+            .env("WHIO_WORKER_RETRY_MAX_DELAY_MILLISECONDS", "30")
             .env("WHIO_LOG_LEVEL", "info")
             .stdout(Stdio::from(output.try_clone().expect("a log handle")))
             .stderr(Stdio::from(output));

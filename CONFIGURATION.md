@@ -100,7 +100,13 @@ metadata resolver URL in the worker too. configured queues in Compose are
 | `WHIO_WORKER_MAX_WORKERS` | `4` | concurrent jobs |
 | `WHIO_WORKER_POLL_INTERVAL_MILLISECONDS` | `200` | ready-job polling |
 | `WHIO_WORKER_PROMOTE_INTERVAL_MILLISECONDS` | `250` | scheduled-job promotion |
-| `WHIO_WORKER_DRAIN_TIMEOUT_SECONDS` | `30` | graceful shutdown budget |
+| `WHIO_WORKER_DRAIN_TIMEOUT_SECONDS` | `30` | graceful shutdown budget; used only when the millisecond setting is absent |
+| `WHIO_WORKER_DRAIN_TIMEOUT_MILLISECONDS` | `30000` | graceful shutdown budget; takes precedence over the seconds setting |
+| `WHIO_WORKER_HEARTBEAT_RESCUE_INTERVAL_MILLISECONDS` | `30000` | stale-heartbeat rescue scan interval |
+| `WHIO_WORKER_HEARTBEAT_INTERVAL_MILLISECONDS` | Awa default (`30000`) | optional heartbeat write interval |
+| `WHIO_WORKER_HEARTBEAT_STALENESS_MILLISECONDS` | Awa default (`90000`) | optional stale-heartbeat threshold; configure at least three times the heartbeat interval |
+| `WHIO_WORKER_RETRY_BASE_DELAY_MILLISECONDS` | `1000` | base unit for the exponential retry policy; attempt `n` starts at `2^n` times this value |
+| `WHIO_WORKER_RETRY_MAX_DELAY_MILLISECONDS` | `86400000` | maximum retry delay |
 
 Compose allows 45 seconds to stop the worker so the drain budget can complete.
 

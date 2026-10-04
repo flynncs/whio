@@ -8,7 +8,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -106,6 +105,23 @@ def main_checkout_key():
     return checks.cache_key(Path(result.stdout.strip()).parent)
 
 
+def clear_target_cache(profile, target):
+    name = project(profile) + '-clear-' + uuid.uuid4().hex[:8]
+    arguments = [*dev.docker_args(profile), 'run', '--rm', '--name', name,
+                 '--label', f'dev.lumen.local-profile={dev.label(profile)}',
+                 '--mount', f'type=volume,source={target},target=/to',
+                 '--entrypoint', 'sh', profile['images']['compiler'], '-c', 'find /to -mindepth 1 -delete']
+    try:
+        result = subprocess.run(arguments, capture_output=True, timeout=30,
+                                env=dev.clean_environment())
+        if result.returncode:
+            raise RuntimeError('failed reflink clone could not be cleared')
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError('failed reflink clone could not be cleared') from error
+    finally:
+        remove_container(profile, name)
+
+
 def clone_target_cache(profile, target, main_key):
     source = build_volume_name(profile, main_key)
     if not dev.inspect('volume', source, profile):
@@ -123,6 +139,7 @@ def clone_target_cache(profile, target, main_key):
         except (subprocess.TimeoutExpired, OSError):
             result = subprocess.CompletedProcess([], 1)
         if result.returncode:
+            clear_target_cache(profile, target)
             print('target cache was not cloned; build starts from an empty target', flush=True)
     finally:
         remove_container(profile, name)
@@ -243,8 +260,12 @@ def config(path, profile, full, source=None):
         service.setdefault('stop_grace_period', '45s')
     if profile.get('disposable'):
         services['postgres'].pop('volumes')
-        services['postgres']['tmpfs'] = ['/var/lib/postgresql:rw,size=512m']
-        services['postgres'].update(mem_limit='768m', memswap_limit='768m', cpus=2)
+        services['postgres']['tmpfs'] = ['/var/lib/postgresql:rw,size=3g']
+        services['postgres'].update(
+            shm_size='1gb', mem_limit='4g', memswap_limit='4g', cpus=4,
+            command=['postgres', '-c', 'shared_buffers=64MB', '-c', 'max_connections=200',
+                     '-c', 'max_locks_per_transaction=256', '-c', 'max_wal_size=128MB',
+                     '-c', 'min_wal_size=32MB'])
         volumes.pop('postgres')
     if source:
         services = {'builder': services['builder']}
@@ -266,14 +287,22 @@ def compose(path, profile, *arguments, builder=False, timeout=55):
 def copy_source(destination, root=None):
     root = dev.source_root(root)
     expected = dev.source_identity(root)
-    for file in dev.source_files(root):
-        output = destination / file.relative_to(root)
+    destination.mkdir(parents=True, exist_ok=True)
+    files = {file.relative_to(root): file for file in dev.source_files(root)}
+    files.update({Path('docker') / name: root / 'docker' / name
+                  for name in ('local.Dockerfile', 'ytm-resolver.Dockerfile')})
+    files[Path('.dockerignore')] = None
+    for relative, source in files.items():
+        output = destination / relative
         output.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file, output)
-    (destination / 'docker').mkdir(exist_ok=True)
-    for name in ('local.Dockerfile', 'ytm-resolver.Dockerfile'):
-        shutil.copy2(root / 'docker' / name, destination / 'docker' / name)
-    (destination / '.dockerignore').write_text('.git\n**/target\n**/__pycache__\n')
+        contents = b'.git\n**/target\n**/__pycache__\n' if source is None else source.read_bytes()
+        if not output.is_file() or output.read_bytes() != contents:
+            output.write_bytes(contents)
+    for path in sorted(destination.rglob('*'), reverse=True):
+        if path.is_file() and path.relative_to(destination) not in files:
+            path.unlink()
+        elif path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
     if expected != dev.source_identity(root):
         raise RuntimeError('source changed while copying; current server retained; retry')
     return expected
@@ -343,8 +372,9 @@ def build(path, profile, persist=True, root=None, commit=None):
     if not (destination / 'build.json').is_file():
         cache = checks.runtime_root()
         key = checks.cache_key(dev.REPO)
-        with checks.admission(cache, key, 60) as (_, descriptors), tempfile.TemporaryDirectory(prefix='lumen-build-source-') as temporary:
-            source = Path(temporary)
+        source = cache / 'sources' / key
+        source.mkdir(parents=True, exist_ok=True)
+        with checks.admission(cache, key, 60) as (_, descriptors):
             source_sha = copy_source(source, root)
             ensure_images(path, profile, source, descriptors, root)
             cleanup_caches(profile)
@@ -396,8 +426,11 @@ def build(path, profile, persist=True, root=None, commit=None):
         if value and (value['Config'].get('Labels') or {}).get(OWNER) != str(os.getuid()):
             raise RuntimeError('installed build image has another owner; left untouched')
     if any(not dev.inspect('image', name, profile) for name in document['images'].values()):
-        with checks.admission(checks.runtime_root(), checks.cache_key(dev.REPO), 60) as (_, descriptors), tempfile.TemporaryDirectory(prefix='lumen-image-source-') as temporary:
-            source = Path(temporary)
+        cache = checks.runtime_root()
+        key = checks.cache_key(dev.REPO)
+        source = cache / 'sources' / key
+        source.mkdir(parents=True, exist_ok=True)
+        with checks.admission(cache, key, 60) as (_, descriptors):
             copy_source(source, root)
             ensure_images(path, profile, source, descriptors, root)
     if commit and document.get('head') != commit:
@@ -635,7 +668,8 @@ def restored_preview(path, profile, directory, build_profile=None):
     saved_runtime = build_profile or saved
     preview_path, preview = dev.load_profile('preview-restore-' + uuid.uuid4().hex[:8], create=True)
     preview.update({key: saved_runtime[key] for key in ('runtime', 'architecture', 'images', 'build', 'docker_context', 'media_root')})
-    preview.update(credential_key=saved['credential_key'], full=False, disposable=True)
+    preview.update(credential_key=saved['credential_key'], full=False, disposable=True,
+                   runner=runner_record())
     preview['rust_build'] = saved_runtime.get('rust_build', saved_runtime['build'])
     configure_profile(preview_path, preview)
     try:
@@ -722,16 +756,85 @@ def size_bytes(value):
     return int(float(match[1]) * units[match[2]])
 
 
+def measurement_image(profile):
+    candidate = image_names(profile)['compiler']
+    if dev.inspect('image', candidate, profile):
+        return candidate
+    current = profile.get('images', {}).get('compiler')
+    if current and dev.inspect('image', current, profile):
+        return current
+    images = command(profile, 'image', 'ls', '--filter', f'label={OWNER}={os.getuid()}',
+                     '--filter', f'reference=lumen-dev-{os.getuid()}/compiler:*', '--format', '{{.Repository}}:{{.Tag}}')
+    if images:
+        return images.splitlines()[0]
+    raise RuntimeError('no owned compiler image is available for volume measurement')
+
+
+def volume_filesystem_usage(profile, volume):
+    name = project(profile) + '-measure-' + uuid.uuid4().hex[:8]
+    script = 'filesystem=$(awk \'$2 == "/v" { print $3; exit }\' /proc/mounts); printf "%s\\n" "$filesystem"; if [ "$filesystem" = btrfs ]; then if ! command -v btrfs >/dev/null; then apt-get update -qq && apt-get install --no-install-recommends --yes btrfs-progs; fi; btrfs filesystem du -s --raw /v; fi'
+    arguments = [*dev.docker_args(profile), 'run', '--rm', '--privileged', '--name', name,
+                 '--label', f'dev.lumen.local-profile={dev.label(profile)}',
+                 '--mount', f'type=volume,source={volume},target=/v,readonly',
+                 '--entrypoint', 'sh', measurement_image(profile), '-c', script]
+    try:
+        output = subprocess.run(arguments, capture_output=True, text=True, timeout=30,
+                                env=dev.clean_environment())
+        if output.returncode:
+            raise RuntimeError('cannot measure exclusive Docker volume usage')
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError('cannot measure exclusive Docker volume usage') from error
+    finally:
+        remove_container(profile, name)
+    lines = output.stdout.splitlines()
+    if not lines or not lines[0]:
+        raise RuntimeError('cannot identify Docker volume filesystem')
+    filesystem = lines[0]
+    if filesystem != 'btrfs':
+        return filesystem, None, None
+    rows = [line.split() for line in lines[1:] if line.strip().endswith('/v')]
+    if len(rows) != 1 or len(rows[0]) < 4:
+        raise RuntimeError('unsupported btrfs exclusive usage output')
+    try:
+        return filesystem, int(rows[0][1]), int(rows[0][2])
+    except ValueError as error:
+        raise RuntimeError('unsupported btrfs exclusive usage value') from error
+
+
 def storage(profile):
     document = json.loads(command(profile, 'system', 'df', '-v', '--format', '{{json .}}'))
     images = set(command(profile, 'image', 'ls', '--filter', f'label={OWNER}={os.getuid()}', '--format', '{{.ID}}', '--no-trunc').splitlines())
-    image_bytes = sum(size_bytes(row['Size']) for row in document['Images'] if row['ID'] in images)
+    image_bytes = sum(
+        size_bytes(row.get('UniqueSize') or row['Size'])
+        for row in document['Images'] if row['ID'] in images
+    )
     volumes = []
+    btrfs_targets = []
     for row in document['Volumes']:
         labels = dict(part.strip().partition('=')[::2] for part in (row['Labels'] or '').split(',') if '=' in part)
-        if labels.get(OWNER) == str(os.getuid()):
-            volumes.append(dict(row, cache_labels=labels, bytes=size_bytes(row['Size'])))
-    return {'bytes': image_bytes + sum(row['bytes'] for row in volumes), 'images_bytes_upper_bound': image_bytes,
+        if labels.get(OWNER) != str(os.getuid()):
+            continue
+        if labels.get(KIND) == 'target':
+            filesystem, exclusive, shared = volume_filesystem_usage(profile, row['Name'])
+            if filesystem == 'btrfs':
+                btrfs_targets.append((row, labels, exclusive, shared))
+                continue
+        volumes.append(dict(row, cache_labels=labels, bytes=size_bytes(row['Size'])))
+
+    if btrfs_targets:
+        shared_volume, _, _, shared_bytes = max(
+            btrfs_targets, key=lambda target: target[3]
+        )
+        volumes.extend(
+            dict(
+                row,
+                cache_labels=labels,
+                bytes=exclusive + (shared_bytes if row['Name'] == shared_volume['Name'] else 0),
+            )
+            for row, labels, exclusive, _ in btrfs_targets
+        )
+
+    return {'bytes': image_bytes + sum(row['bytes'] for row in volumes), 'images_unique_bytes': image_bytes,
             'volumes': volumes, 'context': profile['docker_context'], 'updated': time.time(), 'engine': document}
 
 
@@ -816,6 +919,32 @@ def resources(profile):
     print(command(profile, 'system', 'df'))
 
 
+def runner_identity(pid):
+    result = subprocess.run(['ps', '-o', 'lstart=', '-p', str(pid)], capture_output=True, text=True)
+    if result.returncode or not result.stdout.strip():
+        return None
+    return result.stdout.strip()
+
+
+def runner_record():
+    pid = os.getpid()
+    start_time = runner_identity(pid)
+    if not start_time:
+        raise RuntimeError('cannot identify preview runner process')
+    return {'pid': pid, 'start_time': start_time}
+
+
+def runner_alive(profile):
+    runner = profile.get('runner')
+    if not isinstance(runner, dict) or not isinstance(runner.get('pid'), int):
+        return False
+    start_time = runner.get('start_time')
+    if not isinstance(start_time, str) or not start_time:
+        return False
+    identity = runner_identity(runner['pid'])
+    return bool(identity) and identity == start_time
+
+
 def cleanup():
     root = dev.state_root()
     contexts = {}
@@ -825,6 +954,10 @@ def cleanup():
             continue
         contexts[profile['docker_context']] = profile
         path = file.parent
+        if profile['name'].startswith(('preview-check-', 'preview-restore-')) and not runner_alive(profile):
+            destroy(path, profile)
+            print(f'orphaned preview removed: {profile["name"]}', flush=True)
+            continue
         if not profile.get('expires') or profile['expires'] > time.time():
             continue
         watcher = checks.try_lock(path / 'watcher.lock')
@@ -852,7 +985,7 @@ def upgrade(path, previous, root=None, commit=None):
     import dev_watch
     root = dev.source_root(root)
     dev_watch.owner(path)
-    dev.start_db(path, previous)
+    start_db(path, previous)
     if dev_watch.migration_status(path, previous, display=False, root=root):
         raise RuntimeError('applied migration differs; restore its original source')
     candidate = dict(previous)
@@ -882,11 +1015,13 @@ def check(args, cargo_args, test_args):
         path, profile = dev.load_profile('preview-check-' + uuid.uuid4().hex[:8], create=True)
         profile['disposable'] = True
         profile['source_checkout'] = str(dev.REPO)
+        profile['runner'] = runner_record()
         configure_profile(path, profile)
         root = checks.runtime_root()
         key = checks.cache_key(dev.REPO)
-        with checks.admission(root, key, args.queue_timeout) as (_, descriptors), tempfile.TemporaryDirectory(prefix='lumen-check-source-') as temporary:
-            source = Path(temporary)
+        source = root / 'sources' / key
+        source.mkdir(parents=True, exist_ok=True)
+        with checks.admission(root, key, args.queue_timeout) as (_, descriptors):
             copy_source(source)
             ensure_images(path, profile, source, descriptors)
             cleanup_caches(profile)
@@ -897,6 +1032,8 @@ def check(args, cargo_args, test_args):
             arguments = [*dev.docker_args(profile), 'compose', '-f', str(path / 'builder-compose.json'), 'exec', '-T']
             if args.postgres:
                 arguments.extend(('--env', f'DATABASE_URL=postgres://whio:{profile["postgres_password"]}@postgres:5432/whio'))
+            if os.environ.get('WHIO_TEST_WORKER_PRODUCTION_INTERVALS'):
+                arguments.extend(('--env', 'WHIO_TEST_WORKER_PRODUCTION_INTERVALS=1'))
             arguments.extend(('builder', 'timeout', '--signal=TERM', '--kill-after=5s', f'{args.timeout}s', 'cargo', 'test', '--locked', '--color', 'never', '--manifest-path', 'apps/core/Cargo.toml'))
             if args.postgres:
                 arguments.extend(('--features', 'postgres-integration'))

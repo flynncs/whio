@@ -57,12 +57,21 @@ const WORKER_MAX_WORKERS: &str = "WHIO_WORKER_MAX_WORKERS";
 const WORKER_POLL_INTERVAL: &str = "WHIO_WORKER_POLL_INTERVAL_MILLISECONDS";
 const WORKER_PROMOTE_INTERVAL: &str = "WHIO_WORKER_PROMOTE_INTERVAL_MILLISECONDS";
 const WORKER_DRAIN_TIMEOUT: &str = "WHIO_WORKER_DRAIN_TIMEOUT_SECONDS";
+const WORKER_DRAIN_TIMEOUT_MILLISECONDS: &str = "WHIO_WORKER_DRAIN_TIMEOUT_MILLISECONDS";
+const WORKER_HEARTBEAT_RESCUE_INTERVAL: &str = "WHIO_WORKER_HEARTBEAT_RESCUE_INTERVAL_MILLISECONDS";
+const WORKER_HEARTBEAT_INTERVAL: &str = "WHIO_WORKER_HEARTBEAT_INTERVAL_MILLISECONDS";
+const WORKER_HEARTBEAT_STALENESS: &str = "WHIO_WORKER_HEARTBEAT_STALENESS_MILLISECONDS";
+const WORKER_RETRY_BASE_DELAY: &str = "WHIO_WORKER_RETRY_BASE_DELAY_MILLISECONDS";
+const WORKER_RETRY_MAX_DELAY: &str = "WHIO_WORKER_RETRY_MAX_DELAY_MILLISECONDS";
 
 const DEFAULT_WORKER_BIND_ADDRESS: &str = "127.0.0.1:3001";
 const DEFAULT_WORKER_MAX_WORKERS: u32 = 4;
 const DEFAULT_WORKER_POLL_INTERVAL_MILLISECONDS: u64 = 200;
 const DEFAULT_WORKER_PROMOTE_INTERVAL_MILLISECONDS: u64 = 250;
 const DEFAULT_WORKER_DRAIN_TIMEOUT_SECONDS: u64 = 30;
+const DEFAULT_WORKER_HEARTBEAT_RESCUE_INTERVAL_MILLISECONDS: u64 = 30_000;
+const DEFAULT_WORKER_RETRY_BASE_DELAY_MILLISECONDS: u64 = 1_000;
+const DEFAULT_WORKER_RETRY_MAX_DELAY_MILLISECONDS: u64 = 86_400_000;
 
 const DEFAULT_YOUTUBE_MEDIA_SUFFIX: &str =
     crate::features::playback::media::DEFAULT_YOUTUBE_MEDIA_SUFFIX;
@@ -101,6 +110,10 @@ pub(crate) struct WorkerConfig {
     pub(crate) poll_interval: Duration,
     pub(crate) promote_interval: Duration,
     pub(crate) drain_timeout: Duration,
+    pub(crate) heartbeat_rescue_interval: Duration,
+    pub(crate) heartbeat_interval: Option<Duration>,
+    pub(crate) heartbeat_staleness: Option<Duration>,
+    pub(crate) retry_policy: crate::jobs::RetryPolicy,
 }
 
 #[derive(Debug)]
@@ -514,11 +527,38 @@ impl Config {
                 WORKER_PROMOTE_INTERVAL,
                 DEFAULT_WORKER_PROMOTE_INTERVAL_MILLISECONDS,
             )?,
-            drain_timeout: parse_timeout(
+            drain_timeout: if vars.contains_key(WORKER_DRAIN_TIMEOUT_MILLISECONDS) {
+                parse_millis(
+                    vars,
+                    WORKER_DRAIN_TIMEOUT_MILLISECONDS,
+                    DEFAULT_WORKER_DRAIN_TIMEOUT_SECONDS * 1_000,
+                )?
+            } else {
+                parse_timeout(
+                    vars,
+                    WORKER_DRAIN_TIMEOUT,
+                    DEFAULT_WORKER_DRAIN_TIMEOUT_SECONDS,
+                )?
+            },
+            heartbeat_rescue_interval: parse_millis(
                 vars,
-                WORKER_DRAIN_TIMEOUT,
-                DEFAULT_WORKER_DRAIN_TIMEOUT_SECONDS,
+                WORKER_HEARTBEAT_RESCUE_INTERVAL,
+                DEFAULT_WORKER_HEARTBEAT_RESCUE_INTERVAL_MILLISECONDS,
             )?,
+            heartbeat_interval: parse_optional_millis(vars, WORKER_HEARTBEAT_INTERVAL)?,
+            heartbeat_staleness: parse_optional_millis(vars, WORKER_HEARTBEAT_STALENESS)?,
+            retry_policy: crate::jobs::RetryPolicy::new(
+                parse_millis(
+                    vars,
+                    WORKER_RETRY_BASE_DELAY,
+                    DEFAULT_WORKER_RETRY_BASE_DELAY_MILLISECONDS,
+                )?,
+                parse_millis(
+                    vars,
+                    WORKER_RETRY_MAX_DELAY,
+                    DEFAULT_WORKER_RETRY_MAX_DELAY_MILLISECONDS,
+                )?,
+            ),
         };
 
         Ok(Self {
@@ -580,6 +620,15 @@ fn invalid(name: &'static str, value: &str, reason: &'static str) -> ConfigError
         value: value.to_owned(),
         reason,
     }
+}
+
+fn parse_optional_millis(
+    vars: &HashMap<String, String>,
+    name: &'static str,
+) -> Result<Option<Duration>, ConfigError> {
+    vars.contains_key(name)
+        .then(|| parse_millis(vars, name, 1))
+        .transpose()
 }
 
 fn parse_millis(
@@ -1094,6 +1143,9 @@ mod tests {
             (WORKER_POLL_INTERVAL, "0"),
             (WORKER_PROMOTE_INTERVAL, "later"),
             (WORKER_DRAIN_TIMEOUT, "0"),
+            (WORKER_DRAIN_TIMEOUT_MILLISECONDS, "0"),
+            (WORKER_HEARTBEAT_INTERVAL, "0"),
+            (WORKER_HEARTBEAT_STALENESS, "0"),
         ] {
             assert!(
                 matches!(
@@ -1103,6 +1155,16 @@ mod tests {
                 "{name}={value}"
             );
         }
+    }
+
+    #[test]
+    fn drain_timeout_milliseconds_override_legacy_seconds() {
+        let config = parse_config(&[
+            (WORKER_DRAIN_TIMEOUT, "20"),
+            (WORKER_DRAIN_TIMEOUT_MILLISECONDS, "125"),
+        ])
+        .unwrap();
+        assert_eq!(config.worker.drain_timeout, Duration::from_millis(125));
     }
 
     #[test]

@@ -26,13 +26,13 @@ backup profile="personal":
     python3 tools/dev.py backup {{ quote(profile) }}
 
 test filter:
-    python3 tools/test-core.py --docker -- --lib {{ quote(filter) }}
+    {{ if filter == "" { error("name a test filter (or pass --full)") } else { "python3 tools/test-core.py --docker -- --lib " + quote(filter) } }}
 
 test-db filter:
-    python3 tools/test-postgres.py --docker -- --lib {{ quote(filter) }}
+    {{ if filter == "" { error("name a test filter (or pass --full)") } else { "python3 tools/test-postgres.py --docker -- --lib " + quote(filter) } }}
 
 test-it filter:
-    python3 tools/test-postgres.py --docker -- --test integration {{ quote(filter) }}
+    {{ if filter == "" { error("name a test filter (or pass --full)") } else { "python3 tools/test-postgres.py --docker -- --test integration " + quote(filter) } }}
 
 media action *args:
     {{ if action == "import" { "python3 tools/dev.py media-import" } else if action == "verify" { "python3 tools/dev.py media-verify" } else { error("media takes import or verify") } }} {{ args }}

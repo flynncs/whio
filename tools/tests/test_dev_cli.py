@@ -99,9 +99,9 @@ class CommandSurfaceTests(unittest.TestCase):
              patch.object(dev, 'load_profile', return_value=(self.root, profile)), \
              patch.object(dev, 'cleanup') as cleanup, \
              patch.object(dev_docker, 'configure_profile') as configure, \
-             patch.object(dev, 'build') as build, \
-             patch.object(dev, 'start') as start, \
-             patch.object(dev, 'create_user') as create_user:
+             patch.object(dev_docker, 'build') as build, \
+             patch.object(dev_docker, 'start') as start, \
+             patch.object(dev_docker, 'create_user') as create_user:
             dev.main()
         cleanup.assert_called_once_with()
         configure.assert_called_once_with(self.root, profile)
@@ -114,8 +114,8 @@ class CommandSurfaceTests(unittest.TestCase):
         with patch.object(sys, 'argv', ['dev.py', 'up', 'personal']), \
              patch.object(dev, 'state_lock', unlocked), \
              patch.object(dev, 'load_profile', return_value=(self.root, profile)), \
-             patch.object(dev, 'cleanup'), patch.object(dev, 'build') as build, \
-             patch.object(dev, 'start') as start, patch.object(dev, 'create_user'):
+             patch.object(dev, 'cleanup'), patch.object(dev_docker, 'build') as build, \
+             patch.object(dev_docker, 'start') as start, patch.object(dev_docker, 'create_user'):
             dev.main()
         build.assert_not_called()
         start.assert_called_once_with(self.root, profile, True)
@@ -126,7 +126,7 @@ class CommandSurfaceTests(unittest.TestCase):
              patch.object(dev, 'state_lock', unlocked), \
              patch.object(dev, 'load_profile', return_value=(self.root, profile)), \
              patch.object(dev, 'backup') as backup, \
-             patch.object(dev, 'backup_check') as backup_check:
+             patch.object(dev_docker, 'backup_check') as backup_check:
             dev.main()
         backup.assert_called_once_with(self.root, profile)
         backup_check.assert_called_once_with(self.root, profile)
@@ -152,7 +152,7 @@ class CommandSurfaceTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(sys, 'argv', ['dev.py', 'status']), \
              patch.object(dev, 'ready', side_effect=lambda port: port == 3000), \
-             patch.object(dev, 'running', side_effect=lambda path, profile: profile['name'] != 'preview-stopped'), \
+             patch.object(dev_docker, 'running', side_effect=lambda path, profile: profile['name'] != 'preview-stopped'), \
              redirect_stdout(output):
             self.assertEqual(dev.main(), 0)
         self.assertEqual(output.getvalue().splitlines(), [

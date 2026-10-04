@@ -17,8 +17,6 @@ use crate::support;
 
 use support::worker::{CREDENTIAL_KEY, Worker, database_url};
 
-const RETRY_OVERHEAD_MS: i64 = 1_000;
-
 fn free_address() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
     listener.local_addr().expect("a local address")
@@ -70,6 +68,27 @@ impl Drop for CrashWorker {
     }
 }
 
+async fn expire_heartbeat(pool: &PgPool, operation_id: Uuid) {
+    sqlx::query(
+        "UPDATE awa.jobs SET heartbeat_at = now() - interval '2 minutes'
+         WHERE args->>'operation_id' = $1 AND state::text = 'running'",
+    )
+    .bind(operation_id.to_string())
+    .execute(pool)
+    .await
+    .expect("the stale worker heartbeat");
+}
+
+async fn release_probe(pool: &PgPool, operation_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO public.probe_releases (operation_id) VALUES ($1) ON CONFLICT DO NOTHING",
+    )
+    .bind(operation_id)
+    .execute(pool)
+    .await
+    .expect("the probe release");
+}
+
 async fn count_jobs(pool: &PgPool, operation_id: Uuid, state: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM awa.jobs WHERE args->>'operation_id' = $1 AND state::text = $2",
@@ -91,7 +110,7 @@ async fn await_job_state(pool: &PgPool, operation_id: Uuid, state: &str, within:
             tokio::time::Instant::now() < deadline,
             "job {operation_id} never reached {state}"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await
     }
 }
 
@@ -188,57 +207,63 @@ async fn two_identical_enqueues_coalesce(pool: PgPool) {
         .expect("the worker's own migrations");
 
     let operation_id = Uuid::now_v7();
-
     let mut tx = pool.begin().await.expect("a transaction");
-    let first = whio_core::jobs::probe::enqueue(&mut tx, operation_id)
+    let first = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, false)
         .await
         .expect("an enqueue");
     tx.commit().await.expect("the commit");
-
-    let mut tx = pool.begin().await.expect("a transaction");
-    let second = whio_core::jobs::probe::enqueue(&mut tx, operation_id)
-        .await
-        .expect("an enqueue");
-    tx.commit().await.expect("the commit");
-
-    let first_id = match first {
-        Enqueued::Inserted { job_id } => job_id,
-        Enqueued::Coalesced => panic!("the first enqueue inserts"),
-    };
-    assert_eq!(second, Enqueued::Coalesced, "the second enqueue coalesces");
-
-    assert_eq!(
-        count_jobs(&pool, operation_id, "available").await
-            + count_jobs(&pool, operation_id, "scheduled").await,
-        1,
-        "two identical enqueues produce one job"
-    );
+    assert!(matches!(first, Enqueued::Inserted { .. }));
 
     let mut worker = Worker::start(&pool, PROBE_QUEUE);
     worker.await_health("/health/ready", 200).await;
+    await_job_state(&pool, operation_id, "running", Duration::from_secs(60)).await;
+    await_progress_flushed(&pool, operation_id, Duration::from_secs(30)).await;
+
+    for _ in 0..2 {
+        let mut tx = pool.begin().await.expect("a transaction");
+        let repeated = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, false)
+            .await
+            .expect("an enqueue");
+        tx.commit().await.expect("the commit");
+        assert_eq!(repeated, Enqueued::Coalesced, "a running job coalesces");
+    }
+
+    assert_eq!(
+        count_jobs(&pool, operation_id, "running").await
+            + count_jobs(&pool, operation_id, "available").await
+            + count_jobs(&pool, operation_id, "scheduled").await,
+        1,
+        "three identical enqueues hold one non-terminal job"
+    );
+
+    release_probe(&pool, operation_id).await;
     await_job_state(&pool, operation_id, "completed", Duration::from_secs(60)).await;
-
-    let mut tx = pool.begin().await.expect("a transaction");
-    let third = whio_core::jobs::probe::enqueue(&mut tx, operation_id)
-        .await
-        .expect("an enqueue");
-    tx.commit().await.expect("the commit");
-
-    let third_id = match third {
-        Enqueued::Inserted { job_id } => job_id,
-        Enqueued::Coalesced => panic!("a post-completion enqueue inserts a fresh job"),
-    };
-    assert_ne!(third_id, first_id, "the third enqueue is a new job");
     assert_eq!(
         count_jobs(&pool, operation_id, "completed").await,
         1,
-        "the first job completed"
+        "the held job completes after release"
     );
     assert_eq!(
         count_jobs(&pool, operation_id, "available").await
             + count_jobs(&pool, operation_id, "scheduled").await,
-        1,
-        "the third enqueue produced a second job"
+        0,
+        "coalesced enqueues did not create another job"
+    );
+    worker.interrupt();
+    assert!(worker.await_exit(Duration::from_secs(30)).await.success());
+
+    let mut tx = pool.begin().await.expect("a transaction");
+    let after_completion = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, false)
+        .await
+        .expect("an enqueue after completion");
+    tx.commit().await.expect("the commit");
+    assert!(matches!(after_completion, Enqueued::Inserted { .. }));
+    assert_eq!(
+        count_jobs(&pool, operation_id, "completed").await
+            + count_jobs(&pool, operation_id, "available").await
+            + count_jobs(&pool, operation_id, "scheduled").await,
+        2,
+        "a new enqueue after completion creates a second job"
     );
 }
 
@@ -251,7 +276,7 @@ async fn a_duplicate_execution_has_one_effect(pool: PgPool) {
     let operation_id = Uuid::now_v7();
 
     let mut tx = pool.begin().await.expect("a transaction");
-    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, 60_000, false)
+    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, false)
         .await
         .expect("an enqueue");
     tx.commit().await.expect("the commit");
@@ -262,6 +287,7 @@ async fn a_duplicate_execution_has_one_effect(pool: PgPool) {
     await_progress_flushed(&pool, operation_id, Duration::from_secs(30)).await;
 
     worker.kill9();
+    expire_heartbeat(&pool, operation_id).await;
 
     assert_eq!(
         count_jobs(&pool, operation_id, "running").await,
@@ -269,6 +295,7 @@ async fn a_duplicate_execution_has_one_effect(pool: PgPool) {
         "the in-flight job survives the crash rather than being lost"
     );
 
+    release_probe(&pool, operation_id).await;
     let mut worker = Worker::start(&pool, PROBE_QUEUE);
     worker.await_health("/health/ready", 200).await;
     await_job_state(&pool, operation_id, "completed", Duration::from_secs(180)).await;
@@ -291,84 +318,67 @@ async fn a_duplicate_execution_has_one_effect(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn the_retry_schedule_is_measured(pool: PgPool) {
+async fn the_worker_uses_the_injected_retry_schedule(pool: PgPool) {
     Database::connect(&database_url(&pool))
         .await
         .expect("the worker's own migrations");
-
     let operation_id = Uuid::now_v7();
-
     let mut tx = pool.begin().await.expect("a transaction");
     let enqueued = whio_core::jobs::probe::enqueue_failing(&mut tx, operation_id)
         .await
-        .expect("an enqueue");
+        .expect("a failing job enqueue");
     tx.commit().await.expect("the commit");
     assert!(matches!(enqueued, Enqueued::Inserted { .. }));
 
-    let started = std::time::Instant::now();
     let mut worker = Worker::start(&pool, PROBE_QUEUE);
     worker.await_health("/health/ready", 200).await;
-    await_job_state(&pool, operation_id, "failed", Duration::from_secs(180)).await;
-    let elapsed = started.elapsed();
+    await_job_state(&pool, operation_id, "failed", Duration::from_secs(60)).await;
 
-    let errors: serde_json::Value = sqlx::query_scalar(
-        "SELECT to_jsonb(errors) FROM awa.jobs
-         WHERE args->>'operation_id' = $1 AND state::text = 'failed'",
+    let progress: serde_json::Value = sqlx::query_scalar(
+        "SELECT progress FROM awa.jobs WHERE args->>'operation_id' = $1 AND state::text = 'failed'",
     )
     .bind(operation_id.to_string())
     .fetch_one(&pool)
     .await
-    .expect("the failed job's errors");
-
-    let entries = errors.as_array().expect("a JSON array of errors");
-    let max_attempts = PROBE_FAILING_MAX_ATTEMPTS as usize;
-    assert_eq!(
-        entries.len(),
-        max_attempts,
-        "the job exhausted exactly max_attempts attempts"
-    );
-
-    let times: Vec<(i64, chrono::DateTime<chrono::Utc>)> = entries
+    .expect("the failed job progress");
+    let attempts = progress["metadata"]["probe_retry_attempts"]
+        .as_array()
+        .expect("the job-row retry attempt history")
         .iter()
-        .map(|entry| {
-            let attempt = entry["attempt"].as_i64().expect("an attempt number");
-            let at =
-                chrono::DateTime::parse_from_rfc3339(entry["at"].as_str().expect("a timestamp"))
-                    .expect("an RFC 3339 timestamp")
-                    .with_timezone(&chrono::Utc);
-            (attempt, at)
+        .map(|attempt| {
+            let number = attempt["attempt"].as_i64().expect("attempt number") as i16;
+            let timestamp = chrono::DateTime::parse_from_rfc3339(
+                attempt["at"].as_str().expect("attempt timestamp"),
+            )
+            .expect("RFC 3339 attempt timestamp")
+            .with_timezone(&chrono::Utc);
+            (number, timestamp)
         })
-        .collect();
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attempts.len(),
+        PROBE_FAILING_MAX_ATTEMPTS as usize,
+        "the worker exhausted exactly max_attempts"
+    );
+    assert_eq!(count_jobs(&pool, operation_id, "failed").await, 1);
 
-    for (index, (attempt, _)) in times.iter().enumerate() {
+    for (index, (attempt, _)) in attempts.iter().enumerate() {
         assert_eq!(
             *attempt,
-            (index + 1) as i64,
-            "attempts are consecutive from one"
+            index as i16 + 1,
+            "attempts are ordered and consecutive"
         );
     }
-
-    for window in times.windows(2) {
-        let (attempt, at) = &window[0];
-        let (_, next_at) = &window[1];
-        let gap_ms = (*next_at - *at).num_milliseconds();
-        let base_seconds = 2.0_f64.powi(*attempt as i32);
-        let lower_ms = (base_seconds * 1000.0) as i64 - 150;
-        let upper_ms = (base_seconds * 1.25 * 1000.0) as i64 + RETRY_OVERHEAD_MS;
+    for window in attempts.windows(2) {
+        let attempt = window[0].0;
+        let gap_ms = (window[1].1 - window[0].1).num_milliseconds();
+        let lower_ms = 0;
+        let upper_ms = 1_000;
         assert!(
             gap_ms >= lower_ms && gap_ms <= upper_ms,
-            "attempt {attempt} gap {gap_ms}ms outside the backoff envelope [{lower_ms}, {upper_ms}]"
+            "attempt {attempt} spacing {gap_ms}ms outside the injected retry window [{lower_ms}, {upper_ms}]"
         );
     }
-
-    let backoff_supremum_seconds: f64 = (1..max_attempts)
-        .map(|attempt| 2.0_f64.powi(attempt as i32) * 1.25)
-        .sum();
-    let overhead_seconds = max_attempts as f64 * (RETRY_OVERHEAD_MS as f64 / 1000.0);
-    assert!(
-        elapsed < Duration::from_secs_f64(backoff_supremum_seconds + overhead_seconds + 5.0),
-        "the realised schedule is bounded in time: {elapsed:?}"
-    );
 }
 
 #[sqlx::test]
@@ -399,22 +409,36 @@ async fn concurrent_coalesced_enqueues_produce_one_job(pool: PgPool) {
         "the two calls hold one non-terminal job"
     );
 
-    let mut worker = Worker::start(&pool, PROBE_QUEUE);
-    worker.await_health("/health/ready", 200).await;
-    await_job_state(&pool, operation_id, "completed", Duration::from_secs(60)).await;
+    sqlx::query("UPDATE awa.jobs SET state = 'running' WHERE args->>'operation_id' = $1")
+        .bind(operation_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("the explicit running state");
 
+    let while_running = whio_core::jobs::probe::enqueue_coalesced(&pool, operation_id)
+        .await
+        .expect("an enqueue while running");
+    assert_eq!(while_running, Enqueued::Coalesced);
+    assert_eq!(
+        count_jobs(&pool, operation_id, "running").await,
+        1,
+        "a running job keeps its coalescing claim"
+    );
+
+    sqlx::query("UPDATE awa.jobs SET state = 'completed' WHERE args->>'operation_id' = $1")
+        .bind(operation_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("the explicit completed state");
     let after_terminal = whio_core::jobs::probe::enqueue_coalesced(&pool, operation_id)
         .await
         .expect("a post-completion enqueue");
-    assert!(
-        matches!(after_terminal, Enqueued::Inserted { .. }),
-        "a terminal job releases the claim so a third call inserts a new one"
-    );
+    assert!(matches!(after_terminal, Enqueued::Inserted { .. }));
     assert_eq!(
-        count_jobs(&pool, operation_id, "available").await
-            + count_jobs(&pool, operation_id, "scheduled").await,
-        1,
-        "the third call produced a second job"
+        count_jobs(&pool, operation_id, "completed").await
+            + count_jobs(&pool, operation_id, "available").await,
+        2,
+        "a terminal job releases the claim so a new one inserts"
     );
 }
 
@@ -466,7 +490,7 @@ async fn a_graceful_stop_drains_or_releases(pool: PgPool) {
     let queued_id = Uuid::now_v7();
 
     let mut tx = pool.begin().await.expect("a transaction");
-    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, 60_000, false)
+    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, false)
         .await
         .expect("an enqueue");
     tx.commit().await.expect("the commit");
@@ -531,7 +555,7 @@ async fn a_graceful_stop_releases_a_job_that_outlasts_the_drain(pool: PgPool) {
     let operation_id = Uuid::now_v7();
 
     let mut tx = pool.begin().await.expect("a transaction");
-    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, 60_000, true)
+    let enqueued = whio_core::jobs::probe::enqueue_slow(&mut tx, operation_id, true)
         .await
         .expect("an enqueue");
     tx.commit().await.expect("the commit");
@@ -565,6 +589,7 @@ async fn a_graceful_stop_releases_a_job_that_outlasts_the_drain(pool: PgPool) {
         worker.log()
     );
 
+    release_probe(&pool, operation_id).await;
     let mut worker = Worker::start(&pool, PROBE_QUEUE);
     worker.await_health("/health/ready", 200).await;
     await_job_state(&pool, operation_id, "completed", Duration::from_secs(180)).await;

@@ -32,6 +32,44 @@ class DockerTests(unittest.TestCase):
             override.stop()
         self.temporary.cleanup()
 
+    def test_runner_alive_requires_complete_matching_identity(self):
+        profile = {'runner': {'pid': 123, 'start_time': 'start'}}
+        with patch.object(docker, 'runner_identity', return_value='start'):
+            self.assertTrue(docker.runner_alive(profile))
+        with patch.object(docker, 'runner_identity', return_value='different'):
+            self.assertFalse(docker.runner_alive(profile))
+        with patch.object(docker, 'runner_identity', return_value=None):
+            self.assertFalse(docker.runner_alive(profile))
+        for runner in ({'pid': 123}, {'pid': 123, 'start_time': ''}, {'pid': 123, 'start_time': None}):
+            with self.subTest(runner=runner):
+                self.assertFalse(docker.runner_alive({'runner': runner}))
+
+    def test_runner_record_requires_process_start_time(self):
+        with patch.object(docker.os, 'getpid', return_value=123), \
+             patch.object(docker, 'runner_identity', return_value='start'):
+            self.assertEqual(docker.runner_record(), {'pid': 123, 'start_time': 'start'})
+        with patch.object(docker.os, 'getpid', return_value=123), \
+             patch.object(docker, 'runner_identity', return_value=None):
+            with self.assertRaisesRegex(RuntimeError, 'cannot identify preview runner'):
+                docker.runner_record()
+
+    def test_cleanup_reaps_only_dead_runner_previews(self):
+        dead_path, dead = dev.load_profile('preview-check-dead', create=True)
+        live_path, live = dev.load_profile('preview-restore-live', create=True)
+        for profile in (dead, live):
+            profile.update(runtime='docker', docker_context='fixture', expires=9999999999,
+                           source_checkout=str(dev.REPO), runner={'pid': 123, 'start_time': 'start'})
+            dev.write_json((dev.STATE / 'profiles' / profile['name'] / 'profile.json'), profile)
+        removed = []
+        with patch.object(docker, 'runner_alive', side_effect=lambda profile: profile['name'] == live['name']), \
+             patch.object(docker, 'destroy', side_effect=lambda path, profile: removed.append(profile['name'])), \
+             patch.object(docker, 'cleanup_caches'), patch.object(dev, 'prune_installed_builds'), \
+             patch.object(checks, 'prune_caches'), patch.object(checks, 'check_storage'):
+            docker.cleanup()
+        self.assertEqual(removed, [dead['name']])
+        self.assertTrue(dead_path.exists())
+        self.assertTrue(live_path.exists())
+
     def test_profile_artifacts_live_in_the_container_build_root(self):
         self.assertEqual(dev.builds_root(self.profile), dev.state_root() / 'container-builds' / 'arm64')
         self.assertEqual(dev.docker_args(self.profile), ['docker', '--context', 'fixture'])
@@ -66,12 +104,12 @@ class DockerTests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0)
         with patch.object(dev, 'inspect', side_effect=inspect), \
              patch.object(docker, 'main_checkout_key', return_value=main_key), \
-             patch.object(docker, 'command') as mutation, \
+             patch.object(docker, 'command', return_value='created') as mutation, \
              patch.object(subprocess, 'run', return_value=completed) as run:
             name = docker.cache_volume(self.profile, 'target', 'b' * 16)
         mutation.assert_called_once()
         self.assertEqual(mutation.call_args.args[1:3], ('volume', 'create'))
-        self.assertIn('dev.lumen.checkout=' + 'b' * 16, mutation.call_args.args)
+        self.assertIn('dev.lumen.checkout=' + 'b' * 16, mutation.call_args_list[0].args)
         arguments = run.call_args.args[0]
         self.assertIn(f'type=volume,source={source},target=/from', arguments)
         self.assertIn(f'type=volume,source={name},target=/to', arguments)
@@ -102,19 +140,26 @@ class DockerTests(unittest.TestCase):
         source = f'lumen-build-{os.getuid()}-{docker.context_key(self.profile)}-arm64-{main_key}'
         def inspect(kind, name, profile=None):
             return {'Labels': {}} if kind == 'volume' and name == source else None
-        failures = (patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)),
-                    patch.object(subprocess, 'run', side_effect=subprocess.TimeoutExpired('docker', 300)))
-        for index, run in enumerate(failures):
+        failures = (
+            [subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)],
+            [subprocess.TimeoutExpired('docker', 300), subprocess.CompletedProcess([], 0)],
+        )
+        for index, results in enumerate(failures):
             with self.subTest(failure=index):
                 output = io.StringIO()
                 with patch.object(dev, 'inspect', side_effect=inspect), \
                      patch.object(docker, 'main_checkout_key', return_value=main_key), \
-                     patch.object(docker, 'command') as mutation, run, \
+                     patch.object(docker, 'command', return_value='created') as mutation, \
+                     patch.object(subprocess, 'run', side_effect=results) as run, \
+                     patch.object(docker, 'remove_container') as remove, \
                      contextlib.redirect_stdout(output):
                     docker.cache_volume(self.profile, 'target', 'b' * 16)
-                self.assertIn('not cloned', output.getvalue())
+                self.assertEqual(output.getvalue(), 'target cache was not cloned; build starts from an empty target\n')
                 mutation.assert_called_once()
                 self.assertEqual(mutation.call_args.args[1:3], ('volume', 'create'))
+                self.assertEqual(run.call_count, 2)
+                self.assertIn('find /to -mindepth 1 -delete', run.call_args.args[0])
+                self.assertEqual(remove.call_count, 2)
 
     def test_unowned_cache_cannot_be_adopted(self):
         with patch.object(dev, 'inspect', return_value={'Labels': {docker.OWNER: '-1'}}), patch.object(docker, 'command') as mutation:
@@ -137,6 +182,32 @@ class DockerTests(unittest.TestCase):
             self.assertEqual(media[0]['target'], self.profile['media_root'])
             self.assertTrue(media[0]['read_only'])
             self.assertEqual(document['services'][name]['environment']['WHIO_MEDIA_ROOTS'], self.profile['media_root'])
+
+    def test_source_mirror_updates_changed_files_and_deletes_removed_files(self):
+        repository = self.root / 'repo/apps/core/tests/fixtures'
+        repository.mkdir(parents=True)
+        changed = repository / 'changed.json'
+        removed = repository / 'removed.json'
+        changed.write_text('{"value": 1}')
+        removed.write_text('{"value": 2}')
+        dockerfiles = self.root / 'repo/docker'
+        dockerfiles.mkdir()
+        for name in ('local.Dockerfile', 'ytm-resolver.Dockerfile'):
+            (dockerfiles / name).write_text('FROM scratch\\n')
+        destination = self.root / 'mirror'
+        with patch.object(dev, 'REPO', self.root / 'repo'):
+            docker.copy_source(destination)
+            output = destination / changed.relative_to(dev.REPO)
+            os.utime(output, ns=(1_000_000_000, 1_000_000_000))
+            before = output.stat().st_mtime_ns
+            docker.copy_source(destination)
+            self.assertEqual(output.stat().st_mtime_ns, before)
+            changed.write_text('{"value": 3}')
+            removed.unlink()
+            docker.copy_source(destination)
+            self.assertNotEqual(output.stat().st_mtime_ns, before)
+            self.assertEqual(output.read_text(), '{"value": 3}')
+            self.assertFalse((destination / removed.relative_to(dev.REPO)).exists())
 
     def test_source_snapshot_copies_binary_and_json_fixtures_and_hashes_changes(self):
         fixture_root = self.root / 'repo/apps/core/tests/fixtures'
@@ -171,6 +242,11 @@ class DockerTests(unittest.TestCase):
         document = json.loads(docker.config(self.path, self.profile, False).read_text())
         postgres = document['services']['postgres']
         self.assertEqual(postgres['mem_limit'], postgres['memswap_limit'])
+        self.assertEqual(postgres['mem_limit'], '4g')
+        self.assertEqual(postgres['shm_size'], '1gb')
+        self.assertEqual(postgres['tmpfs'], ['/var/lib/postgresql:rw,size=3g'])
+        self.assertIn('max_connections=200', postgres['command'])
+        self.assertEqual(postgres['command'][postgres['command'].index('max_connections=200') - 1], '-c')
         self.assertIn('127.0.0.1', postgres['healthcheck']['test'])
         self.assertNotIn('volumes', postgres)
         self.assertNotIn('postgres', document['volumes'])
@@ -219,6 +295,40 @@ class DockerTests(unittest.TestCase):
         self.profile['postgres_password'] = 'literal$VALUE'
         document = json.loads(docker.config(self.path, self.profile, False).read_text())
         self.assertEqual(document['services']['postgres']['environment']['POSTGRES_PASSWORD'], 'literal$$VALUE')
+
+    def test_btrfs_volume_measurement_uses_exclusive_bytes(self):
+        result = subprocess.CompletedProcess(
+            [], 0, stdout='btrfs\nTotal Exclusive Set shared Filename\n1000 400 600 /v\n'
+        )
+        with patch.object(subprocess, 'run', return_value=result), \
+             patch.object(docker, 'measurement_image', return_value='compiler-image'), \
+             patch.object(docker, 'remove_container') as remove:
+            measured = docker.volume_filesystem_usage(self.profile, 'target-volume')
+        self.assertEqual(measured, ('btrfs', 400, 600))
+        remove.assert_called_once()
+
+    def test_storage_uses_exclusive_volume_measurement(self):
+        rows = {
+            ('system', 'df'): {
+                'Images': [{'ID': 'image-id', 'Size': '10GiB', 'UniqueSize': '3GiB'}],
+                'Volumes': [{'Name': 'target', 'Labels': f'{docker.OWNER}={os.getuid()},{docker.KIND}=target', 'Size': '8GiB'}],
+            },
+            ('image', 'ls'): 'image-id',
+            ('filesystem', 'target'): ('btrfs', 4 * 1024**3, 2 * 1024**3),
+        }
+
+        def command(_profile, *arguments):
+            if arguments[:2] == ('system', 'df'):
+                return json.dumps(rows[('system', 'df')])
+            if arguments[:2] == ('image', 'ls'):
+                return rows[('image', 'ls')]
+            raise AssertionError(arguments)
+
+        with patch.object(docker, 'command', side_effect=command), \
+             patch.object(docker, 'volume_filesystem_usage', return_value=rows[('filesystem', 'target')]):
+            result = docker.storage(self.profile)
+        self.assertEqual(result['bytes'], 9 * 1024**3)
+        self.assertEqual(result['volumes'][0]['bytes'], 6 * 1024**3)
 
     def test_host_guard_includes_registered_docker_cache(self):
         root = self.root / 'checks'

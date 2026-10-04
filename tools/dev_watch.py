@@ -36,13 +36,14 @@ def components(root=None):
 
 
 def installed_components(profile):
+    import dev_docker
     file = dev.builds_root(profile) / profile['build'] / 'build.json'
     document = json.loads(file.read_text())
     if not document.get('components'):
-        if profile['build'] != dev.current_identity(profile):
+        if profile['build'] != dev_docker.identity(profile):
             raise RuntimeError('installed build lacks a source baseline; run just dev before watching')
         document['components'] = components()
-        if profile['build'] != dev.current_identity(profile):
+        if profile['build'] != dev_docker.identity(profile):
             raise RuntimeError('source changed during baseline inspection; retry')
         dev.write_json(file, document)
     return document['components']
@@ -95,6 +96,7 @@ def replace(path, previous, candidate, schema_changed=False):
 
 
 def reload(path, profile, migrations=False):
+    import dev_docker
     editable(profile)
     owner(path)
     current = components()
@@ -105,17 +107,17 @@ def reload(path, profile, migrations=False):
                 print(f'{name} changed; automatic replacement paused; run just dev {profile["name"]}', flush=True)
                 return
     links_ready = all((path / name).is_symlink() for name in ('current-rust', 'current-resolver'))
-    if not migrations and profile['build'] == dev.current_identity(profile) and profile.get('resolver_snapshot') and links_ready:
+    if not migrations and profile['build'] == dev_docker.identity(profile) and profile.get('resolver_snapshot') and links_ready:
         print('source unchanged; no restart', flush=True)
         return
     if migrations:
-        dev.start_db(path, profile)
+        dev_docker.start_db(path, profile)
         if migration_status(path, profile, display=False):
             raise RuntimeError('applied migration differs or is absent; restore the original file before migrating')
         dev.backup(path, profile)
     previous = dict(profile)
     candidate = dict(profile)
-    dev.build(path, candidate, persist=False)
+    dev_docker.build(path, candidate, persist=False)
     current = json.loads((dev.builds_root(candidate) / candidate['build'] / 'build.json').read_text())['components']
     if not migrations and any(current[name] != previous_components[name] for name in ('migrations', 'dependencies')):
         print(f'migrations/dependencies changed during build; replacement paused; run just dev {profile["name"]}', flush=True)
@@ -127,11 +129,12 @@ def reload(path, profile, migrations=False):
 
 
 def watch_step(path, profile, token):
+    import dev_docker
     editable(profile)
     if not token:
         raise RuntimeError('watch-step requires an active watcher session')
     owner(path, token)
-    if not dev.running(path, profile):
+    if not dev_docker.running(path, profile):
         print('profile stopped; save ignored; start it explicitly to resume', flush=True)
         return
     reload(path, profile)
@@ -172,7 +175,8 @@ def watch(name):
             installed_components(profile)
             reload(path, profile)
             path, profile = dev.load_profile(name)
-            dev.start(path, profile, profile['full'])
+            import dev_docker
+            dev_docker.start(path, profile, profile['full'])
         try:
             process = subprocess.Popen(watch_command(profile, token), env=dev.clean_environment(), start_new_session=True)
             print(f'watching {dev.REPO} for {name}; Ctrl-C stops watching and retains the server', flush=True)

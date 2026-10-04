@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::retry::{RetryPolicy, RetryableWorker};
+
 use crate::features::music_library::delivery::{
     DeliveryError, DeliveryOutcome, DeliveryService, ListenIdentity, RATE_LIMIT_RETRY_AFTER,
     SNOOZE_DEADLINE,
@@ -129,7 +131,7 @@ impl Worker for ListeningDeliveryWorker {
     }
 }
 
-pub(crate) fn register(builder: ClientBuilder) -> ClientBuilder {
+pub(crate) fn register(builder: ClientBuilder, retry_policy: RetryPolicy) -> ClientBuilder {
     builder
         .queue_descriptor(
             LISTEN_DELIVERY_QUEUE,
@@ -149,5 +151,5 @@ pub(crate) fn register(builder: ClientBuilder) -> ClientBuilder {
                 ..JobKindDescriptor::default()
             },
         )
-        .register_worker(ListeningDeliveryWorker)
+        .register_worker(RetryableWorker::new(ListeningDeliveryWorker, retry_policy))
 }

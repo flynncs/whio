@@ -179,7 +179,14 @@ fn build(
 ) -> Result<awa::Client, WorkerError> {
     let mut builder = awa::Client::builder(pool.clone())
         .promote_interval(worker.promote_interval)
+        .heartbeat_rescue_interval(worker.heartbeat_rescue_interval)
         .state(Arc::clone(&state.metadata));
+    if let Some(interval) = worker.heartbeat_interval {
+        builder = builder.heartbeat_interval(interval);
+    }
+    if let Some(staleness) = worker.heartbeat_staleness {
+        builder = builder.heartbeat_staleness(staleness);
+    }
 
     if let Some(subjects) = state.subjects.as_ref() {
         builder = builder.state(Arc::clone(subjects));
@@ -195,6 +202,7 @@ fn build(
                 builder,
                 std::slice::from_ref(queue),
                 &queue_config(worker, queue),
+                worker.retry_policy,
             )
         })
         .build()
@@ -282,7 +290,10 @@ mod tests {
     use super::*;
     use crate::jobs::{KindRegistration, QueueRegistration};
 
-    fn handler(builder: awa::ClientBuilder) -> awa::ClientBuilder {
+    fn handler(
+        builder: awa::ClientBuilder,
+        _retry_policy: jobs::RetryPolicy,
+    ) -> awa::ClientBuilder {
         builder
     }
 
@@ -407,6 +418,10 @@ mod tests {
             poll_interval: Duration::from_millis(200),
             promote_interval: Duration::from_millis(250),
             drain_timeout: Duration::from_secs(30),
+            heartbeat_rescue_interval: Duration::from_secs(30),
+            heartbeat_interval: None,
+            heartbeat_staleness: None,
+            retry_policy: jobs::RetryPolicy::default(),
         };
         let delivery = registry_queue(jobs::listening_delivery::LISTEN_DELIVERY_QUEUE);
         let probe = registry_queue(jobs::probe::PROBE_QUEUE);

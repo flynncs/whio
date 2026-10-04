@@ -971,9 +971,10 @@ async fn start_delivery_worker(pool: &PgPool, delivery: Arc<DeliveryService>) ->
             ..awa::QueueConfig::default()
         },
     );
-    let client = crate::jobs::listening_delivery::register(builder)
-        .build()
-        .expect("a listening delivery worker");
+    let client =
+        crate::jobs::listening_delivery::register(builder, crate::jobs::RetryPolicy::default())
+            .build()
+            .expect("a listening delivery worker");
     client
         .start()
         .await

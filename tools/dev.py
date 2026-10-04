@@ -177,16 +177,6 @@ def builds_root(profile):
     return directory
 
 
-def current_identity(profile):
-    import dev_docker
-    return dev_docker.identity(profile)
-
-
-def running(path, profile):
-    import dev_docker
-    return dev_docker.running(path, profile)
-
-
 def docker_args(profile=None):
     context = (profile or {}).get('docker_context')
     return ['docker', '--context', context] if context else ['docker']
@@ -220,11 +210,6 @@ def prune_installed_builds(root):
         if directory not in referenced:
             shutil.rmtree(directory)
             print(f'removed unused installed build {directory.name[:12]}')
-
-
-def build(path, profile, persist=True, root=None, commit=None):
-    import dev_docker
-    return dev_docker.build(path, profile, persist, root=root, commit=commit)
 
 
 def label(profile):
@@ -264,11 +249,6 @@ def docker_operation(*arguments, profile=None):
     return result.stdout.strip()
 
 
-def start_db(path, profile):
-    import dev_docker
-    return dev_docker.start_db(path, profile)
-
-
 def environment(path, profile, full):
     ports = profile['ports']
     result = {'WHIO_DATABASE_URL': f'postgres://whio:{profile["postgres_password"]}@127.0.0.1:{ports["postgres"]}/whio',
@@ -301,11 +281,6 @@ def ready(port):
         return False
 
 
-def stop(path, profile, database=True):
-    import dev_docker
-    return dev_docker.stop(path, profile, database)
-
-
 def runtime_links(path, profile, previous=None):
     root = builds_root(profile).resolve()
     for name, target in (('current-rust', root / profile.get('rust_build', profile['build'])),
@@ -323,23 +298,9 @@ def runtime_links(path, profile, previous=None):
         staging.replace(link)
 
 
-def config(path, profile, full):
-    import dev_docker
-    return dev_docker.config(path, profile, full)
-
-
-def start(path, profile, full):
-    import dev_docker
-    return dev_docker.start(path, profile, full)
-
-
-def create_user(path, profile):
-    import dev_docker
-    return dev_docker.create_user(path, profile)
-
-
 def backup(path, profile):
-    start_db(path, profile)
+    import dev_docker
+    dev_docker.start_db(path, profile)
     name, _ = db_names(profile)
     directory = path / 'backups' / (time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
     directory.mkdir(mode=0o700)
@@ -363,22 +324,13 @@ def backup(path, profile):
     return directory
 
 
-def backup_check(path, profile):
-    import dev_docker
-    return dev_docker.backup_check(path, profile)
-
-
-def status(path, profile):
-    import dev_docker
-    return dev_docker.status(path, profile)
-
-
 def overview():
+    import dev_docker
     root = state_root()
     for file in sorted((root / 'profiles').glob('*/profile.json')):
         profile = json.loads(file.read_text())
         state = 'ready' if ready(profile['ports']['api']) else (
-            'running' if running(file.parent, profile) else 'stopped')
+            'running' if dev_docker.running(file.parent, profile) else 'stopped')
         print(f'{profile["name"]}  http://127.0.0.1:{profile["ports"]["api"]}  '
               f'{(profile["build"] or "none")[:12]}  {state}')
     return 0
@@ -386,12 +338,12 @@ def overview():
 
 def up(path, profile):
     cleanup()
+    import dev_docker
     if not profile['build']:
-        import dev_docker
         dev_docker.configure_profile(path, profile)
-        build(path, profile)
-    start(path, profile, True)
-    create_user(path, profile)
+        dev_docker.build(path, profile)
+    dev_docker.start(path, profile, True)
+    dev_docker.create_user(path, profile)
 
 
 @contextmanager
@@ -423,11 +375,6 @@ def deploy(path, profile):
         return dev_docker.upgrade(path, profile, root=root, commit=commit)
 
 
-def logs(path, profile, service):
-    import dev_docker
-    return dev_docker.observe(path, profile, 'logs', service)
-
-
 def cleanup():
     root = state_root()
     import dev_docker
@@ -436,7 +383,8 @@ def cleanup():
         path, profile = load_profile(file.parent.name)
         if profile.get('expires') is None or profile['expires'] > time.time():
             continue
-        if running(path, profile):
+        import dev_docker
+        if dev_docker.running(path, profile):
             continue
         name, volume = db_names(profile)
         container = owned('container', name, profile)
@@ -494,7 +442,8 @@ def main():
             return dev_watch.watch(args.profile)
         if args.command == 'logs':
             path, profile = load_profile(args.profile)
-            return logs(path, profile, args.service)
+            import dev_docker
+            return dev_docker.observe(path, profile, 'logs', args.service)
         with state_lock():
             if args.command == 'media-import':
                 dev_media.import_media(state_root(), args.remote, args.source, args.manifest)
@@ -507,14 +456,17 @@ def main():
                 if args.command == 'up':
                     up(path, profile)
                 elif args.command == 'down':
-                    stop(path, profile)
+                    import dev_docker
+                    dev_docker.stop(path, profile)
                 elif args.command == 'status':
-                    status(path, profile)
+                    import dev_docker
+                    dev_docker.status(path, profile)
                 elif args.command == 'deploy':
                     deploy(path, profile)
                 elif args.command == 'backup':
                     backup(path, profile)
-                    backup_check(path, profile)
+                    import dev_docker
+                    dev_docker.backup_check(path, profile)
                 elif args.command == 'migrations':
                     import dev_watch
                     dev_watch.migration_status(path, profile)

@@ -204,6 +204,6 @@ async fn await_completion(pool: &PgPool, job_id: i64) {
             "the probe job did not complete: {row:?}"
         );
 
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await
     }
 }

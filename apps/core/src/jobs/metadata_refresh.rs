@@ -17,6 +17,8 @@ use crate::features::metadata::{
 };
 use crate::platform::jobs::{Enqueued, JobPhase, JobsError, PendingJob};
 
+use super::retry::{RetryPolicy, RetryableWorker};
+
 pub const METADATA_REFRESH_QUEUE: &str = "whio.metadata.refresh";
 pub const METADATA_REFRESH_KIND: &str = "whio.metadata.refresh.v1";
 pub const METADATA_REFRESH_MAX_ATTEMPTS: i16 = 5;
@@ -206,7 +208,7 @@ fn job_error(error: &MetadataError) -> JobError {
     }
 }
 
-pub(crate) fn register(builder: ClientBuilder) -> ClientBuilder {
+pub(crate) fn register(builder: ClientBuilder, retry_policy: RetryPolicy) -> ClientBuilder {
     builder
         .queue_descriptor(
             METADATA_REFRESH_QUEUE,
@@ -226,7 +228,7 @@ pub(crate) fn register(builder: ClientBuilder) -> ClientBuilder {
                 ..JobKindDescriptor::default()
             },
         )
-        .register_worker(MetadataRefreshWorker)
+        .register_worker(RetryableWorker::new(MetadataRefreshWorker, retry_policy))
 }
 
 #[cfg(test)]

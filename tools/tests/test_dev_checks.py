@@ -192,7 +192,7 @@ class DevChecksTest(unittest.TestCase):
         self.assertEqual(environment['CARGO_PROFILE_TEST_STRIP'], 'none')
 
     def test_unscoped_and_no_execution_selectors_fail_before_resources(self):
-        for args in ([], ['--', '--lib'], ['--', '--lib', ''], ['--', '--list'], ['--', '--test', 'x', '--', '--test-threads=99']):
+        for args in ([], ['--', '--lib'], ['--', '--lib', ''], ['--', '--list'], ['--', '--test', 'x'], ['--', '--test', 'x', '--', '--test-threads=99']):
             with self.subTest(args=args):
                 result, observed = self.invoke_main(args)
                 self.assertEqual(result.returncode, 2)
@@ -202,9 +202,9 @@ class DevChecksTest(unittest.TestCase):
     def test_full_is_explicit_and_zero_tests_fail(self):
         result, _ = self.invoke_main(['--full'])
         self.assertEqual(result.returncode, 0, result.stderr)
-        result, _ = self.invoke_main(['--', '--test', 'named_target'], executed=0)
+        result, _ = self.invoke_main(['--', '--test', 'named_target', 'named_filter'], executed=0)
         self.assertEqual(result.returncode, 2)
-        result, _ = self.invoke_main(['--', '--test', 'named_target'], exit_code=7)
+        result, _ = self.invoke_main(['--', '--test', 'named_target', 'named_filter'], exit_code=7)
         self.assertEqual(result.returncode, 7)
 
     def test_streaming_is_visible_before_child_exit_and_failure_propagates(self):

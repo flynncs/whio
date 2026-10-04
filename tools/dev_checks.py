@@ -339,8 +339,8 @@ def selected_args(parser, values, full):
         else:
             parser.error(f'unsupported test option: {value}')
         index += 1
-    if not full and (not (targets or library) or (library and not filters)):
-        parser.error('workers must select --lib <filter> or --test <name>; complete suites require integration-owner --full')
+    if not full and (not (targets or library) or not filters):
+        parser.error('name a test filter (or pass --full)')
     return cargo_args, test_args
 
 
@@ -349,7 +349,7 @@ def main(postgres_default=False):
     parser.add_argument('--postgres', action='store_true', default=postgres_default)
     parser.add_argument('--docker', action='store_true')
     parser.add_argument('--full', action='store_true')
-    parser.add_argument('--threads', type=int, choices=range(1, 5), default=2)
+    parser.add_argument('--threads', type=int, choices=range(1, 9), default=4)
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--queue-timeout', type=int, default=60)
     parser.add_argument('cargo_args', nargs=argparse.REMAINDER)

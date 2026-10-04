@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import dev
+import dev_docker
 import dev_watch
 
 
@@ -55,7 +56,7 @@ class WatchTests(unittest.TestCase):
             current = dict(baseline, **{kind: 'changed'})
             with patch.object(dev_watch, 'installed_components', return_value=baseline), \
                  patch.object(dev_watch, 'components', return_value=current), \
-                 patch.object(dev, 'build') as build, patch.object(dev_watch, 'replace') as replace:
+                 patch.object(dev_docker, 'build') as build, patch.object(dev_watch, 'replace') as replace:
                 dev_watch.reload(self.path, self.profile)
             build.assert_not_called()
             replace.assert_not_called()
@@ -63,14 +64,13 @@ class WatchTests(unittest.TestCase):
     def test_failed_compile_does_not_dump_stop_or_replace(self):
         baseline = dev_watch.components()
         with patch.object(dev_watch, 'installed_components', return_value=baseline), \
-             patch.object(dev, 'current_identity', return_value=self.profile['build']), \
-             patch.object(dev, 'build', side_effect=RuntimeError('compile failed')), \
-             patch.object(dev, 'backup') as backup, patch.object(dev, 'stop') as stop, \
+             patch.object(dev_docker, 'identity', return_value=self.profile['build']), \
+             patch.object(dev_docker, 'build', side_effect=RuntimeError('compile failed')), \
+             patch.object(dev, 'backup') as backup, \
              patch.object(dev_watch, 'replace') as replace:
             with self.assertRaisesRegex(RuntimeError, 'compile failed'):
                 dev_watch.reload(self.path, self.profile)
         backup.assert_not_called()
-        stop.assert_not_called()
         replace.assert_not_called()
 
     def test_two_watchers_cannot_own_one_profile(self):
@@ -88,7 +88,8 @@ class WatchTests(unittest.TestCase):
 
     def test_stopped_profile_is_not_resurrected_by_a_save(self):
         with dev_watch.watcher_owner(self.path) as token:
-            with patch.object(dev_watch, 'reload') as reload:
+            with patch.object(dev_watch, 'reload') as reload, patch.object(dev_docker, 'running', return_value=False):
+
                 dev_watch.watch_step(self.path, self.profile, token)
             reload.assert_not_called()
 
