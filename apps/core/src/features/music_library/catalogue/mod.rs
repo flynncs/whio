@@ -21,6 +21,7 @@ pub use ports::CatalogueProvider;
 pub use provider_error::ProviderError;
 pub use search::{
     SearchHit, SearchOutcome, SearchRequest, SearchService, SearchWindow, SearchWindows,
+    TrackSearch,
 };
 
 pub use crate::features::music_library::domain::{

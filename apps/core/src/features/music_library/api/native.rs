@@ -16,9 +16,8 @@ use crate::{
     features::music_library::api::errors::ApiError,
     features::music_library::catalogue::{
         AlbumListFilter, AlbumListScope, AlbumOrder, ArtistListFilter, ArtistSort, MAX_PAGE_LIMIT,
-        PageLimit, SearchHit, SearchLimit, SearchOffset, SearchQuery,
-        SearchRequest as CatalogueRequest, SearchWindow, TrackListFilter, TrackListScope,
-        TrackOrder, ValidationError,
+        PageLimit, SearchHit, SearchLimit, SearchOffset, SearchQuery, SearchWindow,
+        TrackListFilter, TrackListScope, TrackOrder, ValidationError,
     },
     features::music_library::domain::{
         AlbumId, AlbumSummary, AlbumTrack, ArtistId, ArtistSummary, Availability, IdSet,
@@ -44,16 +43,14 @@ pub(crate) struct SearchRequest {
     offset: u32,
 }
 
-impl TryFrom<SearchRequest> for CatalogueRequest {
-    type Error = ValidationError;
-
-    fn try_from(value: SearchRequest) -> Result<Self, Self::Error> {
+impl SearchRequest {
+    fn track_search(self) -> Result<(SearchQuery, SearchWindow), ValidationError> {
         let window = SearchWindow::new(
-            SearchLimit::new(value.limit)?,
-            SearchOffset::new(value.offset)?,
+            SearchLimit::new(self.limit)?,
+            SearchOffset::new(self.offset)?,
         );
 
-        Ok(Self::uniform(SearchQuery::new(value.query)?, window))
+        Ok((SearchQuery::new(self.query)?, window))
     }
 }
 
@@ -110,16 +107,18 @@ pub(crate) async fn search(
         error,
     })?;
 
-    let search = CatalogueRequest::try_from(request).map_err(|error| ApiError::InvalidRequest {
-        context: context.clone(),
-        error,
-    })?;
+    let (query, window) = request
+        .track_search()
+        .map_err(|error| ApiError::InvalidRequest {
+            context: context.clone(),
+            error,
+        })?;
 
     let user_uuid = principal.user_id.as_uuid();
 
-    let outcome = state
+    let track_search = state
         .search
-        .search(&search, Some(&user_uuid), &context)
+        .search_tracks(&query, window, Some(&user_uuid), &context)
         .await
         .map_err(|error| ApiError::Catalogue {
             context: context.clone(),
@@ -127,7 +126,7 @@ pub(crate) async fn search(
         })?;
 
     let library = &state.library;
-    let results = outcome
+    let results = track_search
         .tracks
         .into_iter()
         .map(|hit| {
@@ -139,7 +138,7 @@ pub(crate) async fn search(
 
     Ok(Json(SearchResponse {
         results,
-        confidence: outcome.confidence.as_str().to_owned(),
+        confidence: track_search.confidence.as_str().to_owned(),
     }))
 }
 

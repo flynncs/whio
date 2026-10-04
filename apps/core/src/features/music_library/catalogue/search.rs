@@ -40,6 +40,17 @@ pub struct SearchOutcome {
     pub confidence: SearchConfidence,
 }
 
+impl SearchOutcome {
+    fn is_empty(&self) -> bool {
+        self.tracks.is_empty() && self.albums.is_empty() && self.artists.is_empty()
+    }
+}
+
+pub struct TrackSearch {
+    pub tracks: Vec<SearchHit>,
+    pub confidence: SearchConfidence,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchWindow {
     limit: SearchLimit,
@@ -62,17 +73,29 @@ impl SearchWindow {
     fn target(self) -> u32 {
         u32::from(self.limit.get()).saturating_add(self.offset.get())
     }
+
+    fn slice<T>(self, items: Vec<T>) -> Vec<T> {
+        items
+            .into_iter()
+            .skip(self.offset.get() as usize)
+            .take(self.limit.get() as usize)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchWindows {
-    tracks: SearchWindow,
-    albums: SearchWindow,
-    artists: SearchWindow,
+    tracks: Option<SearchWindow>,
+    albums: Option<SearchWindow>,
+    artists: Option<SearchWindow>,
 }
 
 impl SearchWindows {
-    pub fn new(tracks: SearchWindow, albums: SearchWindow, artists: SearchWindow) -> Self {
+    pub fn new(
+        tracks: Option<SearchWindow>,
+        albums: Option<SearchWindow>,
+        artists: Option<SearchWindow>,
+    ) -> Self {
         Self {
             tracks,
             albums,
@@ -81,18 +104,18 @@ impl SearchWindows {
     }
 
     pub fn uniform(window: SearchWindow) -> Self {
-        Self::new(window, window, window)
+        Self::new(Some(window), Some(window), Some(window))
     }
 
-    pub fn tracks(&self) -> SearchWindow {
+    pub fn tracks(&self) -> Option<SearchWindow> {
         self.tracks
     }
 
-    pub fn albums(&self) -> SearchWindow {
+    pub fn albums(&self) -> Option<SearchWindow> {
         self.albums
     }
 
-    pub fn artists(&self) -> SearchWindow {
+    pub fn artists(&self) -> Option<SearchWindow> {
         self.artists
     }
 }
@@ -198,15 +221,78 @@ impl SearchService {
         context: &RequestContext,
     ) -> Result<SearchOutcome, CatalogueError> {
         let windows = request.windows();
-        let query = request.query().as_str().to_owned();
+        let query = request.query();
+        let (tracks, albums, artists) = tokio::join!(
+            when(windows.tracks(), |window| self
+                .search_tracks(query, window, user, context)),
+            when(windows.albums(), |window| self
+                .search_albums(query, window, user)),
+            when(windows.artists(), |window| self.search_artists(
+                query,
+                window,
+                request.artist_filter(),
+                user
+            )),
+        );
 
+        let mut provider_failure = None;
+        let tracks = degrade_provider_failure(tracks, &mut provider_failure)?;
+        let albums = degrade_provider_failure(albums, &mut provider_failure)?.unwrap_or_default();
+        let artists = degrade_provider_failure(artists, &mut provider_failure)?.unwrap_or_default();
+
+        let (tracks, confidence) = match tracks {
+            Some(track) => (track.tracks, track.confidence),
+            None => (Vec::new(), SearchConfidence::None),
+        };
+        let outcome = SearchOutcome {
+            tracks,
+            albums,
+            artists,
+            confidence,
+        };
+
+        match provider_failure {
+            Some(error) if outcome.is_empty() => Err(error),
+            _ => Ok(outcome),
+        }
+    }
+
+    pub async fn search_tracks(
+        &self,
+        query: &SearchQuery,
+        window: SearchWindow,
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> Result<TrackSearch, CatalogueError> {
         let known = self
             .library
-            .search_tracks(&query, windows.tracks().target(), user.copied())
+            .search_tracks(query.as_str(), window.target(), user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
-        let (fresh, first_error, any_success) = self.fan_out(request, user, context).await;
-        let (known, fresh) = super::dedup::apply(
+        let (fresh, discovery) = self
+            .discover_tracks(query, window.target(), user, context)
+            .await;
+        let (known, fresh) = self.dedup_tracks(known, fresh, user, context).await;
+        let confidence = library_confidence(&SearchTerms::new(query.as_str()), &known);
+        let merged = merge_by_track(known.into_iter().chain(fresh));
+        if let Some(error) = discovery.failure(!merged.is_empty()) {
+            return Err(error);
+        }
+
+        Ok(TrackSearch {
+            tracks: window.slice(order_by_confidence(merged, confidence, window.target())),
+            confidence,
+        })
+    }
+
+    async fn dedup_tracks(
+        &self,
+        known: Vec<SearchHit>,
+        fresh: Vec<SearchHit>,
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> (Vec<SearchHit>, Vec<SearchHit>) {
+        super::dedup::apply(
             super::dedup::Ports {
                 library: &self.library,
                 sources: &self.source_lookup,
@@ -219,44 +305,50 @@ impl SearchService {
             self.dedup_mode,
             self.dedup_budget,
         )
-        .await;
-        let albums = self
-            .library
-            .search_albums(&query, windows.albums().target(), user.copied())
-            .await
-            .map_err(CatalogueError::Repository)?;
-        let artists = self
-            .library
-            .search_artists(
-                &query,
-                windows.artists().target(),
-                user.copied(),
-                request.artist_filter(),
-            )
-            .await
-            .map_err(CatalogueError::Repository)?;
-
-        Self::finalize(
-            request,
-            known,
-            fresh,
-            albums,
-            artists,
-            first_error,
-            any_success,
-        )
+        .await
     }
 
-    async fn fan_out(
+    pub async fn search_albums(
         &self,
-        request: &SearchRequest,
+        query: &SearchQuery,
+        window: SearchWindow,
+        user: Option<&Uuid>,
+    ) -> Result<Vec<AlbumSummary>, CatalogueError> {
+        let albums = self
+            .library
+            .search_albums(query.as_str(), window.target(), user.copied())
+            .await
+            .map_err(CatalogueError::Repository)?;
+
+        Ok(window.slice(albums))
+    }
+
+    pub async fn search_artists(
+        &self,
+        query: &SearchQuery,
+        window: SearchWindow,
+        filter: &ArtistListFilter,
+        user: Option<&Uuid>,
+    ) -> Result<Vec<ArtistSummary>, CatalogueError> {
+        let artists = self
+            .library
+            .search_artists(query.as_str(), window.target(), user.copied(), filter)
+            .await
+            .map_err(CatalogueError::Repository)?;
+
+        Ok(window.slice(artists))
+    }
+
+    async fn discover_tracks(
+        &self,
+        query: &SearchQuery,
+        target: u32,
         user: Option<&Uuid>,
         context: &RequestContext,
-    ) -> (Vec<SearchHit>, Option<CatalogueError>, bool) {
+    ) -> (Vec<SearchHit>, DiscoveryStatus) {
         let mut tasks = JoinSet::new();
         let concurrency = Arc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY));
-        let query = request.query().clone();
-        let target = request.windows().tracks().target();
+        let query = query.clone();
         let budget = self.search_budget;
         for (index, provider) in self.providers.iter().enumerate() {
             let permit = Arc::clone(&concurrency);
@@ -317,112 +409,13 @@ impl SearchService {
                 }
             }
         }
-        (hits, first_error, any_success)
-    }
-
-    fn finalize(
-        request: &SearchRequest,
-        known: Vec<SearchHit>,
-        fresh: Vec<SearchHit>,
-        albums: Vec<AlbumSummary>,
-        artists: Vec<ArtistSummary>,
-        first_error: Option<CatalogueError>,
-        any_success: bool,
-    ) -> Result<SearchOutcome, CatalogueError> {
-        let windows = request.windows();
-        let tracks_window = windows.tracks();
-        let albums_window = windows.albums();
-        let artists_window = windows.artists();
-        let terms = SearchTerms::new(request.query().as_str());
-        let confidence = Self::library_confidence(&terms, &known);
-
-        let mut positions: HashMap<TrackId, usize> = HashMap::new();
-        let mut unique: Vec<SearchHit> = Vec::new();
-        for hit in known.into_iter().chain(fresh) {
-            match positions.get(hit.track().id()).copied() {
-                Some(index) => unique[index].merge(hit),
-                None => {
-                    positions.insert(hit.track().id().clone(), unique.len());
-                    unique.push(hit);
-                }
-            }
-        }
-
-        if !any_success
-            && (unique.is_empty() && albums.is_empty() && artists.is_empty())
-            && let Some(error) = first_error
-        {
-            return Err(error);
-        }
-        if let Some(error @ CatalogueError::Provider(ProviderError::Access)) = first_error {
-            return Err(error);
-        }
-
-        let (mut library_hits, provider_hits): (Vec<SearchHit>, Vec<SearchHit>) = unique
-            .into_iter()
-            .partition(|hit| hit.match_quality().is_some());
-        if !provider_hits.is_empty() {
-            library_hits.truncate(Self::library_window(tracks_window.target()) as usize);
-        }
-        let ordered = match confidence {
-            SearchConfidence::Strong => library_hits
-                .into_iter()
-                .chain(provider_hits)
-                .collect::<Vec<_>>(),
-            SearchConfidence::Weak | SearchConfidence::None => provider_hits
-                .into_iter()
-                .chain(library_hits)
-                .collect::<Vec<_>>(),
-        };
-
-        Ok(SearchOutcome {
-            tracks: ordered
-                .into_iter()
-                .skip(tracks_window.offset().get() as usize)
-                .take(tracks_window.limit().get() as usize)
-                .collect(),
-            albums: albums
-                .into_iter()
-                .skip(albums_window.offset().get() as usize)
-                .take(albums_window.limit().get() as usize)
-                .collect(),
-            artists: artists
-                .into_iter()
-                .skip(artists_window.offset().get() as usize)
-                .take(artists_window.limit().get() as usize)
-                .collect(),
-            confidence,
-        })
-    }
-
-    fn library_confidence(terms: &SearchTerms, hits: &[SearchHit]) -> SearchConfidence {
-        if hits.is_empty() {
-            return SearchConfidence::None;
-        }
-        if terms.low_signal() {
-            return SearchConfidence::Weak;
-        }
-
-        let best = best_field_quality(
-            terms,
-            hits.iter().flat_map(|hit| {
-                std::iter::once(hit.track().title())
-                    .chain(hit.track().artists().iter().map(|artist| artist.name()))
-            }),
-        );
-
-        match best {
-            Some(quality) if quality.is_confident() => SearchConfidence::Strong,
-            _ => SearchConfidence::Weak,
-        }
-    }
-
-    fn library_window(window: u32) -> u32 {
-        if window <= 1 {
-            return window;
-        }
-
-        window - window.div_ceil(PROVIDER_WINDOW_DIVISOR)
+        (
+            hits,
+            DiscoveryStatus {
+                first_error,
+                any_success,
+            },
+        )
     }
 
     async fn search_source(
@@ -455,6 +448,118 @@ impl SearchService {
             }
         }
         Ok(hits)
+    }
+}
+
+struct DiscoveryStatus {
+    first_error: Option<CatalogueError>,
+    any_success: bool,
+}
+
+impl DiscoveryStatus {
+    fn failure(self, found_tracks: bool) -> Option<CatalogueError> {
+        match self.first_error {
+            Some(error @ CatalogueError::Provider(ProviderError::Access)) => Some(error),
+            Some(error) if !self.any_success && !found_tracks => Some(error),
+            _ => None,
+        }
+    }
+}
+
+fn library_confidence(terms: &SearchTerms, hits: &[SearchHit]) -> SearchConfidence {
+    if hits.is_empty() {
+        return SearchConfidence::None;
+    }
+    if terms.low_signal() {
+        return SearchConfidence::Weak;
+    }
+
+    let best = best_field_quality(
+        terms,
+        hits.iter().flat_map(|hit| {
+            std::iter::once(hit.track().title())
+                .chain(hit.track().artists().iter().map(|artist| artist.name()))
+        }),
+    );
+
+    match best {
+        Some(quality) if quality.is_confident() => SearchConfidence::Strong,
+        _ => SearchConfidence::Weak,
+    }
+}
+
+fn library_window(window: u32) -> u32 {
+    if window <= 1 {
+        return window;
+    }
+
+    window - window.div_ceil(PROVIDER_WINDOW_DIVISOR)
+}
+
+fn degrade_provider_failure<T>(
+    result: Option<Result<T, CatalogueError>>,
+    provider_failure: &mut Option<CatalogueError>,
+) -> Result<Option<T>, CatalogueError> {
+    match result {
+        Some(Ok(value)) => Ok(Some(value)),
+        Some(Err(error @ CatalogueError::Provider(ProviderError::Access))) => Err(error),
+        Some(Err(error @ CatalogueError::Provider(_))) => {
+            provider_failure.get_or_insert(error);
+
+            Ok(None)
+        }
+        Some(Err(error)) => Err(error),
+        None => Ok(None),
+    }
+}
+
+fn merge_by_track(hits: impl IntoIterator<Item = SearchHit>) -> Vec<SearchHit> {
+    let mut positions: HashMap<TrackId, usize> = HashMap::new();
+    let mut unique: Vec<SearchHit> = Vec::new();
+    for hit in hits {
+        match positions.get(hit.track().id()).copied() {
+            Some(index) => unique[index].merge(hit),
+            None => {
+                positions.insert(hit.track().id().clone(), unique.len());
+                unique.push(hit);
+            }
+        }
+    }
+
+    unique
+}
+
+fn order_by_confidence(
+    hits: Vec<SearchHit>,
+    confidence: SearchConfidence,
+    target: u32,
+) -> Vec<SearchHit> {
+    let (mut library_hits, provider_hits): (Vec<SearchHit>, Vec<SearchHit>) = hits
+        .into_iter()
+        .partition(|hit| hit.match_quality().is_some());
+    if !provider_hits.is_empty() {
+        library_hits.truncate(library_window(target) as usize);
+    }
+
+    match confidence {
+        SearchConfidence::Strong => library_hits.into_iter().chain(provider_hits).collect(),
+        SearchConfidence::Weak | SearchConfidence::None => {
+            provider_hits.into_iter().chain(library_hits).collect()
+        }
+    }
+}
+
+async fn when<T, F, Fut>(
+    window: Option<SearchWindow>,
+    search: F,
+) -> Option<Result<T, CatalogueError>>
+where
+    F: FnOnce(SearchWindow) -> Fut,
+    Fut: std::future::Future<Output = Result<T, CatalogueError>>,
+{
+    match window {
+        Some(window) => Some(search(window).await),
+        None => None,
     }
 }
 

@@ -257,26 +257,92 @@ async fn search3_with_one_window_is_unchanged(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn search3_zero_kind_count_is_invalid(pool: PgPool) {
+async fn search3_zero_kind_count_suppresses_only_that_kind(pool: PgPool) {
+    seed_matches(&pool).await;
+    let (app, secret) = client(pool, empty_responses(3));
+    let auth = auth_query(&secret);
+
+    let control = get(
+        app.clone(),
+        &search3(
+            "query=song&songCount=20&albumCount=20&artistCount=20",
+            &auth,
+        ),
+    )
+    .await;
+    assert_eq!(control["subsonic-response"]["status"], "ok");
+    let control = &control["subsonic-response"]["searchResult3"];
+
+    for (uri, suppressed) in [
+        (
+            "query=song&songCount=0&albumCount=20&artistCount=20",
+            "song",
+        ),
+        (
+            "query=song&songCount=20&albumCount=0&artistCount=20",
+            "album",
+        ),
+        (
+            "query=song&songCount=20&albumCount=20&artistCount=0",
+            "artist",
+        ),
+    ] {
+        let body = get(app.clone(), &search3(uri, &auth)).await;
+        assert_eq!(body["subsonic-response"]["status"], "ok", "uri: {uri}");
+        let result = &body["subsonic-response"]["searchResult3"];
+        assert!(
+            result.get(suppressed).is_none(),
+            "the zero kind is absent, uri: {uri}"
+        );
+        for kept in ["song", "album", "artist"] {
+            if kept == suppressed {
+                continue;
+            }
+            assert_eq!(
+                result[kept], control[kept],
+                "kept kind {kept} matches the control, uri: {uri}"
+            );
+        }
+    }
+}
+
+#[sqlx::test]
+async fn search3_all_kinds_suppressed_returns_an_empty_ok_result(pool: PgPool) {
     seed_matches(&pool).await;
     let (app, secret) = client(pool, empty_responses(0));
     let auth = auth_query(&secret);
 
-    for window in ["songCount=0", "albumCount=0", "artistCount=0"] {
-        let (status, body) = status(
-            app.clone(),
-            &search3(&format!("query=song&{window}"), &auth),
-        )
-        .await;
+    let body = get(
+        app,
+        &search3("query=song&songCount=0&albumCount=0&artistCount=0", &auth),
+    )
+    .await;
 
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "window: {window}");
-        assert_eq!(
-            body["subsonic-response"]["status"], "failed",
-            "window: {window}"
-        );
+    assert_eq!(body["subsonic-response"]["status"], "ok");
+    let result = &body["subsonic-response"]["searchResult3"];
+    assert!(result.get("song").is_none());
+    assert!(result.get("album").is_none());
+    assert!(result.get("artist").is_none());
+}
+
+#[sqlx::test]
+async fn search3_suppressed_kind_still_validates_parameters(pool: PgPool) {
+    seed_matches(&pool).await;
+    let (app, secret) = client(pool, empty_responses(0));
+    let auth = auth_query(&secret);
+
+    for uri in [
+        "query=song&songCount=0&songOffset=abc",
+        "query=song&songCount=0&songOffset=1001",
+        "query=song&albumCount=many",
+    ] {
+        let (status, body) = status(app.clone(), &search3(uri, &auth)).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "uri: {uri}");
+        assert_eq!(body["subsonic-response"]["status"], "failed", "uri: {uri}");
         assert!(
             body["subsonic-response"]["searchResult3"].is_null(),
-            "window: {window}"
+            "uri: {uri}"
         );
     }
 }

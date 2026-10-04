@@ -163,7 +163,11 @@ fn candidate_with_index(index: u32) -> CatalogueCandidate {
 }
 
 fn windows(count: Option<&str>, offset: Option<&str>) -> SearchWindows {
-    SearchWindows::uniform(search_window(count, offset).expect("window parses"))
+    SearchWindows::uniform(
+        search_window(count, offset)
+            .expect("window parses")
+            .expect("window present"),
+    )
 }
 
 #[sqlx::test]
@@ -185,20 +189,33 @@ async fn search_maps_tracks_and_short_circuits_empty(pool: sqlx::PgPool) {
     assert_eq!(songs[0].artist.as_deref(), Some("artist"));
     assert_eq!(songs[0].duration, Some(200));
     assert!(!songs[0].id.is_empty());
+}
 
-    let result = search(
-        &catalogue(pool.clone(), vec![]),
-        &context(),
-        None,
-        "",
-        &windows(None, None),
-        SourceTags::Off,
-    )
-    .await
-    .expect("search succeeds");
-    assert!(result.songs.is_empty());
-    assert!(result.albums.is_empty());
-    assert!(result.artists.is_empty());
+#[test]
+fn search_window_treats_a_zero_count_as_suppressed() {
+    assert!(
+        search_window(Some("0"), None)
+            .expect("window parses")
+            .is_none()
+    );
+    assert!(
+        search_window(Some("0"), Some("100"))
+            .expect("window parses")
+            .is_none()
+    );
+    assert!(
+        search_window(Some("10"), Some("0"))
+            .expect("window parses")
+            .is_some()
+    );
+    assert!(matches!(
+        search_window(Some("0"), Some("abc")),
+        Err(SearchError::InvalidSearch)
+    ));
+    assert!(matches!(
+        search_window(Some("0"), Some("1001")),
+        Err(SearchError::InvalidSearch)
+    ));
 }
 
 #[sqlx::test]

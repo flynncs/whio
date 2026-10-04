@@ -277,13 +277,16 @@ fn search_windows(query: &RawQuery) -> Result<SearchWindows, service::SearchErro
 fn search_window(
     raw_count: Option<&str>,
     raw_offset: Option<&str>,
-) -> Result<SearchWindow, service::SearchError> {
+) -> Result<Option<SearchWindow>, service::SearchError> {
     let (count, offset) = window_params(raw_count, raw_offset)?;
+    let offset = SearchOffset::new(offset).map_err(|_| service::SearchError::InvalidSearch)?;
+    if count == 0 {
+        return Ok(None);
+    }
     let limit = SearchLimit::new(count.min(MAX_SEARCH_COUNT))
         .map_err(|_| service::SearchError::InvalidSearch)?;
-    let offset = SearchOffset::new(offset).map_err(|_| service::SearchError::InvalidSearch)?;
 
-    Ok(SearchWindow::new(limit, offset))
+    Ok(Some(SearchWindow::new(limit, offset)))
 }
 
 const MAX_SEARCH_COUNT: u32 = 25;

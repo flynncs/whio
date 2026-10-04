@@ -16,12 +16,13 @@ use parking_lot::Mutex;
 use super::*;
 use crate::{
     features::music_library::catalogue::{
-        CatalogueCandidate, SearchLimit, SearchOffset, SearchQuery, SearchRequest, SearchWindow,
+        ArtistListFilter, CatalogueCandidate, SearchLimit, SearchOffset, SearchQuery,
+        SearchRequest, SearchWindow, SearchWindows,
     },
     features::music_library::{
         domain::{
-            AlbumMetadata, ArtistCredit, ProviderId, SourceIdentity, SourceScope, Track,
-            TrackMetadata,
+            AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
+            Track, TrackMetadata,
         },
         storage::contracts::TrackRepositoryError,
         storage::postgres::PostgresTrackRepository,
@@ -516,7 +517,14 @@ async fn the_within_budget_search_is_complete(pool: sqlx::PgPool) {
     )
     .with_search_budget(WITHIN_SEARCH_BUDGET);
     let started = Instant::now();
-    let (hits, _error, _success) = catalogue.fan_out(&search(), None, &context()).await;
+    let (hits, _status) = catalogue
+        .discover_tracks(
+            &SearchQuery::new("Daft Punk".to_owned()).unwrap(),
+            10,
+            None,
+            &context(),
+        )
+        .await;
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].track().title(), "YTM Song");
@@ -571,6 +579,70 @@ async fn search_preserves_repository_errors(_pool: sqlx::PgPool) {
         Arc::new(FailingTrackRepository) as Arc<dyn StateStore>,
         vec![provider(resolver)],
     );
+
+    let result = service.search(&search(), None, &context()).await;
+
+    assert!(matches!(
+        result,
+        Err(CatalogueError::Repository(
+            TrackRepositoryError::Unavailable
+        ))
+    ));
+}
+
+struct AlbumReadFails;
+
+#[async_trait]
+impl LibraryRead for AlbumReadFails {
+    async fn find_track(
+        &self,
+        _track_id: &crate::features::music_library::domain::TrackId,
+    ) -> Result<Option<Track>, TrackRepositoryError> {
+        Ok(None)
+    }
+
+    async fn page_tracks(
+        &self,
+        _offset: u32,
+        _limit: u32,
+        _order: crate::features::music_library::domain::TrackOrder,
+        _filter: &crate::features::music_library::domain::TrackListFilter,
+        _user: Option<Uuid>,
+    ) -> Result<crate::features::music_library::domain::TrackPage, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    async fn track_views(
+        &self,
+        _track_ids: &[crate::features::music_library::domain::TrackId],
+        _user: Option<Uuid>,
+    ) -> Result<Vec<crate::features::music_library::domain::TrackView>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn search_albums(
+        &self,
+        _query: &str,
+        _limit: u32,
+        _user: Option<Uuid>,
+    ) -> Result<Vec<crate::features::music_library::domain::AlbumSummary>, TrackRepositoryError>
+    {
+        Err(TrackRepositoryError::Unavailable)
+    }
+}
+
+#[sqlx::test]
+async fn a_repository_error_in_one_kind_fails_the_search(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let resolver = StubProvider::new(vec![Ok(vec![candidate("source-a", "Title")])]);
+    let service = SearchService::with_providers(
+        Arc::new(AlbumReadFails) as Arc<dyn LibraryRead>,
+        repository.clone() as Arc<dyn CatalogueWrite>,
+        repository.clone() as Arc<dyn SourceLookup>,
+        repository as Arc<dyn StateStore>,
+        vec![provider(resolver)],
+    )
+    .with_dedup_mode(DedupMode::Off);
 
     let result = service.search(&search(), None, &context()).await;
 
@@ -860,6 +932,110 @@ async fn the_library_fills_the_page_when_providers_return_nothing(pool: sqlx::Pg
             .iter()
             .all(|hit| hit.match_quality().is_some())
     );
+}
+
+#[sqlx::test]
+async fn the_mux_runs_only_requested_kinds(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Daft Punk Album".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Daft Punk".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(local_source(), named_metadata("Daft Punk Song"))
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let limits = StdArc::new(Mutex::new(Vec::new()));
+    let catalogue = Fixture { store: repository }.service(vec![provider(LimitRecordingProvider {
+        limit: StdArc::clone(&limits),
+    })]);
+    let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
+
+    let albums_and_artists = SearchRequest::new(
+        query.clone(),
+        SearchWindows::new(None, Some(window(10, 0)), Some(window(10, 0))),
+        ArtistListFilter::default(),
+    );
+    let outcome = catalogue
+        .search(&albums_and_artists, None, &context())
+        .await
+        .unwrap();
+    assert!(outcome.tracks.is_empty());
+    assert_eq!(outcome.confidence, SearchConfidence::None);
+    assert_eq!(outcome.albums.len(), 1);
+    assert_eq!(outcome.artists.len(), 1);
+    assert!(
+        limits.lock().is_empty(),
+        "a suppressed track kind makes no provider call"
+    );
+
+    let tracks_only = SearchRequest::new(
+        query.clone(),
+        SearchWindows::new(Some(window(10, 0)), None, None),
+        ArtistListFilter::default(),
+    );
+    catalogue
+        .search(&tracks_only, None, &context())
+        .await
+        .unwrap();
+    assert_eq!(
+        limits.lock().len(),
+        1,
+        "the track kind calls the provider once"
+    );
+
+    let nothing = SearchRequest::new(
+        query.clone(),
+        SearchWindows::new(None, None, None),
+        ArtistListFilter::default(),
+    );
+    let outcome = catalogue.search(&nothing, None, &context()).await.unwrap();
+    assert!(outcome.tracks.is_empty());
+    assert!(outcome.albums.is_empty());
+    assert!(outcome.artists.is_empty());
+    assert_eq!(outcome.confidence, SearchConfidence::None);
+    assert_eq!(
+        limits.lock().len(),
+        1,
+        "no requested kind makes no provider call"
+    );
+}
+
+#[sqlx::test]
+async fn a_failing_kind_degrades_when_another_kind_answers(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Answer Album".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Answer Artist".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let catalogue =
+        Fixture { store: repository }.service(vec![provider(StubProvider::new(vec![Err(
+            ProviderError::ProviderUnavailable,
+        )]))]);
+
+    let request = SearchRequest::new(
+        SearchQuery::new("answer".to_owned()).unwrap(),
+        SearchWindows::new(Some(window(10, 0)), Some(window(10, 0)), None),
+        ArtistListFilter::default(),
+    );
+    let outcome = catalogue.search(&request, None, &context()).await.unwrap();
+
+    assert!(outcome.tracks.is_empty());
+    assert_eq!(outcome.albums.len(), 1);
+    assert_eq!(outcome.confidence, SearchConfidence::None);
 }
 #[test]
 fn the_default_budget_is_unchanged() {

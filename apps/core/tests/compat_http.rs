@@ -2597,9 +2597,13 @@ async fn nonempty_query_still_uses_bounded_provider_search(pool: PgPool) {
         &subsonic_search3("query=song&songCount=0&songOffset=0", &auth),
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["subsonic-response"]["status"], json!("failed"));
-    assert!(body["subsonic-response"]["searchResult3"].is_null());
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    assert!(
+        body["subsonic-response"]["searchResult3"]
+            .get("song")
+            .is_none()
+    );
 }
 
 #[sqlx::test]

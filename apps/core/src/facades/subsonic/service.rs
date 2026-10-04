@@ -66,14 +66,6 @@ pub(crate) async fn search(
     windows: &SearchWindows,
     tags: SourceTags,
 ) -> Result<SearchResult, SearchError> {
-    if query.is_empty() {
-        return Ok(SearchResult {
-            songs: Vec::new(),
-            albums: Vec::new(),
-            artists: Vec::new(),
-        });
-    }
-
     let request = SearchRequest::new(
         SearchQuery::new(query.to_owned()).map_err(|_| SearchError::InvalidSearch)?,
         *windows,
