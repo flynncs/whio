@@ -418,6 +418,152 @@ async fn subsonic_artist_surfaces_are_album_artist_scoped(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn subsonic_get_artist_settles_empty_sources_and_retries_failures(pool: PgPool) {
+    use std::collections::HashMap;
+    use whio_core::{
+        features::music_library::availability::ProviderRegistry,
+        features::music_library::catalogue::{
+            CatalogueCandidate, CatalogueProvider, CatalogueSearch, CompletionService,
+            ProviderError,
+        },
+        features::music_library::domain::{
+            AlbumMetadata, ArtistCredit, SourceIdentity, SourceScope,
+        },
+    };
+
+    struct ArtistAlbumsProvider {
+        calls: std::sync::Mutex<HashMap<String, usize>>,
+        album: AlbumMetadata,
+    }
+
+    #[async_trait]
+    impl CatalogueProvider for ArtistAlbumsProvider {
+        async fn search_tracks(
+            &self,
+            _search: &CatalogueSearch,
+            _context: &RequestContext,
+        ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_artist_albums(
+            &self,
+            source: &SourceIdentity,
+            _context: &RequestContext,
+        ) -> Result<Vec<AlbumMetadata>, ProviderError> {
+            let mut calls = self.calls.lock().unwrap();
+            let count = calls.entry(source.external_id().to_owned()).or_default();
+            *count += 1;
+            match (source.external_id(), *count) {
+                ("UC-empty", _) => Ok(Vec::new()),
+                ("UC-retry", 1) => Err(ProviderError::ProviderUnavailable),
+                ("UC-retry", _) => Ok(vec![self.album.clone()]),
+                _ => Err(ProviderError::SourceNotFound),
+            }
+        }
+    }
+
+    fn provider_source(external_id: &str) -> SourceIdentity {
+        SourceIdentity::new(
+            ProviderId::new("youtube_music".to_owned()).unwrap(),
+            SourceScope::Global,
+            external_id.to_owned(),
+        )
+        .unwrap()
+    }
+
+    let (credential, secret) = credential_service_with_known_app_password();
+    let ports = StorePorts::new(pool.clone());
+    let empty_source = provider_source("UC-empty");
+    let retry_source = provider_source("UC-retry");
+    let artist_credit = ArtistCredit::new("Olivia Rodrigo".to_owned(), None)
+        .unwrap()
+        .with_provider(Some(empty_source.clone()));
+    let artist = ports
+        .store
+        .resolve_or_create_artist(&artist_credit)
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_artist_source(artist.id(), &empty_source)
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_artist_source(artist.id(), &retry_source)
+        .await
+        .unwrap();
+    let album = AlbumMetadata::new("SOUR".to_owned())
+        .unwrap()
+        .with_provider(Some(provider_source("MPREb_retry-album")))
+        .with_album_artist(artist_credit);
+    let provider = Arc::new(ArtistAlbumsProvider {
+        calls: std::sync::Mutex::new(HashMap::new()),
+        album,
+    });
+    let (search, library) = ports.bare_catalogue();
+    let completion = Arc::new(
+        CompletionService::new(
+            Arc::clone(&library),
+            ports.catalogue(),
+            ports.sources(),
+            vec![provider.clone()],
+        )
+        .with_registry(ProviderRegistry::with_enabled(["youtube_music"])),
+    );
+    let app = router_with_completion(
+        credential,
+        search,
+        library,
+        completion,
+        ports.streaming(vec![]),
+    );
+    let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");
+    let route = format!(
+        "/compat/subsonic/rest/getArtist.view?{auth}&id={}",
+        artist.id()
+    );
+
+    let first = get(app.clone(), &route).await;
+    assert_eq!(first["subsonic-response"]["artist"]["albumCount"], json!(0));
+    let empty_state = ports
+        .sources()
+        .find_provider_entity_state(&empty_source)
+        .await
+        .unwrap()
+        .unwrap();
+    let retry_state = ports
+        .sources()
+        .find_provider_entity_state(&retry_source)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(empty_state.last_error().is_none());
+    assert!(retry_state.last_error().is_some());
+
+    let second = get(app.clone(), &route).await;
+    assert_eq!(
+        second["subsonic-response"]["artist"]["album"][0]["name"],
+        json!("SOUR")
+    );
+    let third = get(app, &route).await;
+    assert_eq!(third["subsonic-response"]["artist"]["albumCount"], json!(1));
+    {
+        let calls = provider.calls.lock().unwrap();
+        assert_eq!(calls.get("UC-empty"), Some(&1));
+        assert_eq!(calls.get("UC-retry"), Some(&2));
+    }
+    let retry_state = ports
+        .sources()
+        .find_provider_entity_state(&retry_source)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retry_state.last_error().is_none());
+}
+
+#[sqlx::test]
 async fn navidrome_browse_lists_albums_artists_and_songs(pool: PgPool) {
     let (service, secret) = credential_service_with_known_app_password();
     let app = browse_app(pool.clone(), service).await;
@@ -865,10 +1011,9 @@ async fn opening_a_partial_provider_album_completes_it_over_the_facade(pool: PgP
 
     #[async_trait]
     impl CatalogueProvider for AlbumProvider {
-        async fn search(
+        async fn search_tracks(
             &self,
             _search: &CatalogueSearch,
-            _user: Option<&uuid::Uuid>,
             _context: &RequestContext,
         ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
             Ok(Vec::new())

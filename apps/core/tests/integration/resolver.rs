@@ -1,7 +1,18 @@
 // the HTTP resolver client is gone; this suite pins the DTO mapping and
 // disabled-adapter behavior it used to cover instead
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
+use axum::{
+    Json, Router,
+    routing::{get, post},
+};
+use serde_json::json;
 use whio_core::{
     features::music_library::catalogue::{
         CatalogueCandidate, CatalogueProvider, CatalogueSearch,
@@ -18,10 +29,13 @@ use whio_core::{
     integrations::ytm::playback::YtmPlayback,
     platform::request::{RequestContext, RequestId},
 };
-use whio_resolver_api::models::{
-    CatalogueAlbum as CatalogueAlbumDto, CatalogueArtist as CatalogueArtistDto,
-    CatalogueCandidate as CatalogueCandidateDto, MediaMetadata as MediaMetadataDto,
-    PlaybackResolveResponse as PlaybackResolveResponseDto, SourceIdentity as SourceIdentityDto,
+use whio_resolver_api::{
+    apis::configuration::Configuration,
+    models::{
+        CatalogueAlbum as CatalogueAlbumDto, CatalogueArtist as CatalogueArtistDto,
+        CatalogueCandidate as CatalogueCandidateDto, MediaMetadata as MediaMetadataDto,
+        PlaybackResolveResponse as PlaybackResolveResponseDto, SourceIdentity as SourceIdentityDto,
+    },
 };
 
 fn candidate_dto() -> CatalogueCandidateDto {
@@ -159,12 +173,195 @@ fn invalid_playback_dto_is_rejected() {
     ));
 }
 
+async fn resolver_server(
+    capabilities: Vec<&'static str>,
+    album_calls: Arc<AtomicUsize>,
+    artist_search_calls: Arc<AtomicUsize>,
+    artist_fetch_calls: Arc<AtomicUsize>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let capabilities = capabilities
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let caps_route = get(move || {
+        let capabilities = capabilities.clone();
+        async move {
+            Json(json!({
+                "contract_version": "1",
+                "providers": [{
+                    "provider_id": "youtube_music",
+                    "capabilities": capabilities,
+                }]
+            }))
+        }
+    });
+    let album_route = post(move || {
+        let calls = Arc::clone(&album_calls);
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Json(json!({
+                "results": [{
+                    "source": {"provider_id": "youtube_music", "external_id": "MPREb_album"},
+                    "title": "SOUR",
+                    "artists": [{
+                        "name": "Olivia Rodrigo",
+                        "source": {"provider_id": "youtube_music", "external_id": "UC-artist"}
+                    }],
+                    "year": 2021,
+                    "release_type": "Album"
+                }],
+                "next_offset": 25
+            }))
+        }
+    });
+    let artist_search_route = post(move || {
+        let calls = Arc::clone(&artist_search_calls);
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Json(json!({
+                "results": [{
+                    "source": {"provider_id": "youtube_music", "external_id": "UC-artist"},
+                    "name": "Beyoncé"
+                }],
+                "next_offset": null
+            }))
+        }
+    });
+    let artist_fetch_route = post(move || {
+        let calls = Arc::clone(&artist_fetch_calls);
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Json(json!({
+                "results": [{
+                    "source": {"provider_id": "youtube_music", "external_id": "MPREb_artist-album"},
+                    "title": "SOUR",
+                    "artists": [{"name": "Olivia Rodrigo", "source": {"provider_id": "youtube_music", "external_id": "UC-artist"}}],
+                    "year": 2021,
+                    "release_type": "Album"
+                }]
+            }))
+        }
+    });
+    let app = Router::new()
+        .route("/v1/capabilities", caps_route)
+        .route("/v1/catalogue/album-search", album_route)
+        .route("/v1/catalogue/artist-search", artist_search_route)
+        .route("/v1/catalogue/artist", artist_fetch_route);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (base, task)
+}
+
+#[tokio::test]
+async fn absent_album_search_capability_skips_the_operation_request() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (base, server) = resolver_server(
+        vec!["catalogue.search"],
+        Arc::clone(&calls),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let mut configuration = Configuration::new();
+    configuration.base_path = base;
+    let adapter = YtmCatalogue::new(Some(Arc::new(configuration)));
+
+    assert!(matches!(
+        adapter.search_albums(&search(), &context()).await,
+        Err(CatalogueProviderError::UnsupportedProvider)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn advertised_album_search_converts_candidates_and_cursor() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (base, server) = resolver_server(
+        vec!["catalogue.album-search"],
+        Arc::clone(&calls),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let mut configuration = Configuration::new();
+    configuration.base_path = base;
+    let adapter = YtmCatalogue::new(Some(Arc::new(configuration)));
+
+    let page = adapter.search_albums(&search(), &context()).await.unwrap();
+    assert_eq!(page.items()[0].title(), "SOUR");
+    assert_eq!(
+        page.items()[0].provider().unwrap().external_id(),
+        "MPREb_album"
+    );
+    assert_eq!(
+        page.items()[0].album_artist().unwrap().name(),
+        "Olivia Rodrigo"
+    );
+    assert_eq!(page.next_offset().unwrap().get(), 25);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn advertised_artist_operations_convert_provider_results() {
+    let album_calls = Arc::new(AtomicUsize::new(0));
+    let artist_search_calls = Arc::new(AtomicUsize::new(0));
+    let artist_fetch_calls = Arc::new(AtomicUsize::new(0));
+    let (base, server) = resolver_server(
+        vec!["catalogue.artist-search", "catalogue.artist"],
+        album_calls,
+        Arc::clone(&artist_search_calls),
+        Arc::clone(&artist_fetch_calls),
+    )
+    .await;
+    let mut configuration = Configuration::new();
+    configuration.base_path = base;
+    let adapter = YtmCatalogue::new(Some(Arc::new(configuration)));
+
+    let artists = adapter.search_artists(&search(), &context()).await.unwrap();
+    assert_eq!(artists.items()[0].name(), "Beyoncé");
+    assert_eq!(
+        artists.items()[0].provider().unwrap().external_id(),
+        "UC-artist"
+    );
+    let source = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        "UC-artist".to_owned(),
+    )
+    .unwrap();
+    let albums = adapter
+        .fetch_artist_albums(&source, &context())
+        .await
+        .unwrap();
+    assert_eq!(albums[0].title(), "SOUR");
+    assert_eq!(
+        albums[0].provider().unwrap().external_id(),
+        "MPREb_artist-album"
+    );
+    assert_eq!(artist_search_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(artist_fetch_calls.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
 #[tokio::test]
 async fn disabled_adapter_search_reports_disabled() {
     let adapter = YtmCatalogue::disabled();
 
     assert!(matches!(
-        adapter.search(&search(), None, &context()).await,
+        adapter.search_tracks(&search(), &context()).await,
+        Err(CatalogueProviderError::Disabled)
+    ));
+    assert!(matches!(
+        adapter.search_albums(&search(), &context()).await,
+        Err(CatalogueProviderError::Disabled)
+    ));
+    assert!(matches!(
+        adapter.search_artists(&search(), &context()).await,
         Err(CatalogueProviderError::Disabled)
     ));
 }

@@ -1,4 +1,4 @@
-use super::{ArtistCredit, text::normalize_for_matching};
+use super::{ArtistCredit, text::normalize_for_search};
 
 const STOPWORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "i", "in", "is", "it",
@@ -58,7 +58,7 @@ pub struct SearchTerms {
 
 impl SearchTerms {
     pub fn new(query: &str) -> Self {
-        let normalized = normalize_for_matching(query);
+        let normalized = normalize_for_search(query);
         let tokens = normalized
             .split_whitespace()
             .map(str::to_owned)
@@ -88,7 +88,7 @@ impl SearchTerms {
             return None;
         }
 
-        let normalized = normalize_for_matching(value);
+        let normalized = normalize_for_search(value);
 
         if normalized == self.normalized {
             return Some(MatchQuality::Exact);
@@ -206,6 +206,29 @@ mod tests {
         assert!(terms("a").low_signal());
         assert!(!terms("daft punk").low_signal());
         assert!(!terms("love").low_signal());
+    }
+
+    #[test]
+    fn accent_folding_matches_plain_composed_and_decomposed_text() {
+        for (query, value) in [
+            ("marias", "The Marías"),
+            ("beyonce", "Beyoncé"),
+            ("sigur ros", "Sigur Rós"),
+            ("Jose\u{301}", "José"),
+        ] {
+            assert!(terms(query).classify(value).is_some(), "{query} / {value}");
+        }
+        assert_eq!(terms("strasse").classify("Straße"), None);
+        assert_eq!(terms("smore").classify("Smørrebrød"), None);
+        assert_eq!(terms("lodz").classify("Łódź"), None);
+    }
+
+    #[test]
+    fn l25_plain_query_matches_the_accented_artist_name() {
+        assert_eq!(
+            terms("marias").classify("The Marías"),
+            Some(MatchQuality::WordBoundary)
+        );
     }
 
     #[test]

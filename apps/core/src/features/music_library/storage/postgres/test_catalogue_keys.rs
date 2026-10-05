@@ -5,7 +5,9 @@ use crate::features::music_library::domain::{
     AlbumMetadata, ArtistCredit, ArtistListFilter, CreditRole, ProviderId, RoleSelector, RoleSet,
     SourceIdentity, SourceScope, TrackMetadata,
 };
-use crate::features::music_library::storage::contracts::{CatalogueWrite, LibraryRead};
+use crate::features::music_library::storage::contracts::{
+    CatalogueWrite, LibraryRead, SourceLookup,
+};
 
 fn credit(name: &str) -> ArtistCredit {
     ArtistCredit::new(name.to_owned(), None).unwrap()
@@ -55,7 +57,76 @@ async fn track_count(pool: &PgPool) -> i64 {
 }
 
 #[sqlx::test]
+async fn provider_artist_source_keeps_its_first_owner(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let identity = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        "same-artist".to_owned(),
+    )
+    .unwrap();
+    let first = repository
+        .resolve_or_create_artist(&credit("First owner"))
+        .await
+        .unwrap();
+    repository
+        .set_artist_source(first.id(), &identity)
+        .await
+        .unwrap();
+    let second = repository
+        .resolve_or_create_artist(&credit("Second owner"))
+        .await
+        .unwrap();
 
+    repository
+        .set_artist_source(second.id(), &identity)
+        .await
+        .unwrap();
+    let owner = repository
+        .find_artist_by_source(&identity)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(owner.id(), first.id());
+}
+
+#[sqlx::test]
+async fn provider_album_source_keeps_its_first_owner(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let identity = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        "same-album".to_owned(),
+    )
+    .unwrap();
+    let first = repository
+        .resolve_or_create_album(&album("First owner"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(first.id(), &identity)
+        .await
+        .unwrap();
+    let second = repository
+        .resolve_or_create_album(&album("Second owner"))
+        .await
+        .unwrap();
+
+    repository
+        .set_album_source(second.id(), &identity)
+        .await
+        .unwrap();
+    let owner = repository
+        .find_album_by_source(&identity)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(owner.id(), first.id());
+}
+
+#[sqlx::test]
 async fn resolving_a_typographic_name_finds_the_stored_row(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool.clone());
 

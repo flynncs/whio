@@ -249,10 +249,9 @@ struct OneResult;
 
 #[async_trait::async_trait]
 impl whio_core::features::music_library::catalogue::CatalogueProvider for OneResult {
-    async fn search(
+    async fn search_tracks(
         &self,
         _search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<
         Vec<whio_core::features::music_library::catalogue::CatalogueCandidate>,

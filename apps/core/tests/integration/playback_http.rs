@@ -43,10 +43,9 @@ struct StubProvider {
 
 #[async_trait]
 impl CatalogueProvider for StubProvider {
-    async fn search(
+    async fn search_tracks(
         &self,
         _search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, CatalogueProviderError> {
         Ok(vec![self.candidate.clone()])

@@ -70,7 +70,7 @@ pub(crate) async fn search(
     let request = SearchRequest::new(
         SearchQuery::new(query.to_owned()).map_err(|_| SearchError::InvalidSearch)?,
         *windows,
-        album_artist_filter().map_err(|_| SearchError::InvalidSearch)?,
+        album_artist_filter(!query.is_empty()).map_err(|_| SearchError::InvalidSearch)?,
     );
 
     let outcome = search_service
@@ -181,7 +181,7 @@ pub(crate) async fn enumerate(
     let artists = if request.artists.count == 0 {
         Vec::new()
     } else {
-        let filter = album_artist_filter().map_err(|_| SearchError::InvalidSearch)?;
+        let filter = album_artist_filter(false).map_err(|_| SearchError::InvalidSearch)?;
 
         library
             .artist_list(
@@ -813,17 +813,21 @@ pub(crate) async fn album_detail(
     Ok(mapping::album_detail_with_songs(&detail, tags))
 }
 
-pub(crate) fn album_artist_filter() -> Result<ArtistListFilter, ValidationError> {
+pub(crate) fn album_artist_filter(
+    provider_identity: bool,
+) -> Result<ArtistListFilter, ValidationError> {
     let role = RoleSet::new([RoleSelector::AlbumArtist])?;
 
-    Ok(ArtistListFilter::new().with_role(Some(role)))
+    Ok(ArtistListFilter::new()
+        .with_role(Some(role))
+        .with_provider_identity(provider_identity))
 }
 
 pub(crate) async fn artists(
     library: &LibraryService,
     user: Option<&Uuid>,
 ) -> Result<Vec<models::ArtistId3>, BrowseError> {
-    let filter = album_artist_filter().map_err(|_| BrowseError::InvalidRequest)?;
+    let filter = album_artist_filter(false).map_err(|_| BrowseError::InvalidRequest)?;
 
     library
         .artist_list(0, u32::MAX, ArtistSort::Name, &filter, user)
@@ -849,12 +853,12 @@ pub(crate) async fn song_detail(
 }
 
 pub(crate) async fn artist_detail(
-    library: &LibraryService,
+    completion: &CompletionService,
     raw_id: &str,
     user: Option<&Uuid>,
 ) -> Result<models::ArtistWithAlbumsId3, BrowseError> {
     let artist_id: ArtistId = raw_id.parse().map_err(|_| BrowseError::ArtistNotFound)?;
-    let detail = library
+    let detail = completion
         .artist_detail(&artist_id, user)
         .await
         .map_err(BrowseError::Catalogue)?
@@ -1300,7 +1304,7 @@ pub(crate) async fn indexes(
     scanner: &ScanService,
     user: Option<&Uuid>,
 ) -> Result<models::Indexes, BrowseError> {
-    let filter = album_artist_filter().map_err(|_| BrowseError::InvalidRequest)?;
+    let filter = album_artist_filter(false).map_err(|_| BrowseError::InvalidRequest)?;
     let artists = library
         .artist_list(0, u32::MAX, ArtistSort::Name, &filter, user)
         .await

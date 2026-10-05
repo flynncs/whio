@@ -6,12 +6,13 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::features::music_library::{
+    availability::ProviderRegistry,
     domain::{
-        Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, AlbumTrack, Artist,
-        ArtistCredit, ArtistId, ArtistListFilter, ArtistSort, ArtistSummary, GenreSummary,
-        LOCAL_PROVIDER_ID, LibraryState, RandomSeed, Range, Resource, RoleSelector, RoleSet,
-        SearchTerms, SortDirection, SourceIdentity, SourceRepresentationFacts, Track, TrackHit,
-        TrackId, TrackListFilter, TrackListScope, TrackOrder, TrackPage, TrackView,
+        Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumPage, AlbumSummary,
+        AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort, ArtistSummary,
+        GenreSummary, LOCAL_PROVIDER_ID, LibraryState, RandomSeed, Range, Resource, RoleSelector,
+        RoleSet, SearchTerms, SortDirection, SourceIdentity, SourceRepresentationFacts, Track,
+        TrackHit, TrackId, TrackListFilter, TrackListScope, TrackOrder, TrackPage, TrackView,
         YOUTUBE_MUSIC_PROVIDER_ID,
     },
     library::{LibraryRegistrationError, LibraryRegistry},
@@ -33,7 +34,7 @@ use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS,
     AlbumBrowseRow, AlbumEntryRow, AlbumRow, ArtistRow, CREDIT_NORMALIZED, TRACK_COLUMNS,
     TRACK_ENGAGED, TRACK_OWNED, TrackPageRow, TrackRecord, TrackSearchRow, album_scope,
-    artist_membership, artist_scope, folded,
+    artist_membership, artist_scope, folded, search_folded,
 };
 use crate::features::music_library::domain::{
     album_quality, normalize_for_matching, track_quality,
@@ -228,6 +229,96 @@ impl LibraryRead for PgStore {
         row.map(decode_artist).transpose()
     }
 
+    async fn page_artist_albums(
+        &self,
+        artist_id: &ArtistId,
+        offset: u32,
+        limit: u32,
+        order: AlbumOrder,
+        filter: &AlbumListFilter,
+        user: Option<Uuid>,
+    ) -> Result<AlbumPage, TrackRepositoryError> {
+        let library_ids = self.library_provider_ids();
+        let direction = filter.resolved_direction(order);
+        let seed = filter
+            .resolved_seed(order)
+            .map_err(|_| TrackRepositoryError::InvalidData)?;
+        let seed = match (order, seed) {
+            (AlbumOrder::Random, Some(seed)) => Some(seed),
+            (AlbumOrder::Random, None) => Some(RandomSeed::for_request(
+                user,
+                Resource::Album,
+                chrono::Utc::now().date_naive(),
+            )),
+            _ => None,
+        };
+        let mut predicates = TrackPredicates::new(6);
+        album_selector_clauses(&self.pool, filter, &mut predicates).await?;
+        predicates.push("a.album_artist_id = $3".to_owned());
+        let selectors = predicates.where_clause();
+        let order_clause = album_order_clause(order, direction, seed, &mut predicates);
+        let scope = match filter.scope() {
+            crate::features::music_library::domain::AlbumListScope::Engaged => "TRUE".to_owned(),
+            scope => album_scope(scope, 1, 2),
+        };
+        let statement = format!(
+            r#"
+            SELECT {ALBUM_BROWSE_COLUMNS}
+            {ALBUM_BROWSE_FROM}
+            WHERE {scope}
+              {selectors}
+            GROUP BY a.id, ar.id
+            ORDER BY {order_clause}
+            LIMIT $4 OFFSET $5
+            "#
+        );
+        let mut query = sqlx::query_as::<_, AlbumBrowseRow>(&statement)
+            .bind(user)
+            .bind(&library_ids)
+            .bind(artist_id.as_uuid())
+            .bind(i64::from(limit))
+            .bind(i64::from(offset));
+        for value in predicates.values() {
+            query = value.bind(query);
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(repository_error)?;
+        let mut albums = rows
+            .into_iter()
+            .map(decode_album_summary)
+            .collect::<Result<Vec<_>, _>>()?;
+        attach_album_states(&self.pool, user, &mut albums).await?;
+
+        let mut count_predicates = TrackPredicates::new(4);
+        album_selector_clauses(&self.pool, filter, &mut count_predicates).await?;
+        count_predicates.push("a.album_artist_id = $3".to_owned());
+        let count_scope = match filter.scope() {
+            crate::features::music_library::domain::AlbumListScope::Engaged => "TRUE".to_owned(),
+            scope => album_scope(scope, 1, 2),
+        };
+        let count_statement = format!(
+            "SELECT COUNT(*)::BIGINT FROM albums AS a WHERE {count_scope} {}",
+            count_predicates.where_clause()
+        );
+        let mut count_query = sqlx::query_as::<_, (i64,)>(&count_statement)
+            .bind(user)
+            .bind(&library_ids)
+            .bind(artist_id.as_uuid());
+        for value in count_predicates.values() {
+            count_query = value.bind(count_query);
+        }
+        let (total,) = count_query
+            .fetch_one(&self.pool)
+            .await
+            .map_err(repository_error)?;
+        Ok(AlbumPage {
+            albums,
+            total: u32::try_from(total).map_err(|_| TrackRepositoryError::InvalidData)?,
+        })
+    }
+
     async fn list_albums(
         &self,
         offset: u32,
@@ -380,8 +471,9 @@ impl LibraryRead for PgStore {
         filter: &ArtistListFilter,
     ) -> Result<u32, TrackRepositoryError> {
         let library_ids = self.library_provider_ids();
+        let filter = filter.clone().with_provider_identity(false);
         let mut predicates = TrackPredicates::new(3);
-        artist_selector_clauses(&self.pool, filter, &mut predicates).await?;
+        artist_selector_clauses(&self.pool, &filter, &mut predicates).await?;
         let scope = artist_scope(1, 2);
         let where_clause = predicates.where_clause();
         let statement =
@@ -1097,7 +1189,8 @@ struct SearchMatch {
 
 impl SearchMatch {
     fn new(column: &str, query: &str) -> Self {
-        let key = folded(query);
+        let column = search_folded(column);
+        let key = search_folded(query);
         let pattern =
             format!("replace(replace(replace({key}, '\\', '\\\\'), '%', '\\%'), '_', '\\_')");
         let query_words = format!("string_to_array({key}, ' ')");
@@ -2164,10 +2257,24 @@ fn artist_membership_selectors(
     let membership = artist_role_membership(filter.role(), predicates);
     let (album_count, song_count) = artist_count_expressions(&membership);
 
-    if filter.role().is_some() {
-        predicates.push(format!(
-            "EXISTS (SELECT 1 FROM ({membership}) AS artist_membership)"
-        ));
+    if filter.role().is_some() || filter.provider_identity() {
+        let has_membership = format!("EXISTS (SELECT 1 FROM ({membership}) AS artist_membership)");
+        if filter.provider_identity() {
+            let libraries = predicates.texts(
+                ProviderRegistry::builtin()
+                    .library_ids()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            );
+            predicates.push(format!(
+                "({has_membership} OR EXISTS (SELECT 1 FROM artist_sources AS provider_artist \
+                 WHERE provider_artist.artist_id = ar.id \
+                   AND provider_artist.provider_id <> ALL({libraries})))"
+            ));
+        } else {
+            predicates.push(has_membership);
+        }
     }
 
     ArtistSelectors {

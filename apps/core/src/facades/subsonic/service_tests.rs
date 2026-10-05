@@ -20,7 +20,9 @@ use crate::{
     features::music_library::EnrichmentGuard,
     features::music_library::api::artist_info::{ArtistInfoState, related, top},
     features::music_library::catalogue::ProviderError,
-    features::music_library::catalogue::{CatalogueCandidate, CatalogueProvider, CatalogueSearch},
+    features::music_library::catalogue::{
+        CatalogueCandidate, CatalogueProvider, CatalogueSearch, CompletionService,
+    },
     features::music_library::history::ListenService,
     features::music_library::{
         domain::{
@@ -57,10 +59,9 @@ struct StubCatalogue {
 
 #[async_trait]
 impl CatalogueProvider for StubCatalogue {
-    async fn search(
+    async fn search_tracks(
         &self,
         _search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         self.responses
@@ -94,10 +95,9 @@ struct PagedCatalogue {
 
 #[async_trait]
 impl CatalogueProvider for PagedCatalogue {
-    async fn search(
+    async fn search_tracks(
         &self,
         search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         let start = search.offset().get();
@@ -1741,7 +1741,7 @@ async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx:
     assert_eq!(detail.duration, (summary.duration_ms() / 1000) as i32);
     assert_eq!(detail.song.len(), summary.track_count() as usize);
 
-    let detail = artist_detail(&library, &artist.artist().id().to_string(), None)
+    let detail = artist_detail(&completion, &artist.artist().id().to_string(), None)
         .await
         .expect("the artist detail succeeds");
     let files = detail
@@ -1771,7 +1771,7 @@ async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx:
         Err(BrowseError::AlbumNotFound)
     ));
     assert!(matches!(
-        artist_detail(&library, &Uuid::now_v7().to_string(), None).await,
+        artist_detail(&completion, &Uuid::now_v7().to_string(), None).await,
         Err(BrowseError::ArtistNotFound)
     ));
 }
@@ -2352,9 +2352,13 @@ async fn subsonic_artist_info_reports_a_disabled_metadata_feature(pool: sqlx::Pg
         BrowseError::Catalogue(CatalogueError::Provider(ProviderError::Disabled))
     ));
     assert!(
-        artist_detail(&library, &artist.id().to_string(), None)
-            .await
-            .is_ok(),
+        artist_detail(
+            &CompletionService::disabled(Arc::new(library_over(&repository))),
+            &artist.id().to_string(),
+            None,
+        )
+        .await
+        .is_ok(),
         "the artist read stays usable without the metadata feature"
     );
     assert!(

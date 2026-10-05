@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::features::music_library::domain::{
-    Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, Artist, ArtistId,
-    ArtistListFilter, ArtistSort, ArtistSummary, GenreSummary, ProviderEntityState, SourceIdentity,
-    Track, TrackHit, TrackId, TrackListFilter, TrackOrder, TrackPage, TrackView,
+    Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumPage, AlbumSummary, Artist,
+    ArtistId, ArtistListFilter, ArtistSort, ArtistSummary, GenreSummary, ProviderEntityState,
+    SourceIdentity, Track, TrackHit, TrackId, TrackListFilter, TrackOrder, TrackPage, TrackView,
 };
 
 use super::TrackRepositoryError;
@@ -54,6 +54,18 @@ pub trait LibraryRead: Send + Sync {
         _user: Option<Uuid>,
     ) -> Result<Option<Artist>, TrackRepositoryError> {
         Ok(None)
+    }
+
+    async fn page_artist_albums(
+        &self,
+        _artist_id: &ArtistId,
+        _offset: u32,
+        _limit: u32,
+        _order: AlbumOrder,
+        _filter: &AlbumListFilter,
+        _user: Option<Uuid>,
+    ) -> Result<AlbumPage, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
     }
 
     async fn list_albums(
@@ -208,7 +220,14 @@ pub trait SourceLookup: Send + Sync {
     async fn find_artist_by_source(
         &self,
         _source: &SourceIdentity,
-    ) -> Result<Option<ArtistId>, TrackRepositoryError> {
+    ) -> Result<Option<Artist>, TrackRepositoryError> {
+        Ok(None)
+    }
+
+    async fn find_album_by_source(
+        &self,
+        _source: &SourceIdentity,
+    ) -> Result<Option<Album>, TrackRepositoryError> {
         Ok(None)
     }
 

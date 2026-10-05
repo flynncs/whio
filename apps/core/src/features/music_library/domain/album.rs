@@ -524,6 +524,12 @@ impl AlbumSummary {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumPage {
+    pub albums: Vec<AlbumSummary>,
+    pub total: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlbumOrder {
     #[default]

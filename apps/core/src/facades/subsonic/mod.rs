@@ -425,7 +425,7 @@ pub(crate) async fn get_artist(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::artist_detail(state.library(), id, Some(&user)).await {
+    match service::artist_detail(state.completion(), id, Some(&user)).await {
         Ok(artist) => Json(artist_envelope(artist)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }

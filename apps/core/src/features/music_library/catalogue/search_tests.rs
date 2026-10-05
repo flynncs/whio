@@ -12,6 +12,7 @@ use std::{
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use tokio::sync::{Semaphore, mpsc};
 
 use super::*;
 use crate::{
@@ -122,10 +123,9 @@ impl StubProvider {
 
 #[async_trait]
 impl CatalogueProvider for StubProvider {
-    async fn search(
+    async fn search_tracks(
         &self,
         _search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         if !self.delay.is_zero() {
@@ -225,6 +225,58 @@ fn service(pool: sqlx::PgPool, providers: Vec<Arc<dyn CatalogueProvider>>) -> Se
     Fixture::new(pool.clone()).service(providers)
 }
 
+struct KindProvider {
+    track_calls: StdArc<AtomicUsize>,
+    album_calls: StdArc<AtomicUsize>,
+    artist_calls: StdArc<AtomicUsize>,
+    album: AlbumMetadata,
+    artist: ArtistCredit,
+}
+
+#[async_trait]
+impl CatalogueProvider for KindProvider {
+    async fn search_tracks(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        self.track_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+
+    async fn search_albums(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<
+        crate::features::music_library::catalogue::CataloguePage<AlbumMetadata>,
+        ProviderError,
+    > {
+        self.album_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(
+            crate::features::music_library::catalogue::CataloguePage::new(
+                vec![self.album.clone()],
+                None,
+            ),
+        )
+    }
+
+    async fn search_artists(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<crate::features::music_library::catalogue::CataloguePage<ArtistCredit>, ProviderError>
+    {
+        self.artist_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(
+            crate::features::music_library::catalogue::CataloguePage::new(
+                vec![self.artist.clone()],
+                None,
+            ),
+        )
+    }
+}
+
 fn provider(stub: impl CatalogueProvider + 'static) -> Arc<dyn CatalogueProvider> {
     Arc::new(stub) as Arc<dyn CatalogueProvider>
 }
@@ -233,10 +285,9 @@ struct HangingProvider;
 
 #[async_trait]
 impl CatalogueProvider for HangingProvider {
-    async fn search(
+    async fn search_tracks(
         &self,
         _search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         std::future::pending().await
@@ -250,10 +301,9 @@ struct ConcurrencyProbe {
 
 #[async_trait]
 impl CatalogueProvider for ConcurrencyProbe {
-    async fn search(
+    async fn search_tracks(
         &self,
         _search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         let active = self.current.fetch_add(1, Ordering::SeqCst) + 1;
@@ -264,16 +314,117 @@ impl CatalogueProvider for ConcurrencyProbe {
     }
 }
 
+struct CrossKindGate {
+    current: StdArc<AtomicUsize>,
+    maximum: StdArc<AtomicUsize>,
+    started: mpsc::UnboundedSender<()>,
+    release: StdArc<Semaphore>,
+}
+
+impl CrossKindGate {
+    async fn enter(&self) {
+        let active = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+        self.maximum.fetch_max(active, Ordering::SeqCst);
+        self.started.send(()).unwrap();
+        self.release.clone().acquire_owned().await.unwrap().forget();
+        self.current.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct CrossKindProvider {
+    gate: CrossKindGate,
+}
+
+#[async_trait]
+impl CatalogueProvider for CrossKindProvider {
+    async fn search_tracks(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        self.gate.enter().await;
+        Ok(Vec::new())
+    }
+
+    async fn search_albums(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<
+        crate::features::music_library::catalogue::CataloguePage<AlbumMetadata>,
+        ProviderError,
+    > {
+        self.gate.enter().await;
+        Ok(crate::features::music_library::catalogue::CataloguePage::new(Vec::new(), None))
+    }
+
+    async fn search_artists(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<crate::features::music_library::catalogue::CataloguePage<ArtistCredit>, ProviderError>
+    {
+        self.gate.enter().await;
+        Ok(crate::features::music_library::catalogue::CataloguePage::new(Vec::new(), None))
+    }
+}
+
+#[sqlx::test]
+async fn all_kinds_share_the_source_concurrency_bound(pool: sqlx::PgPool) {
+    let (started, mut started_rx) = mpsc::unbounded_channel();
+    let current = StdArc::new(AtomicUsize::new(0));
+    let maximum = StdArc::new(AtomicUsize::new(0));
+    let release = StdArc::new(Semaphore::new(0));
+    let provider_count = MAX_SOURCE_CONCURRENCY;
+    let providers = (0..provider_count)
+        .map(|_| {
+            provider(CrossKindProvider {
+                gate: CrossKindGate {
+                    current: StdArc::clone(&current),
+                    maximum: StdArc::clone(&maximum),
+                    started: started.clone(),
+                    release: StdArc::clone(&release),
+                },
+            })
+        })
+        .collect();
+    let catalogue = Arc::new(service(pool, providers));
+    let request = search();
+    let context = context();
+    let search_task = tokio::spawn(async move { catalogue.search(&request, None, &context).await });
+    for _ in 0..MAX_SOURCE_CONCURRENCY {
+        wait_for_provider_start(&mut started_rx).await;
+    }
+    assert_eq!(current.load(Ordering::SeqCst), MAX_SOURCE_CONCURRENCY);
+    release.add_permits(MAX_SOURCE_CONCURRENCY);
+
+    let remaining = provider_count * 3 - MAX_SOURCE_CONCURRENCY;
+    for _ in 0..remaining {
+        wait_for_provider_start(&mut started_rx).await;
+        release.add_permits(1);
+    }
+
+    search_task.await.unwrap().unwrap();
+    assert_eq!(maximum.load(Ordering::SeqCst), MAX_SOURCE_CONCURRENCY);
+    assert_eq!(current.load(Ordering::SeqCst), 0);
+}
+
+async fn wait_for_provider_start(receiver: &mut mpsc::UnboundedReceiver<()>) {
+    tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("provider call started before the hang deadline")
+        .expect("provider channel stays open");
+}
+
 struct LimitRecordingProvider {
     limit: StdArc<Mutex<Vec<u8>>>,
 }
 
 #[async_trait]
 impl CatalogueProvider for LimitRecordingProvider {
-    async fn search(
+    async fn search_tracks(
         &self,
         search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         self.limit.lock().push(search.limit().get());
@@ -287,10 +438,9 @@ struct PagedProvider {
 
 #[async_trait]
 impl CatalogueProvider for PagedProvider {
-    async fn search(
+    async fn search_tracks(
         &self,
         search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         let start = search.offset().get();
@@ -521,10 +671,10 @@ async fn the_within_budget_search_is_complete(pool: sqlx::PgPool) {
         .discover_tracks(
             &SearchQuery::new("Daft Punk".to_owned()).unwrap(),
             10,
-            None,
             &context(),
         )
-        .await;
+        .await
+        .unwrap();
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].track().title(), "YTM Song");
@@ -655,6 +805,136 @@ async fn a_repository_error_in_one_kind_fails_the_search(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test]
+async fn per_kind_discovery_materializes_only_the_requested_kind(pool: sqlx::PgPool) {
+    let album_source = provider_source_for_test("album-source");
+    let album_artist_source = provider_source_for_test("album-artist-source");
+    let artist_source = provider_source_for_test("artist-source");
+    let album = AlbumMetadata::new("The Marías".to_owned())
+        .unwrap()
+        .with_provider(Some(album_source))
+        .with_album_artist(
+            ArtistCredit::new("The Marías".to_owned(), None)
+                .unwrap()
+                .with_provider(Some(album_artist_source)),
+        );
+    let artist = ArtistCredit::new("Beyoncé".to_owned(), None)
+        .unwrap()
+        .with_provider(Some(artist_source));
+    let track_calls = StdArc::new(AtomicUsize::new(0));
+    let album_calls = StdArc::new(AtomicUsize::new(0));
+    let artist_calls = StdArc::new(AtomicUsize::new(0));
+    let stub = KindProvider {
+        track_calls: StdArc::clone(&track_calls),
+        album_calls: StdArc::clone(&album_calls),
+        artist_calls: StdArc::clone(&artist_calls),
+        album,
+        artist,
+    };
+    let catalogue = service(pool, vec![provider(stub)]);
+    let query = SearchQuery::new("marias".to_owned()).unwrap();
+    let context = context();
+
+    let albums = catalogue
+        .search_albums(&query, window(10, 0), None, &context)
+        .await
+        .unwrap();
+    assert_eq!(albums.len(), 1);
+    assert_eq!(albums[0].album().title(), "The Marías");
+    assert_eq!(artist_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(album_calls.load(Ordering::SeqCst), 1);
+
+    let artists = catalogue
+        .search_artists(
+            &SearchQuery::new("beyonce".to_owned()).unwrap(),
+            window(10, 0),
+            &ArtistListFilter::default(),
+            None,
+            &context,
+        )
+        .await
+        .unwrap();
+    assert_eq!(artists.len(), 1);
+    assert_eq!(artists[0].artist().name(), "Beyoncé");
+    assert_eq!(album_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(artist_calls.load(Ordering::SeqCst), 1);
+}
+
+#[sqlx::test]
+async fn a_zero_window_for_each_kind_skips_provider_operations(pool: sqlx::PgPool) {
+    let track_calls = StdArc::new(AtomicUsize::new(0));
+    let album_calls = StdArc::new(AtomicUsize::new(0));
+    let artist_calls = StdArc::new(AtomicUsize::new(0));
+    let stub = KindProvider {
+        track_calls: StdArc::clone(&track_calls),
+        album_calls: StdArc::clone(&album_calls),
+        artist_calls: StdArc::clone(&artist_calls),
+        album: AlbumMetadata::new("Unused".to_owned()).unwrap(),
+        artist: ArtistCredit::new("Unused".to_owned(), None).unwrap(),
+    };
+    let catalogue = service(pool, vec![provider(stub)]);
+    let context = context();
+    let cases = [
+        (None, Some(window(1, 0)), Some(window(1, 0)), 0usize),
+        (Some(window(1, 0)), None, Some(window(1, 0)), 1usize),
+        (Some(window(1, 0)), Some(window(1, 0)), None, 2usize),
+    ];
+
+    for (tracks, albums, artists, omitted) in cases {
+        let before = [
+            track_calls.load(Ordering::SeqCst),
+            album_calls.load(Ordering::SeqCst),
+            artist_calls.load(Ordering::SeqCst),
+        ];
+        let request = SearchRequest::new(
+            SearchQuery::new("unused".to_owned()).unwrap(),
+            SearchWindows::new(tracks, albums, artists),
+            ArtistListFilter::default(),
+        );
+        catalogue.search(&request, None, &context).await.unwrap();
+        let after = [
+            track_calls.load(Ordering::SeqCst),
+            album_calls.load(Ordering::SeqCst),
+            artist_calls.load(Ordering::SeqCst),
+        ];
+        assert_eq!(after[omitted], before[omitted]);
+        for kind in 0..after.len() {
+            if kind != omitted {
+                assert!(after[kind] > before[kind]);
+            }
+        }
+    }
+
+    let no_kinds = SearchRequest::new(
+        SearchQuery::new("unused".to_owned()).unwrap(),
+        SearchWindows::new(None, None, None),
+        ArtistListFilter::default(),
+    );
+    let before = [
+        track_calls.load(Ordering::SeqCst),
+        album_calls.load(Ordering::SeqCst),
+        artist_calls.load(Ordering::SeqCst),
+    ];
+    catalogue.search(&no_kinds, None, &context).await.unwrap();
+    assert_eq!(
+        [
+            track_calls.load(Ordering::SeqCst),
+            album_calls.load(Ordering::SeqCst),
+            artist_calls.load(Ordering::SeqCst),
+        ],
+        before
+    );
+}
+
+fn provider_source_for_test(external_id: &str) -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        external_id.to_owned(),
+    )
+    .unwrap()
+}
+
+#[sqlx::test]
 async fn a_provider_album_is_registered_with_its_source(pool: sqlx::PgPool) {
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let base = candidate("ytm-album-track", "Song");
@@ -714,30 +994,68 @@ async fn provider_album_and_artist_identity_round_trip_through_materialize(pool:
         .unwrap();
     let candidate =
         CatalogueCandidate::new(provider_source("video-1"), metadata).with_album(Some(album));
+    let renamed_artist = ArtistCredit::new("Olivia Rodrigo (renamed)".to_owned(), None)
+        .unwrap()
+        .with_provider(Some(provider_source("artist-1")));
+    let renamed_metadata = TrackMetadata::new(
+        "brutal (renamed)".to_owned(),
+        vec![renamed_artist.clone()],
+        Some(144_000),
+    )
+    .unwrap();
+    let renamed_album = AlbumMetadata::new("SOUR (renamed)".to_owned())
+        .unwrap()
+        .with_provider(Some(provider_source("album-1")))
+        .with_album_artist(renamed_artist);
+    let renamed_candidate = CatalogueCandidate::new(provider_source("video-1"), renamed_metadata)
+        .with_album(Some(renamed_album));
 
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
-    let resolver = StubProvider::new(vec![Ok(vec![candidate.clone()])]);
+    let resolver = StubProvider::new(vec![Ok(vec![candidate]), Ok(vec![renamed_candidate])]);
     let catalogue = Fixture {
         store: repository.clone(),
     }
     .service(vec![provider(resolver)]);
 
     catalogue.search(&search(), None, &context()).await.unwrap();
-
-    let album = repository
-        .resolve_or_create_album(candidate.album().expect("the album metadata"))
+    let original_album = repository
+        .find_album_by_source(&provider_source("album-1"))
         .await
+        .unwrap()
         .unwrap();
+    let original_artist = repository
+        .find_artist_by_source(&provider_source("artist-1"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    catalogue.search(&search(), None, &context()).await.unwrap();
+
+    let renamed_album = repository
+        .find_album_by_source(&provider_source("album-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    let renamed_artist = repository
+        .find_artist_by_source(&provider_source("artist-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original_album.id(), renamed_album.id());
+    assert_eq!(original_artist.id(), renamed_artist.id());
     assert_eq!(
-        repository.find_album_sources(album.id()).await.unwrap(),
+        repository
+            .find_album_sources(original_album.id())
+            .await
+            .unwrap(),
         vec![provider_source("album-1")],
         "materialize stores the album's own identity, not the song's"
     );
-
-    let credit = &candidate.metadata().artists()[0];
-    let artist = repository.resolve_or_create_artist(credit).await.unwrap();
     assert_eq!(
-        repository.find_artist_sources(artist.id()).await.unwrap(),
+        repository
+            .find_artist_sources(original_artist.id())
+            .await
+            .unwrap(),
         vec![provider_source("artist-1")],
         "materialize stores the artist's provider identity"
     );

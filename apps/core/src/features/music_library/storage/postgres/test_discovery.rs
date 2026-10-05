@@ -42,7 +42,7 @@ async fn find_artist_by_source_returns_the_canonical_id_for_a_known_key(pool: Pg
         .await
         .unwrap();
 
-    assert_eq!(found, Some(known));
+    assert_eq!(found.map(|artist| artist.id().clone()), Some(known));
 }
 
 #[sqlx::test]
@@ -94,7 +94,11 @@ async fn find_artist_by_source_distinguishes_the_same_external_id_under_another_
 
     assert_eq!(found, None);
     assert_eq!(
-        repository.find_artist_by_source(&global).await.unwrap(),
+        repository
+            .find_artist_by_source(&global)
+            .await
+            .unwrap()
+            .map(|artist| artist.id().clone()),
         Some(scoped)
     );
 }
@@ -118,6 +122,6 @@ async fn find_artist_by_source_uses_the_artist_sources_unique_key(pool: PgPool) 
     let sources = Arc::clone(&repository) as Arc<dyn SourceLookup>;
     let second_sources = sources.find_artist_sources(&second).await.unwrap();
 
-    assert_eq!(found, Some(first));
+    assert_eq!(found.map(|artist| artist.id().clone()), Some(first));
     assert!(second_sources.is_empty());
 }

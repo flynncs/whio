@@ -7,7 +7,12 @@ from app.api.catalogue import get_catalogue
 from app.errors import ProviderUnavailableError, SourceNotFoundError
 from app.generated.resolver_v1 import (
     CatalogueAlbum,
+    CatalogueAlbumCandidate,
+    CatalogueAlbumSearchResponse,
     CatalogueArtist,
+    CatalogueArtistAlbumsResponse,
+    CatalogueArtistCandidate,
+    CatalogueArtistSearchResponse,
     CatalogueCandidate,
     CatalogueCandidatesResponse,
     CatalogueSearchResponse,
@@ -37,6 +42,18 @@ class CatalogueRoutesTest(unittest.TestCase):
     def tearDown(self) -> None:
         app.dependency_overrides.clear()
 
+    def test_capabilities_advertise_album_artist_search_and_artist_fetch(self) -> None:
+        response = self.client.get("/v1/capabilities")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["contract_version"], "1")
+        self.assertTrue(
+            {
+                "catalogue.album-search",
+                "catalogue.artist-search",
+                "catalogue.artist",
+            }.issubset(set(response.json()["providers"][0]["capabilities"]))
+        )
+
     def test_search_matches_the_contract(self) -> None:
         response = self.client.post(
             "/v1/catalogue/search",
@@ -61,6 +78,61 @@ class CatalogueRoutesTest(unittest.TestCase):
                 ]
             },
         )
+
+    def test_album_search_matches_the_contract(self) -> None:
+        self.catalogue.search_albums.return_value = CatalogueAlbumSearchResponse(
+            results=[
+                CatalogueAlbumCandidate(
+                    source=SourceIdentity(provider_id="youtube_music", external_id="MPREb_album"),
+                    title="SOUR",
+                    artists=[CatalogueArtist(name="Olivia Rodrigo")],
+                    year=2021,
+                    release_type="Album",
+                )
+            ],
+            next_offset=25,
+        )
+        response = self.client.post(
+            "/v1/catalogue/album-search",
+            json={"query": "SOUR", "limit": 5, "offset": 20},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.catalogue.search_albums.assert_called_once_with("SOUR", 5, 20)
+        self.assertEqual(response.json()["next_offset"], 25)
+        self.assertEqual(response.json()["results"][0]["title"], "SOUR")
+
+    def test_artist_search_and_artist_fetch_match_the_contract(self) -> None:
+        self.catalogue.search_artists.return_value = CatalogueArtistSearchResponse(
+            results=[
+                CatalogueArtistCandidate(
+                    source=SourceIdentity(provider_id="youtube_music", external_id="UC1"),
+                    name="Beyoncé",
+                )
+            ]
+        )
+        search = self.client.post(
+            "/v1/catalogue/artist-search", json={"query": "beyonce", "limit": 5}
+        )
+        self.assertEqual(search.status_code, 200)
+        self.catalogue.search_artists.assert_called_once_with("beyonce", 5, 0)
+        self.assertEqual(search.json()["results"][0]["name"], "Beyoncé")
+
+        self.catalogue.fetch_artist.return_value = CatalogueArtistAlbumsResponse(
+            results=[
+                CatalogueAlbumCandidate(
+                    source=SourceIdentity(provider_id="youtube_music", external_id="MPREb_album"),
+                    title="SOUR",
+                    artists=[CatalogueArtist(name="Olivia Rodrigo")],
+                )
+            ]
+        )
+        fetched = self.client.post(
+            "/v1/catalogue/artist",
+            json={"source": {"provider_id": "youtube_music", "external_id": "UC1"}},
+        )
+        self.assertEqual(fetched.status_code, 200)
+        self.catalogue.fetch_artist.assert_called_once()
+        self.assertEqual(fetched.json()["results"][0]["source"]["external_id"], "MPREb_album")
 
     def test_fetch_album_matches_the_contract(self) -> None:
         album_source = SourceIdentity(

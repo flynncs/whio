@@ -25,6 +25,9 @@ RETRIEVED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 YOUTUBE_MUSIC_CAPABILITIES = [
     "catalogue.search",
     "catalogue.album",
+    "catalogue.album-search",
+    "catalogue.artist-search",
+    "catalogue.artist",
     "playback.resolve",
     "metadata.artist.display",
 ]

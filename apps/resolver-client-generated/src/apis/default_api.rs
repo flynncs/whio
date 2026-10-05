@@ -37,6 +37,18 @@ pub enum FetchCatalogueAlbumError {
     UnknownValue(serde_json::Value),
 }
 
+/// struct for typed errors of method [`fetch_catalogue_artist`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FetchCatalogueArtistError {
+    Status400(models::ErrorResponse),
+    Status404(models::ErrorResponse),
+    Status422(models::ErrorResponse),
+    Status500(models::ErrorResponse),
+    Status503(models::ErrorResponse),
+    UnknownValue(serde_json::Value),
+}
+
 /// struct for typed errors of method [`get_capabilities`]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -78,6 +90,26 @@ pub enum ResolvePlaybackError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SearchCatalogueError {
+    Status400(models::ErrorResponse),
+    Status500(models::ErrorResponse),
+    Status503(models::ErrorResponse),
+    UnknownValue(serde_json::Value),
+}
+
+/// struct for typed errors of method [`search_catalogue_albums`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SearchCatalogueAlbumsError {
+    Status400(models::ErrorResponse),
+    Status500(models::ErrorResponse),
+    Status503(models::ErrorResponse),
+    UnknownValue(serde_json::Value),
+}
+
+/// struct for typed errors of method [`search_catalogue_artists`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SearchCatalogueArtistsError {
     Status400(models::ErrorResponse),
     Status500(models::ErrorResponse),
     Status503(models::ErrorResponse),
@@ -179,6 +211,57 @@ pub async fn fetch_catalogue_album(
     } else {
         let content = resp.text().await?;
         let entity: Option<FetchCatalogueAlbumError> = serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
+}
+
+pub async fn fetch_catalogue_artist(
+    configuration: &configuration::Configuration,
+    catalogue_entity_request: models::CatalogueEntityRequest,
+    x_request_id: Option<&str>,
+) -> Result<models::CatalogueArtistAlbumsResponse, Error<FetchCatalogueArtistError>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_body_catalogue_entity_request = catalogue_entity_request;
+    let p_header_x_request_id = x_request_id;
+
+    let uri_str = format!("{}/v1/catalogue/artist", configuration.base_path);
+    let mut req_builder = configuration
+        .client
+        .request(reqwest::Method::POST, &uri_str);
+
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+    if let Some(param_value) = p_header_x_request_id {
+        req_builder = req_builder.header("X-Request-ID", param_value.to_string());
+    }
+    req_builder = req_builder.json(&p_body_catalogue_entity_request);
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_str(&content)).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::CatalogueArtistAlbumsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::CatalogueArtistAlbumsResponse`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<FetchCatalogueArtistError> = serde_json::from_str(&content).ok();
         Err(Error::ResponseError(ResponseContent {
             status,
             content,
@@ -419,6 +502,108 @@ pub async fn search_catalogue(
     } else {
         let content = resp.text().await?;
         let entity: Option<SearchCatalogueError> = serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
+}
+
+pub async fn search_catalogue_albums(
+    configuration: &configuration::Configuration,
+    catalogue_search_request: models::CatalogueSearchRequest,
+    x_request_id: Option<&str>,
+) -> Result<models::CatalogueAlbumSearchResponse, Error<SearchCatalogueAlbumsError>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_body_catalogue_search_request = catalogue_search_request;
+    let p_header_x_request_id = x_request_id;
+
+    let uri_str = format!("{}/v1/catalogue/album-search", configuration.base_path);
+    let mut req_builder = configuration
+        .client
+        .request(reqwest::Method::POST, &uri_str);
+
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+    if let Some(param_value) = p_header_x_request_id {
+        req_builder = req_builder.header("X-Request-ID", param_value.to_string());
+    }
+    req_builder = req_builder.json(&p_body_catalogue_search_request);
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_str(&content)).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::CatalogueAlbumSearchResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::CatalogueAlbumSearchResponse`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<SearchCatalogueAlbumsError> = serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
+}
+
+pub async fn search_catalogue_artists(
+    configuration: &configuration::Configuration,
+    catalogue_search_request: models::CatalogueSearchRequest,
+    x_request_id: Option<&str>,
+) -> Result<models::CatalogueArtistSearchResponse, Error<SearchCatalogueArtistsError>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_body_catalogue_search_request = catalogue_search_request;
+    let p_header_x_request_id = x_request_id;
+
+    let uri_str = format!("{}/v1/catalogue/artist-search", configuration.base_path);
+    let mut req_builder = configuration
+        .client
+        .request(reqwest::Method::POST, &uri_str);
+
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+    if let Some(param_value) = p_header_x_request_id {
+        req_builder = req_builder.header("X-Request-ID", param_value.to_string());
+    }
+    req_builder = req_builder.json(&p_body_catalogue_search_request);
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_str(&content)).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::CatalogueArtistSearchResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::CatalogueArtistSearchResponse`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<SearchCatalogueArtistsError> = serde_json::from_str(&content).ok();
         Err(Error::ResponseError(ResponseContent {
             status,
             content,

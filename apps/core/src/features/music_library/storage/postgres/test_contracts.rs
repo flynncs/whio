@@ -63,6 +63,80 @@ fn album_metadata(title: &str) -> AlbumMetadata {
 }
 
 #[sqlx::test]
+async fn catalogue_search_folds_accents_without_changing_identity_or_display(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album_artist = credit("The Marías", None);
+    let album = repository
+        .resolve_or_create_album(
+            &album_metadata("Ma\u{301}rias").with_album_artist(album_artist.clone()),
+        )
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(
+            source("local", "accent-song"),
+            TrackMetadata::from_names(
+                "Beyoncé Song".to_owned(),
+                vec!["Sigur Rós".to_owned()],
+                Some(1_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository
+            .search_tracks("beyonce", 10, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repository
+            .search_tracks("sigur ros", 10, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let albums = repository.search_albums("marias", 10, None).await.unwrap();
+    assert_eq!(albums.len(), 1);
+    assert_eq!(albums[0].album().title(), "Ma\u{301}rias");
+    let artists = repository
+        .search_artists("marias", 10, None, &ArtistListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(artists.len(), 1);
+    assert_eq!(artists[0].artist().name(), "The Marías");
+
+    let plain_artist = repository
+        .resolve_or_create_artist(&credit("Jose", None))
+        .await
+        .unwrap();
+    let accented_artist = repository
+        .resolve_or_create_artist(&credit("José", None))
+        .await
+        .unwrap();
+    assert_ne!(plain_artist.id(), accented_artist.id());
+    assert_eq!(
+        repository
+            .search_artists("jose", 10, None, &ArtistListFilter::default())
+            .await
+            .unwrap()
+            .iter()
+            .filter(|summary| matches!(summary.artist().name(), "Jose" | "José"))
+            .count(),
+        2
+    );
+}
+
+#[sqlx::test]
 async fn repository_maintains_stable_bidirectional_mappings(pool: sqlx::PgPool) {
     let repository = PostgresTrackRepository::new(pool.clone());
     let first_source = source("youtube_music", "source-a");

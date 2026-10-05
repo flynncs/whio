@@ -1,12 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use uuid::Uuid;
 use whio_resolver_api::{
     apis::{
-        Error as TransportError,
-        configuration::Configuration,
-        default_api::{FetchCatalogueAlbumError, SearchCatalogueError},
+        Error as TransportError, configuration::Configuration, default_api::SearchCatalogueError,
     },
     models::{CatalogueEntityRequest, CatalogueSearchRequest, SourceIdentity as SourceIdentityDto},
 };
@@ -14,9 +11,12 @@ use whio_resolver_api::{
 use crate::{
     features::music_library::catalogue::ProviderError,
     features::music_library::catalogue::{
-        CatalogueCandidate, CatalogueProvider, CatalogueSearch, FetchedAlbum,
+        CatalogueCandidate, CataloguePage, CatalogueProvider, CatalogueSearch, FetchedAlbum,
+        SearchOffset,
     },
-    features::music_library::domain::{SourceIdentity, YOUTUBE_MUSIC_PROVIDER_ID},
+    features::music_library::domain::{
+        AlbumMetadata, ArtistCredit, SourceIdentity, YOUTUBE_MUSIC_PROVIDER_ID,
+    },
     platform::request::RequestContext,
 };
 
@@ -31,14 +31,21 @@ impl YtmCatalogue {
     pub fn disabled() -> Self {
         Self { transport: None }
     }
+
+    async fn ready(&self, capability: &str) -> Result<&Configuration, ProviderError> {
+        let transport = self.transport.as_deref().ok_or(ProviderError::Disabled)?;
+        if !advertises(transport, capability).await? {
+            return Err(ProviderError::UnsupportedProvider);
+        }
+        Ok(transport)
+    }
 }
 
 #[async_trait]
 impl CatalogueProvider for YtmCatalogue {
-    async fn search(
+    async fn search_tracks(
         &self,
         search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         let Some(transport) = self.transport.as_ref() else {
@@ -67,6 +74,77 @@ impl CatalogueProvider for YtmCatalogue {
             .collect()
     }
 
+    async fn search_albums(
+        &self,
+        search: &CatalogueSearch,
+        context: &RequestContext,
+    ) -> Result<CataloguePage<AlbumMetadata>, ProviderError> {
+        let transport = self.ready("catalogue.album-search").await?;
+        let response = whio_resolver_api::apis::default_api::search_catalogue_albums(
+            transport,
+            search_request(search),
+            Some(context.request_id().as_str()),
+        )
+        .await
+        .map_err(map_catalogue_transport_error)?;
+        let items = response
+            .results
+            .into_iter()
+            .map(mapping::album_candidate)
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_offset = page_offset(response.next_offset)?;
+        Ok(CataloguePage::new(items, next_offset))
+    }
+
+    async fn search_artists(
+        &self,
+        search: &CatalogueSearch,
+        context: &RequestContext,
+    ) -> Result<CataloguePage<ArtistCredit>, ProviderError> {
+        let transport = self.ready("catalogue.artist-search").await?;
+        let response = whio_resolver_api::apis::default_api::search_catalogue_artists(
+            transport,
+            search_request(search),
+            Some(context.request_id().as_str()),
+        )
+        .await
+        .map_err(map_catalogue_transport_error)?;
+        let items = response
+            .results
+            .into_iter()
+            .map(mapping::artist_candidate)
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_offset = page_offset(response.next_offset)?;
+        Ok(CataloguePage::new(items, next_offset))
+    }
+
+    async fn fetch_artist_albums(
+        &self,
+        source: &SourceIdentity,
+        context: &RequestContext,
+    ) -> Result<Vec<AlbumMetadata>, ProviderError> {
+        if source.provider_id().as_str() != YOUTUBE_MUSIC_PROVIDER_ID {
+            return Err(ProviderError::UnsupportedProvider);
+        }
+        let transport = self.ready("catalogue.artist").await?;
+        let body = CatalogueEntityRequest::new(SourceIdentityDto::new(
+            source.provider_id().as_str().to_owned(),
+            source.external_id().to_owned(),
+        ));
+        let response = whio_resolver_api::apis::default_api::fetch_catalogue_artist(
+            transport,
+            body,
+            Some(context.request_id().as_str()),
+        )
+        .await
+        .map_err(map_catalogue_transport_error)?;
+        response
+            .results
+            .into_iter()
+            .map(mapping::album_candidate)
+            .collect()
+    }
+
     async fn fetch_album(
         &self,
         source: &SourceIdentity,
@@ -88,7 +166,7 @@ impl CatalogueProvider for YtmCatalogue {
             Some(context.request_id().as_str()),
         )
         .await
-        .map_err(map_album_error)?;
+        .map_err(map_catalogue_transport_error)?;
         let candidates = response
             .results
             .into_iter()
@@ -107,22 +185,49 @@ impl CatalogueProvider for YtmCatalogue {
     }
 }
 
-fn map_search_error(error: TransportError<SearchCatalogueError>) -> ProviderError {
-    match error {
-        TransportError::Reqwest(error) => ProviderError::request(error),
-        TransportError::Serde(error) => ProviderError::malformed(error),
-        TransportError::SerdePathToError(error) => ProviderError::malformed(error),
-        TransportError::Io(error) => ProviderError::request(error),
-        TransportError::ResponseError(response) => match response.status {
-            reqwest::StatusCode::BAD_REQUEST => ProviderError::InvalidRequest,
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR => ProviderError::Internal,
-            reqwest::StatusCode::SERVICE_UNAVAILABLE => ProviderError::ProviderUnavailable,
-            _ => ProviderError::ProviderUnavailable,
-        },
-    }
+fn search_request(search: &CatalogueSearch) -> CatalogueSearchRequest {
+    let mut request = CatalogueSearchRequest::new(
+        search.query().as_str().to_owned(),
+        i32::from(search.limit().get()),
+    );
+    request.offset = Some(search.offset().get() as i32);
+    request
 }
 
-fn map_album_error(error: TransportError<FetchCatalogueAlbumError>) -> ProviderError {
+async fn advertises(transport: &Configuration, capability: &str) -> Result<bool, ProviderError> {
+    let response = whio_resolver_api::apis::default_api::get_capabilities(transport, None)
+        .await
+        .map_err(map_catalogue_transport_error)?;
+    Ok(response.providers.iter().any(|provider| {
+        provider.provider_id == YOUTUBE_MUSIC_PROVIDER_ID
+            && provider
+                .capabilities
+                .iter()
+                .any(|advertised| advertised == capability)
+    }))
+}
+
+fn page_offset(offset: Option<i32>) -> Result<Option<SearchOffset>, ProviderError> {
+    offset
+        .map(|offset| {
+            u32::try_from(offset)
+                .map_err(|_| invalid_offset())
+                .and_then(|offset| SearchOffset::new(offset).map_err(|_| invalid_offset()))
+        })
+        .transpose()
+}
+
+fn invalid_offset() -> ProviderError {
+    ProviderError::InvalidCatalogueData(
+        crate::features::music_library::domain::ValidationError::OutOfRange {
+            field: "offset",
+            min: 0,
+            max: i64::from(crate::features::music_library::catalogue::MAX_SEARCH_OFFSET),
+        },
+    )
+}
+
+fn map_catalogue_transport_error<T>(error: TransportError<T>) -> ProviderError {
     match error {
         TransportError::Reqwest(error) => ProviderError::request(error),
         TransportError::Serde(error) => ProviderError::malformed(error),
@@ -139,14 +244,31 @@ fn map_album_error(error: TransportError<FetchCatalogueAlbumError>) -> ProviderE
     }
 }
 
+fn map_search_error(error: TransportError<SearchCatalogueError>) -> ProviderError {
+    match error {
+        TransportError::Reqwest(error) => ProviderError::request(error),
+        TransportError::Serde(error) => ProviderError::malformed(error),
+        TransportError::SerdePathToError(error) => ProviderError::malformed(error),
+        TransportError::Io(error) => ProviderError::request(error),
+        TransportError::ResponseError(response) => match response.status {
+            reqwest::StatusCode::BAD_REQUEST => ProviderError::InvalidRequest,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR => ProviderError::Internal,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE => ProviderError::ProviderUnavailable,
+            _ => ProviderError::ProviderUnavailable,
+        },
+    }
+}
+
 mod mapping {
     use whio_resolver_api::models::{
-        CatalogueAlbum as CatalogueAlbumDto, CatalogueArtist as CatalogueArtistDto,
+        CatalogueAlbum as CatalogueAlbumDto, CatalogueAlbumCandidate as CatalogueAlbumCandidateDto,
+        CatalogueArtist as CatalogueArtistDto,
+        CatalogueArtistCandidate as CatalogueArtistCandidateDto,
         CatalogueCandidate as CatalogueCandidateDto, SourceIdentity as SourceIdentityDto,
     };
 
     use crate::{
-        features::music_library::catalogue::CatalogueCandidate,
+        features::music_library::catalogue::{CatalogueCandidate, ProviderError},
         features::music_library::domain::{
             AlbumMetadata, ArtistCredit, ArtworkRef, ProviderId, SourceIdentity, SourceScope,
             TrackMetadata, ValidationError,
@@ -165,6 +287,36 @@ mod mapping {
                 )
             })
             .transpose()
+    }
+
+    pub(super) fn album_candidate(
+        candidate: CatalogueAlbumCandidateDto,
+    ) -> Result<AlbumMetadata, ProviderError> {
+        let source = provider_source(Some(candidate.source))
+            .map_err(ProviderError::InvalidCatalogueData)?
+            .expect("an album candidate has a source");
+        let artist = candidate.artists.into_iter().next().ok_or_else(|| {
+            ProviderError::InvalidCatalogueData(ValidationError::Empty { field: "artist" })
+        })?;
+        let artist = artist_credit(artist).map_err(ProviderError::InvalidCatalogueData)?;
+        AlbumMetadata::new(candidate.title)
+            .map_err(ProviderError::InvalidCatalogueData)?
+            .with_provider(Some(source))
+            .with_year(candidate.year.flatten())
+            .map_err(ProviderError::InvalidCatalogueData)?
+            .with_release_type(candidate.release_type.flatten())
+            .map(|album| album.with_album_artist(artist))
+            .map_err(ProviderError::InvalidCatalogueData)
+    }
+
+    pub(super) fn artist_candidate(
+        candidate: CatalogueArtistCandidateDto,
+    ) -> Result<ArtistCredit, ProviderError> {
+        let source =
+            provider_source(Some(candidate.source)).map_err(ProviderError::InvalidCatalogueData)?;
+        ArtistCredit::new(candidate.name, None)
+            .map(|credit| credit.with_provider(source))
+            .map_err(ProviderError::InvalidCatalogueData)
     }
 
     fn artist_credit(artist: CatalogueArtistDto) -> Result<ArtistCredit, ValidationError> {

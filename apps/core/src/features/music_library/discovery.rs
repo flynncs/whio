@@ -381,7 +381,7 @@ impl DiscoveryService {
                 let Some(source) = credit else {
                     return Err(DiscoveryError::UnknownSeed);
                 };
-                let Some(artist_id) = self
+                let Some(artist) = self
                     .sources
                     .find_artist_by_source(&source)
                     .await
@@ -390,7 +390,7 @@ impl DiscoveryService {
                     return Err(DiscoveryError::UnknownSeed);
                 };
 
-                artist_id
+                artist.id().clone()
             }
         };
 
@@ -452,6 +452,7 @@ impl DiscoveryService {
         self.sources
             .find_artist_by_source(&source)
             .await
+            .map(|artist| artist.map(|artist| artist.id().clone()))
             .map_err(map_error)
     }
 
@@ -894,6 +895,7 @@ impl DiscoveryService {
                     .sources
                     .find_artist_by_source(&source)
                     .await
+                    .map(|artist| artist.map(|artist| artist.id().clone()))
                     .map_err(map_error)?,
                 None => None,
             };

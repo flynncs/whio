@@ -319,6 +319,22 @@ async fn find_or_attach_artist(
     }
 }
 
+pub(super) async fn find_artist_by_source(
+    pool: &PgPool,
+    source: &SourceIdentity,
+) -> Result<Option<Artist>, TrackRepositoryError> {
+    let row = sqlx::query_as::<_, ArtistRow>(
+        "SELECT a.id, a.name, a.sort_name, a.musicbrainz_artist_id FROM artists AS a JOIN artist_sources AS s ON s.artist_id = a.id WHERE s.provider_id = $1 AND s.source_scope = $2 AND s.external_id = $3",
+    )
+    .bind(source.provider_id().as_str())
+    .bind(encode_source_scope(source.source_scope()))
+    .bind(source.external_id())
+    .fetch_optional(pool)
+    .await
+    .map_err(repository_error)?;
+    row.map(decode_artist).transpose()
+}
+
 async fn find_artist_by_identifier(
     pool: &PgPool,
     identifier: &str,
@@ -475,6 +491,22 @@ async fn apply_observed_album_facts(
         Some(row) => Ok(Some(decode_album(row)?)),
         None => Ok(None),
     }
+}
+
+pub(super) async fn find_album_by_source(
+    pool: &PgPool,
+    source: &SourceIdentity,
+) -> Result<Option<Album>, TrackRepositoryError> {
+    let row = sqlx::query_as::<_, AlbumRow>(
+        "SELECT a.id, a.title, a.album_artist_id, a.year, a.release_type, a.label, a.musicbrainz_release_group_id, a.musicbrainz_release_id FROM albums AS a JOIN album_sources AS s ON s.album_id = a.id WHERE s.provider_id = $1 AND s.source_scope = $2 AND s.external_id = $3",
+    )
+    .bind(source.provider_id().as_str())
+    .bind(encode_source_scope(source.source_scope()))
+    .bind(source.external_id())
+    .fetch_optional(pool)
+    .await
+    .map_err(repository_error)?;
+    row.map(decode_album).transpose()
 }
 
 async fn find_album_by_release_group(

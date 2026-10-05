@@ -210,6 +210,7 @@ pub struct ArtistListFilter {
     library_id: Option<IdSet<LibraryId>>,
     missing: Option<bool>,
     sort_direction: Option<SortDirection>,
+    provider_identity: bool,
 }
 
 impl ArtistListFilter {
@@ -257,6 +258,11 @@ impl ArtistListFilter {
         self
     }
 
+    pub fn with_provider_identity(mut self, provider_identity: bool) -> Self {
+        self.provider_identity = provider_identity;
+        self
+    }
+
     pub fn name(&self) -> Option<&SelectorText> {
         self.name.as_ref()
     }
@@ -287,6 +293,10 @@ impl ArtistListFilter {
 
     pub fn sort_direction(&self) -> Option<SortDirection> {
         self.sort_direction
+    }
+
+    pub fn provider_identity(&self) -> bool {
+        self.provider_identity
     }
 
     pub fn resolved_direction(&self, sort: ArtistSort) -> SortDirection {

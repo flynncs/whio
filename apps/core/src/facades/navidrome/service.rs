@@ -244,7 +244,7 @@ pub(crate) async fn song_detail(
 const DEFAULT_PAGE_SIZE: u32 = 500;
 
 pub(crate) async fn album_list(
-    library: &LibraryService,
+    completion: &CompletionService,
     credential: &CredentialService,
     token: &str,
     order: AlbumOrder,
@@ -254,16 +254,16 @@ pub(crate) async fn album_list(
 ) -> Result<(Vec<Album>, u32), SongError> {
     let user = authorize(credential, token).await?;
     let (offset, limit) = page(start, end)?;
-    let total = library
-        .album_count(Some(&user), filter.clone())
-        .await
-        .map_err(SongError::Catalogue)?;
-    let albums = library
-        .album_list(offset, limit, order, filter, Some(&user))
+    let limit = PageLimit::new(limit).map_err(|_| SongError::InvalidSearch)?;
+    let page = completion
+        .album_page(offset, limit, order, &filter, Some(&user))
         .await
         .map_err(SongError::Catalogue)?;
 
-    Ok((albums.iter().map(album_from_summary).collect(), total))
+    Ok((
+        page.albums.iter().map(album_from_summary).collect(),
+        page.total,
+    ))
 }
 
 pub(crate) async fn album_detail(
@@ -624,14 +624,14 @@ pub(crate) async fn artist_list(
 }
 
 pub(crate) async fn artist_detail(
-    library: &LibraryService,
+    completion: &CompletionService,
     credential: &CredentialService,
     token: &str,
     raw_id: &str,
 ) -> Result<Artist, SongError> {
     let user = authorize(credential, token).await?;
     let artist_id: ArtistId = raw_id.parse().map_err(|_| SongError::NotFound)?;
-    let detail = library
+    let detail = completion
         .artist_detail(&artist_id, Some(&user))
         .await
         .map_err(SongError::Catalogue)?

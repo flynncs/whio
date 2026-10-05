@@ -1,12 +1,69 @@
 use std::sync::Arc;
 
 use crate::features::music_library::{
-    domain::{AlbumTrack, TrackHit},
+    domain::{Album, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, TrackHit},
     storage::contracts::{CatalogueWrite, SourceLookup},
 };
 
 use super::CatalogueError;
 use super::domain::CatalogueCandidate;
+
+pub(crate) async fn materialize_artist(
+    catalogue: &Arc<dyn CatalogueWrite>,
+    sources: &Arc<dyn SourceLookup>,
+    credit: &ArtistCredit,
+) -> Result<Artist, CatalogueError> {
+    if let Some(source) = credit.provider()
+        && let Some(artist) = sources
+            .find_artist_by_source(source)
+            .await
+            .map_err(CatalogueError::Repository)?
+    {
+        return Ok(artist);
+    }
+
+    let artist = catalogue
+        .resolve_or_create_artist(credit)
+        .await
+        .map_err(CatalogueError::Repository)?;
+    if let Some(source) = credit.provider() {
+        catalogue
+            .set_artist_source(artist.id(), source)
+            .await
+            .map_err(CatalogueError::Repository)?;
+    }
+    Ok(artist)
+}
+
+pub(crate) async fn materialize_album(
+    catalogue: &Arc<dyn CatalogueWrite>,
+    sources: &Arc<dyn SourceLookup>,
+    metadata: &AlbumMetadata,
+) -> Result<Album, CatalogueError> {
+    if let Some(source) = metadata.provider()
+        && let Some(album) = sources
+            .find_album_by_source(source)
+            .await
+            .map_err(CatalogueError::Repository)?
+    {
+        return Ok(album);
+    }
+
+    if let Some(artist) = metadata.album_artist() {
+        materialize_artist(catalogue, sources, artist).await?;
+    }
+    let album = catalogue
+        .resolve_or_create_album(metadata)
+        .await
+        .map_err(CatalogueError::Repository)?;
+    if let Some(source) = metadata.provider() {
+        catalogue
+            .set_album_source(album.id(), source)
+            .await
+            .map_err(CatalogueError::Repository)?;
+    }
+    Ok(album)
+}
 
 pub(crate) async fn materialize(
     catalogue: &Arc<dyn CatalogueWrite>,
@@ -28,16 +85,7 @@ pub(crate) async fn materialize(
 
         let album = match &album_metadata {
             Some(album_metadata) => {
-                let album = catalogue
-                    .resolve_or_create_album(album_metadata)
-                    .await
-                    .map_err(CatalogueError::Repository)?;
-                if let Some(provider) = album_metadata.provider() {
-                    catalogue
-                        .set_album_source(album.id(), provider)
-                        .await
-                        .map_err(CatalogueError::Repository)?;
-                }
+                let album = materialize_album(catalogue, sources, album_metadata).await?;
                 catalogue
                     .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
                     .await
@@ -56,15 +104,8 @@ pub(crate) async fn materialize(
         };
 
         for credit in &credits {
-            if let Some(provider) = credit.provider() {
-                let artist = catalogue
-                    .resolve_or_create_artist(credit)
-                    .await
-                    .map_err(CatalogueError::Repository)?;
-                catalogue
-                    .set_artist_source(artist.id(), provider)
-                    .await
-                    .map_err(CatalogueError::Repository)?;
+            if credit.provider().is_some() {
+                materialize_artist(catalogue, sources, credit).await?;
             }
         }
 

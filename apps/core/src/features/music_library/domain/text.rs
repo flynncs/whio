@@ -3,6 +3,18 @@ use unicode_normalization::UnicodeNormalization;
 use super::ValidationError;
 
 pub(crate) fn normalize_for_matching(value: &str) -> String {
+    normalize(value)
+}
+
+pub(crate) fn normalize_for_search(value: &str) -> String {
+    normalize(value)
+        .nfd()
+        .filter(|character| !('\u{0300}'..='\u{036f}').contains(character))
+        .nfc()
+        .collect()
+}
+
+fn normalize(value: &str) -> String {
     value
         .nfc()
         .map(fold_typographic)
@@ -69,6 +81,16 @@ mod tests {
         assert_eq!(normalize_for_matching("  À  B "), "à b");
         assert_eq!(normalize_for_matching("Discovery"), "discovery");
         assert_eq!(normalize_for_matching("a\t\n b"), "a b");
+    }
+
+    #[test]
+    fn search_normalization_folds_only_combining_accents() {
+        assert_eq!(normalize_for_search("Marías"), "marias");
+        assert_eq!(normalize_for_search("Jose\u{301}"), "jose");
+        assert_eq!(
+            normalize_for_search("Straße Smørre Łódź"),
+            "straße smørre łodz"
+        );
     }
 
     #[test]

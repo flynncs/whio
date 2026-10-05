@@ -133,6 +133,97 @@ paths:
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 
+  /v1/catalogue/album-search:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: searchCatalogueAlbums
+      summary: Search provider albums
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogueSearchRequest"
+      responses:
+        "200":
+          description: Normalized provider album candidates
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueAlbumSearchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/catalogue/artist-search:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: searchCatalogueArtists
+      summary: Search provider artists
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogueSearchRequest"
+      responses:
+        "200":
+          description: Normalized provider artist candidates
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueArtistSearchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/catalogue/artist:
+    parameters:
+      - $ref: "#/components/parameters/RequestId"
+    post:
+      operationId: fetchCatalogueArtist
+      summary: Fetch an artist's albums and singles
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogueEntityRequest"
+      responses:
+        "200":
+          description: Normalized artist album candidates
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogueArtistAlbumsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/SourceNotFound"
+        "422":
+          $ref: "#/components/responses/UnsupportedProvider"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
   /v1/catalogue/album:
     parameters:
       - $ref: "#/components/parameters/RequestId"
@@ -391,6 +482,9 @@ components:
       pattern: "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
       examples:
         - catalogue.search
+        - catalogue.album-search
+        - catalogue.artist-search
+        - catalogue.artist
         - playback.resolve
 
     SourceIdentity:
@@ -478,6 +572,92 @@ components:
           minimum: 0
           maximum: 1000
           default: 0
+
+    CatalogueAlbumSearchResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - results
+      properties:
+        next_offset:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogueAlbumCandidate"
+
+    CatalogueArtistSearchResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - results
+      properties:
+        next_offset:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogueArtistCandidate"
+
+    CatalogueArtistAlbumsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogueAlbumCandidate"
+
+    CatalogueAlbumCandidate:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - title
+        - artists
+      properties:
+        source:
+          $ref: "#/components/schemas/SourceIdentity"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        artists:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/CatalogueArtist"
+        year:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        release_type:
+          type:
+            - string
+            - "null"
+          minLength: 1
+          maxLength: 100
+
+    CatalogueArtistCandidate:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+        - name
+      properties:
+        source:
+          $ref: "#/components/schemas/SourceIdentity"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 500
 
     CatalogueSearchResponse:
       type: object

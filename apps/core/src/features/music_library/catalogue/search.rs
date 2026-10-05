@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use tokio::{sync::Semaphore, task::JoinSet};
 use uuid::Uuid;
@@ -11,7 +11,7 @@ use crate::{
     features::music_library::{
         domain::{
             AlbumSummary, ArtistListFilter, ArtistSummary, SearchConfidence, SearchTerms, TrackId,
-            best_field_quality,
+            ValidationError, best_field_quality,
         },
         storage::contracts::{CatalogueWrite, LibraryRead, SourceLookup, StateStore},
     },
@@ -31,6 +31,7 @@ pub struct SearchService {
     dedup_mode: DedupMode,
     dedup_budget: Duration,
     search_budget: Duration,
+    concurrency: Arc<Semaphore>,
 }
 
 pub struct SearchOutcome {
@@ -177,6 +178,7 @@ impl SearchService {
             dedup_mode: DedupMode::Suppress,
             dedup_budget: super::dedup::DEFAULT_DEDUP_BUDGET,
             search_budget: DEFAULT_SEARCH_BUDGET,
+            concurrency: Arc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY)),
         }
     }
 
@@ -196,6 +198,7 @@ impl SearchService {
             dedup_mode: DedupMode::Suppress,
             dedup_budget: super::dedup::DEFAULT_DEDUP_BUDGET,
             search_budget: DEFAULT_SEARCH_BUDGET,
+            concurrency: Arc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY)),
         }
     }
 
@@ -226,12 +229,13 @@ impl SearchService {
             when(windows.tracks(), |window| self
                 .search_tracks(query, window, user, context)),
             when(windows.albums(), |window| self
-                .search_albums(query, window, user)),
+                .search_albums(query, window, user, context)),
             when(windows.artists(), |window| self.search_artists(
                 query,
                 window,
                 request.artist_filter(),
-                user
+                user,
+                context
             )),
         );
 
@@ -270,8 +274,8 @@ impl SearchService {
             .await
             .map_err(CatalogueError::Repository)?;
         let (fresh, discovery) = self
-            .discover_tracks(query, window.target(), user, context)
-            .await;
+            .discover_tracks(query, window.target(), context)
+            .await?;
         let (known, fresh) = self.dedup_tracks(known, fresh, user, context).await;
         let confidence = library_confidence(&SearchTerms::new(query.as_str()), &known);
         let merged = merge_by_track(known.into_iter().chain(fresh));
@@ -313,13 +317,30 @@ impl SearchService {
         query: &SearchQuery,
         window: SearchWindow,
         user: Option<&Uuid>,
+        context: &RequestContext,
     ) -> Result<Vec<AlbumSummary>, CatalogueError> {
+        let (metadata, discovery) = self
+            .discover_page_kind(
+                query,
+                window.target(),
+                context,
+                |provider, search, context| async move {
+                    provider.search_albums(&search, &context).await
+                },
+            )
+            .await?;
+        for album in &metadata {
+            super::materialize::materialize_album(&self.catalogue, &self.source_lookup, album)
+                .await?;
+        }
         let albums = self
             .library
             .search_albums(query.as_str(), window.target(), user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
-
+        if let Some(error) = discovery.failure(!albums.is_empty()) {
+            return Err(error);
+        }
         Ok(window.slice(albums))
     }
 
@@ -329,13 +350,30 @@ impl SearchService {
         window: SearchWindow,
         filter: &ArtistListFilter,
         user: Option<&Uuid>,
+        context: &RequestContext,
     ) -> Result<Vec<ArtistSummary>, CatalogueError> {
+        let (credits, discovery) = self
+            .discover_page_kind(
+                query,
+                window.target(),
+                context,
+                |provider, search, context| async move {
+                    provider.search_artists(&search, &context).await
+                },
+            )
+            .await?;
+        for credit in &credits {
+            super::materialize::materialize_artist(&self.catalogue, &self.source_lookup, credit)
+                .await?;
+        }
         let artists = self
             .library
             .search_artists(query.as_str(), window.target(), user.copied(), filter)
             .await
             .map_err(CatalogueError::Repository)?;
-
+        if let Some(error) = discovery.failure(!artists.is_empty()) {
+            return Err(error);
+        }
         Ok(window.slice(artists))
     }
 
@@ -343,79 +381,63 @@ impl SearchService {
         &self,
         query: &SearchQuery,
         target: u32,
-        user: Option<&Uuid>,
         context: &RequestContext,
-    ) -> (Vec<SearchHit>, DiscoveryStatus) {
-        let mut tasks = JoinSet::new();
-        let concurrency = Arc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY));
+    ) -> Result<(Vec<SearchHit>, DiscoveryStatus), CatalogueError> {
         let query = query.clone();
-        let budget = self.search_budget;
-        for (index, provider) in self.providers.iter().enumerate() {
-            let permit = Arc::clone(&concurrency);
-            let pending = Self::search_source(
-                Arc::clone(provider),
-                Arc::clone(&self.catalogue),
-                Arc::clone(&self.source_lookup),
-                query.clone(),
-                target,
-                user.copied(),
-                context.clone(),
-            );
-            tasks.spawn(async move {
-                let _permit = permit
-                    .acquire_owned()
-                    .await
-                    .expect("catalogue concurrency semaphore never closes");
-                match tokio::time::timeout(budget, pending).await {
-                    Ok(result) => (index, result),
-                    Err(_) => {
-                        tracing::warn!("catalogue source exceeded its provider budget");
-                        (
-                            index,
-                            Err(CatalogueError::Provider(ProviderError::ProviderUnavailable)),
-                        )
-                    }
+        let context = context.clone();
+        let catalogue = Arc::clone(&self.catalogue);
+        let sources = Arc::clone(&self.source_lookup);
+        run_provider_tasks(
+            self.providers.clone(),
+            Arc::clone(&self.concurrency),
+            self.search_budget,
+            move |provider| {
+                let query = query.clone();
+                let context = context.clone();
+                let catalogue = Arc::clone(&catalogue);
+                let sources = Arc::clone(&sources);
+                async move {
+                    Self::search_source(provider, catalogue, sources, query, target, context).await
                 }
-            });
-        }
-
-        let mut results = (0..self.providers.len())
-            .map(|_| None)
-            .collect::<Vec<Option<Result<Vec<SearchHit>, CatalogueError>>>>();
-        while let Some(result) = tasks.join_next().await {
-            let (index, result) = result.expect("search tasks never panic");
-            results[index] = Some(result);
-        }
-
-        let mut hits = Vec::new();
-        let mut first_error = None;
-        let mut any_success = false;
-        for result in results.into_iter().flatten() {
-            match result {
-                Ok(page) => {
-                    any_success = true;
-                    hits.extend(page);
-                }
-                Err(CatalogueError::Provider(ProviderError::CredentialsRejected)) => {
-                    tracing::warn!("catalogue source credentials were rejected");
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "catalogue source skipped");
-                    if matches!(error, CatalogueError::Provider(ProviderError::Access)) {
-                        first_error = Some(error);
-                    } else {
-                        first_error.get_or_insert(error);
-                    }
-                }
-            }
-        }
-        (
-            hits,
-            DiscoveryStatus {
-                first_error,
-                any_success,
             },
         )
+        .await
+    }
+
+    async fn discover_page_kind<T, F, Fut>(
+        &self,
+        query: &SearchQuery,
+        target: u32,
+        context: &RequestContext,
+        fetch: F,
+    ) -> Result<(Vec<T>, DiscoveryStatus), CatalogueError>
+    where
+        T: Send + 'static,
+        F: Fn(Arc<dyn CatalogueProvider>, CatalogueSearch, RequestContext) -> Fut
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        Fut: Future<Output = Result<super::domain::CataloguePage<T>, ProviderError>>
+            + Send
+            + 'static,
+    {
+        let query = query.clone();
+        let context = context.clone();
+        run_provider_tasks(
+            self.providers.clone(),
+            Arc::clone(&self.concurrency),
+            self.search_budget,
+            move |provider| {
+                let query = query.clone();
+                let context = context.clone();
+                let fetch = fetch.clone();
+                async move {
+                    fetch_catalogue_pages(provider, &query, target, &context, fetch).await
+                }
+            },
+        )
+        .await
     }
 
     async fn search_source(
@@ -424,7 +446,6 @@ impl SearchService {
         sources: Arc<dyn SourceLookup>,
         query: SearchQuery,
         target: u32,
-        user: Option<Uuid>,
         context: RequestContext,
     ) -> Result<Vec<SearchHit>, CatalogueError> {
         let mut hits = Vec::new();
@@ -437,7 +458,7 @@ impl SearchService {
                 SearchOffset::new(fetched).expect("bounded provider offset is valid"),
             );
             let candidates = provider
-                .search(&search, user.as_ref(), &context)
+                .search_tracks(&search, &context)
                 .await
                 .map_err(CatalogueError::Provider)?;
             let page_len = candidates.len() as u32;
@@ -456,11 +477,133 @@ struct DiscoveryStatus {
     any_success: bool,
 }
 
+async fn run_provider_tasks<T, F, Fut>(
+    providers: Vec<Arc<dyn CatalogueProvider>>,
+    concurrency: Arc<Semaphore>,
+    budget: Duration,
+    operation: F,
+) -> Result<(Vec<T>, DiscoveryStatus), CatalogueError>
+where
+    T: Send + 'static,
+    F: Fn(Arc<dyn CatalogueProvider>) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<Vec<T>, CatalogueError>> + Send + 'static,
+{
+    let mut tasks = JoinSet::new();
+    for (index, provider) in providers.iter().cloned().enumerate() {
+        let permit = Arc::clone(&concurrency);
+        let operation = operation.clone();
+        tasks.spawn(async move {
+            let _permit = permit
+                .acquire_owned()
+                .await
+                .expect("catalogue concurrency semaphore never closes");
+            match tokio::time::timeout(budget, operation(provider)).await {
+                Ok(result) => (index, result),
+                Err(_) => {
+                    tracing::warn!("catalogue source exceeded its provider budget");
+                    (
+                        index,
+                        Err(CatalogueError::Provider(ProviderError::ProviderUnavailable)),
+                    )
+                }
+            }
+        });
+    }
+
+    let mut results = (0..providers.len())
+        .map(|_| None)
+        .collect::<Vec<Option<Result<Vec<T>, CatalogueError>>>>();
+    while let Some(result) = tasks.join_next().await {
+        let (index, result) = result.expect("search tasks never panic");
+        results[index] = Some(result);
+    }
+
+    let mut items = Vec::new();
+    let mut first_error = None;
+    let mut access_error = None;
+    let mut any_success = false;
+    for result in results.into_iter().flatten() {
+        match result {
+            Ok(found) => {
+                any_success = true;
+                items.extend(found);
+            }
+            Err(CatalogueError::Provider(ProviderError::UnsupportedProvider)) => {}
+            Err(CatalogueError::Provider(ProviderError::CredentialsRejected)) => {
+                tracing::warn!("catalogue source credentials were rejected");
+            }
+            Err(error @ CatalogueError::Repository(_))
+            | Err(error @ CatalogueError::Invalid(_)) => return Err(error),
+            Err(error) => {
+                tracing::warn!(%error, "catalogue source skipped");
+                if matches!(error, CatalogueError::Provider(ProviderError::Access)) {
+                    access_error.get_or_insert(error);
+                } else {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+    }
+    Ok((
+        items,
+        DiscoveryStatus {
+            first_error: access_error.or(first_error),
+            any_success,
+        },
+    ))
+}
+
+async fn fetch_catalogue_pages<T, F, Fut>(
+    provider: Arc<dyn CatalogueProvider>,
+    query: &SearchQuery,
+    target: u32,
+    context: &RequestContext,
+    mut fetch: F,
+) -> Result<Vec<T>, CatalogueError>
+where
+    F: FnMut(Arc<dyn CatalogueProvider>, CatalogueSearch, RequestContext) -> Fut,
+    Fut: Future<Output = Result<super::domain::CataloguePage<T>, ProviderError>>,
+{
+    let mut items = Vec::new();
+    let mut offset = 0u32;
+    while offset < target {
+        let limit = (target - offset).min(PROVIDER_PAGE_LIMIT);
+        let search = CatalogueSearch::new_with_offset(
+            query.clone(),
+            SearchLimit::new(limit).expect("bounded provider limit is valid"),
+            SearchOffset::new(offset).expect("provider offset is bounded"),
+        );
+        let expected_next = offset + limit;
+        let page = fetch(Arc::clone(&provider), search, context.clone())
+            .await
+            .map_err(CatalogueError::Provider)?;
+        let (found, next_offset) = page.into_parts();
+        if found.len() as u32 > limit {
+            return Err(invalid_provider_cursor());
+        }
+        items.extend(found);
+        match next_offset {
+            Some(next) if next.get() == expected_next && next.get() <= super::MAX_SEARCH_OFFSET => {
+                offset = next.get();
+            }
+            Some(_) => return Err(invalid_provider_cursor()),
+            None => break,
+        }
+    }
+    Ok(items)
+}
+
+fn invalid_provider_cursor() -> CatalogueError {
+    CatalogueError::Provider(ProviderError::InvalidCatalogueData(
+        ValidationError::Invalid { field: "offset" },
+    ))
+}
+
 impl DiscoveryStatus {
-    fn failure(self, found_tracks: bool) -> Option<CatalogueError> {
+    fn failure(self, found_results: bool) -> Option<CatalogueError> {
         match self.first_error {
             Some(error @ CatalogueError::Provider(ProviderError::Access)) => Some(error),
-            Some(error) if !self.any_success && !found_tracks => Some(error),
+            Some(error) if !self.any_success && !found_results => Some(error),
             _ => None,
         }
     }

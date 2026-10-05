@@ -51,10 +51,9 @@ struct StubAlbumProvider {
 
 #[async_trait]
 impl CatalogueProvider for StubAlbumProvider {
-    async fn search(
+    async fn search_tracks(
         &self,
         _search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         Ok(Vec::new())
@@ -74,6 +73,31 @@ impl CatalogueProvider for StubAlbumProvider {
     }
 }
 
+struct ArtistAlbumsProvider {
+    album: AlbumMetadata,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl CatalogueProvider for ArtistAlbumsProvider {
+    async fn search_tracks(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn fetch_artist_albums(
+        &self,
+        _source: &SourceIdentity,
+        _context: &RequestContext,
+    ) -> Result<Vec<AlbumMetadata>, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![self.album.clone()])
+    }
+}
+
 struct PerSourceAlbumProvider {
     missing: &'static str,
     fetched: FetchedAlbum,
@@ -82,10 +106,9 @@ struct PerSourceAlbumProvider {
 
 #[async_trait]
 impl CatalogueProvider for PerSourceAlbumProvider {
-    async fn search(
+    async fn search_tracks(
         &self,
         _search: &CatalogueSearch,
-        _user: Option<&Uuid>,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
         Ok(Vec::new())
@@ -166,6 +189,82 @@ async fn partial_album_with_sources(
 
 async fn partial_album(repository: &Arc<PostgresTrackRepository>) -> AlbumId {
     partial_album_with_sources(repository, &["MPREb_album"]).await
+}
+
+#[sqlx::test]
+async fn artist_detail_completes_each_provider_discography_once(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let artist_source = provider_source("UC-artist");
+    let artist = repository
+        .resolve_or_create_artist(
+            &ArtistCredit::new("Olivia Rodrigo".to_owned(), None)
+                .unwrap()
+                .with_provider(Some(artist_source.clone())),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_artist_source(artist.id(), &artist_source)
+        .await
+        .unwrap();
+    let album = AlbumMetadata::new("SOUR".to_owned())
+        .unwrap()
+        .with_provider(Some(provider_source("MPREb_artist-album")))
+        .with_album_artist(
+            ArtistCredit::new("Olivia Rodrigo".to_owned(), None)
+                .unwrap()
+                .with_provider(Some(artist_source.clone())),
+        );
+    let sources = Arc::clone(&repository) as Arc<dyn SourceLookup>;
+    let library = Arc::new(LibraryService::new(
+        Arc::clone(&repository) as Arc<dyn LibraryRead>,
+        Arc::clone(&sources),
+        Arc::clone(&repository) as Arc<dyn StateStore>,
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let completion = CompletionService::new(
+        library,
+        Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&sources),
+        vec![Arc::new(ArtistAlbumsProvider {
+            album,
+            calls: Arc::clone(&calls),
+        })],
+    );
+
+    let detail = completion
+        .artist_detail(artist.id(), None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.albums.len(), 1);
+    assert_eq!(detail.albums[0].album().title(), "SOUR");
+    assert_eq!(detail.albums[0].track_count(), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let filter = AlbumListFilter::new().with_artist_id(Some(
+        crate::features::music_library::domain::IdSet::new([artist.id().clone()]).unwrap(),
+    ));
+    let page = completion
+        .album_page(
+            0,
+            crate::features::music_library::domain::PageLimit::new(1).unwrap(),
+            crate::features::music_library::domain::AlbumOrder::Name,
+            &filter,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.albums[0].album().title(), "SOUR");
+
+    completion.artist_detail(artist.id(), None).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let state = sources
+        .find_provider_entity_state(&artist_source)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(state.last_error().is_none());
 }
 
 #[sqlx::test]

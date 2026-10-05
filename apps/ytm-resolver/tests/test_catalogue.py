@@ -78,6 +78,155 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
             str(response.results[0].artwork_url), "https://art.test/sour.jpg"
         )
 
+    def test_album_search_slices_raw_rows_before_dropping_invalid_rows(self) -> None:
+        client = Mock()
+        client.search.return_value = [
+            {"browseId": "MPREb_0", "title": "Skip", "artists": [{"name": "A"}]},
+            {"browseId": "MPREb_1", "title": "The Marías", "artists": [{"name": "Marias", "id": "UC1"}]},
+            {"browseId": "not-an-album", "title": "No ID", "artists": [{"name": "A"}]},
+            {"browseId": "MPREb_3", "title": "Valid", "artists": [{"name": "B"}]},
+        ]
+        page = YouTubeMusicCatalogue(client).search_albums("marias", 2, 1)
+        client.search.assert_called_once_with("marias", filter="albums", limit=3)
+        self.assertEqual([album.title for album in page.results], ["The Marías"])
+        self.assertEqual(page.results[0].artists[0].source.external_id, "UC1")
+        self.assertEqual(page.next_offset, 3)
+
+    def test_artist_search_drops_rows_without_real_identity_or_name(self) -> None:
+        client = Mock()
+        client.search.return_value = [
+            {"browseId": "UC1", "artist": "Beyoncé"},
+            {"browseId": "not-an-artist", "artist": "Missing identity"},
+            {"browseId": "UC3", "artist": "  "},
+        ]
+        page = YouTubeMusicCatalogue(client).search_artists("beyonce", 3)
+        client.search.assert_called_once_with("beyonce", filter="artists", limit=3)
+        self.assertEqual([artist.name for artist in page.results], ["Beyoncé"])
+        self.assertEqual(page.next_offset, 3)
+
+    def test_entity_search_drops_non_mapping_rows(self) -> None:
+        client = Mock()
+        client.search.side_effect = [
+            [
+                None,
+                {"browseId": "MPREb_album", "title": "SOUR", "artists": [{"name": "Artist"}]},
+            ],
+            [False, {"browseId": "UC1", "artist": "Beyoncé"}],
+        ]
+
+        albums = YouTubeMusicCatalogue(client).search_albums("SOUR", 2)
+        artists = YouTubeMusicCatalogue(client).search_artists("beyonce", 2)
+
+        self.assertEqual([album.title for album in albums.results], ["SOUR"])
+        self.assertEqual([artist.name for artist in artists.results], ["Beyoncé"])
+        self.assertEqual(client.search.call_count, 2)
+
+    def test_artist_fetch_drops_non_mapping_shelf_rows(self) -> None:
+        client = Mock()
+        client.get_artist.return_value = {
+            "albums": {
+                "results": [
+                    None,
+                    {"browseId": "MPREb_album", "title": "SOUR", "artists": [{"name": "Artist"}]},
+                ]
+            },
+            "singles": {
+                "results": [
+                    "malformed",
+                    {"browseId": "MPREb_single", "title": "Single", "artists": [{"name": "Artist"}]},
+                ]
+            },
+        }
+
+        result = YouTubeMusicCatalogue(client).fetch_artist(
+            SourceIdentity(provider_id="youtube_music", external_id="UCartist")
+        )
+
+        self.assertEqual(
+            [album.source.external_id for album in result.results],
+            ["MPREb_album", "MPREb_single"],
+        )
+
+    def test_artist_fetch_maps_non_mapping_artist_response_to_source_not_found(self) -> None:
+        client = Mock()
+        client.get_artist.return_value = []
+
+        with self.assertRaises(SourceNotFoundError):
+            YouTubeMusicCatalogue(client).fetch_artist(
+                SourceIdentity(provider_id="youtube_music", external_id="UCartist")
+            )
+
+        client.get_artist_albums.assert_not_called()
+
+    def test_artist_fetch_maps_non_mapping_expanded_shelf_to_provider_error(self) -> None:
+        client = Mock()
+        client.get_artist.return_value = {
+            "albums": {"results": [], "browseId": "VL1", "params": "album-params"}
+        }
+        client.get_artist_albums.return_value = []
+
+        with self.assertRaises(ProviderUnavailableError):
+            YouTubeMusicCatalogue(client).fetch_artist(
+                SourceIdentity(provider_id="youtube_music", external_id="UCartist")
+            )
+
+    def test_artist_fetch_expands_shelves_and_deduplicates_in_order(self) -> None:
+        client = Mock()
+        client.get_artist.return_value = {
+            "albums": {"results": [{"browseId": "MPREb_1", "title": "First", "artists": [{"name": "Artist"}]}], "browseId": "VL1", "params": "album-params"},
+            "singles": {"results": [{"browseId": "MPREb_2", "title": "Single", "artists": [{"name": "Artist"}]}], "browseId": "VL2", "params": "single-params"},
+        }
+        client.get_artist_albums.side_effect = [
+            {"results": [
+                {"browseId": "MPREb_1", "title": "Duplicate", "artists": [{"name": "Artist"}]},
+                {"browseId": "MPREb_3", "title": "Second", "artists": [{"name": "Artist"}]},
+            ]},
+            {"results": [
+                {"browseId": "MPREb_3", "title": "Duplicate single", "artists": [{"name": "Artist"}]},
+                {"browseId": "MPREb_4", "title": "Fourth", "artists": [{"name": "Artist"}]},
+            ]},
+        ]
+        result = YouTubeMusicCatalogue(client).fetch_artist(
+            SourceIdentity(provider_id="youtube_music", external_id="UCartist")
+        )
+        self.assertEqual(
+            [album.source.external_id for album in result.results],
+            ["MPREb_1", "MPREb_3", "MPREb_4"],
+        )
+        self.assertEqual([album.title for album in result.results], ["Duplicate", "Second", "Fourth"])
+        client.get_artist.assert_called_once_with("UCartist")
+        self.assertEqual(client.get_artist_albums.call_count, 2)
+
+    def test_artist_fetch_caps_each_shelf_and_total_distinct_identities(self) -> None:
+        client = Mock()
+        albums = [
+            {"browseId": f"MPREb_{index}", "title": f"Album {index}", "artists": [{"name": "Artist"}]}
+            for index in range(120)
+        ]
+        singles = [
+            {"browseId": f"MPREb_{index}", "title": f"Single {index}", "artists": [{"name": "Artist"}]}
+            for index in range(100, 220)
+        ]
+        client.get_artist.return_value = {
+            "albums": {"results": albums},
+            "singles": {"results": singles},
+        }
+        result = YouTubeMusicCatalogue(client).fetch_artist(
+            SourceIdentity(provider_id="youtube_music", external_id="UCartist")
+        )
+        self.assertEqual(len(result.results), 200)
+        self.assertEqual(result.results[0].source.external_id, "MPREb_0")
+        self.assertEqual(result.results[-1].source.external_id, "MPREb_199")
+        client.get_artist_albums.assert_not_called()
+
+    def test_fetch_artist_rejects_wrong_identity_before_calling_provider(self) -> None:
+        client = Mock()
+        with self.assertRaises(SourceNotFoundError):
+            YouTubeMusicCatalogue(client).fetch_artist(
+                SourceIdentity(provider_id="youtube_music", external_id="not-UC")
+            )
+        client.get_artist.assert_not_called()
+
     def test_fetch_album_rejects_a_non_album_id_before_calling_the_provider(
         self,
     ) -> None:

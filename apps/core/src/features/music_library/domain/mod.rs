@@ -23,7 +23,7 @@ mod track;
 
 pub use album::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumListScope, AlbumMetadata, AlbumOrder,
-    AlbumSummary, AlbumTrack, DatePrecision, PartialDate,
+    AlbumPage, AlbumSummary, AlbumTrack, DatePrecision, PartialDate,
 };
 pub use artist::{
     Artist, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort, ArtistSummary, CreditRole,

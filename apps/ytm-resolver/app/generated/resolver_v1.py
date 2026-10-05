@@ -10,7 +10,7 @@ from pydantic import AnyUrl, AwareDatetime, BaseModel, ConfigDict, Field, RootMo
 class CapabilityId(RootModel[str]):
     root: str = Field(
         ...,
-        examples=['catalogue.search', 'playback.resolve'],
+        examples=['catalogue.search', 'catalogue.album-search', 'catalogue.artist-search', 'catalogue.artist', 'playback.resolve'],
         max_length=64,
         min_length=1,
         pattern='^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$',
@@ -66,6 +66,14 @@ class CatalogueSearchRequest(BaseModel):
     query: str = Field(..., max_length=500, min_length=1)
     limit: int = Field(..., ge=1, le=25)
     offset: int = Field(0, ge=0, le=1000)
+
+
+class CatalogueArtistCandidate(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    source: SourceIdentity
+    name: str = Field(..., max_length=500, min_length=1)
 
 
 class CatalogueArtist(BaseModel):
@@ -272,6 +280,25 @@ class CapabilitiesResponse(BaseModel):
     providers: list[ProviderCapabilities] = Field(..., min_length=1)
 
 
+class CatalogueArtistSearchResponse(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    next_offset: int | None = Field(None, ge=1, le=1000)
+    results: list[CatalogueArtistCandidate]
+
+
+class CatalogueAlbumCandidate(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    source: SourceIdentity
+    title: str = Field(..., max_length=500, min_length=1)
+    artists: list[CatalogueArtist] = Field(..., min_length=1)
+    year: int | None = Field(None, ge=0)
+    release_type: str | None = Field(None, max_length=100, min_length=1)
+
+
 class CatalogueCandidate(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
@@ -356,6 +383,21 @@ class MetadataFieldError(BaseModel):
     code: ErrorCode
     retryable: bool
     message: str | None = Field(None, max_length=500)
+
+
+class CatalogueAlbumSearchResponse(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    next_offset: int | None = Field(None, ge=1, le=1000)
+    results: list[CatalogueAlbumCandidate]
+
+
+class CatalogueArtistAlbumsResponse(BaseModel):
+    model_config = ConfigDict(
+        extra='forbid',
+    )
+    results: list[CatalogueAlbumCandidate]
 
 
 class CatalogueSearchResponse(BaseModel):

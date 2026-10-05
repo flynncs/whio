@@ -331,7 +331,7 @@ pub(crate) async fn album_list(
     };
 
     match service::album_list(
-        state.library(),
+        state.completion(),
         state.credential(),
         &token.0,
         order,
@@ -442,7 +442,7 @@ pub(crate) async fn artist_detail(
     token: NdToken,
     Path(id): Path<String>,
 ) -> Response {
-    match service::artist_detail(state.library(), state.credential(), &token.0, &id).await {
+    match service::artist_detail(state.completion(), state.credential(), &token.0, &id).await {
         Ok(artist) => Json(artist).into_response(),
         Err(error) => song_error(error, &context),
     }

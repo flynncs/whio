@@ -696,10 +696,9 @@ async fn invalid_song_queries_do_not_complete_provider_albums(pool: PgPool) {
 
     #[async_trait::async_trait]
     impl CatalogueProvider for CountingAlbumProvider {
-        async fn search(
+        async fn search_tracks(
             &self,
             _search: &CatalogueSearch,
-            _user: Option<&Uuid>,
             _context: &RequestContext,
         ) -> Result<Vec<CatalogueCandidate>, CatalogueProviderError> {
             Ok(Vec::new())

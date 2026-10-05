@@ -114,6 +114,11 @@ pub(crate) fn folded(value: &str) -> String {
     )
 }
 
+pub(crate) fn search_folded(value: &str) -> String {
+    let decomposed = format!("normalize({}, NFD)", folded(value));
+    format!("normalize(regexp_replace({decomposed}, U&'[\\0300-\\036F]', '', 'g'), NFC)")
+}
+
 // the browse scope. a provider entity is browsable when it is engaged: owned,
 // or starred, rated or played by the viewer. each query inlines the clause with
 // its own parameter positions, so the numbers here match that query's binds.

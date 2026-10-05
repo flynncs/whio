@@ -29,6 +29,9 @@ YOUTUBE_MUSIC_CAPABILITIES: Mapping[str, tuple[CapabilityId, ...]] = {
     YOUTUBE_MUSIC_PROVIDER: (
         CapabilityId("catalogue.search"),
         CapabilityId("catalogue.album"),
+        CapabilityId("catalogue.album-search"),
+        CapabilityId("catalogue.artist-search"),
+        CapabilityId("catalogue.artist"),
         CapabilityId("playback.resolve"),
         METADATA_ARTIST_DISPLAY,
     )

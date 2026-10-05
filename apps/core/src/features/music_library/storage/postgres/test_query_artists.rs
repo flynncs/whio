@@ -1917,3 +1917,27 @@ async fn artist_selectors_are_scoped(pool: PgPool) {
         "and the count rejects it too"
     );
 }
+
+#[sqlx::test]
+async fn provider_identity_extends_search_eligibility_without_changing_role_counts(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let artist = repository
+        .resolve_or_create_artist(&credit("Provider Search Artist", None))
+        .await
+        .unwrap();
+    repository
+        .set_artist_source(artist.id(), &source("youtube_music", "provider-artist"))
+        .await
+        .unwrap();
+    let filter = ArtistListFilter::new()
+        .with_role(Some(role_set(&[RoleSelector::AlbumArtist])))
+        .with_provider_identity(true);
+
+    let found = repository
+        .search_artists("provider search", 25, None, &filter)
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].artist().id(), artist.id());
+    assert_eq!(repository.count_artists(None, &filter).await.unwrap(), 0);
+}

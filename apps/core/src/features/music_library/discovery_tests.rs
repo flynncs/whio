@@ -292,26 +292,25 @@ impl SourceLookup for FakeSources {
     async fn find_artist_by_source(
         &self,
         source: &SourceIdentity,
-    ) -> Result<Option<ArtistId>, TrackRepositoryError> {
+    ) -> Result<Option<Artist>, TrackRepositoryError> {
         *self.calls.lock().expect("the calls") += 1;
-        if let Some((_, artist_id)) = self
+        let artist_id = self
             .artists
             .iter()
             .find(|(candidate, _)| candidate == source)
-        {
-            return Ok(Some(artist_id.clone()));
-        }
-        if let Some((_, artist_id)) = self
-            .writes
-            .lock()
-            .expect("the writes")
-            .iter()
-            .find(|(candidate, _)| candidate == source)
-        {
-            return Ok(Some(artist_id.clone()));
-        }
+            .map(|(_, artist_id)| artist_id.clone())
+            .or_else(|| {
+                self.writes
+                    .lock()
+                    .expect("the writes")
+                    .iter()
+                    .find(|(candidate, _)| candidate == source)
+                    .map(|(_, artist_id)| artist_id.clone())
+            });
 
-        Ok(None)
+        Ok(artist_id.map(|id| {
+            Artist::new(id, "Found Artist".to_owned(), None, None).expect("a found artist")
+        }))
     }
 }
 

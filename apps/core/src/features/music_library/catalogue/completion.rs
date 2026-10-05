@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -7,13 +7,18 @@ use crate::{
     features::music_library::availability::ProviderRegistry,
     features::music_library::catalogue::ProviderError,
     features::music_library::{
-        domain::{AlbumId, ProviderEntityState, SourceIdentity},
+        domain::{
+            AlbumId, AlbumListFilter, AlbumListScope, AlbumMetadata, AlbumOrder, AlbumPage,
+            ArtistId, PageLimit, ProviderEntityState, SourceIdentity,
+        },
         storage::contracts::{CatalogueWrite, SourceLookup, TrackRepositoryError},
     },
     platform::request::{RequestContext, RequestId},
 };
 
-use super::{AlbumDetail, CatalogueError, CatalogueProvider, FetchedAlbum, LibraryService};
+use super::{
+    AlbumDetail, ArtistDetail, CatalogueError, CatalogueProvider, FetchedAlbum, LibraryService,
+};
 
 const COMPLETION_BUDGET: Duration = Duration::from_secs(30);
 const MAX_ERROR: usize = 500;
@@ -63,6 +68,103 @@ impl CompletionService {
     pub fn with_budget(mut self, budget: Duration) -> Self {
         self.budget = budget;
         self
+    }
+
+    pub async fn artist_detail(
+        &self,
+        artist_id: &ArtistId,
+        user: Option<&Uuid>,
+    ) -> Result<Option<ArtistDetail>, CatalogueError> {
+        let (Some(catalogue), Some(sources)) = (&self.catalogue, &self.sources) else {
+            return self.library.artist_detail(artist_id, user).await;
+        };
+        if self.library.artist_detail(artist_id, user).await?.is_none() {
+            return Ok(None);
+        }
+        let artist_sources = sources
+            .find_artist_sources(artist_id)
+            .await
+            .map_err(CatalogueError::Repository)?
+            .into_iter()
+            .filter(|source| !self.registry.is_library(source.provider_id()))
+            .collect::<Vec<_>>();
+        for source in artist_sources {
+            if sources
+                .find_provider_entity_state(&source)
+                .await
+                .map_err(CatalogueError::Repository)?
+                .is_some_and(|state| state.last_error().is_none())
+            {
+                continue;
+            }
+            match self.fetch_artist_albums(&source).await {
+                Ok(albums) => {
+                    for album in &albums {
+                        super::materialize::materialize_album(catalogue, sources, album).await?;
+                    }
+                    let state = self.state(None, None)?;
+                    catalogue
+                        .set_provider_entity_state(&source, &state)
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+                }
+                Err(error) => {
+                    if matches!(error, CatalogueError::Provider(ProviderError::Access)) {
+                        return Err(error);
+                    }
+                    let state = self.state(None, Some(error.to_string()))?;
+                    catalogue
+                        .set_provider_entity_state(&source, &state)
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+                }
+            }
+        }
+        self.library.artist_detail(artist_id, user).await
+    }
+
+    async fn fetch_artist_albums(
+        &self,
+        source: &SourceIdentity,
+    ) -> Result<Vec<AlbumMetadata>, CatalogueError> {
+        self.fetch_from_providers(source, |provider, source, context| async move {
+            provider.fetch_artist_albums(&source, &context).await
+        })
+        .await
+    }
+
+    pub async fn album_page(
+        &self,
+        offset: u32,
+        limit: PageLimit,
+        order: AlbumOrder,
+        filter: &AlbumListFilter,
+        user: Option<&Uuid>,
+    ) -> Result<AlbumPage, CatalogueError> {
+        let artist_id = filter
+            .artist_id()
+            .filter(|ids| ids.len() == 1)
+            .and_then(|ids| ids.iter().next());
+        if filter.scope() == AlbumListScope::Engaged
+            && let Some(artist_id) = artist_id
+        {
+            if self.artist_detail(artist_id, user).await?.is_none() {
+                return Ok(AlbumPage {
+                    albums: Vec::new(),
+                    total: 0,
+                });
+            }
+            return self
+                .library
+                .artist_album_page(artist_id, offset, limit, order, filter, user)
+                .await;
+        }
+        let total = self.library.album_count(user, filter.clone()).await?;
+        let albums = self
+            .library
+            .album_list(offset, limit.get(), order, filter.clone(), user)
+            .await?;
+        Ok(AlbumPage { albums, total })
     }
 
     pub async fn album_detail(
@@ -170,19 +272,35 @@ impl CompletionService {
     }
 
     async fn fetch(&self, source: &SourceIdentity) -> Result<FetchedAlbum, CatalogueError> {
-        let context = RequestContext::new(RequestId::generate());
+        self.fetch_from_providers(source, |provider, source, context| async move {
+            provider.fetch_album(&source, &context).await
+        })
+        .await
+    }
 
+    async fn fetch_from_providers<T, F, Fut>(
+        &self,
+        source: &SourceIdentity,
+        fetch: F,
+    ) -> Result<T, CatalogueError>
+    where
+        F: Fn(Arc<dyn CatalogueProvider>, SourceIdentity, RequestContext) -> Fut,
+        Fut: Future<Output = Result<T, ProviderError>>,
+    {
+        let context = RequestContext::new(RequestId::generate());
         for provider in &self.providers {
-            match tokio::time::timeout(self.budget, provider.fetch_album(source, &context)).await {
-                Ok(Ok(fetched)) => return Ok(fetched),
-                Ok(Err(ProviderError::UnsupportedProvider)) => continue,
+            match tokio::time::timeout(
+                self.budget,
+                fetch(Arc::clone(provider), source.clone(), context.clone()),
+            )
+            .await
+            {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(ProviderError::UnsupportedProvider | ProviderError::SourceNotFound)) => {}
                 Ok(Err(error)) => return Err(CatalogueError::Provider(error)),
-                Err(_) => {
-                    return Err(CatalogueError::Provider(ProviderError::ProviderUnavailable));
-                }
+                Err(_) => return Err(CatalogueError::Provider(ProviderError::ProviderUnavailable)),
             }
         }
-
         Err(CatalogueError::Provider(ProviderError::UnsupportedProvider))
     }
 

@@ -9,7 +9,7 @@ use crate::features::music_library::{
     availability::ProviderRegistry,
     {
         domain::{
-            AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumSummary, ArtistId,
+            AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumPage, AlbumSummary, ArtistId,
             ArtistInformation, ArtistListFilter, ArtistSort, ArtistSummary, Availability,
             EnrichmentSubject, GenreSummary, LibraryState, PageLimit, RefreshDemand, RefreshStatus,
             SourceIdentity, Track, TrackId, TrackListFilter, TrackOrder, TrackPage, TrackView,
@@ -142,6 +142,21 @@ impl LibraryService {
         Ok(Some(
             SearchHit::new(track, album, sources).with_state(state),
         ))
+    }
+
+    pub async fn artist_album_page(
+        &self,
+        artist_id: &ArtistId,
+        offset: u32,
+        limit: PageLimit,
+        order: AlbumOrder,
+        filter: &AlbumListFilter,
+        user: Option<&Uuid>,
+    ) -> Result<AlbumPage, CatalogueError> {
+        self.library
+            .page_artist_albums(artist_id, offset, limit.get(), order, filter, user.copied())
+            .await
+            .map_err(catalogue_error)
     }
 
     pub async fn album_list(

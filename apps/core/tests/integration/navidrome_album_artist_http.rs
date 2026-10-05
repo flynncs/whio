@@ -23,7 +23,7 @@ use whio_core::{
         library_state::test_support::seed_play,
         test_support::{
             CatalogueWrite, LibraryStore, PostgresLibraryStore, PostgresTrackRepository,
-            StateStore, TrackRepositoryError,
+            SourceLookup, StateStore, TrackRepositoryError,
         },
     },
 };
@@ -45,6 +45,13 @@ struct Fixture {
 }
 
 async fn fixture(pool: PgPool) -> Fixture {
+    fixture_with_providers(pool, Vec::new()).await
+}
+
+async fn fixture_with_providers(
+    pool: PgPool,
+    providers: Vec<Arc<dyn whio_core::features::music_library::catalogue::CatalogueProvider>>,
+) -> Fixture {
     let (credential, secret) = database_credential_service(pool.clone()).await;
     let (search, library, playback) = services(pool.clone(), Vec::new());
     let registry = Arc::new(LibraryRegistry::new(Arc::new(PostgresLibraryStore::new(
@@ -57,9 +64,20 @@ async fn fixture(pool: PgPool) -> Fixture {
         ])
         .await
         .expect("registered libraries");
-    let app = whio_core::app::router(
-        AppState::new(credential, search, library, playback).with_library_registry(registry),
-    );
+    let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let state = AppState::new(credential, search, Arc::clone(&library), playback);
+    let state = if providers.is_empty() {
+        state
+    } else {
+        let completion = whio_core::features::music_library::catalogue::CompletionService::new(
+            Arc::clone(&library),
+            Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&store) as Arc<dyn SourceLookup>,
+            providers,
+        );
+        state.with_completion(Arc::new(completion))
+    };
+    let app = whio_core::app::router(state.with_library_registry(registry));
     let login = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().expect("token").to_owned();
     let user = login["id"]
@@ -79,7 +97,7 @@ async fn fixture(pool: PgPool) -> Fixture {
         app,
         token,
         user,
-        store: Arc::new(PostgresTrackRepository::new(pool.clone())),
+        store,
         pool,
         music: library_named("music"),
         elsewhere: library_named("elsewhere"),
@@ -899,6 +917,203 @@ async fn navidrome_album_and_artist_facts_are_sourced(pool: PgPool) {
     );
     absent(&body, "size");
     absent(&body, "missing");
+}
+
+#[sqlx::test]
+async fn navidrome_artist_detail_completes_multiple_sources_and_pages_trackless_albums(
+    pool: PgPool,
+) {
+    use std::collections::HashMap;
+    use whio_core::features::music_library::catalogue::{
+        CatalogueCandidate, CatalogueProvider, CatalogueSearch, ProviderError,
+    };
+
+    struct ArtistAlbumsProvider {
+        calls: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+        albums: HashMap<String, AlbumMetadata>,
+    }
+
+    #[async_trait::async_trait]
+    impl CatalogueProvider for ArtistAlbumsProvider {
+        async fn search_tracks(
+            &self,
+            _search: &CatalogueSearch,
+            _context: &whio_core::platform::request::RequestContext,
+        ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_artist_albums(
+            &self,
+            source: &SourceIdentity,
+            _context: &whio_core::platform::request::RequestContext,
+        ) -> Result<Vec<AlbumMetadata>, ProviderError> {
+            let mut calls = self.calls.lock().unwrap();
+            let count = calls.entry(source.external_id().to_owned()).or_default();
+            *count += 1;
+            if source.external_id() == "UC-retry" && *count == 1 {
+                return Err(ProviderError::ProviderUnavailable);
+            }
+            if source.external_id() == "UC-empty" {
+                return Ok(Vec::new());
+            }
+            self.albums
+                .get(source.external_id())
+                .cloned()
+                .map(|album| vec![album])
+                .ok_or(ProviderError::SourceNotFound)
+        }
+    }
+
+    let source = |external_id: &str| {
+        SourceIdentity::new(
+            ProviderId::new("youtube_music".to_owned()).unwrap(),
+            SourceScope::Global,
+            external_id.to_owned(),
+        )
+        .unwrap()
+    };
+    let artist_source_a = source("UC-artist-a");
+    let artist_source_b = source("UC-artist-b");
+    let empty_source = source("UC-empty");
+    let retry_source = source("UC-retry");
+    let album_a = AlbumMetadata::new("First Discovery".to_owned())
+        .unwrap()
+        .with_provider(Some(source("MPREb-first")))
+        .with_album_artist(
+            ArtistCredit::new("Provider Artist".to_owned(), None)
+                .unwrap()
+                .with_provider(Some(artist_source_a.clone())),
+        );
+    let album_b = AlbumMetadata::new("Second Discovery".to_owned())
+        .unwrap()
+        .with_provider(Some(source("MPREb-second")))
+        .with_album_artist(
+            ArtistCredit::new("Provider Artist".to_owned(), None)
+                .unwrap()
+                .with_provider(Some(artist_source_a.clone())),
+        );
+    let album_c = AlbumMetadata::new("Third Discovery".to_owned())
+        .unwrap()
+        .with_provider(Some(source("MPREb-third")))
+        .with_album_artist(
+            ArtistCredit::new("Provider Artist".to_owned(), None)
+                .unwrap()
+                .with_provider(Some(artist_source_a.clone())),
+        );
+    let calls = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let provider = Arc::new(ArtistAlbumsProvider {
+        calls: Arc::clone(&calls),
+        albums: HashMap::from([
+            (artist_source_a.external_id().to_owned(), album_a),
+            (artist_source_b.external_id().to_owned(), album_b),
+            (retry_source.external_id().to_owned(), album_c),
+        ]),
+    });
+    let fixture =
+        fixture_with_providers(pool.clone(), vec![provider as Arc<dyn CatalogueProvider>]).await;
+    let artist_credit = ArtistCredit::new("Provider Artist".to_owned(), None)
+        .unwrap()
+        .with_provider(Some(artist_source_a.clone()));
+    let artist = fixture
+        .store
+        .resolve_or_create_artist(&artist_credit)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_artist_source(artist.id(), &artist_source_a)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_artist_source(artist.id(), &artist_source_b)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_artist_source(artist.id(), &empty_source)
+        .await
+        .unwrap();
+    fixture
+        .store
+        .set_artist_source(artist.id(), &retry_source)
+        .await
+        .unwrap();
+
+    let detail_path = format!("/artist/{}", artist.id());
+    let (status, _, detail) = get(&fixture, &detail_path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["albumCount"], json!(2));
+    let empty_state = fixture
+        .store
+        .find_provider_entity_state(&empty_source)
+        .await
+        .unwrap()
+        .unwrap();
+    let retry_state = fixture
+        .store
+        .find_provider_entity_state(&retry_source)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(empty_state.last_error().is_none());
+    assert!(retry_state.last_error().is_some());
+    assert_eq!(calls.lock().unwrap().get("UC-empty"), Some(&1));
+    assert_eq!(calls.lock().unwrap().get("UC-retry"), Some(&1));
+
+    let artist_id = artist.id().to_string();
+    let (status, headers, first_page) = get(
+        &fixture,
+        &format!("/album?artist_id={artist_id}&_sort=name&_start=0&_end=1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-total-count"], "3");
+    assert_eq!(first_page[0]["name"], json!("First Discovery"));
+    assert_eq!(first_page[0]["songCount"], json!(0));
+
+    let (status, headers, second_page) = get(
+        &fixture,
+        &format!("/album?artist_id={artist_id}&_sort=name&_start=1&_end=2"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-total-count"], "3");
+    assert_eq!(second_page[0]["name"], json!("Second Discovery"));
+    assert_eq!(second_page[0]["songCount"], json!(0));
+
+    let (status, headers, third_page) = get(
+        &fixture,
+        &format!("/album?artist_id={artist_id}&_sort=name&_start=2&_end=3"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-total-count"], "3");
+    assert_eq!(third_page[0]["name"], json!("Third Discovery"));
+    assert_eq!(third_page[0]["songCount"], json!(0));
+    let retry_state = fixture
+        .store
+        .find_provider_entity_state(&retry_source)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(retry_state.last_error().is_none());
+    assert_eq!(calls.lock().unwrap().get("UC-retry"), Some(&2));
+
+    let (status, headers, ordinary) = get(&fixture, "/album?_start=0&_end=10").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["x-total-count"], "0");
+    assert!(ordinary.as_array().unwrap().is_empty());
+
+    let (status, _, repeated_detail) = get(&fixture, &detail_path).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(repeated_detail["albumCount"], json!(3));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.get("UC-artist-a"), Some(&1));
+    assert_eq!(calls.get("UC-artist-b"), Some(&1));
+    assert_eq!(calls.get("UC-empty"), Some(&1));
+    assert_eq!(calls.get("UC-retry"), Some(&2));
 }
 
 #[sqlx::test]
