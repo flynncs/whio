@@ -9,17 +9,6 @@ pub const LISTENBRAINZ: &str = "listenbrainz";
 pub const LASTFM: &str = "lastfm";
 pub const LOCAL: &str = "local";
 
-pub const ADDRESSING_PROVIDERS: [&str; 1] = [YOUTUBE_MUSIC];
-
-pub const METADATA_PROVIDERS: [&str; 6] = [
-    THEAUDIODB,
-    MUSICBRAINZ,
-    WIKIPEDIA,
-    COMMONS,
-    LISTENBRAINZ,
-    LASTFM,
-];
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FieldOrder {
     orders: Vec<(FieldId, Vec<String>)>,

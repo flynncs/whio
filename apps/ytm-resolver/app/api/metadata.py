@@ -6,8 +6,6 @@ from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 from ytmusicapi import YTMusic
 
-from app.audiodb.artist_metadata import AudioDbArtistMetadata
-from app.audiodb.client import AudioDbClient
 from app.generated.resolver_v1 import (
     Artist,
     CapabilityId,
@@ -19,7 +17,6 @@ from app.generated.resolver_v1 import (
     MetadataFieldCandidate,
     MetadataFieldError,
 )
-from app.hosts import HostLimiter
 from app.metadata.document import (
     ArtistDocument,
     Candidate,
@@ -30,8 +27,6 @@ from app.metadata.document import (
 from app.youtube.artist_metadata import YouTubeMusicArtistMetadata
 
 YOUTUBE_MUSIC_PROVIDER = "youtube_music"
-AUDIODB_PROVIDER = "theaudiodb"
-
 METADATA_ARTIST_DISPLAY = CapabilityId("metadata.artist.display")
 METADATA_CAPABILITY_IDS = frozenset({METADATA_ARTIST_DISPLAY.root})
 
@@ -64,16 +59,12 @@ ERROR_RESPONSES = {
     ErrorCode.provider_unavailable: (503, "The provider is temporarily unavailable"),
 }
 
-ArtistMetadata = YouTubeMusicArtistMetadata | AudioDbArtistMetadata
+ArtistMetadata = YouTubeMusicArtistMetadata
 ArtistMetadataFactory = Callable[[], ArtistMetadata]
 
 
 def youtube_music_artist_metadata() -> ArtistMetadata:
     return YouTubeMusicArtistMetadata(YTMusic())
-
-
-def audiodb_artist_metadata(key: str, *, limiter: HostLimiter) -> ArtistMetadata:
-    return AudioDbArtistMetadata(AudioDbClient(key, limiter=limiter))
 
 
 def validate_metadata_dispatch(

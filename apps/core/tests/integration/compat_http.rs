@@ -33,11 +33,12 @@ use whio_core::{
     features::music_library::library_state::LibraryStateService,
     features::music_library::playlists::PlaylistService,
     features::music_library::queue::{RestoreQueueSave, RestoreQueueService},
-    features::playback::providers::{ProviderError, YtmAdapter},
+    features::playback::providers::ProviderError,
     features::playback::{
         Clock, PlaybackActivityService, PlaybackProvider, PlaybackSource, ResolvedPlayback,
         StreamingService,
     },
+    integrations::ytm::playback::YtmPlayback,
     platform::request::RequestContext,
 };
 
@@ -57,7 +58,7 @@ fn role_app(
     let ports = StorePorts::new(pool.clone());
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+        Arc::new(YtmPlayback::disabled()) as Arc<dyn PlaybackProvider>
     ]);
     let scanner = whio_core::features::music_library::library::ScanService::new(
         ports.catalogue(),
@@ -82,7 +83,7 @@ fn app(
     let ports = StorePorts::new(pool.clone());
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+        Arc::new(YtmPlayback::disabled()) as Arc<dyn PlaybackProvider>
     ]);
 
     router(credential, search, library, playback)
@@ -185,7 +186,7 @@ async fn browse_app(
     let ports = StorePorts { store: repository };
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+        Arc::new(YtmPlayback::disabled()) as Arc<dyn PlaybackProvider>
     ]);
 
     router(credential, search, library, playback)
@@ -332,7 +333,7 @@ async fn artist_scope_app(
     };
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+        Arc::new(YtmPlayback::disabled()) as Arc<dyn PlaybackProvider>
     ]);
 
     (router(credential, search, library, playback), repository)
@@ -3509,7 +3510,7 @@ async fn reporting_fixture_with_clock(pool: PgPool, clock: Clock) -> ReportingFi
 
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+        Arc::new(YtmPlayback::disabled()) as Arc<dyn PlaybackProvider>
     ]);
     let listens = Arc::new(ListenService::new(
         Arc::clone(&ports.store) as Arc<dyn ListenStore>,

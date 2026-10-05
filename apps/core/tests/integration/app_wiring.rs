@@ -1,9 +1,6 @@
 use std::{
     net::SocketAddr,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -12,17 +9,11 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
-use tracing::{
-    Event, Metadata,
-    field::{Field, Visit},
-    span,
-    subscriber::Subscriber,
-};
 use whio_core::{
     features::identity::destinations::DestinationValidator,
     features::metadata::{
-        CapabilityError, CapabilitySnapshot, CapabilitySource, DocumentError, DocumentRouting,
-        MetadataDocuments, MetadataProfile, RoutingCapabilities, Snapshot,
+        CapabilityError, CapabilitySnapshot, CapabilitySource, DocumentError, DocumentProvider,
+        DocumentProviders, MetadataDocuments, MetadataProfile, Snapshot,
         selection::{MUSICBRAINZ, THEAUDIODB, YOUTUBE_MUSIC},
     },
     features::music_library::delivery::ListenSender,
@@ -30,8 +21,6 @@ use whio_core::{
     integrations::listenbrainz::ListenBrainzAdapter,
 };
 use whio_resolver_api::apis::configuration::Configuration;
-
-const CAPABILITY_WRONG_APPLICATION: &str = "capability_advertised_by_the_wrong_application";
 
 fn identity(provider_id: &str, external_id: &str) -> SourceIdentity {
     SourceIdentity::new(
@@ -44,20 +33,6 @@ fn identity(provider_id: &str, external_id: &str) -> SourceIdentity {
 
 fn profile() -> MetadataProfile {
     MetadataProfile::artist_display()
-}
-
-fn capabilities_body(providers: &[&str]) -> String {
-    let providers = providers
-        .iter()
-        .map(|provider_id| {
-            format!(
-                r#"{{"provider_id":"{provider_id}","capabilities":["metadata.artist.display"]}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-
-    format!(r#"{{"contract_version":"1","providers":[{providers}]}}"#)
 }
 
 fn document_body(provider_id: &str) -> String {
@@ -123,7 +98,7 @@ impl ResolverStub {
         Self { address, requests }
     }
 
-    fn routing(&self) -> Arc<Configuration> {
+    fn configuration(&self) -> Arc<Configuration> {
         Arc::new(Configuration {
             base_path: format!("http://{}", self.address),
             ..Configuration::default()
@@ -189,191 +164,159 @@ impl CapabilitySource for Capabilities {
     }
 }
 
-struct WarningCounter {
-    reason: &'static str,
-    count: Arc<AtomicUsize>,
+fn youtube_registered(youtube: Arc<Configuration>) -> DocumentProviders {
+    DocumentProviders::new(vec![Arc::new(
+        whio_core::integrations::ytm::documents::ResolverDocuments::new(
+            YOUTUBE_MUSIC.to_owned(),
+            youtube,
+        ),
+    )])
+    .unwrap()
 }
 
-struct ReasonVisitor<'a> {
-    reason: &'a mut Option<String>,
+fn native_musicbrainz() -> Arc<dyn DocumentProvider> {
+    Arc::new(
+        whio_core::integrations::musicbrainz::artist::MusicBrainzDocuments::new(
+            &whio_core::integrations::musicbrainz::config::Config {
+                user_agent: "app-wiring-test".to_owned(),
+                wikimedia_user_agent: "app-wiring-test".to_owned(),
+            },
+        )
+        .unwrap(),
+    )
 }
 
-impl Visit for ReasonVisitor<'_> {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "reason" {
-            *self.reason = Some(value.to_owned());
-        }
-    }
-
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "reason" {
-            *self.reason = Some(format!("{value:?}"));
-        }
-    }
-}
-
-impl Subscriber for WarningCounter {
-    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
-        true
-    }
-
-    fn new_span(&self, _attributes: &span::Attributes<'_>) -> span::Id {
-        span::Id::from_u64(1)
-    }
-
-    fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
-
-    fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
-
-    fn event(&self, event: &Event<'_>) {
-        let mut reason = None;
-        event.record(&mut ReasonVisitor {
-            reason: &mut reason,
-        });
-
-        if reason.as_deref() == Some(self.reason) {
-            self.count.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    fn enter(&self, _span: &span::Id) {}
-
-    fn exit(&self, _span: &span::Id) {}
+fn native_metadata_providers() -> Vec<Arc<dyn DocumentProvider>> {
+    vec![
+        native_musicbrainz(),
+        Arc::new(
+            whio_core::integrations::audiodb::AudioDbDocuments::new(
+                &whio_core::integrations::audiodb::config::Config {
+                    key: "app-wiring-test-key".to_owned(),
+                },
+            )
+            .unwrap(),
+        ),
+    ]
 }
 
 #[tokio::test]
 async fn a_youtube_music_request_reaches_only_the_youtube_server() {
     let youtube = ResolverStub::start(200, document_body(YOUTUBE_MUSIC)).await;
-    let metadata = ResolverStub::start(200, document_body(MUSICBRAINZ)).await;
-    let routing = DocumentRouting::new(Some(youtube.routing()), Some(metadata.routing()));
+    let documents = youtube_registered(youtube.configuration());
 
-    routing
-        .fetch(&identity(YOUTUBE_MUSIC, "channel"), &profile(), "en", &[])
-        .await
-        .unwrap();
+    MetadataDocuments::fetch(
+        &documents,
+        &identity(YOUTUBE_MUSIC, "channel"),
+        &profile(),
+        "en",
+        &[],
+    )
+    .await
+    .unwrap();
 
     assert_eq!(youtube.requests(), vec!["POST /v1/metadata/artist/display"]);
-    assert!(metadata.requests().is_empty());
 }
 
 #[tokio::test]
-async fn every_non_youtube_source_reaches_only_the_metadata_server() {
+async fn an_unregistered_provider_is_unsupported_without_a_call() {
     let youtube = ResolverStub::start(200, document_body(YOUTUBE_MUSIC)).await;
-    let metadata = ResolverStub::start(200, document_body(MUSICBRAINZ)).await;
-    let routing = DocumentRouting::new(Some(youtube.routing()), Some(metadata.routing()));
-
-    for provider_id in [MUSICBRAINZ, THEAUDIODB] {
-        routing
-            .fetch(&identity(provider_id, "id"), &profile(), "en", &[])
-            .await
-            .unwrap();
-    }
-
-    assert_eq!(
-        metadata.requests(),
-        vec![
-            "POST /v1/metadata/artist/display",
-            "POST /v1/metadata/artist/display",
-        ]
-    );
-    assert!(youtube.requests().is_empty());
-}
-
-#[tokio::test]
-async fn an_absent_metadata_client_is_unsupported_for_that_source_only() {
-    let youtube = ResolverStub::start(200, document_body(YOUTUBE_MUSIC)).await;
-    let routing = DocumentRouting::new(Some(youtube.routing()), None);
-
-    let error = routing
-        .fetch(&identity(MUSICBRAINZ, "mbid"), &profile(), "en", &[])
-        .await
-        .unwrap_err();
-
+    let documents = youtube_registered(youtube.configuration());
+    let error = MetadataDocuments::fetch(
+        &documents,
+        &identity(MUSICBRAINZ, "mbid"),
+        &profile(),
+        "en",
+        &[],
+    )
+    .await
+    .unwrap_err();
     assert_eq!(error, DocumentError::Unsupported);
     assert!(youtube.requests().is_empty());
 }
 
 #[tokio::test]
-async fn an_absent_youtube_client_does_not_block_a_metadata_source() {
-    let metadata = ResolverStub::start(200, document_body(THEAUDIODB)).await;
-    let routing = DocumentRouting::new(None, Some(metadata.routing()));
-
-    routing
-        .fetch(&identity(THEAUDIODB, "audiodb"), &profile(), "en", &[])
-        .await
-        .unwrap();
-
-    assert_eq!(
-        metadata.requests(),
-        vec!["POST /v1/metadata/artist/display"]
-    );
-}
-
-#[tokio::test]
 async fn a_failed_youtube_advertisement_keeps_the_metadata_advertisement() {
     let youtube = ResolverStub::start(503, String::new()).await;
-    let metadata = ResolverStub::start(200, capabilities_body(&[MUSICBRAINZ])).await;
-    let snapshot = CapabilitySnapshot::new(
-        Arc::new(RoutingCapabilities::new(
-            Some(youtube.routing()),
-            Some(metadata.routing()),
-        )),
-        Duration::from_secs(300),
-    );
-    let now = chrono::Utc::now();
-
-    assert_eq!(
-        snapshot
-            .enabled_sources(&[YOUTUBE_MUSIC.to_owned(), MUSICBRAINZ.to_owned()], now)
-            .await,
-        vec![MUSICBRAINZ]
-    );
-    assert!(!snapshot.advertised(YOUTUBE_MUSIC, now).await);
+    let mut providers: Vec<Arc<dyn DocumentProvider>> = vec![Arc::new(
+        whio_core::integrations::ytm::documents::ResolverDocuments::new(
+            YOUTUBE_MUSIC.to_owned(),
+            youtube.configuration(),
+        ),
+    )];
+    let native = native_metadata_providers();
+    for provider in &native {
+        assert!(provider.advertised().await.unwrap());
+    }
+    providers.extend(native);
+    let providers = DocumentProviders::new(providers).unwrap();
+    let snapshot = CapabilitySource::fetch(&providers).await.unwrap();
+    assert!(!snapshot.advertised(YOUTUBE_MUSIC));
+    assert!(snapshot.advertised(MUSICBRAINZ));
+    assert!(snapshot.advertised(THEAUDIODB));
     assert_eq!(youtube.requests(), vec!["GET /v1/capabilities"]);
-    assert_eq!(metadata.requests(), vec!["GET /v1/capabilities"]);
 }
 
 #[tokio::test]
-async fn a_youtube_music_advertisement_from_the_metadata_application_is_rejected_and_warned_once() {
-    let metadata = ResolverStub::start(200, capabilities_body(&[YOUTUBE_MUSIC, MUSICBRAINZ])).await;
-    let snapshot = CapabilitySnapshot::new(
-        Arc::new(RoutingCapabilities::new(None, Some(metadata.routing()))),
-        Duration::from_secs(300),
+async fn a_provider_is_advertised_only_by_its_own_registration() {
+    let providers = DocumentProviders::new(vec![native_musicbrainz()]).unwrap();
+    assert_eq!(
+        CapabilitySource::fetch(&providers).await.unwrap(),
+        Snapshot::new([MUSICBRAINZ.to_owned()])
     );
-    let warnings = Arc::new(AtomicUsize::new(0));
-    let _guard = tracing::subscriber::set_default(WarningCounter {
-        reason: CAPABILITY_WRONG_APPLICATION,
-        count: Arc::clone(&warnings),
-    });
-    let now = chrono::Utc::now();
-
-    assert!(!snapshot.advertised(YOUTUBE_MUSIC, now).await);
-    assert!(snapshot.advertised(MUSICBRAINZ, now).await);
-    assert_eq!(warnings.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn a_metadata_advertisement_from_the_youtube_application_is_rejected_and_warned_once() {
-    let youtube = ResolverStub::start(200, capabilities_body(&[THEAUDIODB])).await;
-    let snapshot = CapabilitySnapshot::new(
-        Arc::new(RoutingCapabilities::new(Some(youtube.routing()), None)),
-        Duration::from_secs(300),
-    );
-    let warnings = Arc::new(AtomicUsize::new(0));
-    let _guard = tracing::subscriber::set_default(WarningCounter {
-        reason: CAPABILITY_WRONG_APPLICATION,
-        count: Arc::clone(&warnings),
-    });
-    let now = chrono::Utc::now();
-
-    assert!(!snapshot.advertised(THEAUDIODB, now).await);
-    assert!(
-        snapshot
-            .enabled_sources(&[THEAUDIODB.to_owned()], now)
-            .await
-            .is_empty()
-    );
-    assert_eq!(warnings.load(Ordering::SeqCst), 1);
+async fn resolver_error_codes_classify_before_status() {
+    let cases = [
+        (
+            422,
+            r#"{"code":"unsupported_provider"}"#,
+            DocumentError::Unsupported,
+        ),
+        (
+            502,
+            r#"{"code":"resolution_failed"}"#,
+            DocumentError::ResolutionFailed,
+        ),
+        (
+            404,
+            r#"{"code":"source_not_found"}"#,
+            DocumentError::NotFound,
+        ),
+        (
+            503,
+            r#"{"code":"provider_unavailable"}"#,
+            DocumentError::Unavailable { retry_after: None },
+        ),
+        (
+            400,
+            r#"{"code":"invalid_request"}"#,
+            DocumentError::Malformed,
+        ),
+        (500, "", DocumentError::Unavailable { retry_after: None }),
+        (418, "", DocumentError::Malformed),
+    ];
+    for (status, body, expected) in cases {
+        let resolver = ResolverStub::start(status, body.to_owned()).await;
+        let providers = DocumentProviders::new(vec![Arc::new(
+            whio_core::integrations::ytm::documents::ResolverDocuments::new(
+                YOUTUBE_MUSIC.to_owned(),
+                resolver.configuration(),
+            ),
+        )])
+        .unwrap();
+        let actual = MetadataDocuments::fetch(
+            &providers,
+            &identity(YOUTUBE_MUSIC, "mbid"),
+            &profile(),
+            "en",
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(actual, expected, "status {status}");
+    }
 }
 
 #[tokio::test]
@@ -532,17 +475,26 @@ mod worker_startup {
     use sqlx::PgPool;
 
     #[sqlx::test]
-    async fn the_worker_refuses_a_metadata_refresh_queue_without_the_resolver(pool: PgPool) {
-        let mut worker = support::worker::Worker::start_with(&pool, "whio.metadata.refresh", &[]);
+    async fn the_worker_refuses_a_metadata_refresh_queue_without_a_document_provider(pool: PgPool) {
+        let mut worker = support::worker::Worker::start_with(
+            &pool,
+            "whio.metadata.refresh",
+            &[
+                ("WHIO_MUSICBRAINZ_ENABLED", "false"),
+                ("WHIO_AUDIODB_ENABLED", "false"),
+                ("WHIO_LISTENBRAINZ_METADATA_ENABLED", "false"),
+                ("WHIO_YOUTUBE_ENABLED", "false"),
+            ],
+        );
         let status = worker.await_exit(Duration::from_secs(30)).await;
 
         assert!(
             !status.success(),
-            "a metadata refresh queue without WHIO_METADATA_RESOLVER_URL must not start:\n{}",
+            "a metadata refresh queue without a metadata document provider must not start:\n{}",
             worker.log()
         );
         assert!(
-            worker.log().contains("WHIO_METADATA_RESOLVER_URL"),
+            worker.log().contains("WHIO_MUSICBRAINZ_ENABLED"),
             "the refusal must name the missing variable:\n{}",
             worker.log()
         );
@@ -681,7 +633,8 @@ mod postgres {
 
     #[sqlx::test]
     async fn a_metadata_wiring_with_an_unreachable_resolver_still_constructs(pool: PgPool) {
-        let documents: Arc<dyn MetadataDocuments> = Arc::new(DocumentRouting::new(None, None));
+        let documents: Arc<dyn MetadataDocuments> =
+            Arc::new(DocumentProviders::new(Vec::new()).unwrap());
         let capabilities = Arc::new(CapabilitySnapshot::new(
             Arc::new(Capabilities {
                 inner: Arc::new(Recorder::default()),

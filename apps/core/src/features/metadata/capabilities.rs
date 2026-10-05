@@ -6,9 +6,6 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use whio_resolver_api::apis::configuration::Configuration;
-
-pub const ARTIST_DISPLAY_CAPABILITY: &str = "metadata.artist.display";
 pub const CAPABILITY_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -55,45 +52,6 @@ impl Snapshot {
 #[async_trait]
 pub trait CapabilitySource: Send + Sync {
     async fn fetch(&self) -> Result<Snapshot, CapabilityError>;
-}
-
-pub struct ResolverCapabilities {
-    transport: Option<Arc<Configuration>>,
-}
-
-impl ResolverCapabilities {
-    pub fn new(transport: Option<Arc<Configuration>>) -> Self {
-        Self { transport }
-    }
-
-    pub fn disabled() -> Self {
-        Self { transport: None }
-    }
-}
-
-#[async_trait]
-impl CapabilitySource for ResolverCapabilities {
-    async fn fetch(&self) -> Result<Snapshot, CapabilityError> {
-        let Some(transport) = self.transport.as_ref() else {
-            return Err(CapabilityError::Disabled);
-        };
-        let response = whio_resolver_api::apis::default_api::get_capabilities(transport, None)
-            .await
-            .map_err(|_| CapabilityError::Unavailable)?;
-        let providers = response
-            .providers
-            .into_iter()
-            .filter(|provider| {
-                provider
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability == ARTIST_DISPLAY_CAPABILITY)
-            })
-            .map(|provider| provider.provider_id)
-            .collect::<Vec<_>>();
-
-        Ok(Snapshot::new(providers))
-    }
 }
 
 pub struct CapabilitySnapshot {

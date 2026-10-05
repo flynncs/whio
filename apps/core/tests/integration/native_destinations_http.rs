@@ -32,7 +32,8 @@ use whio_core::{
         secrets::CredentialKey,
         service::CredentialService,
     },
-    integrations::listenbrainz::{CallLimiter, ListenBrainzAdapter, SUBMIT_PATH, VALIDATE_PATH},
+    integrations::listenbrainz::{ListenBrainzAdapter, SUBMIT_PATH, VALIDATE_PATH},
+    platform::pacing::CallLimiter,
 };
 
 const PASSWORD: &str = "whio-test-password";

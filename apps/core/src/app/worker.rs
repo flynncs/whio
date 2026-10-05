@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 
 use crate::{
-    app::config::{Config, ConfigError, MetadataResolverConfig, WorkerConfig},
+    app::config::{Config, ConfigError, WorkerConfig},
     app::database::{Database, DatabaseError},
     app::startup::{WorkerState, shutdown_signal},
     jobs::{self, QueueRegistration},
@@ -91,7 +91,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let worker = config.worker.clone();
     let registered = jobs::queues();
     let queues = check_queues(&worker.queues, &registered)?;
-    check_queue_dependencies(&queues, &config.metadata_resolver)?;
+    check_queue_dependencies(&queues, &config.integrations)?;
     let database = Database::connect(&config.database_url).await?;
     let state =
         super::startup::worker_state(&config, database.pool()).map_err(WorkerError::Dependency)?;
@@ -135,9 +135,9 @@ fn check_queues<'a>(
 
 fn check_queue_dependencies(
     queues: &[&QueueRegistration],
-    metadata_resolver: &MetadataResolverConfig,
+    integrations: &crate::integrations::IntegrationsConfig,
 ) -> Result<(), WorkerError> {
-    if !matches!(metadata_resolver, MetadataResolverConfig::Disabled) {
+    if integrations.has_document_provider() {
         return Ok(());
     }
 
@@ -145,7 +145,7 @@ fn check_queue_dependencies(
         if queue.name == jobs::metadata_refresh::METADATA_REFRESH_QUEUE {
             return Err(WorkerError::UnavailableDependency {
                 queue: queue.name.to_owned(),
-                dependency: "WHIO_METADATA_RESOLVER_URL",
+                dependency: "a metadata document provider (WHIO_MUSICBRAINZ_ENABLED, WHIO_AUDIODB_ENABLED, WHIO_LISTENBRAINZ_METADATA_ENABLED or WHIO_YOUTUBE_ENABLED)",
             });
         }
     }
@@ -376,11 +376,15 @@ mod tests {
             .expect("the queue is registered")
     }
 
-    fn enabled_metadata_resolver() -> MetadataResolverConfig {
-        MetadataResolverConfig::Enabled {
-            url: "http://metadata-resolver:8000".parse().unwrap(),
-            connect_timeout: Duration::from_secs(2),
-            total_timeout: Duration::from_secs(35),
+    fn enabled_integrations() -> crate::integrations::IntegrationsConfig {
+        crate::integrations::IntegrationsConfig {
+            ytm: None,
+            musicbrainz: Some(crate::integrations::musicbrainz::config::Config {
+                user_agent: "test".to_owned(),
+                wikimedia_user_agent: "test".to_owned(),
+            }),
+            audiodb: None,
+            listenbrainz_documents: None,
         }
     }
 
@@ -388,16 +392,24 @@ mod tests {
     fn a_metadata_refresh_queue_without_the_resolver_is_refused_and_named() {
         let queue = registry_queue(jobs::metadata_refresh::METADATA_REFRESH_QUEUE);
 
-        let error = check_queue_dependencies(&[&queue], &MetadataResolverConfig::Disabled)
-            .expect_err("a metadata refresh queue needs the metadata transport");
+        let error = check_queue_dependencies(
+            &[&queue],
+            &crate::integrations::IntegrationsConfig {
+                ytm: None,
+                musicbrainz: None,
+                audiodb: None,
+                listenbrainz_documents: None,
+            },
+        )
+        .expect_err("a metadata refresh queue needs the metadata transport");
 
         assert!(matches!(
             &error,
             WorkerError::UnavailableDependency { queue, dependency }
                 if queue == jobs::metadata_refresh::METADATA_REFRESH_QUEUE
-                    && *dependency == "WHIO_METADATA_RESOLVER_URL"
+                    && *dependency == "a metadata document provider (WHIO_MUSICBRAINZ_ENABLED, WHIO_AUDIODB_ENABLED, WHIO_LISTENBRAINZ_METADATA_ENABLED or WHIO_YOUTUBE_ENABLED)"
         ));
-        assert!(error.to_string().contains("WHIO_METADATA_RESOLVER_URL"));
+        assert!(error.to_string().contains("WHIO_MUSICBRAINZ_ENABLED"));
     }
 
     #[test]
@@ -405,8 +417,19 @@ mod tests {
         let metadata = registry_queue(jobs::metadata_refresh::METADATA_REFRESH_QUEUE);
         let probe = registry_queue(jobs::probe::PROBE_QUEUE);
 
-        assert!(check_queue_dependencies(&[&metadata], &enabled_metadata_resolver()).is_ok());
-        assert!(check_queue_dependencies(&[&probe], &MetadataResolverConfig::Disabled).is_ok());
+        assert!(check_queue_dependencies(&[&metadata], &enabled_integrations()).is_ok());
+        assert!(
+            check_queue_dependencies(
+                &[&probe],
+                &crate::integrations::IntegrationsConfig {
+                    ytm: None,
+                    musicbrainz: None,
+                    audiodb: None,
+                    listenbrainz_documents: None,
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]

@@ -10,8 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::features::metadata::capabilities::{
-    ARTIST_DISPLAY_CAPABILITY, CAPABILITY_TTL, CapabilityError, CapabilitySnapshot,
-    CapabilitySource, Snapshot,
+    CAPABILITY_TTL, CapabilityError, CapabilitySnapshot, CapabilitySource, Snapshot,
 };
 
 fn at(seconds: i64) -> DateTime<Utc> {
@@ -55,8 +54,7 @@ impl CapabilitySource for StubSource {
 }
 
 #[test]
-fn the_capability_id_is_the_per_provider_document_id() {
-    assert_eq!(ARTIST_DISPLAY_CAPABILITY, "metadata.artist.display");
+fn the_capability_snapshot_ttl_is_five_minutes() {
     assert_eq!(CAPABILITY_TTL, Duration::from_secs(5 * 60));
 }
 

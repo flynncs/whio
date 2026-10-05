@@ -1,17 +1,17 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use reqwest::{StatusCode, Url, header};
 use serde::{Deserialize, Serialize};
 
-use crate::features::identity::destinations::{
-    DestinationProvider, DestinationValidator, ValidatedDestination, ValidationError,
-};
 use crate::features::music_library::delivery::{
     ListenSender, ScrobbleListen, SubmissionError, SubmissionOutcome,
+};
+use crate::{
+    features::identity::destinations::{
+        DestinationProvider, DestinationValidator, ValidatedDestination, ValidationError,
+    },
+    platform::{http::USER_AGENT, pacing::CallLimiter},
 };
 
 pub const HOST: &str = "api.listenbrainz.org";
@@ -21,11 +21,6 @@ pub const MINIMUM_INTERVAL: Duration = Duration::from_secs(1);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
 
-const USER_AGENT: &str = concat!(
-    "whio/",
-    env!("CARGO_PKG_VERSION"),
-    " ( https://github.com/flynncs/whio )"
-);
 const LISTEN_TYPE: &str = "single";
 
 pub struct ListenBrainzAdapter {
@@ -114,46 +109,6 @@ fn host_url() -> Url {
 
 fn unreachable_url() -> Url {
     Url::parse("https://127.0.0.1/").expect("a literal URL parses")
-}
-
-#[derive(Debug)]
-pub struct CallLimiter {
-    interval: Duration,
-    earliest: Mutex<Option<Instant>>,
-}
-
-impl CallLimiter {
-    pub fn new(interval: Duration) -> Self {
-        Self {
-            interval,
-            earliest: Mutex::new(None),
-        }
-    }
-
-    pub async fn acquire(&self) {
-        let wait = self.reserve();
-
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-    }
-
-    fn reserve(&self) -> Duration {
-        let now = Instant::now();
-        let mut earliest = match self.earliest.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let start = earliest
-            .as_ref()
-            .copied()
-            .filter(|at| *at > now)
-            .unwrap_or(now);
-
-        *earliest = Some(start + self.interval);
-
-        start.saturating_duration_since(now)
-    }
 }
 
 #[derive(Serialize)]
@@ -325,6 +280,31 @@ fn retry_after(response: &reqwest::Response) -> Option<Duration> {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
+}
+
+pub mod documents;
+pub mod documents_artist;
+pub mod documents_config;
+pub mod stream;
+
+#[async_trait]
+impl crate::features::metadata::DocumentProvider for documents_artist::ListenBrainzDocuments {
+    fn provider_id(&self) -> &str {
+        "listenbrainz"
+    }
+    async fn advertised(&self) -> Result<bool, crate::features::metadata::CapabilityError> {
+        Ok(true)
+    }
+    async fn fetch(
+        &self,
+        source: &crate::features::music_library::domain::SourceIdentity,
+        _profile: &crate::features::metadata::MetadataProfile,
+        _language: &str,
+        fields: &[crate::features::metadata::domain::FieldId],
+    ) -> Result<crate::features::metadata::DocumentOutcome, crate::features::metadata::DocumentError>
+    {
+        self.fetch_document(source, fields).await
+    }
 }
 
 #[cfg(test)]

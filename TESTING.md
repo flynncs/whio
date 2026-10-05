@@ -14,7 +14,7 @@ just test-it native_artist_info_http
 | `apps/core/tests/integration/` | HTTP, playback, wiring and spawned-worker integration | the `integration` target, filtered by module |
 | `apps/core/tests/integration/support/` | shared credentials, media and worker fixtures | imported by integration tests |
 | `apps/ytm-resolver/tests/` | resolver/provider contracts and controlled responses | pytest |
-| `apps/ytm-resolver/tests/fixtures/metadata/` | provider response fixtures, including malformed/absent fields | consumed by provider tests |
+| `apps/core/src/integrations/*/fixtures/` | native-provider response fixtures, including malformed/absent fields | consumed by provider tests |
 | `tools/tests/` | dev lifecycle, watching, Docker ownership, worktrees and check admission | unittest |
 
 Rust unit checks need no database. Postgres checks enable `postgres-integration`

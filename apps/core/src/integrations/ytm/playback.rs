@@ -16,11 +16,11 @@ use crate::{
     platform::request::RequestContext,
 };
 
-pub struct YtmAdapter {
+pub struct YtmPlayback {
     transport: Option<Arc<Configuration>>,
 }
 
-impl YtmAdapter {
+impl YtmPlayback {
     pub fn new(transport: Option<Arc<Configuration>>) -> Self {
         Self { transport }
     }
@@ -30,7 +30,7 @@ impl YtmAdapter {
 }
 
 #[async_trait]
-impl PlaybackProvider for YtmAdapter {
+impl PlaybackProvider for YtmPlayback {
     fn kind(&self) -> ProviderKind {
         ProviderKind::YoutubeMusic
     }

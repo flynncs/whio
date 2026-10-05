@@ -15,18 +15,18 @@ up builds the current source the first time, starts the full stack and creates a
 user; the credential file location is printed. each profile has its own database
 and key.
 
-| profile | API | worker health | YouTube | metadata | Postgres |
-| --- | --- | --- | --- | --- | --- |
-| personal | 3000 | 3001 | 8000 | 8100 | 5432 |
-| dev | 3100 | 3101 | 18000 | 18100 | 55432 |
-| preview-* | allocated | allocated | allocated | allocated | allocated |
+| profile | API | worker health | YouTube | Postgres |
+| --- | --- | --- | --- | --- |
+| personal | 3000 | 3001 | 8000 | 5432 |
+| dev | 3100 | 3101 | 18000 | 55432 |
+| preview-* | allocated | allocated | allocated | allocated |
 
 - personal: persistent listening; updated with `just deploy`.
 - dev: separate database; follows source changes while watching.
 - preview-*: temporary app for an isolated worktree; 24-hour lease.
 - ports bind to loopback. omitted profile means personal.
 
-the stack is api, worker, both resolvers and Postgres; modes are not selectable.
+the stack is api, worker, the YTM resolver and Postgres; modes are not selectable.
 
 ```sh
 just down personal
@@ -40,7 +40,7 @@ just dev dev
 ```
 
 - Rust saves rebuild and restart API/worker.
-- Python saves check imports and restart resolvers.
+- Python saves check imports and restart the YTM resolver.
 - saves during a build queue one further build.
 - build/import failures leave the previous server running.
 - Postgres stays up. Ctrl-C stops the watcher, leaving the app running.
@@ -97,7 +97,7 @@ python3 tools/dev-cache.py --prune
 | --- | --- | --- |
 | Postgres | 512 MiB | 1 |
 | API / worker, each | 512 MiB | 2 |
-| each resolver | 256 MiB | 1 |
+| YTM resolver | 256 MiB | 1 |
 | compiler, while building | 4 GiB | 4 |
 
 logs rotate at 8 MiB, two files. artwork/spool budgets: 256/512 MiB.

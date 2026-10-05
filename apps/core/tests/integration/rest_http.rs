@@ -30,7 +30,7 @@ use whio_core::{
         },
     },
     features::playback::PlaybackProvider,
-    features::playback::providers::YtmAdapter,
+    integrations::ytm::playback::YtmPlayback,
 };
 
 fn app(
@@ -40,7 +40,7 @@ fn app(
     let ports = StorePorts::new(pool.clone());
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+        Arc::new(YtmPlayback::disabled()) as Arc<dyn PlaybackProvider>
     ]);
 
     router(credential, search, library, playback)
@@ -400,7 +400,7 @@ async fn folder_fixture(pool: PgPool) -> FolderFixture {
     let ports = StorePorts::new(pool.clone());
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+        Arc::new(YtmPlayback::disabled()) as Arc<dyn PlaybackProvider>
     ]);
     let registry = Arc::new(LibraryRegistry::new(Arc::new(PostgresLibraryStore::new(
         pool.clone(),
@@ -632,7 +632,7 @@ async fn subsonic_music_folder_store_failure_is_not_a_client_error(pool: PgPool)
     let ports = StorePorts::new(pool);
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+        Arc::new(YtmPlayback::disabled()) as Arc<dyn PlaybackProvider>
     ]);
     let (credential, secret) = credential_service_with_known_app_password();
     let failing = Arc::new(LibraryRegistry::new(Arc::new(FailingLibraryStore)));

@@ -2,7 +2,7 @@
 
 ## container setup
 
-`compose.yaml`: core API, worker, Postgres, YouTube resolver, metadata resolver.
+`compose.yaml`: core API, worker, Postgres and YouTube resolver.
 API on port 3000; other services on the internal network.
 Postgres volume: `postgres-data`.
 
@@ -62,7 +62,6 @@ keep container mount paths stable between restarts.
 | `WHIO_MEDIA_ROOTS` | absent | local library roots |
 | `WHIO_YOUTUBE_ENABLED` | off | enable YouTube resolution |
 | `WHIO_YOUTUBE_RESOLVER_URL` | required when enabled | absolute HTTP(S) resolver URL |
-| `WHIO_METADATA_RESOLVER_URL` | absent, disabled | independent metadata resolver URL |
 | `WHIO_DEDUP_MODE` | `suppress` | substitute conservative local matches; `shadow` logs, `off` skips |
 | `WHIO_SOURCE_TAGS` | `off` | `artist` adds provider prefixes to search display; no stored changes |
 | `WHIO_PLAYBACK_MAX_SESSIONS` | `16` | concurrent spool playbacks before overload |
@@ -74,11 +73,10 @@ keep container mount paths stable between restarts.
 | `WHIO_ARTWORK_CACHE_DIR` | absent | enable ready artwork storage at the chosen path |
 | `WHIO_ARTWORK_CACHE_BYTES` | `2147483648` | artwork cache budget when configured |
 
-resolver connect/total budgets use
+YouTube resolver connect/total budgets use
 `WHIO_YOUTUBE_RESOLVER_CONNECT_TIMEOUT_SECONDS` /
-`WHIO_YOUTUBE_RESOLVER_TOTAL_TIMEOUT_SECONDS`, and the corresponding
-`WHIO_METADATA_RESOLVER_*` variables. defaults are 2/35 seconds. total must be at
-least 35 seconds and greater than connect.
+`WHIO_YOUTUBE_RESOLVER_TOTAL_TIMEOUT_SECONDS`. defaults are 2/35 seconds. total
+must be at least 35 seconds and greater than connect.
 
 `WHIO_SPOOL_MAX_BYTES` bounds one spool; `WHIO_SPOOL_BUDGET_BYTES` bounds their
 combined storage. max must not exceed the total budget. managed development
@@ -89,8 +87,9 @@ per-field provider order. accepted values: [config.rs](apps/core/src/app/config.
 
 ## worker
 
-core and worker share the database and credential key. metadata jobs need the
-metadata resolver URL in the worker too. configured queues in Compose are
+core and worker share the database and credential key. metadata jobs require at
+least one enabled document provider, available by default through MusicBrainz.
+configured queues in Compose are
 `whio.jobs.probe,whio.metadata.refresh,whio.listening.delivery`.
 
 | variable | default | use |
@@ -112,15 +111,21 @@ Compose allows 45 seconds to stop the worker so the drain budget can complete.
 
 ## metadata providers
 
-set these inside the metadata resolver container, using a Compose override or
-its environment. values in a host `.env` are not forwarded automatically.
+provider settings are read by core and worker. Set the same values in both
+services; the managed dev launcher forwards mode-0600 `providers.env` settings
+to those services only. Every enabled variable accepts exactly `true` or
+`false`. Secret values can be supplied directly or through the corresponding
+`_FILE` variable; do not set both.
 
-| variable | use |
-| --- | --- |
-| `WHIO_RESOLVER_AUDIODB_KEY` | enables TheAudioDB |
-| `WHIO_RESOLVER_MUSICBRAINZ_USER_AGENT` | identifies the client and enables MusicBrainz |
-| `WHIO_RESOLVER_WIKIMEDIA_USER_AGENT` | optional separate Wikimedia client identity |
-| `WHIO_RESOLVER_LISTENBRAINZ_TOKEN` | enables ListenBrainz when MusicBrainz is also configured |
-| `WHIO_METADATA_ALGORITHM` | ListenBrainz recommendation algorithm |
+| variable | default / requirement | use |
+| --- | --- | --- |
+| `WHIO_MUSICBRAINZ_ENABLED` | `true` | enable MusicBrainz, Wikimedia and Wikipedia document lookups |
+| `WHIO_MUSICBRAINZ_USER_AGENT` | platform user agent | MusicBrainz client identity |
+| `WHIO_WIKIMEDIA_USER_AGENT` | MusicBrainz user agent | optional separate Wikimedia client identity |
+| `WHIO_AUDIODB_ENABLED` | `false` | enable TheAudioDB documents |
+| `WHIO_AUDIODB_KEY` / `WHIO_AUDIODB_KEY_FILE` | required when enabled | TheAudioDB API key |
+| `WHIO_LISTENBRAINZ_METADATA_ENABLED` | `false` | enable ListenBrainz artist documents; does not affect scrobbling |
+| `WHIO_LISTENBRAINZ_TOKEN` / `WHIO_LISTENBRAINZ_TOKEN_FILE` | required when enabled | ListenBrainz API token |
+| `WHIO_LISTENBRAINZ_ALGORITHM` | pinned session-based default | ListenBrainz similar-artist algorithm |
 
 core reads cached metadata; the worker runs provider refreshes.

@@ -214,7 +214,7 @@ class DockerTests(unittest.TestCase):
         fixture_root.mkdir(parents=True)
         audio = fixture_root / 'tagged.flac'
         audio.write_bytes(b'fixture bytes')
-        response = self.root / 'repo/apps/ytm-resolver/tests/fixtures/metadata/artist.json'
+        response = self.root / 'repo/apps/core/src/integrations/musicbrainz/fixtures/artist.json'
         response.parent.mkdir(parents=True)
         response.write_text('{"artist": "controlled"}')
         dockerfiles = self.root / 'repo/docker'
@@ -278,8 +278,17 @@ class DockerTests(unittest.TestCase):
     def test_provider_configuration_cannot_import_unrelated_environment(self):
         (self.path / 'providers.env').write_text('WHIO_DATABASE_URL=unrelated\n')
         (self.path / 'providers.env').chmod(0o600)
-        with self.assertRaisesRegex(RuntimeError, 'WHIO_RESOLVER_'):
+        with self.assertRaisesRegex(RuntimeError, 'native metadata provider'):
             docker.providers(self.path)
+
+    def test_provider_settings_reach_api_and_worker_only(self):
+        (self.path / 'providers.env').write_text('WHIO_MUSICBRAINZ_ENABLED=true\nWHIO_AUDIODB_KEY=secret\n')
+        (self.path / 'providers.env').chmod(0o600)
+        document = json.loads(docker.config(self.path, self.profile, True).read_text())
+        for name in ('api', 'worker'):
+            self.assertEqual(document['services'][name]['environment']['WHIO_MUSICBRAINZ_ENABLED'], 'true')
+            self.assertEqual(document['services'][name]['environment']['WHIO_AUDIODB_KEY'], 'secret')
+        self.assertNotIn('WHIO_AUDIODB_KEY', document['services']['youtube']['environment'])
 
     def test_failed_import_does_not_publish_or_stop_live_stack(self):
         with patch.object(docker, 'running', return_value=True), patch.object(dev, 'ready', return_value=True), \

@@ -692,11 +692,6 @@ async fn a_provider_album_is_registered_with_its_source(pool: sqlx::PgPool) {
 
 #[sqlx::test]
 async fn provider_album_and_artist_identity_round_trip_through_materialize(pool: sqlx::PgPool) {
-    use whio_resolver_api::models::{
-        CatalogueAlbum as AlbumDto, CatalogueArtist as ArtistDto,
-        CatalogueCandidate as CandidateDto, SourceIdentity as SourceIdentityDto,
-    };
-
     fn provider_source(external_id: &str) -> SourceIdentity {
         SourceIdentity::new(
             ProviderId::new("youtube_music".to_owned()).unwrap(),
@@ -706,32 +701,19 @@ async fn provider_album_and_artist_identity_round_trip_through_materialize(pool:
         .unwrap()
     }
 
-    let dto = CandidateDto {
-        source: Box::new(SourceIdentityDto::new(
-            "youtube_music".to_owned(),
-            "video-1".to_owned(),
-        )),
-        title: "brutal".to_owned(),
-        artists: vec![ArtistDto {
-            name: "Olivia Rodrigo".to_owned(),
-            source: Some(Box::new(SourceIdentityDto::new(
-                "youtube_music".to_owned(),
-                "artist-1".to_owned(),
-            ))),
-        }],
-        duration_ms: Some(Some(144_000)),
-        album: Some(Box::new(AlbumDto {
-            title: "SOUR".to_owned(),
-            source: Some(Box::new(SourceIdentityDto::new(
-                "youtube_music".to_owned(),
-                "album-1".to_owned(),
-            ))),
-            year: Some(Some(2021)),
-            release_type: Some(Some("Album".to_owned())),
-        })),
-        artwork_url: None,
-    };
-    let candidate = CatalogueCandidate::try_from(dto).unwrap();
+    let artist = ArtistCredit::new("Olivia Rodrigo".to_owned(), None)
+        .unwrap()
+        .with_provider(Some(provider_source("artist-1")));
+    let metadata = TrackMetadata::new("brutal".to_owned(), vec![artist], Some(144_000)).unwrap();
+    let album = AlbumMetadata::new("SOUR".to_owned())
+        .unwrap()
+        .with_provider(Some(provider_source("album-1")))
+        .with_year(Some(2021))
+        .unwrap()
+        .with_release_type(Some("Album".to_owned()))
+        .unwrap();
+    let candidate =
+        CatalogueCandidate::new(provider_source("video-1"), metadata).with_album(Some(album));
 
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let resolver = StubProvider::new(vec![Ok(vec![candidate.clone()])]);

@@ -4,7 +4,7 @@ use whio_resolver_api::apis::configuration::Configuration;
 
 use crate::features::playback::providers::ProviderError;
 
-pub fn client(
+pub fn resolver_client(
     base_url: reqwest::Url,
     connect_timeout: Duration,
     total_timeout: Duration,

@@ -118,10 +118,10 @@ def load_profile(name, create=False):
     if path.exists() and any(path.iterdir()):
         raise RuntimeError('refusing to adopt a nonempty profile directory')
     path.mkdir(mode=0o700, exist_ok=True)
-    ports = dict(zip(('api', 'worker', 'youtube', 'metadata', 'postgres'),
-                     (3000, 3001, 8000, 8100, 5432) if name == 'personal' else
-                     (3100, 3101, 18000, 18100, 55432) if name == 'dev' else
-                     tuple(free_port() for _ in range(5))))
+    ports = dict(zip(('api', 'worker', 'youtube', 'postgres'),
+                     (3000, 3001, 8000, 5432) if name == 'personal' else
+                     (3100, 3101, 18000, 55432) if name == 'dev' else
+                     tuple(free_port() for _ in range(4))))
     check_ports(ports)
     value = {'name': name, 'uid': os.getuid(), 'ports': ports, 'created': time.time(),
              'expires': time.time() + 86400 if name.startswith('preview-') else None,
@@ -147,7 +147,10 @@ def source_files(root=None):
                               ('target', '.venv', '__pycache__', '.pytest_cache', '.ruff_cache')]
             for name in names:
                 path = Path(parent) / name
-                if path.suffix in ('.rs', '.sql', '.py', '.toml', '.lock') or name == 'README.md' or path.is_relative_to(base / 'tests/fixtures'):
+                if (path.suffix in ('.rs', '.sql', '.py', '.toml', '.lock') or name == 'README.md' or
+                        path.is_relative_to(base / 'tests/fixtures') or
+                        (directory == 'core' and path.is_relative_to(base / 'src/integrations') and
+                         'fixtures' in path.parts and path.suffix == '.json')):
                     if path.is_symlink():
                         raise RuntimeError('build source must not be a symlink')
                     files.append(path)
@@ -262,8 +265,7 @@ def environment(path, profile, full):
               'WHIO_WORKER_MAX_WORKERS': '1', 'WHIO_WORKER_POLL_INTERVAL_MILLISECONDS': '1000',
               'WHIO_WORKER_DRAIN_TIMEOUT_SECONDS': '30', 'DENO_DIR': str(path / 'deno')}
     if full:
-        result.update({'WHIO_YOUTUBE_RESOLVER_URL': f'http://127.0.0.1:{ports["youtube"]}',
-                       'WHIO_METADATA_RESOLVER_URL': f'http://127.0.0.1:{ports["metadata"]}'})
+        result['WHIO_YOUTUBE_RESOLVER_URL'] = f'http://127.0.0.1:{ports["youtube"]}'
     return result
 
 
@@ -415,7 +417,7 @@ def main():
     parser = argparse.ArgumentParser(description='bounded laptop development stack')
     parser.add_argument('command', metavar='{' + ','.join(COMMANDS) + '}')
     parser.add_argument('profile', nargs='?', type=profile_name)
-    parser.add_argument('--service', choices=('api', 'worker', 'youtube', 'metadata', 'postgres'))
+    parser.add_argument('--service', choices=('api', 'worker', 'youtube', 'postgres'))
     parser.add_argument('--watch-token')
     parser.add_argument('--remote')
     parser.add_argument('--source')

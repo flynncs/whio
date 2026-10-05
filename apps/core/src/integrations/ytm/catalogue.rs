@@ -20,11 +20,11 @@ use crate::{
     platform::request::RequestContext,
 };
 
-pub struct YoutubeCatalogueProvider {
+pub struct YtmCatalogue {
     transport: Option<Arc<Configuration>>,
 }
 
-impl YoutubeCatalogueProvider {
+impl YtmCatalogue {
     pub fn new(transport: Option<Arc<Configuration>>) -> Self {
         Self { transport }
     }
@@ -34,7 +34,7 @@ impl YoutubeCatalogueProvider {
 }
 
 #[async_trait]
-impl CatalogueProvider for YoutubeCatalogueProvider {
+impl CatalogueProvider for YtmCatalogue {
     async fn search(
         &self,
         search: &CatalogueSearch,

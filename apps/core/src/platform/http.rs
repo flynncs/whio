@@ -9,6 +9,11 @@ use reqwest::{
     redirect::{Attempt, Policy},
 };
 
+pub const USER_AGENT: &str = concat!(
+    "whio/",
+    env!("CARGO_PKG_VERSION"),
+    " ( https://github.com/flynncs/whio )"
+);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const STALLED_READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_REDIRECTS: usize = 10;

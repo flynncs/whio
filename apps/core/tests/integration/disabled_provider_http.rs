@@ -15,10 +15,10 @@ use tower::ServiceExt;
 use whio_core::{
     features::music_library::catalogue::CatalogueProvider,
     features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
-    features::music_library::providers::YoutubeCatalogueProvider,
     features::music_library::test_support::CatalogueWrite,
     features::playback::PlaybackProvider,
-    features::playback::providers::YtmAdapter,
+    integrations::ytm::catalogue::YtmCatalogue,
+    integrations::ytm::playback::YtmPlayback,
 };
 
 fn source() -> SourceIdentity {
@@ -44,12 +44,11 @@ async fn app(pool: PgPool) -> (axum::Router, String) {
         .to_string();
     // Disabled catalogue and playback adapters both map to 503 responses.
     let ports = StorePorts { store: repository };
-    let (search, library) =
-        ports.catalogue_service(vec![
-            Arc::new(YoutubeCatalogueProvider::disabled()) as Arc<dyn CatalogueProvider>
-        ]);
+    let (search, library) = ports.catalogue_service(vec![
+        Arc::new(YtmCatalogue::disabled()) as Arc<dyn CatalogueProvider>
+    ]);
     let playback = ports.streaming(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+        Arc::new(YtmPlayback::disabled()) as Arc<dyn PlaybackProvider>
     ]);
 
     (

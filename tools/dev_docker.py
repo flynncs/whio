@@ -193,8 +193,8 @@ def providers(path):
         if not line.strip() or line.lstrip().startswith('#'):
             continue
         key, separator, value = line.partition('=')
-        if not separator or not re.fullmatch(r'WHIO_RESOLVER_[A-Z0-9_]+', key.strip()):
-            raise RuntimeError('providers.env accepts only WHIO_RESOLVER_ settings')
+        if not separator or not re.fullmatch(r'WHIO_(MUSICBRAINZ|WIKIMEDIA|AUDIODB|LISTENBRAINZ)_[A-Z0-9_]+', key.strip()):
+            raise RuntimeError('providers.env accepts only native metadata provider settings')
         import shlex
         words = shlex.split(value.strip()) if value.strip().startswith(('"', "'")) else [value.strip()]
         if len(words) != 1:
@@ -213,9 +213,9 @@ def config(path, profile, full, source=None):
     common = dev.environment(path, profile, full)
     common.update(WHIO_DATABASE_URL=f'postgres://whio:{profile["postgres_password"]}@postgres:5432/whio',
                   WHIO_BIND_ADDRESS='0.0.0.0:3000', WHIO_WORKER_BIND_ADDRESS='0.0.0.0:3001',
-                  WHIO_MEDIA_ROOTS=profile['media_root'])
+                  WHIO_MEDIA_ROOTS=profile['media_root'], **providers(path))
     if full:
-        common.update(WHIO_YOUTUBE_RESOLVER_URL='http://youtube:8000', WHIO_METADATA_RESOLVER_URL='http://metadata:8000')
+        common.update(WHIO_YOUTUBE_RESOLVER_URL='http://youtube:8000')
     runtime_mounts = [bind(dev.builds_root(profile)), bind(path), bind(Path(profile['media_root'])),
                       bind(path / 'artwork', readonly=False), bind(path / 'spool', readonly=False)]
     services = {'postgres': {'image': 'postgres:18-alpine', 'container_name': pg,
@@ -233,12 +233,12 @@ def config(path, profile, full, source=None):
                     'profiles': [] if name == 'api' else ['full'],
                     'healthcheck': {'test': ['CMD', 'curl', '--fail', '--silent', f'http://127.0.0.1:{port}/health/ready'],
                                     'interval': '10s', 'start_interval': '1s', 'start_period': '45s', 'timeout': '3s', 'retries': 3}}
-    for name, module in (('youtube', 'app.main:app'), ('metadata', 'app.metadata_main:app')):
+    for name, module in (('youtube', 'app.main:app'),):
         directory = path / 'deno'
         directory.mkdir(mode=0o700, exist_ok=True)
         services[name] = {'image': names['resolver'], 'entrypoint': ['/opt/venv/bin/uvicorn'],
                     'command': [module, '--host', '0.0.0.0', '--port', '8000'], 'working_dir': str(path / 'current-resolver'),
-                    'user': f'{os.getuid()}:{os.getgid()}', 'environment': dict(providers(path), DENO_DIR=str(directory), PYTHONDONTWRITEBYTECODE='1'),
+                    'user': f'{os.getuid()}:{os.getgid()}', 'environment': {'DENO_DIR': str(directory), 'PYTHONDONTWRITEBYTECODE': '1'},
                     'volumes': [bind(dev.builds_root(profile)), bind(path), bind(directory, readonly=False)],
                     'ports': [f'127.0.0.1:{profile["ports"][name]}:8000'], 'profiles': ['full'], 'mem_limit': '256m', 'cpus': 1,
                     'healthcheck': {'test': ['CMD', '/opt/venv/bin/python', '-c', 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/ready", timeout=2)'],
@@ -496,7 +496,7 @@ def running(path, profile):
 
 
 def wait_ready(profile):
-    names = ('api', 'worker', 'youtube', 'metadata') if profile['full'] else ('api',)
+    names = ('api', 'worker', 'youtube') if profile['full'] else ('api',)
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         if all(dev.ready(profile['ports'][name]) for name in names):
@@ -521,7 +521,7 @@ def start(path, profile, full):
             raise RuntimeError('one full preview is already active; stop it first')
     media(profile)
     guard(profile)
-    names = ('api', 'worker', 'youtube', 'metadata') if full else ('api',)
+    names = ('api', 'worker', 'youtube') if full else ('api',)
     dev.check_ports({name: profile['ports'][name] for name in names})
     profile['full'] = full
     start_db(path, profile)
@@ -529,7 +529,7 @@ def start(path, profile, full):
     validate_resolvers(path, profile)
     try:
         if full:
-            compose(path, profile, 'up', '-d', 'youtube', 'metadata')
+            compose(path, profile, 'up', '-d', 'youtube')
         compose(path, profile, 'up', '-d', *(['worker', 'api'] if full else ['api']))
         wait_ready(profile)
     except BaseException:
@@ -543,7 +543,7 @@ def start(path, profile, full):
 
 def stop(path, profile, database=True):
     if (path / 'compose.json').exists():
-        compose(path, profile, 'stop', *(['api', 'worker', 'youtube', 'metadata', 'postgres'] if database else ['api', 'worker', 'youtube', 'metadata']))
+        compose(path, profile, 'stop', *(['api', 'worker', 'youtube', 'postgres'] if database else ['api', 'worker', 'youtube']))
     print(f'{profile["name"]} stopped; database and music retained', flush=True)
 
 
@@ -555,7 +555,7 @@ def validate_resolvers(path, profile):
         except SyntaxError as error:
             raise RuntimeError(f'resolver syntax error: {file.name}:{error.lineno}; previous server retained')
     if profile['full']:
-        for module in ('app.main', 'app.metadata_main'):
+        for module in ('app.main',):
             name = project(profile) + '-import-' + uuid.uuid4().hex[:8]
             try:
                 arguments = [*dev.docker_args(profile), 'run', '--rm', '--name', name,
@@ -587,8 +587,8 @@ def replace(path, previous, candidate, schema_changed=False):
         if old['rust'] != new['rust'] or previous['images']['compiler'] != candidate['images']['compiler'] or schema_changed:
             changed.extend(['worker', 'api'] if candidate['full'] else ['api'])
         if candidate['full'] and old['python'] != new['python']:
-            changed.extend(['youtube', 'metadata'])
-        names = ('api', 'worker', 'youtube', 'metadata') if candidate['full'] else ('api',)
+            changed.append('youtube')
+        names = ('api', 'worker', 'youtube') if candidate['full'] else ('api',)
         for name in names:
             if old_services.get(name) != new_services[name] and name not in changed:
                 changed.append(name)

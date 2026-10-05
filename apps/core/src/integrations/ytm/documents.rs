@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -7,43 +7,51 @@ use whio_resolver_api::{
     models,
 };
 
-use crate::features::metadata::{
-    capabilities::{CapabilityError, CapabilitySource, Snapshot},
-    domain::{Attribution, CandidateItem, FieldId, FieldValue, ImageFact, MatchBasis, MetricFact},
-    licences::LicenceAssertion,
-    refresh::{
-        ARTIST_DISPLAY_OPERATION, CandidateSource, DocumentCandidate, DocumentError,
-        DocumentFieldError, DocumentOutcome, MetadataDocuments,
+use crate::features::{
+    metadata::{
+        domain::{
+            Attribution, CandidateItem, FieldId, FieldValue, ImageFact, MatchBasis, MetricFact,
+        },
+        licences::LicenceAssertion,
+        providers::DocumentProvider,
+        refresh::{
+            CandidateSource, DocumentCandidate, DocumentError, DocumentFieldError, DocumentOutcome,
+        },
+        selection::LOCAL,
+        service::MetadataProfile,
     },
-    selection::{LOCAL, METADATA_PROVIDERS, YOUTUBE_MUSIC},
-    service::MetadataProfile,
+    music_library::domain::{ProviderId, SourceIdentity, SourceScope},
 };
-use crate::features::music_library::domain::{ProviderId, SourceIdentity, SourceScope};
 
-const ADDRESSING_PROVIDERS: [&str; 1] = [YOUTUBE_MUSIC];
-const CAPABILITY_ADDRESSING_ERROR: &str = "capability_advertised_by_the_wrong_application";
-
-pub struct DocumentRouting {
-    youtube: Option<Arc<Configuration>>,
-    metadata: Option<Arc<Configuration>>,
+pub struct ResolverDocuments {
+    provider_id: String,
+    transport: Arc<Configuration>,
 }
 
-impl DocumentRouting {
-    pub fn new(youtube: Option<Arc<Configuration>>, metadata: Option<Arc<Configuration>>) -> Self {
-        Self { youtube, metadata }
-    }
-
-    fn client(&self, source: &SourceIdentity) -> Option<&Arc<Configuration>> {
-        if ADDRESSING_PROVIDERS.contains(&source.provider_id().as_str()) {
-            self.youtube.as_ref()
-        } else {
-            self.metadata.as_ref()
+impl ResolverDocuments {
+    pub fn new(provider_id: String, transport: Arc<Configuration>) -> Self {
+        Self {
+            provider_id,
+            transport,
         }
     }
 
-    async fn documents(
+    async fn advertised(
         &self,
-        client: &Configuration,
+    ) -> Result<bool, crate::features::metadata::capabilities::CapabilityError> {
+        let response = default_api::get_capabilities(&self.transport, None)
+            .await
+            .map_err(|_| crate::features::metadata::capabilities::CapabilityError::Unavailable)?;
+        Ok(response.providers.iter().any(|provider| {
+            provider.provider_id == self.provider_id
+                && provider.capabilities.iter().any(|capability| {
+                    capability == crate::features::metadata::refresh::ARTIST_DISPLAY_OPERATION
+                })
+        }))
+    }
+
+    async fn fetch_document(
+        &self,
         source: &SourceIdentity,
         profile: &MetadataProfile,
         language: &str,
@@ -63,16 +71,25 @@ impl DocumentRouting {
                     .collect(),
             ),
         };
-
-        match default_api::fetch_artist_metadata(client, request, None).await {
-            Ok(response) => Ok(document(response)),
-            Err(error) => Err(document_error(error)),
-        }
+        default_api::fetch_artist_metadata(&self.transport, request, None)
+            .await
+            .map(document)
+            .map_err(document_error)
     }
 }
 
 #[async_trait]
-impl MetadataDocuments for DocumentRouting {
+impl DocumentProvider for ResolverDocuments {
+    fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    async fn advertised(
+        &self,
+    ) -> Result<bool, crate::features::metadata::capabilities::CapabilityError> {
+        ResolverDocuments::advertised(self).await
+    }
+
     async fn fetch(
         &self,
         source: &SourceIdentity,
@@ -80,104 +97,7 @@ impl MetadataDocuments for DocumentRouting {
         language: &str,
         fields: &[FieldId],
     ) -> Result<DocumentOutcome, DocumentError> {
-        let client = self.client(source).ok_or(DocumentError::Unsupported)?;
-
-        self.documents(client, source, profile, language, fields)
-            .await
-    }
-}
-
-pub struct RoutingCapabilities {
-    youtube: Option<Arc<Configuration>>,
-    metadata: Option<Arc<Configuration>>,
-}
-
-impl RoutingCapabilities {
-    pub fn new(youtube: Option<Arc<Configuration>>, metadata: Option<Arc<Configuration>>) -> Self {
-        Self { youtube, metadata }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Application {
-    Addressing,
-    Metadata,
-}
-
-impl Application {
-    fn owns(self, provider_id: &str) -> bool {
-        match self {
-            Application::Addressing => ADDRESSING_PROVIDERS.contains(&provider_id),
-            Application::Metadata => METADATA_PROVIDERS.contains(&provider_id),
-        }
-    }
-}
-
-fn known_provider(provider_id: &str) -> bool {
-    ADDRESSING_PROVIDERS.contains(&provider_id) || METADATA_PROVIDERS.contains(&provider_id)
-}
-
-async fn advertised(client: &Configuration) -> Result<Snapshot, CapabilityError> {
-    let response = default_api::get_capabilities(client, None)
-        .await
-        .map_err(|_| CapabilityError::Unavailable)?;
-
-    Ok(Snapshot::new(
-        response
-            .providers
-            .into_iter()
-            .filter(|provider| {
-                provider
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability == ARTIST_DISPLAY_OPERATION)
-            })
-            .map(|provider| provider.provider_id)
-            .collect::<Vec<_>>(),
-    ))
-}
-
-#[async_trait]
-impl CapabilitySource for RoutingCapabilities {
-    async fn fetch(&self) -> Result<Snapshot, CapabilityError> {
-        if self.youtube.is_none() && self.metadata.is_none() {
-            return Err(CapabilityError::Disabled);
-        }
-
-        let mut providers: BTreeSet<String> = BTreeSet::new();
-        let mut reachable = false;
-
-        for (application, client) in [
-            (Application::Addressing, self.youtube.as_ref()),
-            (Application::Metadata, self.metadata.as_ref()),
-        ] {
-            let Some(client) = client else {
-                continue;
-            };
-            let Ok(snapshot) = advertised(client).await else {
-                continue;
-            };
-
-            reachable = true;
-
-            for provider_id in snapshot.providers() {
-                if application.owns(provider_id) || !known_provider(provider_id) {
-                    providers.insert(provider_id.to_owned());
-                } else {
-                    tracing::warn!(
-                        provider_id = %provider_id,
-                        reason = CAPABILITY_ADDRESSING_ERROR,
-                        "a resolver application advertises a source it does not serve"
-                    );
-                }
-            }
-        }
-
-        if reachable {
-            Ok(Snapshot::new(providers))
-        } else {
-            Err(CapabilityError::Unavailable)
-        }
+        self.fetch_document(source, profile, language, fields).await
     }
 }
 
@@ -365,26 +285,69 @@ fn code(entity: &Option<default_api::FetchArtistMetadataError>) -> Option<models
         default_api::FetchArtistMetadataError::Status422(response) => Some(response.code),
         default_api::FetchArtistMetadataError::Status500(response) => Some(response.code),
         default_api::FetchArtistMetadataError::Status503(response) => Some(response.code),
-        default_api::FetchArtistMetadataError::UnknownValue(_) => None,
+        default_api::FetchArtistMetadataError::UnknownValue(value) => value
+            .get("code")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
     }
 }
 
-fn document_error(error: ApiError<default_api::FetchArtistMetadataError>) -> DocumentError {
+pub(crate) fn document_error(
+    error: ApiError<default_api::FetchArtistMetadataError>,
+) -> DocumentError {
     match error {
-        ApiError::ResponseError(response) => match response.status.as_u16() {
-            404 => DocumentError::NotFound,
-            409 => DocumentError::Unsupported,
-            429 => DocumentError::Unavailable { retry_after: None },
-            500..=599 => DocumentError::Unavailable { retry_after: None },
-            400 => match code(&response.entity) {
-                Some(models::ErrorCode::ResolutionFailed) => DocumentError::ResolutionFailed,
-                Some(models::ErrorCode::UnsupportedProvider) => DocumentError::Unsupported,
+        ApiError::ResponseError(response) => {
+            let code = code(&response.entity);
+            match code {
                 Some(models::ErrorCode::SourceNotFound) => DocumentError::NotFound,
-                _ => DocumentError::Malformed,
-            },
-            _ => DocumentError::Malformed,
-        },
+                Some(models::ErrorCode::UnsupportedProvider) => DocumentError::Unsupported,
+                Some(models::ErrorCode::ResolutionFailed) => DocumentError::ResolutionFailed,
+                Some(models::ErrorCode::ProviderUnavailable) => {
+                    DocumentError::Unavailable { retry_after: None }
+                }
+                Some(models::ErrorCode::InvalidRequest | models::ErrorCode::InternalError) => {
+                    DocumentError::Malformed
+                }
+                None => match response.status.as_u16() {
+                    404 => DocumentError::NotFound,
+                    422 => DocumentError::Unsupported,
+                    429 | 500..=599 => DocumentError::Unavailable { retry_after: None },
+                    _ => DocumentError::Malformed,
+                },
+            }
+        }
         ApiError::Reqwest(_) => DocumentError::Unavailable { retry_after: None },
         _ => DocumentError::Malformed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognized_unknown_response_codes_classify_before_status() {
+        let cases = [
+            ("source_not_found", DocumentError::NotFound),
+            ("unsupported_provider", DocumentError::Unsupported),
+            ("resolution_failed", DocumentError::ResolutionFailed),
+            (
+                "provider_unavailable",
+                DocumentError::Unavailable { retry_after: None },
+            ),
+            ("invalid_request", DocumentError::Malformed),
+            ("internal_error", DocumentError::Malformed),
+        ];
+
+        for (code, expected) in cases {
+            let error = ApiError::ResponseError(whio_resolver_api::apis::ResponseContent {
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                content: String::new(),
+                entity: Some(default_api::FetchArtistMetadataError::UnknownValue(
+                    serde_json::json!({"code": code}),
+                )),
+            });
+            assert_eq!(document_error(error), expected, "{code}");
+        }
     }
 }

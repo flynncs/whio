@@ -19,7 +19,7 @@ use whio_core::{
     features::music_library::library::ScanService,
     features::music_library::test_support::CatalogueWrite,
     features::playback::PlaybackProvider,
-    features::playback::providers::YtmAdapter,
+    integrations::ytm::playback::YtmPlayback,
 };
 
 use support::{StorePorts, credentials::database_credential_service};
@@ -137,7 +137,7 @@ async fn seeded_app(pool: PgPool) -> Seeded {
         Arc::clone(&library),
     ));
     let playback = ports.streaming(vec![
-        Arc::new(YtmAdapter::disabled()) as Arc<dyn PlaybackProvider>
+        Arc::new(YtmPlayback::disabled()) as Arc<dyn PlaybackProvider>
     ]);
     let app = whio_core::app::router(
         AppState::new(credential, search, library, playback)

@@ -10,12 +10,12 @@ use whio_core::{
     features::music_library::domain::{
         ProviderId, SourceIdentity, SourceScope, ValidationError as TrackValidationError,
     },
-    features::music_library::providers::YoutubeCatalogueProvider,
     features::playback::providers::ProviderError,
-    features::playback::providers::YtmAdapter,
     features::playback::{
         PlayableMedia, PlaybackProvider, PlaybackSource, ValidationError as PlaybackValidationError,
     },
+    integrations::ytm::catalogue::YtmCatalogue,
+    integrations::ytm::playback::YtmPlayback,
     platform::request::{RequestContext, RequestId},
 };
 use whio_resolver_api::models::{
@@ -161,7 +161,7 @@ fn invalid_playback_dto_is_rejected() {
 
 #[tokio::test]
 async fn disabled_adapter_search_reports_disabled() {
-    let adapter = YoutubeCatalogueProvider::disabled();
+    let adapter = YtmCatalogue::disabled();
 
     assert!(matches!(
         adapter.search(&search(), None, &context()).await,
@@ -171,7 +171,7 @@ async fn disabled_adapter_search_reports_disabled() {
 
 #[tokio::test]
 async fn disabled_adapter_resolve_reports_disabled() {
-    let adapter = YtmAdapter::disabled();
+    let adapter = YtmPlayback::disabled();
 
     assert!(matches!(
         adapter.resolve(&playback_source(), None, &context()).await,
@@ -181,7 +181,7 @@ async fn disabled_adapter_resolve_reports_disabled() {
 
 #[tokio::test]
 async fn disabled_adapter_fetch_album_reports_disabled() {
-    let adapter = YoutubeCatalogueProvider::disabled();
+    let adapter = YtmCatalogue::disabled();
     let source = SourceIdentity::new(
         ProviderId::new("youtube_music".to_owned()).unwrap(),
         SourceScope::Global,

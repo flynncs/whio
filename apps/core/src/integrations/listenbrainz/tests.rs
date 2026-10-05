@@ -1,6 +1,9 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
-use crate::features::identity::destinations::DestinationProvider;
+use crate::{
+    features::identity::destinations::DestinationProvider,
+    platform::{http::USER_AGENT, pacing::CallLimiter},
+};
 
 use super::*;
 use axum::{
@@ -10,10 +13,7 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
-use std::sync::{
-    Mutex as StdMutex,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Mutex as StdMutex;
 
 type Calls = Arc<StdMutex<Vec<(String, String, String)>>>;
 
@@ -26,7 +26,7 @@ struct Recorded {
 impl Recorded {
     fn start() -> (Router, Calls, Arc<CallLimiter>) {
         let calls = Arc::new(StdMutex::new(Vec::new()));
-        let limiter = Arc::new(CallLimiter::new(MINIMUM_INTERVAL));
+        let limiter = Arc::new(CallLimiter::new(Duration::ZERO));
         let state = Self {
             calls: Arc::clone(&calls),
             limiter: Arc::clone(&limiter),
@@ -302,10 +302,9 @@ async fn the_submission_errors_map_to_the_library_outcomes() {
 }
 
 #[tokio::test]
-async fn the_shared_limiter_serialises_calls_to_the_one_host() {
+async fn the_shared_limiter_is_used_by_every_operation_to_the_one_host() {
     let (app, calls, limiter) = Recorded::start();
     let adapter = adapter(app, limiter).await;
-    let started = Instant::now();
 
     adapter
         .validate(&DestinationProvider::ListenBrainz, "good-token")
@@ -314,12 +313,7 @@ async fn the_shared_limiter_serialises_calls_to_the_one_host() {
     adapter.submit("good-token", &listen()).await.unwrap();
     adapter.submit("good-token", &listen()).await.unwrap();
 
-    let elapsed = started.elapsed();
     assert_eq!(calls.lock().unwrap().len(), 3);
-    assert!(
-        elapsed >= 2 * MINIMUM_INTERVAL,
-        "three calls to one host must be serialised, took {elapsed:?}"
-    );
 }
 
 #[tokio::test]
@@ -344,7 +338,7 @@ async fn the_request_never_carries_the_provider_token_in_its_body() {
             }
         }),
     );
-    let limiter = Arc::new(CallLimiter::new(Duration::from_millis(1)));
+    let limiter = Arc::new(CallLimiter::new(Duration::ZERO));
     let adapter = adapter(app, limiter).await;
 
     adapter.submit("secret-token", &listen()).await.unwrap();
@@ -357,9 +351,14 @@ async fn the_request_never_carries_the_provider_token_in_its_body() {
 #[test]
 fn the_limiter_reserves_the_next_slot_before_a_call_runs() {
     let limiter = CallLimiter::new(Duration::from_millis(50));
+    let now = Instant::now();
 
-    assert_eq!(limiter.reserve(), Duration::ZERO);
-    assert!(limiter.reserve() >= Duration::from_millis(40));
+    assert_eq!(limiter.reserve_at(now), Duration::ZERO);
+    assert_eq!(limiter.reserve_at(now), Duration::from_millis(50));
+    assert_eq!(
+        limiter.reserve_at(now + Duration::from_millis(10)),
+        Duration::from_millis(90)
+    );
 }
 
 #[test]
@@ -376,18 +375,13 @@ fn the_process_wide_interval_is_one_call_per_second() {
 }
 
 #[test]
-fn the_counter_is_shared_by_handle_not_copied_per_client() {
+fn limiter_clones_share_the_same_reservation_state() {
     let limiter = Arc::new(CallLimiter::new(MINIMUM_INTERVAL));
-    let calls = Arc::new(AtomicUsize::new(0));
+    let clone = Arc::clone(&limiter);
+    let now = Instant::now();
 
-    for _ in 0..3 {
-        let clone = Arc::clone(&limiter);
-        calls.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(limiter.interval, clone.interval);
-    }
-
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-    assert_eq!(Arc::strong_count(&limiter), 1);
+    assert_eq!(limiter.reserve_at(now), Duration::ZERO);
+    assert_eq!(clone.reserve_at(now), MINIMUM_INTERVAL);
 }
 
 #[test]

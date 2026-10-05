@@ -16,10 +16,6 @@ services:
   ytm-resolver:
     image: ghcr.io/flynncs/whio-ytm-resolver:latest
 
-  metadata-resolver:
-    image: ghcr.io/flynncs/whio-ytm-resolver:latest
-    command: ["app.metadata_main:app", "--host", "0.0.0.0", "--port", "8000"]
-
   core:
     image: ghcr.io/flynncs/whio-core:latest
     depends_on:
@@ -30,7 +26,6 @@ services:
       WHIO_CREDENTIAL_KEY: ${WHIO_CREDENTIAL_KEY:?set WHIO_CREDENTIAL_KEY in .env (openssl rand -base64 32)}
       WHIO_YOUTUBE_ENABLED: "true"
       WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000
-      WHIO_METADATA_RESOLVER_URL: http://metadata-resolver:8000
     ports:
       - 3000:3000
 
@@ -45,7 +40,6 @@ services:
       WHIO_CREDENTIAL_KEY: ${WHIO_CREDENTIAL_KEY:?set WHIO_CREDENTIAL_KEY in .env (openssl rand -base64 32)}
       WHIO_YOUTUBE_ENABLED: "true"
       WHIO_YOUTUBE_RESOLVER_URL: http://ytm-resolver:8000
-      WHIO_METADATA_RESOLVER_URL: http://metadata-resolver:8000
       WHIO_WORKER_QUEUES: whio.jobs.probe,whio.metadata.refresh,whio.listening.delivery
       WHIO_WORKER_DRAIN_TIMEOUT_SECONDS: "30"
     stop_grace_period: 45s

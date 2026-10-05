@@ -2,23 +2,26 @@ use std::{future::Future, sync::Arc};
 
 use tokio::net::TcpListener;
 
-use super::config::{Config, MetadataResolverConfig, YoutubeResolverConfig};
+use super::config::Config;
 use crate::{
     app::AppState,
-    app::{database::Database, resolver},
+    app::database::Database,
     features::identity::{self, destinations::DestinationValidator},
     features::metadata::{METADATA_ADAPTER_VERSION, storage::PostgresMetadataStore},
     features::music_library::{
         self, ArtworkStore, DeliveryStore, EnrichmentGuard, PostgresTrackRepository,
         catalogue::CatalogueProvider, domain::YOUTUBE_MUSIC_PROVIDER_ID,
-        library::LibraryRegistrationError, providers::YoutubeCatalogueProvider,
+        library::LibraryRegistrationError,
     },
     features::playback::activity::PlaybackActivityService,
     features::playback::delivery::StreamDelivery,
     features::playback::media::{self, HttpMediaFetcher},
-    features::playback::providers::{LocalPlaybackProvider, ProviderError, YtmAdapter},
+    features::playback::providers::{LocalPlaybackProvider, ProviderError},
     features::playback::{PlaybackProvider, StreamingService},
-    integrations::listenbrainz::ListenBrainzAdapter,
+    integrations::{
+        listenbrainz::ListenBrainzAdapter,
+        ytm::{catalogue::YtmCatalogue, playback::YtmPlayback},
+    },
 };
 
 pub(crate) async fn shutdown_signal() {
@@ -90,32 +93,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, ProviderError> {
-    let transport = match &config.youtube_resolver {
-        YoutubeResolverConfig::Disabled => None,
-        YoutubeResolverConfig::Enabled {
-            url,
-            connect_timeout,
-            total_timeout,
-        } => Some(resolver::client(
-            url.clone(),
-            *connect_timeout,
-            *total_timeout,
-        )?),
-    };
-    let ytm_playback = Arc::new(YtmAdapter::new(transport.clone()));
-    let ytm_catalogue = Arc::new(YoutubeCatalogueProvider::new(transport.clone()));
-    let metadata_transport = match &config.metadata_resolver {
-        MetadataResolverConfig::Disabled => None,
-        MetadataResolverConfig::Enabled {
-            url,
-            connect_timeout,
-            total_timeout,
-        } => Some(resolver::client(
-            url.clone(),
-            *connect_timeout,
-            *total_timeout,
-        )?),
-    };
+    let transport = ytm_transport(config)?;
+    let ytm_playback = Arc::new(YtmPlayback::new(transport.clone()));
+    let ytm_catalogue = Arc::new(YtmCatalogue::new(transport.clone()));
 
     let credential = Arc::new(identity::credentials(
         database.pool(),
@@ -124,12 +104,13 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
     let (catalogue_providers, enabled_providers): (
         Vec<Arc<dyn CatalogueProvider>>,
         Vec<&'static str>,
-    ) = match &config.youtube_resolver {
-        YoutubeResolverConfig::Disabled => (Vec::new(), Vec::new()),
-        YoutubeResolverConfig::Enabled { .. } => (
+    ) = if config.integrations.ytm.is_some() {
+        (
             vec![ytm_catalogue as Arc<dyn CatalogueProvider>],
             vec![YOUTUBE_MUSIC_PROVIDER_ID],
-        ),
+        )
+    } else {
+        (Vec::new(), Vec::new())
     };
 
     let listenbrainz = Arc::new(
@@ -146,7 +127,6 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         config,
         database.pool(),
         &transport,
-        &metadata_transport,
         &listenbrainz,
         &destinations,
     )?;
@@ -229,30 +209,7 @@ pub(crate) fn worker_state(
     config: &Config,
     pool: sqlx::PgPool,
 ) -> Result<WorkerState, ProviderError> {
-    let youtube_transport = match &config.youtube_resolver {
-        YoutubeResolverConfig::Disabled => None,
-        YoutubeResolverConfig::Enabled {
-            url,
-            connect_timeout,
-            total_timeout,
-        } => Some(resolver::client(
-            url.clone(),
-            *connect_timeout,
-            *total_timeout,
-        )?),
-    };
-    let metadata_transport = match &config.metadata_resolver {
-        MetadataResolverConfig::Disabled => None,
-        MetadataResolverConfig::Enabled {
-            url,
-            connect_timeout,
-            total_timeout,
-        } => Some(resolver::client(
-            url.clone(),
-            *connect_timeout,
-            *total_timeout,
-        )?),
-    };
+    let youtube_transport = ytm_transport(config)?;
     let listenbrainz = Arc::new(ListenBrainzAdapter::new().map_err(ProviderError::request)?);
     let destinations = Arc::new(identity::destinations(
         pool.clone(),
@@ -263,7 +220,6 @@ pub(crate) fn worker_state(
         config,
         pool.clone(),
         &youtube_transport,
-        &metadata_transport,
         &listenbrainz,
         &destinations,
     )?;
@@ -282,6 +238,23 @@ pub(crate) fn worker_state(
         subjects: Some(music.subjects),
         delivery: music.delivery,
     })
+}
+
+fn ytm_transport(
+    config: &Config,
+) -> Result<Option<Arc<whio_resolver_api::apis::configuration::Configuration>>, ProviderError> {
+    config
+        .integrations
+        .ytm
+        .as_ref()
+        .map(|ytm| {
+            crate::integrations::ytm::transport::resolver_client(
+                ytm.url.clone(),
+                ytm.connect_timeout,
+                ytm.total_timeout,
+            )
+        })
+        .transpose()
 }
 
 fn missing_metadata() -> ProviderError {
@@ -320,19 +293,53 @@ fn build_w4(
     config: &Config,
     pool: sqlx::PgPool,
     youtube_transport: &Option<Arc<whio_resolver_api::apis::configuration::Configuration>>,
-    metadata_transport: &Option<Arc<whio_resolver_api::apis::configuration::Configuration>>,
     listenbrainz: &Arc<ListenBrainzAdapter>,
     destinations: &Arc<identity::destinations::DestinationService>,
 ) -> Result<music_library::W4Dependencies, ProviderError> {
-    let routing = Arc::new(crate::features::metadata::DocumentRouting::new(
-        youtube_transport.clone(),
-        metadata_transport.clone(),
-    ));
+    let mut providers: Vec<Arc<dyn crate::features::metadata::DocumentProvider>> = Vec::new();
+    if let Some(transport) = youtube_transport {
+        providers.push(Arc::new(
+            crate::integrations::ytm::documents::ResolverDocuments::new(
+                crate::features::metadata::selection::YOUTUBE_MUSIC.to_owned(),
+                Arc::clone(transport),
+            ),
+        ));
+    }
+    if let Some(config) = config.integrations.musicbrainz.as_ref() {
+        let musicbrainz =
+            crate::integrations::musicbrainz::artist::MusicBrainzDocuments::new(config)
+                .map_err(ProviderError::request)?;
+        for provider_id in [
+            crate::features::metadata::selection::MUSICBRAINZ,
+            crate::features::metadata::selection::WIKIPEDIA,
+            crate::features::metadata::selection::COMMONS,
+        ] {
+            providers.push(Arc::new(musicbrainz.for_provider(provider_id)));
+        }
+    }
+    if let Some(config) = config.integrations.audiodb.as_ref() {
+        providers.push(Arc::new(
+            crate::integrations::audiodb::AudioDbDocuments::new(config)
+                .map_err(ProviderError::request)?,
+        ));
+    }
+    if let Some(config) = config.integrations.listenbrainz_documents.as_ref() {
+        providers.push(Arc::new(
+            crate::integrations::listenbrainz::documents_artist::ListenBrainzDocuments::new(
+                config,
+                Arc::clone(listenbrainz.limiter()),
+            )
+            .map_err(ProviderError::request)?,
+        ));
+    }
+    let documents = Arc::new(
+        crate::features::metadata::DocumentProviders::new(providers)
+            .map_err(ProviderError::request)?,
+    );
+    let capability_source: Arc<dyn crate::features::metadata::CapabilitySource> =
+        Arc::clone(&documents) as Arc<dyn crate::features::metadata::CapabilitySource>;
     let capabilities = Arc::new(crate::features::metadata::CapabilitySnapshot::new(
-        Arc::new(crate::features::metadata::RoutingCapabilities::new(
-            youtube_transport.clone(),
-            metadata_transport.clone(),
-        )),
+        capability_source,
         crate::features::metadata::capabilities::CAPABILITY_TTL,
     ));
     spawn_capability_warmer(Arc::clone(&capabilities));
@@ -347,7 +354,7 @@ fn build_w4(
 
         Some(music_library::MetadataWiring {
             store,
-            documents: routing,
+            documents,
             capabilities,
             order: config.metadata_source_order.clone(),
             adapter_version: METADATA_ADAPTER_VERSION.to_owned(),

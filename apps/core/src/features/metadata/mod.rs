@@ -1,18 +1,16 @@
 pub mod capabilities;
-pub mod documents;
 pub mod domain;
 pub mod freshness;
 pub mod licences;
+pub mod providers;
 pub mod refresh;
 pub mod selection;
 pub mod service;
 pub mod storage;
 
-pub use capabilities::{
-    CapabilityError, CapabilitySnapshot, CapabilitySource, ResolverCapabilities, Snapshot,
-};
-pub use documents::{DocumentRouting, RoutingCapabilities};
+pub use capabilities::{CapabilityError, CapabilitySnapshot, CapabilitySource, Snapshot};
 pub use freshness::{Jitter, NoJitter};
+pub use providers::{DocumentProvider, DocumentProviders, DuplicateProvider};
 pub use refresh::{DocumentCandidate, DocumentError, DocumentOutcome, MetadataDocuments};
 pub use service::{
     ARTIST_DISPLAY_FIELDS, ARTIST_DISPLAY_PROFILE, METADATA_ADAPTER_VERSION, MetadataError,
@@ -20,6 +18,10 @@ pub use service::{
     SubjectSource,
 };
 pub use storage::{MetadataStore, PostgresMetadataStore};
+
+#[cfg(test)]
+#[path = "providers_tests.rs"]
+mod providers_tests;
 
 #[cfg(test)]
 #[path = "capabilities_tests.rs"]
