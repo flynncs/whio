@@ -311,9 +311,9 @@ def selected_args(parser, values, full):
         values = values[1:]
     separator = values.index('--') if '--' in values else len(values)
     cargo_args, test_args = values[:separator], values[separator + 1:]
-    targets = 0
+    targets = []
     library = False
-    filters = 0
+    filters = []
     index = 0
     while index < len(cargo_args):
         value = cargo_args[index]
@@ -323,9 +323,9 @@ def selected_args(parser, values, full):
             index += 1
             if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_-]*', cargo_args[index]):
                 parser.error('name an individual integration target after --test')
-            targets += 1
-        elif value and not value.startswith('-') and filters == 0:
-            filters += 1
+            targets.extend(('--test', cargo_args[index]))
+        elif value and not value.startswith('-'):
+            filters.append(value)
         else:
             parser.error(f'unsupported selector: {value}; use --lib <filter> or --test <name>')
         index += 1
@@ -341,7 +341,7 @@ def selected_args(parser, values, full):
         index += 1
     if not full and (not (targets or library) or not filters):
         parser.error('name a test filter (or pass --full)')
-    return cargo_args, test_args
+    return [*(['--lib'] if library else []), *targets], [*filters, *test_args]
 
 
 def main(postgres_default=False):

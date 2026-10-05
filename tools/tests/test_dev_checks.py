@@ -199,6 +199,14 @@ class DevChecksTest(unittest.TestCase):
                 self.assertIsNone(observed)
         self.assertEqual(list((self.root / 'targets').iterdir()), [])
 
+    def test_several_filters_and_targets_share_one_run(self):
+        result, observed = self.invoke_main(['--', '--lib', '--test', 'integration', 'domain::text', 'compat_http', '--', '--exact'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = observed[0]
+        separator = command.index('--')
+        self.assertEqual(command[separator - 3:separator], ['--lib', '--test', 'integration'])
+        self.assertEqual(command[separator + 2:], ['domain::text', 'compat_http', '--exact'])
+
     def test_full_is_explicit_and_zero_tests_fail(self):
         result, _ = self.invoke_main(['--full'])
         self.assertEqual(result.returncode, 0, result.stderr)
