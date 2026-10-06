@@ -600,6 +600,7 @@ def replace(path, previous, candidate, schema_changed=False):
                 compose(path, candidate, 'up', '-d', '--force-recreate', *recreate)
             if restart:
                 compose(path, candidate, 'restart', *restart)
+            compose(path, candidate, 'up', '-d', '--no-recreate', '--remove-orphans', *names)
             wait_ready(candidate)
         else:
             start(path, candidate, candidate['full'])
