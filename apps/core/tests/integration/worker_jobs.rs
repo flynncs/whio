@@ -589,6 +589,7 @@ async fn a_graceful_stop_releases_a_job_that_outlasts_the_drain(pool: PgPool) {
         worker.log()
     );
 
+    expire_heartbeat(&pool, operation_id).await;
     release_probe(&pool, operation_id).await;
     let mut worker = Worker::start(&pool, PROBE_QUEUE);
     worker.await_health("/health/ready", 200).await;

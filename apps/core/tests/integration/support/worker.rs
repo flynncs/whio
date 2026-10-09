@@ -64,7 +64,7 @@ impl Worker {
         ) = if production_intervals {
             ("200", "250", "30000", "30000", "30000", "90000")
         } else {
-            ("2", "2", "250", "2", "50", "500")
+            ("2", "2", "250", "2", "50", "90000")
         };
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_whio-worker"));
