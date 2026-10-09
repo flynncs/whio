@@ -33,7 +33,9 @@ use crate::features::music_library::{
     },
 };
 
-const SCRATCH: &str = "/private/tmp/lumen-mi04b-cache";
+fn scratch() -> PathBuf {
+    std::env::temp_dir().join("lumen-mi04b-cache")
+}
 const PORTRAIT: ArtworkRole = ArtworkRole::Portrait;
 const WIDE: ArtworkRole = ArtworkRole::Wide;
 
@@ -43,7 +45,7 @@ struct Scratch {
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let root = PathBuf::from(SCRATCH).join(format!("{name}-{}", Uuid::now_v7()));
+        let root = scratch().join(format!("{name}-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
 
         Self { root }

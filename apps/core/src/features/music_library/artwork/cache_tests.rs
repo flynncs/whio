@@ -18,7 +18,9 @@ use crate::features::music_library::{
 };
 
 const ROLE: ArtworkRole = ArtworkRole::Portrait;
-const SCRATCH: &str = "/private/tmp/lumen-mi04a-cache";
+fn scratch() -> PathBuf {
+    std::env::temp_dir().join("lumen-mi04a-cache")
+}
 
 struct Scratch {
     root: PathBuf,
@@ -26,14 +28,14 @@ struct Scratch {
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let root = PathBuf::from(SCRATCH).join(format!("{name}-{}", Uuid::now_v7()));
+        let root = scratch().join(format!("{name}-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
 
         Self { root }
     }
 
     fn cleared(name: &str) -> Self {
-        let root = PathBuf::from(SCRATCH).join(format!("{name}-{}", Uuid::now_v7()));
+        let root = scratch().join(format!("{name}-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
 
@@ -323,7 +325,7 @@ async fn a_refusal_writes_no_file_and_no_descriptor(pool: PgPool) {
 async fn a_failed_stage_leaves_no_descriptor_and_no_final_file(pool: PgPool) {
     let store = repository(&pool);
     let artist = ArtistId::new();
-    let missing = PathBuf::from(SCRATCH).join(format!("missing-{}", Uuid::now_v7()));
+    let missing = scratch().join(format!("missing-{}", Uuid::now_v7()));
     let cache = cache(&store, Some(missing.clone()), u64::MAX);
 
     let outcome = cache

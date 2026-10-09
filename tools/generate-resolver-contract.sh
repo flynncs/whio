@@ -45,7 +45,7 @@ else
   exit 1
 fi
 
-temporary_root="$(mktemp -d "${TMPDIR:-/private/tmp}/whio-resolver-codegen.XXXXXX")"
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/whio-resolver-codegen.XXXXXX")"
 cleanup() {
   rm -rf "$temporary_root"
 }
