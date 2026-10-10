@@ -1,7 +1,9 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, new_debouncer};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{
+    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
+};
 
 use super::{scan_service::ScanService, scanner::ScanMode};
 
@@ -23,7 +25,7 @@ pub fn watch(roots: &[PathBuf], service: Arc<ScanService>) -> Result<MediaWatche
             DEBOUNCE,
             None,
             move |result: DebounceEventResult| match result {
-                Ok(events) if !events.is_empty() => service.trigger(ScanMode::Incremental),
+                Ok(events) if changes_library(&events) => service.trigger(ScanMode::Incremental),
                 Ok(_) => {}
                 Err(errors) => {
                     tracing::warn!(count = errors.len(), "media watcher reported errors");
@@ -44,9 +46,37 @@ pub fn watch(roots: &[PathBuf], service: Arc<ScanService>) -> Result<MediaWatche
     })
 }
 
+fn changes_library(events: &[DebouncedEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| !matches!(event.kind, EventKind::Access(_)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notify::{
+        Event,
+        event::{AccessKind, AccessMode, CreateKind},
+    };
+
+    fn debounced(kind: EventKind) -> DebouncedEvent {
+        DebouncedEvent::new(Event::new(kind), std::time::Instant::now())
+    }
+
+    #[test]
+    fn reads_do_not_trigger_a_scan_and_changes_do() {
+        let reads = [
+            debounced(EventKind::Access(AccessKind::Open(AccessMode::Any))),
+            debounced(EventKind::Access(AccessKind::Close(AccessMode::Read))),
+        ];
+        assert!(!changes_library(&reads));
+        assert!(!changes_library(&[]));
+
+        let mut with_change = reads.to_vec();
+        with_change.push(debounced(EventKind::Create(CreateKind::File)));
+        assert!(changes_library(&with_change));
+    }
 
     #[test]
     fn a_media_root_can_be_watched_and_a_missing_one_is_refused() {
