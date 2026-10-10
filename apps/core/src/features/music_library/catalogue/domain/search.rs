@@ -1,4 +1,5 @@
 use super::ValidationError;
+use crate::features::music_library::domain::FullTextSelector;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchQuery(String);
@@ -14,6 +15,10 @@ impl SearchQuery {
         }
 
         Ok(Self(value))
+    }
+
+    pub(crate) fn from_full_text_selector(selector: &FullTextSelector) -> Self {
+        Self(selector.query().to_owned())
     }
 
     pub fn as_str(&self) -> &str {

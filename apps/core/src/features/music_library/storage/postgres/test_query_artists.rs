@@ -12,8 +12,8 @@ use crate::features::music_library::{
     catalogue::LibraryService,
     domain::{
         AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort,
-        ArtistSummary, CreditRole, IdSet, ProviderId, Range, RoleSelector, RoleSet, SelectorText,
-        SortDirection, SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
+        ArtistSummary, CreditRole, FullTextSelector, IdSet, ProviderId, Range, RoleSelector,
+        RoleSet, SortDirection, SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
         ValidationError,
     },
     library::LibraryId,
@@ -66,8 +66,8 @@ fn album(title: &str) -> AlbumMetadata {
     AlbumMetadata::new(title.to_owned()).unwrap()
 }
 
-fn selector(value: &str) -> Option<SelectorText> {
-    SelectorText::new(value).unwrap()
+fn selector(value: &str) -> Option<FullTextSelector> {
+    FullTextSelector::new(value).unwrap()
 }
 
 fn role_set(values: &[RoleSelector]) -> RoleSet {
@@ -1940,4 +1940,103 @@ async fn provider_identity_extends_search_eligibility_without_changing_role_coun
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].artist().id(), artist.id());
     assert_eq!(repository.count_artists(None, &filter).await.unwrap(), 0);
+}
+
+#[sqlx::test]
+async fn full_text_artist_filters_fold_accents_wildcards_and_other_selectors(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    for (index, title, artist) in [
+        ("bea", "Song", "beabadoobee"),
+        ("marias", "Collection", "The Marías"),
+        ("wild", "Percent", "100% Artist"),
+        ("under", "Underscore", "under_score"),
+    ] {
+        repository
+            .get_or_create(
+                source("local", &format!("{index}.flac")),
+                primary(title, &[artist]),
+            )
+            .await
+            .unwrap();
+    }
+
+    let partial = ArtistListFilter::new().with_name(selector("bea"));
+    let matched = listed(&repository, ArtistSort::Name, &partial, None).await;
+    assert_eq!(matched.len(), 1);
+    assert_eq!(
+        repository
+            .find_artist(&matched[0], None)
+            .await
+            .unwrap()
+            .unwrap()
+            .name(),
+        "beabadoobee"
+    );
+    assert_eq!(repository.count_artists(None, &partial).await.unwrap(), 1);
+
+    let multi = ArtistListFilter::new().with_name(selector("bea doo"));
+    assert_eq!(
+        listed(&repository, ArtistSort::Name, &multi, None).await,
+        matched
+    );
+    let accent = ArtistListFilter::new().with_name(selector("marias"));
+    let accent_ids = listed(&repository, ArtistSort::Name, &accent, None).await;
+    assert_eq!(accent_ids.len(), 1);
+    assert_eq!(
+        repository
+            .find_artist(&accent_ids[0], None)
+            .await
+            .unwrap()
+            .unwrap()
+            .name(),
+        "The Marías"
+    );
+    for query in ["%", "_"] {
+        let filter = ArtistListFilter::new().with_name(selector(query));
+        assert_eq!(
+            listed(&repository, ArtistSort::Name, &filter, None)
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(repository.count_artists(None, &filter).await.unwrap(), 1);
+    }
+    let combined = ArtistListFilter::new()
+        .with_name(selector("bea"))
+        .with_role(Some(role_set(&[RoleSelector::Artist])));
+    assert_eq!(
+        listed(&repository, ArtistSort::Name, &combined, None).await,
+        matched
+    );
+    assert_eq!(repository.count_artists(None, &combined).await.unwrap(), 1);
+}
+
+#[sqlx::test]
+async fn provider_identity_widens_text_artist_list_and_count(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let artist = repository
+        .resolve_or_create_artist(&credit("Provider Artist", None))
+        .await
+        .unwrap();
+    repository
+        .set_artist_source(artist.id(), &source("youtube_music", "provider-artist"))
+        .await
+        .unwrap();
+    let text = selector("provider");
+    let ordinary = ArtistListFilter::new().with_name(text.clone());
+    let widened = ArtistListFilter::new()
+        .with_name(text)
+        .with_provider_identity(true);
+
+    assert!(
+        listed(&repository, ArtistSort::Name, &ordinary, None)
+            .await
+            .is_empty()
+    );
+    assert_eq!(repository.count_artists(None, &ordinary).await.unwrap(), 0);
+    assert_eq!(
+        listed(&repository, ArtistSort::Name, &widened, None).await,
+        [artist.id().clone()]
+    );
+    assert_eq!(repository.count_artists(None, &widened).await.unwrap(), 1);
 }

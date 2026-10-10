@@ -9,7 +9,8 @@ use crate::{
     features::music_library::{
         domain::{
             AlbumId, AlbumListFilter, AlbumListScope, AlbumMetadata, AlbumOrder, AlbumPage,
-            ArtistId, PageLimit, ProviderEntityState, SourceIdentity,
+            ArtistId, ArtistListFilter, ArtistPage, ArtistSort, FullTextSelector, PageLimit,
+            ProviderEntityState, SourceIdentity, TrackListFilter, TrackOrder, TrackPage,
         },
         storage::contracts::{CatalogueWrite, SourceLookup, TrackRepositoryError},
     },
@@ -17,7 +18,8 @@ use crate::{
 };
 
 use super::{
-    AlbumDetail, ArtistDetail, CatalogueError, CatalogueProvider, FetchedAlbum, LibraryService,
+    AlbumDetail, ArtistDetail, CatalogueError, CatalogueProvider, Discovery, FetchedAlbum,
+    LibraryService, SearchKind, SearchQuery, SearchService,
 };
 
 const COMPLETION_BUDGET: Duration = Duration::from_secs(30);
@@ -25,6 +27,7 @@ const MAX_ERROR: usize = 500;
 
 pub struct CompletionService {
     library: Arc<LibraryService>,
+    search: Arc<SearchService>,
     catalogue: Option<Arc<dyn CatalogueWrite>>,
     sources: Option<Arc<dyn SourceLookup>>,
     providers: Vec<Arc<dyn CatalogueProvider>>,
@@ -38,9 +41,11 @@ impl CompletionService {
         catalogue: Arc<dyn CatalogueWrite>,
         sources: Arc<dyn SourceLookup>,
         providers: Vec<Arc<dyn CatalogueProvider>>,
+        search: Arc<SearchService>,
     ) -> Self {
         Self {
             library,
+            search,
             catalogue: Some(catalogue),
             sources: Some(sources),
             providers,
@@ -49,9 +54,10 @@ impl CompletionService {
         }
     }
 
-    pub fn disabled(library: Arc<LibraryService>) -> Self {
+    pub fn disabled(library: Arc<LibraryService>, search: Arc<SearchService>) -> Self {
         Self {
             library,
+            search,
             catalogue: None,
             sources: None,
             providers: Vec::new(),
@@ -134,6 +140,7 @@ impl CompletionService {
         .await
     }
 
+    #[tracing::instrument(skip_all, fields(kind = ?SearchKind::Albums, offset, limit = limit.get()))]
     pub async fn album_page(
         &self,
         offset: u32,
@@ -141,31 +148,144 @@ impl CompletionService {
         order: AlbumOrder,
         filter: &AlbumListFilter,
         user: Option<&Uuid>,
+        context: &RequestContext,
     ) -> Result<AlbumPage, CatalogueError> {
+        let target = offset.saturating_add(limit.get());
+        let discovery = self
+            .discover_text(SearchKind::Albums, filter.name(), target, context)
+            .await?;
+        let filter = if discovery.is_some() && filter.scope() == AlbumListScope::Engaged {
+            filter
+                .clone()
+                .with_scope(AlbumListScope::EngagedOrDiscovered)
+        } else {
+            filter.clone()
+        };
         let artist_id = filter
             .artist_id()
             .filter(|ids| ids.len() == 1)
             .and_then(|ids| ids.iter().next());
-        if filter.scope() == AlbumListScope::Engaged
+        let page = if filter.scope() == AlbumListScope::Engaged
             && let Some(artist_id) = artist_id
         {
             if self.artist_detail(artist_id, user).await?.is_none() {
-                return Ok(AlbumPage {
+                AlbumPage {
                     albums: Vec::new(),
                     total: 0,
-                });
+                }
+            } else {
+                self.library
+                    .artist_album_page(artist_id, offset, limit, order, &filter, user)
+                    .await?
             }
-            return self
+        } else {
+            let total = self.library.album_count(user, filter.clone()).await?;
+            let albums = self
                 .library
-                .artist_album_page(artist_id, offset, limit, order, filter, user)
-                .await;
+                .album_list(offset, limit.get(), order, filter, user)
+                .await?;
+            AlbumPage { albums, total }
+        };
+        if let Some(error) = discovery.and_then(|discovery| discovery.failure(page.total > 0)) {
+            return Err(error);
         }
-        let total = self.library.album_count(user, filter.clone()).await?;
-        let albums = self
-            .library
-            .album_list(offset, limit.get(), order, filter.clone(), user)
+        Ok(page)
+    }
+
+    #[tracing::instrument(skip_all, fields(kind = ?SearchKind::Artists, offset, limit = limit.get()))]
+    pub async fn artist_page(
+        &self,
+        offset: u32,
+        limit: PageLimit,
+        sort: ArtistSort,
+        filter: &ArtistListFilter,
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> Result<ArtistPage, CatalogueError> {
+        let target = offset.saturating_add(limit.get());
+        let discovery = self
+            .discover_text(SearchKind::Artists, filter.name(), target, context)
             .await?;
-        Ok(AlbumPage { albums, total })
+        let filter = if discovery.is_some() {
+            filter.clone().with_provider_identity(true)
+        } else {
+            filter.clone()
+        };
+        let total = self.library.artist_count(user, &filter).await?;
+        let artists = self
+            .library
+            .artist_list(offset, limit.get(), sort, &filter, user)
+            .await?;
+        if let Some(error) = discovery.and_then(|discovery| discovery.failure(total > 0)) {
+            return Err(error);
+        }
+        Ok(ArtistPage { artists, total })
+    }
+
+    #[tracing::instrument(skip_all, fields(kind = ?SearchKind::Tracks, offset, limit = limit.get()))]
+    pub async fn track_page(
+        &self,
+        offset: u32,
+        limit: PageLimit,
+        order: TrackOrder,
+        filter: &TrackListFilter,
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> Result<Option<TrackPage>, CatalogueError> {
+        let target = offset.saturating_add(limit.get());
+        let discovery = self
+            .discover_text(SearchKind::Tracks, filter.title(), target, context)
+            .await?;
+        let filter = if discovery.is_some() {
+            filter.clone().with_provider_discovered(true)
+        } else {
+            filter.clone()
+        };
+        let album_id = filter
+            .album_id()
+            .filter(|ids| ids.len() == 1)
+            .and_then(|ids| ids.iter().next());
+        if let Some(album_id) = album_id
+            && self.album_detail(album_id, user).await?.is_none()
+        {
+            if let Some(error) = discovery.and_then(|discovery| discovery.failure(false)) {
+                return Err(error);
+            }
+            return Ok(None);
+        }
+        let page = match album_id {
+            Some(album_id) => {
+                self.library
+                    .album_track_page(album_id, offset, limit, order, &filter, user)
+                    .await?
+            }
+            None => {
+                self.library
+                    .track_page(offset, limit, order, &filter, user)
+                    .await?
+            }
+        };
+        if let Some(error) = discovery.and_then(|discovery| discovery.failure(page.total() > 0)) {
+            return Err(error);
+        }
+        Ok(Some(page))
+    }
+
+    async fn discover_text(
+        &self,
+        kind: SearchKind,
+        text: Option<&FullTextSelector>,
+        target: u32,
+        context: &RequestContext,
+    ) -> Result<Option<Discovery>, CatalogueError> {
+        let Some(text) = text else {
+            return Ok(None);
+        };
+        let query = SearchQuery::from_full_text_selector(text);
+        self.search
+            .discover(kind, &query, target, context)
+            .await
+            .map(Some)
     }
 
     #[tracing::instrument(skip_all)]

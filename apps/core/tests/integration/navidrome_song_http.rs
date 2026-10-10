@@ -410,6 +410,26 @@ async fn songs_without_a_title_enumerate_the_library(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn title_filter_matches_song_and_album_text(pool: PgPool) {
+    let fixture = api_fixture(pool).await;
+    let album = add_album(&fixture.store, "Glue Song", Some("Album Artist")).await;
+    let titled = add_track(&fixture.store, "glue-title", "Glue Song").await;
+    let album_member = add_track(&fixture.store, "glue-album", "Another Track").await;
+    for track in [&titled, &album_member] {
+        fixture
+            .store
+            .set_album_track(&album, track, &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+    }
+
+    let (status, headers, body) = get(fixture.app, &fixture.token, "?title=glue").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(titles(&body), ["Another Track", "Glue Song"]);
+    assert_eq!(total(&headers), "2");
+}
+
+#[sqlx::test]
 async fn title_filter_matches_normalised_text(pool: PgPool) {
     let fixture = api_fixture(pool).await;
     for (index, title) in [
@@ -775,6 +795,7 @@ async fn invalid_song_queries_do_not_complete_provider_albums(pool: PgPool) {
             vec![Arc::new(CountingAlbumProvider {
                 calls: Arc::clone(&calls),
             })],
+            Arc::clone(&search),
         )
         .with_registry(ProviderRegistry::with_enabled(["youtube_music"])),
     );
@@ -1161,7 +1182,7 @@ async fn search_service_is_untouched(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn unengaged_provider_tracks_stay_out(pool: PgPool) {
+async fn text_song_list_discovers_provider_tracks_without_engagement(pool: PgPool) {
     let candidate = CatalogueCandidate::new(
         SourceIdentity::new(
             ProviderId::new("youtube_music".to_owned()).unwrap(),
@@ -1176,7 +1197,15 @@ async fn unengaged_provider_tracks_stay_out(pool: PgPool) {
         )
         .unwrap(),
     );
-    let fixture = fixture(pool, vec![Ok(vec![candidate])]).await;
+    let fixture = fixture(
+        pool,
+        vec![
+            Ok(vec![candidate.clone()]),
+            Ok(vec![candidate.clone()]),
+            Ok(vec![candidate]),
+        ],
+    )
+    .await;
 
     let found = get_plain(
         fixture.app.clone(),
@@ -1199,11 +1228,8 @@ async fn unengaged_provider_tracks_stay_out(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        titles(&body).is_empty(),
-        "an un-engaged provider track stays out"
-    );
-    assert_eq!(total(&headers), "0");
+    assert_eq!(titles(&body), ["Provider Song"]);
+    assert_eq!(total(&headers), "1");
 
     fixture
         .store
@@ -1216,57 +1242,4 @@ async fn unengaged_provider_tracks_stay_out(pool: PgPool) {
     assert_eq!(titles(&body), ["Provider Song"]);
     assert_eq!(total(&headers), "1");
     assert_eq!(body[0]["id"], json!(track_id.to_string()));
-}
-
-#[sqlx::test]
-async fn dead_song_search_path_is_removed(pool: PgPool) {
-    let candidate = CatalogueCandidate::new(
-        SourceIdentity::new(
-            ProviderId::new("youtube_music".to_owned()).unwrap(),
-            SourceScope::Global,
-            "vid-1".to_owned(),
-        )
-        .unwrap(),
-        TrackMetadata::from_names(
-            "Provider Song".to_owned(),
-            vec!["Artist".to_owned()],
-            Some(1_000),
-        )
-        .unwrap(),
-    );
-    let (credential, secret) = database_credential_service(pool.clone()).await;
-    let (search, library, playback) = services(pool.clone(), vec![Ok(vec![candidate])]);
-    let app = router(credential, search, library, playback);
-    let login = post_login(app.clone(), "flynn", &secret).await;
-    let token = login["token"].as_str().unwrap();
-
-    let (status, _, body) = get(app.clone(), token, "?title=provider%20song").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        titles(&body).is_empty(),
-        "the song route is not a search path"
-    );
-
-    let found = get_plain(
-        app.clone(),
-        &format!(
-            "/compat/subsonic/rest/search3.view?u=flynn&v=1.16.1&c=test-client&p={secret}&query=provider"
-        ),
-    )
-    .await;
-    let songs = found["subsonic-response"]["searchResult3"]["song"]
-        .as_array()
-        .expect("provider results");
-    assert_eq!(
-        songs.len(),
-        1,
-        "AppState search still serves the search paths"
-    );
-
-    let (status, _, body) = get(app, token, "?title=provider%20song").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        titles(&body).is_empty(),
-        "materialising a search result is not engagement"
-    );
 }

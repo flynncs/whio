@@ -7,10 +7,10 @@ use super::PostgresTrackRepository;
 use crate::features::identity::provision;
 use crate::features::music_library::{
     domain::{
-        AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ArtistId, CreditRole, IdSet, ProviderId,
-        RandomSeed, Range, RoleSelector, RoleSet, SelectorText, SortDirection, SourceIdentity,
-        SourceRepresentationFacts, SourceScope, StateTarget, TrackId, TrackListFilter,
-        TrackListScope, TrackMetadata, TrackOrder, ValidationError,
+        AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ArtistId, CreditRole, FullTextSelector,
+        IdSet, ProviderId, RandomSeed, Range, RoleSelector, RoleSet, SelectorText, SortDirection,
+        SourceIdentity, SourceRepresentationFacts, SourceScope, StateTarget, TrackId,
+        TrackListFilter, TrackListScope, TrackMetadata, TrackOrder, ValidationError,
     },
     library::LibraryId,
     library_state::test_support::seed_play,
@@ -70,6 +70,10 @@ fn artist_id_set(ids: &[&ArtistId]) -> IdSet<ArtistId> {
 
 fn selector(value: &str) -> Option<SelectorText> {
     SelectorText::new(value).unwrap()
+}
+
+fn full_text_selector(value: &str) -> Option<FullTextSelector> {
+    FullTextSelector::new(value).unwrap()
 }
 
 fn text_set(values: &[&str]) -> IdSet<SelectorText> {
@@ -546,7 +550,7 @@ async fn total_agrees_with_the_list_for_every_selector(pool: PgPool) {
     let fixtures: Vec<(&str, TrackListFilter, Vec<&TrackId>)> = vec![
         (
             "title",
-            TrackListFilter::new().with_title(selector("alpha")),
+            TrackListFilter::new().with_title(full_text_selector("alpha")),
             vec![&alpha_id],
         ),
         (
@@ -1111,7 +1115,7 @@ async fn random_is_repeatable_per_seed_and_not_persistent(pool: PgPool) {
 
     let first = TrackListFilter::new().with_random_seed(Some(RandomSeed::new(4_242)));
     let filtered = TrackListFilter::new()
-        .with_title(selector("random 00"))
+        .with_title(full_text_selector("random 00"))
         .with_random_seed(Some(RandomSeed::new(4_242)));
     let other_filtered = filtered
         .clone()
@@ -1652,7 +1656,7 @@ async fn selectors_do_not_broaden_scope(pool: PgPool) {
     assert_eq!(total(&repository, &owned_star, Some(&user)).await, 0);
     assert_eq!(total(&repository, &star, Some(&user)).await, 1);
 
-    let title = TrackListFilter::new().with_title(selector("song"));
+    let title = TrackListFilter::new().with_title(full_text_selector("song"));
     assert_eq!(
         list(&repository, &title, Some(&user)).await,
         vec![owned_id],
@@ -1783,7 +1787,7 @@ async fn page_reads_do_not_follow_the_page_size(pool: PgPool) {
             .unwrap();
     }
 
-    let strip = TrackListFilter::new().with_title(selector("batched"));
+    let strip = TrackListFilter::new().with_title(full_text_selector("batched"));
     let narrow = strip
         .clone()
         .with_genre(Some(text_set(&["rock"])))
@@ -2881,4 +2885,130 @@ async fn album_track_page_has_no_per_row_projection_reads(pool: PgPool) {
         (measured[0].2, measured[0].3, measured[0].4, measured[0].5),
         "an explicit album page reads its batch sets once regardless of page size"
     );
+}
+
+#[sqlx::test]
+async fn provider_discovered_track_scope_requires_a_title_selector(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let track = repository
+        .get_or_create(
+            source("youtube_music", "provider-track"),
+            metadata_by("Provider Track", "Artist"),
+        )
+        .await
+        .unwrap();
+    let text = full_text_selector("provider");
+    let ordinary = TrackListFilter::new().with_title(text.clone());
+    let widened = TrackListFilter::new()
+        .with_title(text)
+        .with_provider_discovered(true);
+    let unfiltered = TrackListFilter::new().with_provider_discovered(true);
+
+    assert_eq!(total(&repository, &ordinary, None).await, 0);
+    assert_eq!(total(&repository, &widened, None).await, 1);
+    assert_eq!(
+        page_ids(
+            &repository
+                .page_tracks(0, 10, TrackOrder::Id, &widened, None)
+                .await
+                .unwrap()
+        ),
+        [track.id().clone()]
+    );
+    assert_eq!(total(&repository, &unfiltered, None).await, 0);
+}
+
+#[sqlx::test]
+async fn full_text_track_filters_match_song_album_and_credit_fields(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let glue_album = repository
+        .resolve_or_create_album(
+            &album("Glue Song").with_album_artist(credit("Album Artist", None)),
+        )
+        .await
+        .unwrap();
+    let song = repository
+        .get_or_create(
+            source("local", "glue-song.flac"),
+            metadata_by("Glue Song", "Artist"),
+        )
+        .await
+        .unwrap();
+    let album_match = repository
+        .get_or_create(
+            source("local", "album-match.flac"),
+            metadata_by("Another Track", "Artist"),
+        )
+        .await
+        .unwrap();
+    let artist_match = repository
+        .get_or_create(
+            source("local", "artist-match.flac"),
+            metadata_by("Another Song", "Glue Artist"),
+        )
+        .await
+        .unwrap();
+    let unrelated = repository
+        .get_or_create(
+            source("local", "unrelated.flac"),
+            metadata_by("Unrelated", "Artist"),
+        )
+        .await
+        .unwrap();
+    for track in [song.id(), album_match.id()] {
+        repository
+            .set_album_track(glue_album.id(), track, &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+    }
+    let filter = TrackListFilter::new().with_title(full_text_selector("glue"));
+    let page = repository
+        .page_tracks(0, 50, TrackOrder::Id, &filter, None)
+        .await
+        .unwrap();
+    let ids = page_ids(&page);
+    assert_eq!(ids.len(), 3);
+    assert!(ids.contains(song.id()));
+    assert!(ids.contains(album_match.id()));
+    assert!(ids.contains(artist_match.id()));
+    assert!(!ids.contains(unrelated.id()));
+    assert_eq!(page.total(), 3);
+
+    let both = TrackListFilter::new().with_title(full_text_selector("another glue"));
+    assert_eq!(total(&repository, &both, None).await, 2);
+    let accent = repository
+        .get_or_create(
+            source("local", "accent.flac"),
+            metadata_by("Song", "Marías"),
+        )
+        .await
+        .unwrap();
+    let accent_filter = TrackListFilter::new().with_title(full_text_selector("marias"));
+    assert_eq!(
+        page_ids(
+            &repository
+                .page_tracks(0, 50, TrackOrder::Id, &accent_filter, None)
+                .await
+                .unwrap()
+        ),
+        [accent.id().clone()]
+    );
+
+    for (index, title) in [("percent", "100% Pure"), ("underscore", "under_score")] {
+        repository
+            .get_or_create(
+                source("local", &format!("{index}.flac")),
+                metadata_by(title, "Other"),
+            )
+            .await
+            .unwrap();
+    }
+    for query in ["%", "_"] {
+        let filter = TrackListFilter::new().with_title(full_text_selector(query));
+        assert_eq!(total(&repository, &filter, None).await, 1);
+    }
+    let combined = TrackListFilter::new()
+        .with_title(full_text_selector("glue"))
+        .with_genre(Some(text_set(&["Rock"])));
+    assert_eq!(total(&repository, &combined, None).await, 0);
 }

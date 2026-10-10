@@ -54,6 +54,33 @@ pub struct TrackSearch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchKind {
+    Tracks,
+    Albums,
+    Artists,
+}
+
+pub struct Discovery {
+    first_error: Option<CatalogueError>,
+    any_success: bool,
+    tracks: Option<Vec<SearchHit>>,
+}
+
+impl Discovery {
+    pub fn failure(self, found_results: bool) -> Option<CatalogueError> {
+        match self.first_error {
+            Some(error @ CatalogueError::Provider(ProviderError::Access)) => Some(error),
+            Some(error) if !self.any_success && !found_results => Some(error),
+            _ => None,
+        }
+    }
+
+    fn take_tracks(&mut self) -> Option<Vec<SearchHit>> {
+        self.tracks.take()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchWindow {
     limit: SearchLimit,
     offset: SearchOffset,
@@ -263,6 +290,66 @@ impl SearchService {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(kind = ?kind, target))]
+    pub async fn discover(
+        &self,
+        kind: SearchKind,
+        query: &SearchQuery,
+        target: u32,
+        context: &RequestContext,
+    ) -> Result<Discovery, CatalogueError> {
+        let target = target.min(super::MAX_SEARCH_OFFSET);
+        match kind {
+            SearchKind::Tracks => {
+                let (tracks, mut discovery) = self.discover_tracks(query, target, context).await?;
+                discovery.tracks = Some(tracks);
+                Ok(discovery)
+            }
+            SearchKind::Albums => {
+                let (albums, discovery) = self
+                    .discover_page_kind(
+                        query,
+                        target,
+                        context,
+                        |provider, search, context| async move {
+                            provider.search_albums(&search, &context).await
+                        },
+                    )
+                    .await?;
+                for album in &albums {
+                    super::materialize::materialize_album(
+                        &self.catalogue,
+                        &self.source_lookup,
+                        album,
+                    )
+                    .await?;
+                }
+                Ok(discovery)
+            }
+            SearchKind::Artists => {
+                let (artists, discovery) = self
+                    .discover_page_kind(
+                        query,
+                        target,
+                        context,
+                        |provider, search, context| async move {
+                            provider.search_artists(&search, &context).await
+                        },
+                    )
+                    .await?;
+                for artist in &artists {
+                    super::materialize::materialize_artist(
+                        &self.catalogue,
+                        &self.source_lookup,
+                        artist,
+                    )
+                    .await?;
+                }
+                Ok(discovery)
+            }
+        }
+    }
+
     #[tracing::instrument(skip_all, fields(kind = "track", window = ?window))]
     pub async fn search_tracks(
         &self,
@@ -276,9 +363,10 @@ impl SearchService {
             .search_tracks(query.as_str(), window.target(), user.copied())
             .await
             .map_err(CatalogueError::Repository)?;
-        let (fresh, discovery) = self
-            .discover_tracks(query, window.target(), context)
+        let mut discovery = self
+            .discover(SearchKind::Tracks, query, window.target(), context)
             .await?;
+        let fresh = discovery.take_tracks().unwrap_or_default();
         let (known, fresh) = self.dedup_tracks(known, fresh, user, context).await;
         let confidence = library_confidence(&SearchTerms::new(query.as_str()), &known);
         let merged = merge_by_track(known.into_iter().chain(fresh));
@@ -323,20 +411,9 @@ impl SearchService {
         user: Option<&Uuid>,
         context: &RequestContext,
     ) -> Result<Vec<AlbumSummary>, CatalogueError> {
-        let (metadata, discovery) = self
-            .discover_page_kind(
-                query,
-                window.target(),
-                context,
-                |provider, search, context| async move {
-                    provider.search_albums(&search, &context).await
-                },
-            )
+        let discovery = self
+            .discover(SearchKind::Albums, query, window.target(), context)
             .await?;
-        for album in &metadata {
-            super::materialize::materialize_album(&self.catalogue, &self.source_lookup, album)
-                .await?;
-        }
         let albums = self
             .library
             .search_albums(query.as_str(), window.target(), user.copied())
@@ -357,20 +434,9 @@ impl SearchService {
         user: Option<&Uuid>,
         context: &RequestContext,
     ) -> Result<Vec<ArtistSummary>, CatalogueError> {
-        let (credits, discovery) = self
-            .discover_page_kind(
-                query,
-                window.target(),
-                context,
-                |provider, search, context| async move {
-                    provider.search_artists(&search, &context).await
-                },
-            )
+        let discovery = self
+            .discover(SearchKind::Artists, query, window.target(), context)
             .await?;
-        for credit in &credits {
-            super::materialize::materialize_artist(&self.catalogue, &self.source_lookup, credit)
-                .await?;
-        }
         let artists = self
             .library
             .search_artists(query.as_str(), window.target(), user.copied(), filter)
@@ -387,7 +453,7 @@ impl SearchService {
         query: &SearchQuery,
         target: u32,
         context: &RequestContext,
-    ) -> Result<(Vec<SearchHit>, DiscoveryStatus), CatalogueError> {
+    ) -> Result<(Vec<SearchHit>, Discovery), CatalogueError> {
         let query = query.clone();
         let context = context.clone();
         let catalogue = Arc::clone(&self.catalogue);
@@ -415,7 +481,7 @@ impl SearchService {
         target: u32,
         context: &RequestContext,
         fetch: F,
-    ) -> Result<(Vec<T>, DiscoveryStatus), CatalogueError>
+    ) -> Result<(Vec<T>, Discovery), CatalogueError>
     where
         T: Send + 'static,
         F: Fn(Arc<dyn CatalogueProvider>, CatalogueSearch, RequestContext) -> Fut
@@ -477,17 +543,12 @@ impl SearchService {
     }
 }
 
-struct DiscoveryStatus {
-    first_error: Option<CatalogueError>,
-    any_success: bool,
-}
-
 async fn run_provider_tasks<T, F, Fut>(
     providers: Vec<Arc<dyn CatalogueProvider>>,
     concurrency: Arc<Semaphore>,
     budget: Duration,
     operation: F,
-) -> Result<(Vec<T>, DiscoveryStatus), CatalogueError>
+) -> Result<(Vec<T>, Discovery), CatalogueError>
 where
     T: Send + 'static,
     F: Fn(Arc<dyn CatalogueProvider>) -> Fut + Clone + Send + Sync + 'static,
@@ -557,9 +618,10 @@ where
     }
     Ok((
         items,
-        DiscoveryStatus {
+        Discovery {
             first_error: access_error.or(first_error),
             any_success,
+            tracks: None,
         },
     ))
 }
@@ -608,16 +670,6 @@ fn invalid_provider_cursor() -> CatalogueError {
     CatalogueError::Provider(ProviderError::InvalidCatalogueData(
         ValidationError::Invalid { field: "offset" },
     ))
-}
-
-impl DiscoveryStatus {
-    fn failure(self, found_results: bool) -> Option<CatalogueError> {
-        match self.first_error {
-            Some(error @ CatalogueError::Provider(ProviderError::Access)) => Some(error),
-            Some(error) if !self.any_success && !found_results => Some(error),
-            _ => None,
-        }
-    }
 }
 
 fn library_confidence(terms: &SearchTerms, hits: &[SearchHit]) -> SearchConfidence {

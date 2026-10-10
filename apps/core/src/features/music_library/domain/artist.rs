@@ -6,8 +6,8 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    IdSet, LibraryState, MatchQuality, Range, RoleSet, SelectorText, SortDirection, SourceIdentity,
-    ValidationError,
+    FullTextSelector, IdSet, LibraryState, MatchQuality, Range, RoleSet, SortDirection,
+    SourceIdentity, ValidationError,
     text::{optional, required},
 };
 use crate::features::music_library::library::LibraryId;
@@ -152,6 +152,12 @@ impl ArtistSummary {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistPage {
+    pub artists: Vec<ArtistSummary>,
+    pub total: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ArtistSort {
     #[default]
@@ -202,7 +208,7 @@ impl ArtistSort {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArtistListFilter {
-    name: Option<SelectorText>,
+    name: Option<FullTextSelector>,
     role: Option<RoleSet>,
     starred: Option<bool>,
     has_rating: Option<bool>,
@@ -218,7 +224,7 @@ impl ArtistListFilter {
         Self::default()
     }
 
-    pub fn with_name(mut self, name: Option<SelectorText>) -> Self {
+    pub fn with_name(mut self, name: Option<FullTextSelector>) -> Self {
         self.name = name;
         self
     }
@@ -263,7 +269,7 @@ impl ArtistListFilter {
         self
     }
 
-    pub fn name(&self) -> Option<&SelectorText> {
+    pub fn name(&self) -> Option<&FullTextSelector> {
         self.name.as_ref()
     }
 

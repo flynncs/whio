@@ -8,9 +8,9 @@ use crate::features::identity::provision;
 use crate::features::music_library::{
     domain::{
         AlbumId, AlbumListFilter, AlbumListScope, AlbumMetadata, AlbumOrder, AlbumTrack,
-        ArtistCredit, ArtistId, CreditRole, IdSet, ProviderId, RandomSeed, Range, RoleSelector,
-        RoleSet, SelectorText, SortDirection, SourceIdentity, SourceScope, StateTarget, TrackId,
-        TrackMetadata, ValidationError,
+        ArtistCredit, ArtistId, CreditRole, FullTextSelector, IdSet, ProviderId, RandomSeed, Range,
+        RoleSelector, RoleSet, SelectorText, SortDirection, SourceIdentity, SourceScope,
+        StateTarget, TrackId, TrackMetadata, ValidationError,
     },
     library::LibraryId,
     library_state::test_support::seed_play,
@@ -58,12 +58,17 @@ fn artist_id_set(ids: &[&ArtistId]) -> IdSet<ArtistId> {
     IdSet::new(ids.iter().map(|id| (*id).clone())).unwrap()
 }
 
-fn selector(value: &str) -> Option<SelectorText> {
-    SelectorText::new(value).unwrap()
+fn selector(value: &str) -> Option<FullTextSelector> {
+    FullTextSelector::new(value).unwrap()
 }
 
 fn text_set(values: &[&str]) -> IdSet<SelectorText> {
-    IdSet::new(values.iter().map(|value| selector(value).unwrap())).unwrap()
+    IdSet::new(
+        values
+            .iter()
+            .map(|value| SelectorText::new(value).unwrap().unwrap()),
+    )
+    .unwrap()
 }
 
 fn role_set(values: &[RoleSelector]) -> RoleSet {
@@ -2126,4 +2131,163 @@ fn unknown_and_unsupported_inputs_are_explicit() {
             .resolved_direction(AlbumOrder::Name),
         SortDirection::Descending
     );
+}
+
+#[sqlx::test]
+async fn provider_discovered_album_scope_requires_a_text_selector(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let discovered = repository
+        .resolve_or_create_album(&album("Provider Album"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(discovered.id(), &source("youtube_music", "provider-album"))
+        .await
+        .unwrap();
+    let text = selector("provider");
+    let ordinary = AlbumListFilter::new().with_name(text.clone());
+    let widened = AlbumListFilter::new()
+        .with_name(text)
+        .with_scope(AlbumListScope::EngagedOrDiscovered);
+    let unfiltered_scope = AlbumListFilter::new().with_scope(AlbumListScope::EngagedOrDiscovered);
+
+    assert_eq!(total(&repository, &ordinary, None).await, 0);
+    assert_eq!(total(&repository, &widened, None).await, 1);
+    assert_eq!(
+        listed(&repository, AlbumOrder::Name, &widened, None).await,
+        [discovered.id().clone()]
+    );
+    assert_eq!(total(&repository, &unfiltered_scope, None).await, 0);
+}
+
+#[sqlx::test]
+async fn full_text_album_bind_numbers_support_max_query_with_year_range(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album_source = source("local", "max-full-text-query");
+    let album = album("a")
+        .with_year(Some(2000))
+        .unwrap()
+        .with_provider(Some(album_source.clone()));
+    let album = repository.resolve_or_create_album(&album).await.unwrap();
+    repository
+        .set_album_source(album.id(), &album_source)
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(
+            source("local", "max-full-text-track"),
+            metadata_by("track", "Artist"),
+        )
+        .await
+        .unwrap();
+    place(&repository, album.id(), track.id()).await;
+    let query = vec!["a"; 250].join(" ");
+    assert_eq!(query.chars().count(), 499);
+    let filter = AlbumListFilter::new()
+        .with_scope(AlbumListScope::Owned)
+        .with_name(selector(&query))
+        .with_year(Some(range(Some(1990), Some(2000))));
+
+    assert_eq!(
+        listed(&repository, AlbumOrder::Name, &filter, None).await,
+        [album.id().clone()]
+    );
+    assert_eq!(total(&repository, &filter, None).await, 1);
+}
+
+#[sqlx::test]
+async fn artist_album_page_without_text_keeps_row_and_count_scopes_aligned(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album = repository
+        .resolve_or_create_album(&album("Orphan").with_album_artist(credit("Artist", None)))
+        .await
+        .unwrap();
+    let artist = album_artist_of(&pool, album.id()).await;
+    let filter = AlbumListFilter::new().with_scope(AlbumListScope::EngagedOrDiscovered);
+
+    let page = repository
+        .page_artist_albums(&artist, 0, 10, AlbumOrder::Name, &filter, None)
+        .await
+        .unwrap();
+
+    assert_eq!(page.total, page.albums.len() as u32);
+    assert!(page.albums.is_empty());
+}
+
+#[sqlx::test]
+async fn full_text_album_filters_match_all_terms_and_text_fields(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let beatopia = repository
+        .resolve_or_create_album(&album("Beatopia").with_album_artist(credit("beabadoobee", None)))
+        .await
+        .unwrap();
+    let credited = repository
+        .resolve_or_create_album(&album("Credit Match").with_album_artist(credit("Other", None)))
+        .await
+        .unwrap();
+    let glue = repository
+        .resolve_or_create_album(&album("Glue Song").with_album_artist(credit("Other", None)))
+        .await
+        .unwrap();
+    let marías = repository
+        .resolve_or_create_album(
+            &album("The Marías Collection").with_album_artist(credit("Other", None)),
+        )
+        .await
+        .unwrap();
+    let wildcards = repository
+        .resolve_or_create_album(&album("100%_Pure").with_album_artist(credit("Other", None)))
+        .await
+        .unwrap();
+    for (album_id, title, artist, genre, id) in [
+        (beatopia.id(), "Perfect Pair", "Other", "Rock", "beatopia"),
+        (credited.id(), "Featured", "beabadoobee", "Rock", "credited"),
+        (glue.id(), "Glue Song", "Guest Artist", "Pop", "glue"),
+        (marías.id(), "Hush", "Other", "Jazz", "marias"),
+        (wildcards.id(), "Wild", "Other", "Rock", "wildcards"),
+    ] {
+        let track = repository
+            .get_or_create(
+                source("local", &format!("{id}.flac")),
+                metadata_by(title, artist).with_genres(vec![genre.to_owned()]),
+            )
+            .await
+            .unwrap();
+        place(&repository, album_id, track.id()).await;
+    }
+
+    let artist_query = AlbumListFilter::new().with_name(selector("beabadoobee"));
+    assert_eq!(
+        listed(&repository, AlbumOrder::Name, &artist_query, None).await,
+        [beatopia.id().clone(), credited.id().clone()]
+    );
+    assert_eq!(total(&repository, &artist_query, None).await, 2);
+
+    let both_terms = AlbumListFilter::new().with_name(selector("beabadoobee beatopia"));
+    assert_eq!(
+        listed(&repository, AlbumOrder::Name, &both_terms, None).await,
+        [beatopia.id().clone()]
+    );
+    let accent = AlbumListFilter::new().with_name(selector("marias"));
+    assert_eq!(
+        listed(&repository, AlbumOrder::Name, &accent, None).await,
+        [marías.id().clone()]
+    );
+    for query in ["%", "_"] {
+        let filter = AlbumListFilter::new().with_name(selector(query));
+        assert_eq!(
+            listed(&repository, AlbumOrder::Name, &filter, None).await,
+            [wildcards.id().clone()]
+        );
+        assert_eq!(total(&repository, &filter, None).await, 1);
+    }
+
+    let combined = AlbumListFilter::new()
+        .with_name(selector("song"))
+        .with_genre(Some(text_set(&["Pop"])));
+    assert_eq!(
+        listed(&repository, AlbumOrder::Name, &combined, None).await,
+        [glue.id().clone()]
+    );
+    assert_eq!(total(&repository, &combined, None).await, 1);
 }

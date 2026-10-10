@@ -11,6 +11,43 @@ pub const MAX_SELECTOR_IDS: usize = 100;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SelectorText(String);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FullTextSelector {
+    query: String,
+    terms: Vec<String>,
+}
+
+impl FullTextSelector {
+    pub fn new(value: &str) -> Result<Option<Self>, ValidationError> {
+        let normalized = super::text::normalize_for_search(value);
+        let terms = normalized
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+
+        if terms.is_empty() {
+            return Ok(None);
+        }
+
+        if value.trim().chars().count() > MAX_SELECTOR_TEXT {
+            return Err(ValidationError::TooLong { field: "selector" });
+        }
+
+        Ok(Some(Self {
+            query: value.to_owned(),
+            terms,
+        }))
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub fn terms(&self) -> &[String] {
+        &self.terms
+    }
+}
+
 impl SelectorText {
     pub fn new(value: &str) -> Result<Option<Self>, ValidationError> {
         let matches = super::text::normalize_for_matching(value);
@@ -304,6 +341,20 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn full_text_selectors_preserve_query_and_normalize_terms() {
+        let selector = FullTextSelector::new("  Marías   BEATOPIA ")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selector.query(), "  Marías   BEATOPIA ");
+        assert_eq!(selector.terms(), ["marias", "beatopia"]);
+        assert_eq!(FullTextSelector::new("  \t ").unwrap(), None);
+        assert!(matches!(
+            FullTextSelector::new(&"a".repeat(MAX_SELECTOR_TEXT + 1)),
+            Err(ValidationError::TooLong { field: "selector" })
+        ));
     }
 
     #[test]

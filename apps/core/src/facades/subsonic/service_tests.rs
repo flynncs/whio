@@ -21,7 +21,7 @@ use crate::{
     features::music_library::api::artist_info::{ArtistInfoState, related, top},
     features::music_library::catalogue::ProviderError,
     features::music_library::catalogue::{
-        CatalogueCandidate, CatalogueProvider, CatalogueSearch, CompletionService,
+        CatalogueCandidate, CatalogueProvider, CatalogueSearch, CompletionService, SearchService,
     },
     features::music_library::history::ListenService,
     features::music_library::{
@@ -629,11 +629,7 @@ async fn album_detail_lists_its_tracks_in_order(pool: sqlx::PgPool) {
         )
         .await
         .unwrap();
-    let catalogue = CompletionService::disabled(Arc::new(LibraryService::new(
-        Arc::clone(&repository) as Arc<dyn LibraryRead>,
-        Arc::clone(&repository) as Arc<dyn SourceLookup>,
-        Arc::clone(&repository) as Arc<dyn StateStore>,
-    )));
+    let catalogue = disabled_completion(&repository);
 
     let detail = album_detail(&catalogue, &album.id().to_string(), None, SourceTags::Off)
         .await
@@ -1077,6 +1073,19 @@ fn library_over(repository: &Arc<PostgresTrackRepository>) -> LibraryService {
         Arc::clone(repository) as Arc<dyn SourceLookup>,
         Arc::clone(repository) as Arc<dyn StateStore>,
     )
+}
+
+fn search_over(repository: &Arc<PostgresTrackRepository>) -> Arc<SearchService> {
+    Arc::new(SearchService::new(
+        Arc::clone(repository) as Arc<dyn LibraryRead>,
+        Arc::clone(repository) as Arc<dyn CatalogueWrite>,
+        Arc::clone(repository) as Arc<dyn SourceLookup>,
+        Arc::clone(repository) as Arc<dyn StateStore>,
+    ))
+}
+
+fn disabled_completion(repository: &Arc<PostgresTrackRepository>) -> CompletionService {
+    CompletionService::disabled(Arc::new(library_over(repository)), search_over(repository))
 }
 
 fn discovery_over(repository: &Arc<PostgresTrackRepository>) -> DiscoveryService {
@@ -1667,7 +1676,7 @@ async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx:
     }
 
     let library = library_over(&repository);
-    let completion = CompletionService::disabled(Arc::new(library_over(&repository)));
+    let completion = disabled_completion(&repository);
     let albums = library
         .album_list(0, u32::MAX, AlbumOrder::Name, AlbumListFilter::new(), None)
         .await
@@ -2354,7 +2363,7 @@ async fn subsonic_artist_info_reports_a_disabled_metadata_feature(pool: sqlx::Pg
     ));
     assert!(
         artist_detail(
-            &CompletionService::disabled(Arc::new(library_over(&repository))),
+            &disabled_completion(&repository),
             &artist.id().to_string(),
             None,
         )

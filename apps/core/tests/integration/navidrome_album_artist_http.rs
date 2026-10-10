@@ -28,7 +28,7 @@ use whio_core::{
     },
 };
 
-use support::{credentials::database_credential_service, services};
+use support::{StorePorts, credentials::database_credential_service, services};
 
 const API: &str = "/compat/navidrome/api";
 const MUSIC_ROOT: &str = "/music";
@@ -53,7 +53,13 @@ async fn fixture_with_providers(
     providers: Vec<Arc<dyn whio_core::features::music_library::catalogue::CatalogueProvider>>,
 ) -> Fixture {
     let (credential, secret) = database_credential_service(pool.clone()).await;
-    let (search, library, playback) = services(pool.clone(), Vec::new());
+    let (mut search, mut library, playback) = services(pool.clone(), Vec::new());
+    if !providers.is_empty() {
+        let ports = StorePorts::new(pool.clone());
+        let (provided_search, provided_library) = ports.catalogue_service(providers.clone());
+        search = provided_search;
+        library = provided_library;
+    }
     let registry = Arc::new(LibraryRegistry::new(Arc::new(PostgresLibraryStore::new(
         pool.clone(),
     ))));
@@ -65,7 +71,12 @@ async fn fixture_with_providers(
         .await
         .expect("registered libraries");
     let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
-    let state = AppState::new(credential, search, Arc::clone(&library), playback);
+    let state = AppState::new(
+        credential,
+        Arc::clone(&search),
+        Arc::clone(&library),
+        playback,
+    );
     let state = if providers.is_empty() {
         state
     } else {
@@ -74,6 +85,7 @@ async fn fixture_with_providers(
             Arc::clone(&store) as Arc<dyn CatalogueWrite>,
             Arc::clone(&store) as Arc<dyn SourceLookup>,
             providers,
+            Arc::clone(&search),
         );
         state.with_completion(Arc::new(completion))
     };
@@ -443,6 +455,199 @@ async fn contrast(fixture: &Fixture) -> Contrast {
         daft_punk,
         justice,
     }
+}
+
+struct AlbumSearchProvider {
+    outcome: std::sync::Mutex<AlbumSearchOutcome>,
+    calls: Arc<std::sync::Mutex<Vec<String>>>,
+    album: Option<AlbumMetadata>,
+}
+
+#[derive(Clone, Copy)]
+enum AlbumSearchOutcome {
+    Results,
+}
+
+#[async_trait::async_trait]
+impl whio_core::features::music_library::catalogue::CatalogueProvider for AlbumSearchProvider {
+    async fn search_tracks(
+        &self,
+        _search: &whio_core::features::music_library::catalogue::CatalogueSearch,
+        _context: &whio_core::platform::request::RequestContext,
+    ) -> Result<
+        Vec<whio_core::features::music_library::catalogue::CatalogueCandidate>,
+        whio_core::features::music_library::catalogue::ProviderError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn search_albums(
+        &self,
+        search: &whio_core::features::music_library::catalogue::CatalogueSearch,
+        _context: &whio_core::platform::request::RequestContext,
+    ) -> Result<
+        whio_core::features::music_library::catalogue::CataloguePage<AlbumMetadata>,
+        whio_core::features::music_library::catalogue::ProviderError,
+    > {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(search.query().as_str().to_owned());
+        match *self.outcome.lock().unwrap() {
+            AlbumSearchOutcome::Results => Ok(
+                whio_core::features::music_library::catalogue::CataloguePage::new(
+                    self.album.iter().cloned().collect(),
+                    None,
+                ),
+            ),
+        }
+    }
+}
+
+#[sqlx::test]
+async fn navidrome_text_album_list_discovers_provider_rows_and_preserves_browse_scope(
+    pool: PgPool,
+) {
+    use whio_core::features::music_library::catalogue::CatalogueProvider;
+
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let album_source = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        "MPREb-beatopia".to_owned(),
+    )
+    .unwrap();
+    let provider_album = AlbumMetadata::new("Beatopia".to_owned())
+        .unwrap()
+        .with_provider(Some(album_source))
+        .with_album_artist(ArtistCredit::new("beabadoobee".to_owned(), None).unwrap());
+    let provider = Arc::new(AlbumSearchProvider {
+        outcome: std::sync::Mutex::new(AlbumSearchOutcome::Results),
+        calls: Arc::clone(&calls),
+        album: Some(provider_album),
+    });
+    let fixture = fixture_with_providers(pool, vec![provider as Arc<dyn CatalogueProvider>]).await;
+    let local = add_album(
+        &fixture,
+        "Local Artist Credit",
+        Some(("Other", None)),
+        None,
+        None,
+        MUSIC_ROOT,
+        "local-credited.flac",
+    )
+    .await;
+    let local_track = add_track(
+        &fixture,
+        MUSIC_ROOT,
+        "local-credited-track.flac",
+        "A Local Track",
+        "beabadoobee",
+        &[],
+    )
+    .await;
+    place(&fixture, &local, &local_track, 1).await;
+    let unrelated = add_album(
+        &fixture,
+        "Unrelated",
+        Some(("Other", None)),
+        None,
+        None,
+        MUSIC_ROOT,
+        "unrelated.flac",
+    )
+    .await;
+    let unrelated_track = add_track(
+        &fixture,
+        MUSIC_ROOT,
+        "unrelated-track.flac",
+        "Different",
+        "Other",
+        &[],
+    )
+    .await;
+    place(&fixture, &unrelated, &unrelated_track, 1).await;
+
+    let (status, headers, body) = get(
+        &fixture,
+        "/album?_start=0&_end=100&_sort=name&_order=ASC&name=beabadoobee",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count(&headers), 2);
+    assert_eq!(names(&body), ["Beatopia", "Local Artist Credit"]);
+    assert_eq!(calls.lock().unwrap().as_slice(), ["beabadoobee"]);
+
+    let (total, browse) = album_page(&fixture, "?_start=0&_end=40").await;
+    assert_eq!(total, 2);
+    assert_eq!(browse, ["Local Artist Credit", "Unrelated"]);
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "text-free browse never discovers"
+    );
+}
+
+struct ArtistSearchProvider {
+    calls: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl whio_core::features::music_library::catalogue::CatalogueProvider for ArtistSearchProvider {
+    async fn search_tracks(
+        &self,
+        _search: &whio_core::features::music_library::catalogue::CatalogueSearch,
+        _context: &whio_core::platform::request::RequestContext,
+    ) -> Result<
+        Vec<whio_core::features::music_library::catalogue::CatalogueCandidate>,
+        whio_core::features::music_library::catalogue::ProviderError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn search_artists(
+        &self,
+        search: &whio_core::features::music_library::catalogue::CatalogueSearch,
+        _context: &whio_core::platform::request::RequestContext,
+    ) -> Result<
+        whio_core::features::music_library::catalogue::CataloguePage<ArtistCredit>,
+        whio_core::features::music_library::catalogue::ProviderError,
+    > {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(search.query().as_str().to_owned());
+        let source = SourceIdentity::new(
+            ProviderId::new("youtube_music".to_owned()).unwrap(),
+            SourceScope::Global,
+            "artist-beabadoobee".to_owned(),
+        )
+        .unwrap();
+        let artist = ArtistCredit::new("beabadoobee".to_owned(), None)
+            .unwrap()
+            .with_provider(Some(source));
+        Ok(whio_core::features::music_library::catalogue::CataloguePage::new(vec![artist], None))
+    }
+}
+
+#[sqlx::test]
+async fn navidrome_text_artist_list_discovers_provider_rows(pool: PgPool) {
+    use whio_core::features::music_library::catalogue::CatalogueProvider;
+
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fixture = fixture_with_providers(
+        pool,
+        vec![Arc::new(ArtistSearchProvider {
+            calls: Arc::clone(&calls),
+        }) as Arc<dyn CatalogueProvider>],
+    )
+    .await;
+
+    let (status, headers, body) = get(&fixture, "/artist?_start=0&_end=20&name=bea").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count(&headers), 1);
+    assert_eq!(names(&body), ["beabadoobee"]);
+    assert_eq!(calls.lock().unwrap().as_slice(), ["bea"]);
 }
 
 #[sqlx::test]

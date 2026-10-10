@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 
 use super::{
-    AlbumId, ArtistId, IdSet, RandomSeed, Range, RoleSet, SelectorText, SortDirection, TrackView,
-    ValidationError,
+    AlbumId, ArtistId, FullTextSelector, IdSet, RandomSeed, Range, RoleSet, SelectorText,
+    SortDirection, TrackView, ValidationError,
 };
 use crate::features::music_library::library::LibraryId;
 
@@ -145,7 +145,8 @@ impl TrackListScope {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TrackListFilter {
     scope: TrackListScope,
-    title: Option<SelectorText>,
+    title: Option<FullTextSelector>,
+    provider_discovered: bool,
     album_id: Option<IdSet<AlbumId>>,
     album_artist_id: Option<IdSet<ArtistId>>,
     artists_id: Option<IdSet<ArtistId>>,
@@ -188,8 +189,13 @@ impl TrackListFilter {
         self
     }
 
-    pub fn with_title(mut self, title: Option<SelectorText>) -> Self {
+    pub fn with_title(mut self, title: Option<FullTextSelector>) -> Self {
         self.title = title;
+        self
+    }
+
+    pub fn with_provider_discovered(mut self, provider_discovered: bool) -> Self {
+        self.provider_discovered = provider_discovered;
         self
     }
 
@@ -347,8 +353,12 @@ impl TrackListFilter {
         self.scope
     }
 
-    pub fn title(&self) -> Option<&SelectorText> {
+    pub fn title(&self) -> Option<&FullTextSelector> {
         self.title.as_ref()
+    }
+
+    pub fn provider_discovered(&self) -> bool {
+        self.provider_discovered
     }
 
     pub fn album_id(&self) -> Option<&IdSet<AlbumId>> {
@@ -663,7 +673,7 @@ mod tests {
 
     #[test]
     fn the_text_and_id_selectors_keep_their_typed_values() {
-        let title = SelectorText::new("  Discovery ").unwrap();
+        let title = FullTextSelector::new("  Discovery ").unwrap();
         let genre = IdSet::new([
             SelectorText::new("Rock").unwrap().unwrap(),
             SelectorText::new("rock").unwrap().unwrap(),
@@ -675,7 +685,10 @@ mod tests {
             .with_compilation(Some(false))
             .with_missing(Some(true));
 
-        assert_eq!(filter.title().map(SelectorText::as_str), Some("discovery"));
+        assert_eq!(
+            filter.title().map(FullTextSelector::terms),
+            Some(["discovery".to_owned()].as_slice())
+        );
         assert_eq!(filter.genre().map(IdSet::len), Some(1));
         assert_eq!(filter.compilation(), Some(false));
         assert_eq!(filter.missing(), Some(true));

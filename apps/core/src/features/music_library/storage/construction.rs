@@ -162,6 +162,7 @@ pub fn construct(wiring: LibraryWiring) -> MusicServices {
             Arc::clone(&writes),
             Arc::clone(&sources),
             providers,
+            Arc::clone(&search),
         )
         .with_registry(registry),
     );

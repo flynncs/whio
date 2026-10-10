@@ -165,6 +165,12 @@ pub(crate) fn album_scope(scope: AlbumListScope, user_bind: u8, libraries_bind: 
         WHERE rating.album_id = a.id AND rating.user_id = ${user_bind}
     ))"
         ),
+        AlbumListScope::EngagedOrDiscovered => format!(
+            "({} OR EXISTS (SELECT 1 FROM album_sources AS discovered_album \
+             WHERE discovered_album.album_id = a.id \
+               AND discovered_album.provider_id <> ALL(${libraries_bind}::TEXT[])))",
+            album_scope(AlbumListScope::Engaged, user_bind, libraries_bind),
+        ),
         AlbumListScope::Owned => format!(
             "(${user_bind}::UUID IS NOT NULL OR ${user_bind}::UUID IS NULL) AND EXISTS (
         SELECT 1 FROM album_tracks AS owned_mt

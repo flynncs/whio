@@ -20,8 +20,9 @@ use crate::{
         TrackListFilter, TrackListScope, TrackOrder, ValidationError,
     },
     features::music_library::domain::{
-        AlbumId, AlbumSummary, AlbumTrack, ArtistId, ArtistSummary, Availability, IdSet,
-        RandomSeed, Range, Resource, RoleSelector, RoleSet, SelectorText, SortDirection, TrackView,
+        AlbumId, AlbumSummary, AlbumTrack, ArtistId, ArtistSummary, Availability, FullTextSelector,
+        IdSet, RandomSeed, Range, Resource, RoleSelector, RoleSet, SelectorText, SortDirection,
+        TrackView,
     },
     features::music_library::library::LibraryId,
     platform::raw_query::RawQuery,
@@ -303,6 +304,16 @@ fn value<T: FromStr>(raw: &str) -> Option<T> {
     raw.parse().ok()
 }
 
+fn full_text_selector(
+    query: &RawQuery,
+    name: &'static str,
+) -> Result<Option<FullTextSelector>, ValidationError> {
+    match query.get(name) {
+        Some(raw) => FullTextSelector::new(raw).map_err(|error| rejected(error, name)),
+        None => Ok(None),
+    }
+}
+
 fn genre(raw: &str) -> Option<SelectorText> {
     SelectorText::new(raw).ok().flatten()
 }
@@ -493,7 +504,7 @@ impl LibraryTracksQuery {
         let requested_seed = random_seed(query)?;
         let filter = TrackListFilter::new()
             .with_scope(track_scope(query)?)
-            .with_title(selector_text(query, "title")?)
+            .with_title(full_text_selector(query, "title")?)
             .with_album_id(id_set(query, "album_id", value::<AlbumId>)?)
             .with_album_artist_id(id_set(query, "album_artist_id", value::<ArtistId>)?)
             .with_artists_id(id_set(query, "artists_id", value::<ArtistId>)?)
@@ -568,7 +579,7 @@ impl LibraryAlbumsQuery {
         let requested_seed = random_seed(query)?;
         let filter = AlbumListFilter::new()
             .with_scope(album_scope(query)?)
-            .with_name(selector_text(query, "name")?)
+            .with_name(full_text_selector(query, "name")?)
             .with_artist_id(id_set(query, "artist_id", value::<ArtistId>)?)
             .with_album_artist_id(id_set(query, "album_artist_id", value::<ArtistId>)?)
             .with_artists_id(id_set(query, "artists_id", value::<ArtistId>)?)
@@ -626,7 +637,7 @@ impl LibraryArtistsQuery {
         let limit = page_limit(query)?;
         let order = order(query, ArtistSort::parse)?;
         let filter = ArtistListFilter::new()
-            .with_name(selector_text(query, "name")?)
+            .with_name(full_text_selector(query, "name")?)
             .with_role(role_set(query, "role")?)
             .with_starred(flag(query, "starred")?)
             .with_has_rating(flag(query, "has_rating")?)

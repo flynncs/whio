@@ -10,10 +10,10 @@ use crate::features::music_library::{
     domain::{
         Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumPage, AlbumSummary,
         AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort, ArtistSummary,
-        GenreSummary, LOCAL_PROVIDER_ID, LibraryState, RandomSeed, Range, Resource, RoleSelector,
-        RoleSet, SearchTerms, SortDirection, SourceIdentity, SourceRepresentationFacts, Track,
-        TrackHit, TrackId, TrackListFilter, TrackListScope, TrackOrder, TrackPage, TrackView,
-        YOUTUBE_MUSIC_PROVIDER_ID,
+        FullTextSelector, GenreSummary, LOCAL_PROVIDER_ID, LibraryState, RandomSeed, Range,
+        Resource, RoleSelector, RoleSet, SearchTerms, SortDirection, SourceIdentity,
+        SourceRepresentationFacts, Track, TrackHit, TrackId, TrackListFilter, TrackListScope,
+        TrackOrder, TrackPage, TrackView, YOUTUBE_MUSIC_PROVIDER_ID,
     },
     library::{LibraryRegistrationError, LibraryRegistry},
     storage::contracts::TrackRepositoryError,
@@ -257,10 +257,12 @@ impl LibraryRead for PgStore {
         predicates.push("a.album_artist_id = $3".to_owned());
         let selectors = predicates.where_clause();
         let order_clause = album_order_clause(order, direction, seed, &mut predicates);
-        let scope = match filter.scope() {
-            crate::features::music_library::domain::AlbumListScope::Engaged => "TRUE".to_owned(),
-            scope => album_scope(scope, 1, 2),
-        };
+        let scope =
+            if filter.scope() == crate::features::music_library::domain::AlbumListScope::Engaged {
+                "TRUE".to_owned()
+            } else {
+                album_filter_scope(filter, 1, 2)
+            };
         let statement = format!(
             r#"
             SELECT {ALBUM_BROWSE_COLUMNS}
@@ -294,10 +296,7 @@ impl LibraryRead for PgStore {
         let mut count_predicates = TrackPredicates::new(4);
         album_selector_clauses(&self.pool, filter, &mut count_predicates).await?;
         count_predicates.push("a.album_artist_id = $3".to_owned());
-        let count_scope = match filter.scope() {
-            crate::features::music_library::domain::AlbumListScope::Engaged => "TRUE".to_owned(),
-            scope => album_scope(scope, 1, 2),
-        };
+        let count_scope = scope;
         let count_statement = format!(
             "SELECT COUNT(*)::BIGINT FROM albums AS a WHERE {count_scope} {}",
             count_predicates.where_clause()
@@ -345,7 +344,7 @@ impl LibraryRead for PgStore {
         let mut predicates = TrackPredicates::new(5);
         album_selector_clauses(&self.pool, &filter, &mut predicates).await?;
         let order_clause = album_order_clause(order, direction, seed, &mut predicates);
-        let scope = album_scope(filter.scope(), 1, 2);
+        let scope = album_filter_scope(&filter, 1, 2);
         let selectors = predicates.where_clause();
         let statement = format!(
             r#"
@@ -395,7 +394,7 @@ impl LibraryRead for PgStore {
         let mut predicates = TrackPredicates::new(5);
         let selectors = artist_selector_clauses(&self.pool, filter, &mut predicates).await?;
         let order_clause = artist_order_clause(sort, direction, &selectors);
-        let scope = artist_scope(1, 2);
+        let scope = artist_list_scope(filter);
         let where_clause = predicates.where_clause();
         let statement = format!(
             r#"
@@ -445,7 +444,7 @@ impl LibraryRead for PgStore {
         let library_ids = self.library_provider_ids();
         let mut predicates = TrackPredicates::new(3);
         album_selector_clauses(&self.pool, &filter, &mut predicates).await?;
-        let scope = album_scope(filter.scope(), 1, 2);
+        let scope = album_filter_scope(&filter, 1, 2);
         let selectors = predicates.where_clause();
         let statement =
             format!("SELECT COUNT(*)::BIGINT FROM albums AS a WHERE {scope} {selectors}");
@@ -471,10 +470,14 @@ impl LibraryRead for PgStore {
         filter: &ArtistListFilter,
     ) -> Result<u32, TrackRepositoryError> {
         let library_ids = self.library_provider_ids();
-        let filter = filter.clone().with_provider_identity(false);
+        let filter = if filter.name().is_some() {
+            filter.clone()
+        } else {
+            filter.clone().with_provider_identity(false)
+        };
         let mut predicates = TrackPredicates::new(3);
         artist_selector_clauses(&self.pool, &filter, &mut predicates).await?;
-        let scope = artist_scope(1, 2);
+        let scope = artist_list_scope(&filter);
         let where_clause = predicates.where_clause();
         let statement =
             format!("SELECT COUNT(*)::BIGINT FROM artists AS ar WHERE {scope} {where_clause}");
@@ -980,6 +983,15 @@ impl PgStore {
                  WHERE mt.track_id = t.id AND mt.album_id = ANY({album}))"
             ),
             None => match filter.scope() {
+                TrackListScope::Engaged
+                    if filter.provider_discovered() && filter.title().is_some() =>
+                {
+                    format!(
+                        "({TRACK_ENGAGED} OR EXISTS (SELECT 1 FROM track_sources AS discovered_track \
+                     WHERE discovered_track.track_id = t.id \
+                       AND discovered_track.provider_id <> ALL($2::TEXT[])))"
+                    )
+                }
                 TrackListScope::Engaged => TRACK_ENGAGED.to_owned(),
                 TrackListScope::Owned => TRACK_OWNED.to_owned(),
             },
@@ -1220,6 +1232,22 @@ impl SearchMatch {
     }
 }
 
+fn full_text_clause(
+    selector: &FullTextSelector,
+    predicates: &mut TrackPredicates,
+    fields: impl Fn(&str) -> Vec<String>,
+) -> String {
+    selector
+        .terms()
+        .iter()
+        .map(|term| {
+            let pattern = predicates.text(format!("%{}%", escape_like(term)));
+            format!("({})", fields(&pattern).join(" OR "))
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
 fn escape_like(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -1393,9 +1421,31 @@ async fn track_selector_clauses(
     predicates: &mut TrackPredicates,
 ) -> Result<(), TrackRepositoryError> {
     if let Some(title) = filter.title() {
-        let pattern = predicates.text(format!("%{}%", escape_like(title.as_str())));
-
-        predicates.push(format!("t.title_normalized LIKE {pattern}"));
+        let clause = full_text_clause(title, predicates, |pattern| {
+            vec![
+                format!("{} LIKE {pattern}", search_folded("t.title_normalized")),
+                format!(
+                    "EXISTS (SELECT 1 FROM album_tracks AS text_member \
+                    JOIN albums AS text_album ON text_album.id = text_member.album_id \
+                    WHERE text_member.track_id = t.id AND {} LIKE {pattern})",
+                    search_folded("text_album.title_normalized")
+                ),
+                format!(
+                    "EXISTS (SELECT 1 FROM track_artist_credits AS text_credit \
+                    JOIN artists AS text_artist ON text_artist.id = text_credit.artist_id \
+                    WHERE text_credit.track_id = t.id AND {} LIKE {pattern})",
+                    search_folded("text_artist.name_normalized")
+                ),
+                format!(
+                    "EXISTS (SELECT 1 FROM album_tracks AS text_member \
+                    JOIN albums AS text_album ON text_album.id = text_member.album_id \
+                    JOIN artists AS text_album_artist ON text_album_artist.id = text_album.album_artist_id \
+                    WHERE text_member.track_id = t.id AND {} LIKE {pattern})",
+                    search_folded("text_album_artist.name_normalized")
+                ),
+            ]
+        });
+        predicates.push(clause);
     }
 
     if let Some(album_id) = filter.album_id() {
@@ -1674,11 +1724,11 @@ impl TrackBind {
 struct TrackPredicates {
     clauses: Vec<String>,
     binds: Vec<TrackBind>,
-    next: u8,
+    next: u16,
 }
 
 impl TrackPredicates {
-    fn new(first: u8) -> Self {
+    fn new(first: u16) -> Self {
         Self {
             clauses: Vec::new(),
             binds: Vec::new(),
@@ -1705,8 +1755,11 @@ impl TrackPredicates {
     fn add(&mut self, value: TrackBind, cast: &str) -> String {
         let placeholder = format!("${}::{cast}", self.next);
 
+        self.next = self
+            .next
+            .checked_add(1)
+            .expect("PostgreSQL bind index exceeds u16 range");
         self.binds.push(value);
-        self.next = self.next.saturating_add(1);
 
         placeholder
     }
@@ -1974,9 +2027,24 @@ async fn album_selector_clauses(
     predicates: &mut TrackPredicates,
 ) -> Result<(), TrackRepositoryError> {
     if let Some(name) = filter.name() {
-        let pattern = predicates.text(format!("%{}%", escape_like(name.as_str())));
-
-        predicates.push(format!("a.title_normalized LIKE {pattern}"));
+        let clause = full_text_clause(name, predicates, |pattern| {
+            vec![
+                format!("{} LIKE {pattern}", search_folded("a.title_normalized")),
+                format!(
+                    "EXISTS (SELECT 1 FROM artists AS text_album_artist \
+                    WHERE text_album_artist.id = a.album_artist_id AND {} LIKE {pattern})",
+                    search_folded("text_album_artist.name_normalized")
+                ),
+                format!(
+                    "EXISTS (SELECT 1 FROM album_tracks AS text_member \
+                    JOIN track_artist_credits AS text_credit ON text_credit.track_id = text_member.track_id \
+                    JOIN artists AS text_artist ON text_artist.id = text_credit.artist_id \
+                    WHERE text_member.album_id = a.id AND {} LIKE {pattern})",
+                    search_folded("text_artist.name_normalized")
+                ),
+            ]
+        });
+        predicates.push(clause);
     }
 
     if let Some(artist_id) = filter.artist_id() {
@@ -2211,6 +2279,37 @@ struct ArtistSelectors {
     song_count: String,
 }
 
+fn album_filter_scope(filter: &AlbumListFilter, user_bind: u8, libraries_bind: u8) -> String {
+    match (filter.scope(), filter.name().is_some()) {
+        (crate::features::music_library::domain::AlbumListScope::EngagedOrDiscovered, false) => {
+            album_scope(
+                crate::features::music_library::domain::AlbumListScope::Engaged,
+                user_bind,
+                libraries_bind,
+            )
+        }
+        (scope, _) => album_scope(scope, user_bind, libraries_bind),
+    }
+}
+
+fn artist_list_scope(filter: &ArtistListFilter) -> String {
+    let engaged = artist_scope(1, 2);
+    if filter.name().is_none() || !filter.provider_identity() {
+        return engaged;
+    }
+
+    format!(
+        "({engaged} OR EXISTS (SELECT 1 FROM artist_sources AS discovered_artist \
+         WHERE discovered_artist.artist_id = ar.id \
+           AND discovered_artist.provider_id <> ALL($2::TEXT[])) \
+         OR EXISTS (SELECT 1 FROM track_artist_credits AS discovered_credit \
+         JOIN track_sources AS discovered_track \
+           ON discovered_track.track_id = discovered_credit.track_id \
+         WHERE discovered_credit.artist_id = ar.id \
+           AND discovered_track.provider_id <> ALL($2::TEXT[])))"
+    )
+}
+
 fn artist_role_membership(role: Option<&RoleSet>, predicates: &mut TrackPredicates) -> String {
     let mut stored_roles = Vec::new();
     let mut primary = role.is_none();
@@ -2290,9 +2389,13 @@ async fn artist_selector_clauses(
     predicates: &mut TrackPredicates,
 ) -> Result<ArtistSelectors, TrackRepositoryError> {
     if let Some(name) = filter.name() {
-        let pattern = predicates.text(format!("%{}%", escape_like(name.as_str())));
-
-        predicates.push(format!("ar.name_normalized LIKE {pattern}"));
+        let clause = full_text_clause(name, predicates, |pattern| {
+            vec![format!(
+                "{} LIKE {pattern}",
+                search_folded("ar.name_normalized")
+            )]
+        });
+        predicates.push(clause);
     }
 
     let selectors = artist_membership_selectors(filter, predicates);

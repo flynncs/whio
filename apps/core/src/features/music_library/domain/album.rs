@@ -6,9 +6,9 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    Artist, ArtistCredit, ArtistId, IdSet, LibraryState, MatchQuality, RandomSeed, Range, RoleSet,
-    SelectorText, SortDirection, SourceIdentity, SourceRepresentationFacts, Track, TrackView,
-    ValidationError,
+    Artist, ArtistCredit, ArtistId, FullTextSelector, IdSet, LibraryState, MatchQuality,
+    RandomSeed, Range, RoleSet, SelectorText, SortDirection, SourceIdentity,
+    SourceRepresentationFacts, Track, TrackView, ValidationError,
     text::{optional, required},
 };
 use crate::features::music_library::library::LibraryId;
@@ -606,6 +606,7 @@ impl AlbumOrder {
 pub enum AlbumListScope {
     #[default]
     Engaged,
+    EngagedOrDiscovered,
     Owned,
 }
 
@@ -613,6 +614,7 @@ impl AlbumListScope {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Engaged => "engaged",
+            Self::EngagedOrDiscovered => "engaged_or_discovered",
             Self::Owned => "owned",
         }
     }
@@ -620,6 +622,7 @@ impl AlbumListScope {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "engaged" => Some(Self::Engaged),
+            "engaged_or_discovered" => Some(Self::EngagedOrDiscovered),
             "owned" => Some(Self::Owned),
             _ => None,
         }
@@ -629,7 +632,7 @@ impl AlbumListScope {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AlbumListFilter {
     scope: AlbumListScope,
-    name: Option<SelectorText>,
+    name: Option<FullTextSelector>,
     artist_id: Option<IdSet<ArtistId>>,
     album_artist_id: Option<IdSet<ArtistId>>,
     artists_id: Option<IdSet<ArtistId>>,
@@ -659,7 +662,7 @@ impl AlbumListFilter {
         self
     }
 
-    pub fn with_name(mut self, name: Option<SelectorText>) -> Self {
+    pub fn with_name(mut self, name: Option<FullTextSelector>) -> Self {
         self.name = name;
         self
     }
@@ -756,7 +759,7 @@ impl AlbumListFilter {
         self.scope
     }
 
-    pub fn name(&self) -> Option<&SelectorText> {
+    pub fn name(&self) -> Option<&FullTextSelector> {
         self.name.as_ref()
     }
 
@@ -1262,6 +1265,10 @@ mod tests {
             Some(AlbumListScope::Engaged)
         );
         assert_eq!(AlbumListScope::parse("owned"), Some(AlbumListScope::Owned));
+        assert_eq!(
+            AlbumListScope::parse("engaged_or_discovered"),
+            Some(AlbumListScope::EngagedOrDiscovered)
+        );
         assert_eq!(AlbumListScope::parse("all"), None);
         assert_eq!(AlbumListScope::default(), AlbumListScope::Engaged);
     }

@@ -200,7 +200,10 @@ impl AppState {
         streaming: Arc<StreamingService>,
         database: Option<Arc<database::Database>>,
     ) -> Self {
-        let completion = Arc::new(CompletionService::disabled(Arc::clone(&library)));
+        let completion = Arc::new(CompletionService::disabled(
+            Arc::clone(&library),
+            Arc::clone(&search),
+        ));
         let playlists = Arc::new(PlaylistService::disabled(Arc::clone(&library)));
         let queue = Arc::new(RestoreQueueService::disabled());
         let listen = Arc::new(ListenService::disabled());

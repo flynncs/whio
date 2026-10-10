@@ -7,9 +7,13 @@ use async_trait::async_trait;
 
 use super::*;
 use crate::{
-    features::music_library::catalogue::{CatalogueCandidate, CatalogueSearch},
+    features::music_library::catalogue::{CatalogueCandidate, CataloguePage, CatalogueSearch},
     features::music_library::{
-        domain::{AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceScope, TrackMetadata},
+        domain::{
+            AlbumId, AlbumListFilter, AlbumMetadata, AlbumOrder, AlbumTrack, ArtistCredit,
+            ArtistListFilter, ArtistSort, FullTextSelector, IdSet, ProviderId, SourceScope,
+            TrackListFilter, TrackMetadata, TrackOrder,
+        },
         storage::contracts::{LibraryRead, StateStore},
         storage::postgres::PostgresTrackRepository,
     },
@@ -146,7 +150,14 @@ async fn service(
         library,
         Arc::clone(repository) as Arc<dyn CatalogueWrite>,
         Arc::clone(&sources),
-        vec![provider],
+        vec![Arc::clone(&provider)],
+        Arc::new(SearchService::with_providers(
+            Arc::clone(repository) as Arc<dyn LibraryRead>,
+            Arc::clone(repository) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&sources),
+            Arc::clone(repository) as Arc<dyn StateStore>,
+            vec![provider],
+        )),
     )
     .with_registry(ProviderRegistry::with_enabled(["youtube_music"]));
 
@@ -230,6 +241,12 @@ async fn artist_detail_completes_each_provider_discography_once(pool: sqlx::PgPo
             album,
             calls: Arc::clone(&calls),
         })],
+        Arc::new(SearchService::new(
+            Arc::clone(&repository) as Arc<dyn LibraryRead>,
+            Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
+            Arc::clone(&sources),
+            Arc::clone(&repository) as Arc<dyn StateStore>,
+        )),
     );
 
     let detail = completion
@@ -251,6 +268,7 @@ async fn artist_detail_completes_each_provider_discography_once(pool: sqlx::PgPo
             crate::features::music_library::domain::AlbumOrder::Name,
             &filter,
             None,
+            &RequestContext::new(crate::platform::request::RequestId::generate()),
         )
         .await
         .unwrap();
@@ -459,4 +477,445 @@ async fn an_album_with_only_an_unusable_source_degrades_to_the_partial_album(poo
         .unwrap()
         .expect("a failure is recorded when every source is unusable");
     assert!(state.last_error().is_some());
+}
+
+#[derive(Clone, Copy)]
+enum ListSearchOutcome {
+    Results,
+    Access,
+    Unavailable,
+}
+
+struct ListSearchProvider {
+    outcome: ListSearchOutcome,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl ListSearchProvider {
+    fn record(&self, kind: &str, search: &CatalogueSearch) {
+        self.calls.lock().unwrap().push(format!(
+            "{kind}:{}:{}",
+            search.query().as_str(),
+            u32::from(search.limit().get()) + search.offset().get()
+        ));
+    }
+
+    fn failure(&self) -> ProviderError {
+        match self.outcome {
+            ListSearchOutcome::Access => ProviderError::Access,
+            ListSearchOutcome::Unavailable => ProviderError::ProviderUnavailable,
+            ListSearchOutcome::Results => ProviderError::UnsupportedProvider,
+        }
+    }
+
+    fn artist(&self) -> ArtistCredit {
+        ArtistCredit::new("beabadoobee".to_owned(), None)
+            .unwrap()
+            .with_provider(Some(provider_source("artist-beabadoobee")))
+    }
+
+    fn album(&self) -> AlbumMetadata {
+        AlbumMetadata::new("Beatopia".to_owned())
+            .unwrap()
+            .with_provider(Some(provider_source("album-beatopia")))
+            .with_album_artist(self.artist())
+    }
+}
+
+#[async_trait]
+impl CatalogueProvider for ListSearchProvider {
+    async fn search_tracks(
+        &self,
+        search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        self.record("tracks", search);
+        match self.outcome {
+            ListSearchOutcome::Results => Ok(vec![candidate("listed-track", "Glue Song")]),
+            _ => Err(self.failure()),
+        }
+    }
+
+    async fn search_albums(
+        &self,
+        search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<CataloguePage<AlbumMetadata>, ProviderError> {
+        self.record("albums", search);
+        match self.outcome {
+            ListSearchOutcome::Results => Ok(CataloguePage::new(vec![self.album()], None)),
+            _ => Err(self.failure()),
+        }
+    }
+
+    async fn search_artists(
+        &self,
+        search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<CataloguePage<ArtistCredit>, ProviderError> {
+        self.record("artists", search);
+        match self.outcome {
+            ListSearchOutcome::Results => Ok(CataloguePage::new(vec![self.artist()], None)),
+            _ => Err(self.failure()),
+        }
+    }
+}
+
+fn list_completion(
+    repository: &Arc<PostgresTrackRepository>,
+    provider: Arc<dyn CatalogueProvider>,
+) -> CompletionService {
+    let sources = Arc::clone(repository) as Arc<dyn SourceLookup>;
+    let library = Arc::new(LibraryService::new(
+        Arc::clone(repository) as Arc<dyn LibraryRead>,
+        Arc::clone(&sources),
+        Arc::clone(repository) as Arc<dyn StateStore>,
+    ));
+    let search = Arc::new(SearchService::with_providers(
+        Arc::clone(repository) as Arc<dyn LibraryRead>,
+        Arc::clone(repository) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&sources),
+        Arc::clone(repository) as Arc<dyn StateStore>,
+        vec![Arc::clone(&provider)],
+    ));
+    CompletionService::new(
+        library,
+        Arc::clone(repository) as Arc<dyn CatalogueWrite>,
+        sources,
+        vec![provider],
+        search,
+    )
+}
+
+fn selector(text: &str) -> Option<FullTextSelector> {
+    FullTextSelector::new(text).unwrap()
+}
+
+#[sqlx::test]
+async fn text_list_pages_discover_before_reading_and_widen_each_scope(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(ListSearchProvider {
+        outcome: ListSearchOutcome::Results,
+        calls: Arc::clone(&calls),
+    });
+    let completion = list_completion(&repository, provider);
+    let context = RequestContext::new(crate::platform::request::RequestId::generate());
+    let limit = PageLimit::new(10).unwrap();
+
+    let empty_album_page = completion
+        .album_page(
+            0,
+            limit,
+            AlbumOrder::Name,
+            &AlbumListFilter::new(),
+            None,
+            &context,
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty_album_page.total, 0);
+    let empty_artist_page = completion
+        .artist_page(
+            0,
+            limit,
+            ArtistSort::Name,
+            &ArtistListFilter::new(),
+            None,
+            &context,
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty_artist_page.total, 0);
+    let empty_track_page = completion
+        .track_page(
+            0,
+            limit,
+            TrackOrder::Title,
+            &TrackListFilter::new(),
+            None,
+            &context,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(empty_track_page.total(), 0);
+    assert!(calls.lock().unwrap().is_empty());
+
+    let album_filter = AlbumListFilter::new().with_name(selector("beabadoobee"));
+    let albums = completion
+        .album_page(0, limit, AlbumOrder::Name, &album_filter, None, &context)
+        .await
+        .unwrap();
+    assert_eq!(albums.total, 1);
+    assert_eq!(albums.albums[0].album().title(), "Beatopia");
+
+    let artist_filter = ArtistListFilter::new().with_name(selector("bea"));
+    let artist_page = completion
+        .artist_page(0, limit, ArtistSort::Name, &artist_filter, None, &context)
+        .await
+        .unwrap();
+    assert_eq!(artist_page.total, 1);
+    assert_eq!(artist_page.artists[0].artist().name(), "beabadoobee");
+
+    let track_filter = TrackListFilter::new().with_title(selector("glue"));
+    let tracks = completion
+        .track_page(0, limit, TrackOrder::Title, &track_filter, None, &context)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tracks.total(), 1);
+    assert_eq!(tracks.items()[0].track().title(), "Glue Song");
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["albums:beabadoobee:10", "artists:bea:10", "tracks:glue:10"]
+    );
+}
+
+struct FullPageTrackProvider {
+    offsets: Arc<Mutex<Vec<u32>>>,
+}
+
+#[async_trait]
+impl CatalogueProvider for FullPageTrackProvider {
+    async fn search_tracks(
+        &self,
+        search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        let offset = search.offset().get();
+        self.offsets.lock().unwrap().push(offset);
+        Ok((offset..offset + u32::from(search.limit().get()))
+            .map(|index| {
+                CatalogueCandidate::new(
+                    provider_source(&format!("deep-track-{index}")),
+                    TrackMetadata::from_names(
+                        "Needle Track".to_owned(),
+                        vec!["Artist".to_owned()],
+                        Some(1_000),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect())
+    }
+}
+
+#[sqlx::test]
+async fn deep_text_track_page_stops_provider_offsets_at_the_search_bound(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let offsets = Arc::new(Mutex::new(Vec::new()));
+    let completion = list_completion(
+        &repository,
+        Arc::new(FullPageTrackProvider {
+            offsets: Arc::clone(&offsets),
+        }),
+    );
+    let filter = TrackListFilter::new().with_title(selector("needle"));
+    let context = RequestContext::new(crate::platform::request::RequestId::generate());
+
+    let page = completion
+        .track_page(
+            1_001,
+            PageLimit::new(25).unwrap(),
+            TrackOrder::Title,
+            &filter,
+            None,
+            &context,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        page.total(),
+        crate::features::music_library::catalogue::MAX_SEARCH_OFFSET
+    );
+    assert!(page.items().is_empty());
+    let offsets = offsets.lock().unwrap();
+    assert_eq!(offsets.len(), 40);
+    assert!(
+        offsets.iter().all(|offset| {
+            *offset <= crate::features::music_library::catalogue::MAX_SEARCH_OFFSET
+        })
+    );
+    assert_eq!(offsets.last(), Some(&975));
+}
+
+#[sqlx::test]
+async fn text_track_discovery_access_fails_for_an_unknown_album(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let completion = list_completion(
+        &repository,
+        Arc::new(ListSearchProvider {
+            outcome: ListSearchOutcome::Access,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    let filter = TrackListFilter::new()
+        .with_title(selector("missing"))
+        .with_album_id(Some(IdSet::new([AlbumId::new()]).unwrap()));
+    let context = RequestContext::new(crate::platform::request::RequestId::generate());
+
+    let result = completion
+        .track_page(
+            0,
+            PageLimit::new(10).unwrap(),
+            TrackOrder::Title,
+            &filter,
+            None,
+            &context,
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(CatalogueError::Provider(ProviderError::Access))
+    ));
+}
+
+#[sqlx::test]
+async fn padded_maximum_selector_is_discoverable_and_keeps_its_raw_query(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let completion = list_completion(
+        &repository,
+        Arc::new(ListSearchProvider {
+            outcome: ListSearchOutcome::Results,
+            calls: Arc::clone(&calls),
+        }),
+    );
+    let query = format!(" {} ", "x".repeat(500));
+    let selector = FullTextSelector::new(&query).unwrap().unwrap();
+    assert!(FullTextSelector::new(&format!(" {} ", "x".repeat(501))).is_err());
+    let filter = TrackListFilter::new().with_title(Some(selector));
+    let context = RequestContext::new(crate::platform::request::RequestId::generate());
+
+    let page = completion
+        .track_page(
+            0,
+            PageLimit::new(10).unwrap(),
+            TrackOrder::Title,
+            &filter,
+            None,
+            &context,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(page.total(), 0);
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [format!("tracks:{query}:10")]
+    );
+}
+
+#[sqlx::test]
+async fn text_album_discovery_errors_follow_search3_rules(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let local_source = SourceIdentity::new(
+        ProviderId::new("local".to_owned()).unwrap(),
+        SourceScope::Named("/music".to_owned()),
+        "local-track".to_owned(),
+    )
+    .unwrap();
+    let album_source = SourceIdentity::new(
+        ProviderId::new("local".to_owned()).unwrap(),
+        SourceScope::Named("/music".to_owned()),
+        "local-album".to_owned(),
+    )
+    .unwrap();
+    let album_metadata = AlbumMetadata::new("Local Match".to_owned())
+        .unwrap()
+        .with_provider(Some(album_source.clone()))
+        .with_album_artist(ArtistCredit::new("beabadoobee".to_owned(), None).unwrap());
+    let album = repository
+        .resolve_or_create_album(&album_metadata)
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &album_source)
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(
+            local_source,
+            TrackMetadata::from_names(
+                "Local Track".to_owned(),
+                vec!["beabadoobee".to_owned()],
+                Some(1_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let access = list_completion(
+        &repository,
+        Arc::new(ListSearchProvider {
+            outcome: ListSearchOutcome::Access,
+            calls: Arc::clone(&calls),
+        }),
+    );
+    let filter = AlbumListFilter::new().with_name(selector("beabadoobee"));
+    let context = RequestContext::new(crate::platform::request::RequestId::generate());
+    let error = access
+        .album_page(
+            0,
+            PageLimit::new(10).unwrap(),
+            AlbumOrder::Name,
+            &filter,
+            None,
+            &context,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CatalogueError::Provider(ProviderError::Access)
+    ));
+
+    let unavailable = list_completion(
+        &repository,
+        Arc::new(ListSearchProvider {
+            outcome: ListSearchOutcome::Unavailable,
+            calls: Arc::clone(&calls),
+        }),
+    );
+    let local = unavailable
+        .album_page(
+            0,
+            PageLimit::new(10).unwrap(),
+            AlbumOrder::Name,
+            &filter,
+            None,
+            &context,
+        )
+        .await
+        .unwrap();
+    assert_eq!(local.total, 1);
+    assert_eq!(local.albums[0].album().title(), "Local Match");
+
+    let missing = AlbumListFilter::new().with_name(selector("absent"));
+    let error = unavailable
+        .album_page(
+            0,
+            PageLimit::new(10).unwrap(),
+            AlbumOrder::Name,
+            &missing,
+            None,
+            &context,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CatalogueError::Provider(ProviderError::ProviderUnavailable)
+    ));
 }

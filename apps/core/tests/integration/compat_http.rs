@@ -510,6 +510,7 @@ async fn subsonic_get_artist_settles_empty_sources_and_retries_failures(pool: Pg
             ports.catalogue(),
             ports.sources(),
             vec![provider.clone()],
+            Arc::clone(&search),
         )
         .with_registry(ProviderRegistry::with_enabled(["youtube_music"])),
     );
@@ -890,7 +891,10 @@ async fn source_tags_label_the_artist_in_both_song_surfaces(pool: PgPool) {
         TrackMetadata::from_names("song".to_owned(), vec!["artist".to_owned()], Some(200_000))
             .expect("valid metadata"),
     );
-    let (search, library, playback) = services(pool.clone(), vec![Ok(vec![candidate])]);
+    let (search, library, playback) = services(
+        pool.clone(),
+        vec![Ok(vec![candidate.clone()]), Ok(vec![candidate])],
+    );
     let app = router_with_source_tags(service, search, library, playback, SourceTags::ArtistPrefix);
     let (_, login) = post_login(app.clone(), "flynn", &secret).await;
     let token = login["token"].as_str().unwrap();
@@ -1124,6 +1128,7 @@ async fn opening_a_partial_provider_album_completes_it_over_the_facade(pool: PgP
             ports.catalogue(),
             ports.sources(),
             vec![provider],
+            Arc::clone(&search),
         )
         .with_registry(ProviderRegistry::with_enabled(["youtube_music"])),
     );

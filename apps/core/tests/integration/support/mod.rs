@@ -127,7 +127,11 @@ impl CatalogueProvider for StubProvider {
         _search: &CatalogueSearch,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, CatalogueProviderError> {
-        self.responses.lock().unwrap().pop_front().unwrap()
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("controlled provider has a response for each search call")
     }
 }
 
@@ -238,12 +242,16 @@ pub fn services(
     Arc<LibraryService>,
     Arc<StreamingService>,
 ) {
+    let has_catalogue_responses = !responses.is_empty();
     let provider = Arc::new(StubProvider {
         responses: Mutex::new(responses.into()),
     });
     let ports = StorePorts::new(pool);
-    let (search, library) =
-        ports.catalogue_service(vec![provider.clone() as Arc<dyn CatalogueProvider>]);
+    let (search, library) = if has_catalogue_responses {
+        ports.catalogue_service(vec![Arc::clone(&provider) as Arc<dyn CatalogueProvider>])
+    } else {
+        ports.bare_catalogue()
+    };
     let playback = ports.streaming(vec![provider as Arc<dyn PlaybackProvider>]);
     (search, library, playback)
 }

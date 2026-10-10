@@ -20,6 +20,7 @@ use crate::{
         PlaylistDetail, PlaylistEntry, PlaylistError, PlaylistService,
     },
     features::music_library::queue::{RestoreQueueError, RestoreQueueSave, RestoreQueueService},
+    platform::request::RequestContext,
 };
 
 use super::{
@@ -164,53 +165,26 @@ pub(crate) struct SongListRequest {
 }
 
 pub(crate) async fn song_list(
-    library: &LibraryService,
     completion: &CompletionService,
     credential: &CredentialService,
     token: &str,
     request: SongListRequest,
     tags: SourceTags,
+    context: &RequestContext,
 ) -> Result<(Vec<Song>, u32), SongError> {
     let user = authorize(credential, token).await?;
-    let album_id = request
-        .filter
-        .album_id()
-        .filter(|ids| ids.len() == 1)
-        .and_then(|ids| ids.iter().next());
-    if let Some(album_id) = album_id {
-        completion
-            .album_detail(album_id, Some(&user))
-            .await
-            .map_err(SongError::Catalogue)?
-            .ok_or(SongError::NotFound)?;
-    }
-
-    let page = match album_id {
-        Some(album_id) => {
-            library
-                .album_track_page(
-                    album_id,
-                    request.offset,
-                    request.limit,
-                    request.order,
-                    &request.filter,
-                    Some(&user),
-                )
-                .await
-        }
-        None => {
-            library
-                .track_page(
-                    request.offset,
-                    request.limit,
-                    request.order,
-                    &request.filter,
-                    Some(&user),
-                )
-                .await
-        }
-    }
-    .map_err(SongError::Catalogue)?;
+    let page = completion
+        .track_page(
+            request.offset,
+            request.limit,
+            request.order,
+            &request.filter,
+            Some(&user),
+            context,
+        )
+        .await
+        .map_err(SongError::Catalogue)?
+        .ok_or(SongError::NotFound)?;
     let (views, total) = page.into_parts();
 
     Ok((
@@ -243,20 +217,32 @@ pub(crate) async fn song_detail(
 
 const DEFAULT_PAGE_SIZE: u32 = 500;
 
+pub(crate) struct AlbumListRequest {
+    pub(crate) order: AlbumOrder,
+    pub(crate) filter: AlbumListFilter,
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+}
+
 pub(crate) async fn album_list(
     completion: &CompletionService,
     credential: &CredentialService,
     token: &str,
-    order: AlbumOrder,
-    filter: AlbumListFilter,
-    start: u32,
-    end: u32,
+    request: AlbumListRequest,
+    context: &RequestContext,
 ) -> Result<(Vec<Album>, u32), SongError> {
     let user = authorize(credential, token).await?;
-    let (offset, limit) = page(start, end)?;
+    let (offset, limit) = page(request.start, request.end)?;
     let limit = PageLimit::new(limit).map_err(|_| SongError::InvalidSearch)?;
     let page = completion
-        .album_page(offset, limit, order, &filter, Some(&user))
+        .album_page(
+            offset,
+            limit,
+            request.order,
+            &request.filter,
+            Some(&user),
+            context,
+        )
         .await
         .map_err(SongError::Catalogue)?;
 
@@ -600,27 +586,39 @@ pub(crate) async fn playlist_delete(
     }
 }
 
+pub(crate) struct ArtistListRequest {
+    pub(crate) sort: ArtistSort,
+    pub(crate) filter: ArtistListFilter,
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+}
+
 pub(crate) async fn artist_list(
-    library: &LibraryService,
+    completion: &CompletionService,
     credential: &CredentialService,
     token: &str,
-    sort: ArtistSort,
-    filter: ArtistListFilter,
-    start: u32,
-    end: u32,
+    request: ArtistListRequest,
+    context: &RequestContext,
 ) -> Result<(Vec<Artist>, u32), SongError> {
     let user = authorize(credential, token).await?;
-    let (offset, limit) = page(start, end)?;
-    let total = library
-        .artist_count(Some(&user), &filter)
-        .await
-        .map_err(SongError::Catalogue)?;
-    let artists = library
-        .artist_list(offset, limit, sort, &filter, Some(&user))
+    let (offset, limit) = page(request.start, request.end)?;
+    let limit = PageLimit::new(limit).map_err(|_| SongError::InvalidSearch)?;
+    let page = completion
+        .artist_page(
+            offset,
+            limit,
+            request.sort,
+            &request.filter,
+            Some(&user),
+            context,
+        )
         .await
         .map_err(SongError::Catalogue)?;
 
-    Ok((artists.iter().map(artist_from_summary).collect(), total))
+    Ok((
+        page.artists.iter().map(artist_from_summary).collect(),
+        page.total,
+    ))
 }
 
 pub(crate) async fn artist_detail(

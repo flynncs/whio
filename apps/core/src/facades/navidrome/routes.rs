@@ -10,10 +10,10 @@ use uuid::Uuid;
 use crate::{
     facades::navidrome::state::{NavidromeQueueState, NavidromeState},
     features::music_library::domain::{
-        AlbumId, AlbumListFilter, ArtistId, ArtistListFilter, CommentPatch, IdSet, MAX_PAGE_LIMIT,
-        OccurrenceSelector, PageLimit, Playlist, PlaylistEntryChange, PlaylistEntryError,
-        PlaylistMetadataPatch, PlaylistOrder, Range, RoleSelector, RoleSet, SelectorText,
-        SortDirection, TrackId, TrackListFilter, TrackOrder,
+        AlbumId, AlbumListFilter, ArtistId, ArtistListFilter, CommentPatch, FullTextSelector,
+        IdSet, MAX_PAGE_LIMIT, OccurrenceSelector, PageLimit, Playlist, PlaylistEntryChange,
+        PlaylistEntryError, PlaylistMetadataPatch, PlaylistOrder, Range, RoleSelector, RoleSet,
+        SelectorText, SortDirection, TrackId, TrackListFilter, TrackOrder,
     },
     features::music_library::library::{LibraryId, LibraryRegistry},
     features::music_library::playlists::PlaylistError,
@@ -44,12 +44,12 @@ pub(crate) async fn song_list(
     };
 
     match service::song_list(
-        state.library(),
         state.completion(),
         state.credential(),
         &token.0,
         request,
         state.source_tags(),
+        &context,
     )
     .await
     {
@@ -158,7 +158,7 @@ async fn song_list_query(
     })?;
     let library_id = library_id(state.libraries(), query).await?;
     let filter = TrackListFilter::new()
-        .with_title(selector_text(query, "title")?)
+        .with_title(full_text_selector(query, "title")?)
         .with_album_id(album_id)
         .with_album_artist_id(album_artist_id)
         .with_artists_id(artists_id)
@@ -252,9 +252,9 @@ fn number_set(query: &RawQuery, name: &str) -> Result<Option<Vec<i32>>, SongErro
     Ok(Some(numbers))
 }
 
-fn selector_text(query: &RawQuery, name: &str) -> Result<Option<SelectorText>, SongError> {
+fn full_text_selector(query: &RawQuery, name: &str) -> Result<Option<FullTextSelector>, SongError> {
     match query.get(name) {
-        Some(raw) => SelectorText::new(raw).map_err(|_| SongError::InvalidSearch),
+        Some(raw) => FullTextSelector::new(raw).map_err(|_| SongError::InvalidSearch),
         None => Ok(None),
     }
 }
@@ -334,10 +334,13 @@ pub(crate) async fn album_list(
         state.completion(),
         state.credential(),
         &token.0,
-        order,
-        filter,
-        start,
-        end,
+        service::AlbumListRequest {
+            order,
+            filter,
+            start,
+            end,
+        },
+        &context,
     )
     .await
     {
@@ -367,7 +370,7 @@ async fn album_filter(
         .with_recently_played(flag(query, "recently_played")?)
         .with_starred(flag(query, "starred")?)
         .with_missing(flag(query, "missing")?)
-        .with_name(selector_text(query, "name")?)
+        .with_name(full_text_selector(query, "name")?)
         .with_year(single_year(query)?)
         .with_library_id(library_id))
 }
@@ -382,7 +385,7 @@ async fn artist_filter(
 
     Ok(ArtistListFilter::new()
         .with_sort_direction(direction)
-        .with_name(selector_text(query, "name")?)
+        .with_name(full_text_selector(query, "name")?)
         .with_starred(flag(query, "starred")?)
         .with_role(role_set(query, "role")?)
         .with_missing(flag(query, "missing")?)
@@ -421,13 +424,16 @@ pub(crate) async fn artist_list(
     };
 
     match service::artist_list(
-        state.library(),
+        state.completion(),
         state.credential(),
         &token.0,
-        sort,
-        filter,
-        start,
-        end,
+        service::ArtistListRequest {
+            sort,
+            filter,
+            start,
+            end,
+        },
+        &context,
     )
     .await
     {

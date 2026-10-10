@@ -26,7 +26,8 @@ pub use album::{
     AlbumPage, AlbumSummary, AlbumTrack, DatePrecision, PartialDate,
 };
 pub use artist::{
-    Artist, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort, ArtistSummary, CreditRole,
+    Artist, ArtistCredit, ArtistId, ArtistListFilter, ArtistPage, ArtistSort, ArtistSummary,
+    CreditRole,
 };
 pub use artist_information::{ArtistInformation, RefreshDemand, RefreshStatus};
 pub use artwork::ArtworkRef;
@@ -51,8 +52,8 @@ pub use playlist::{
 };
 pub use provider_state::ProviderEntityState;
 pub use query::{
-    IdSet, MAX_SELECTOR_IDS, MAX_SELECTOR_TEXT, RandomSeed, Range, Resource, RoleSelector, RoleSet,
-    SelectorText, SortDirection,
+    FullTextSelector, IdSet, MAX_SELECTOR_IDS, MAX_SELECTOR_TEXT, RandomSeed, Range, Resource,
+    RoleSelector, RoleSet, SelectorText, SortDirection,
 };
 pub use queue::{
     RestoreQueueEntry, RestoreQueueEntryId, RestoreQueueSnapshot, RestoreQueueValidationError,

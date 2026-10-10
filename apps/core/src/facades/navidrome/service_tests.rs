@@ -1,12 +1,14 @@
 use super::*;
 use crate::features::identity::{domain::UserId, secrets::CredentialKey};
+use crate::features::music_library::catalogue::SearchService;
 use crate::features::music_library::domain::{
-    AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SelectorText, SourceIdentity, SourceScope,
-    Track, TrackMetadata,
+    AlbumMetadata, AlbumTrack, ArtistCredit, FullTextSelector, ProviderId, SourceIdentity,
+    SourceScope, Track, TrackMetadata,
 };
 use crate::features::music_library::test_support::{
     CatalogueWrite, LibraryRead, PostgresTrackRepository, SourceLookup, StateStore,
 };
+use crate::platform::request::{RequestContext, RequestId};
 use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -86,6 +88,8 @@ impl crate::features::identity::test_support::CredentialRepository for StubCrede
 
 struct TestAuth {
     service: std::sync::Arc<CredentialService>,
+    search: Arc<SearchService>,
+    context: RequestContext,
     token: String,
 }
 
@@ -93,7 +97,7 @@ fn key() -> CredentialKey {
     CredentialKey::from_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").expect("valid key")
 }
 
-fn auth() -> TestAuth {
+fn auth(pool: sqlx::PgPool) -> TestAuth {
     let key = key();
     let user = UserId::from_uuid(Uuid::now_v7());
     let credential = Uuid::now_v7();
@@ -104,7 +108,21 @@ fn auth() -> TestAuth {
     ));
     let token = session::mint(user, credential, &key);
 
-    TestAuth { service, token }
+    let store = Arc::new(PostgresTrackRepository::new(pool));
+    let search = Arc::new(SearchService::new(
+        Arc::clone(&store) as Arc<dyn LibraryRead>,
+        Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&store) as Arc<dyn SourceLookup>,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+    ));
+    let context = RequestContext::new(RequestId::new("request-123".to_owned()).unwrap());
+
+    TestAuth {
+        service,
+        search,
+        context,
+        token,
+    }
 }
 
 fn library(pool: sqlx::PgPool) -> Arc<LibraryService> {
@@ -173,7 +191,7 @@ fn query(title: Option<&str>, start: Option<u32>, end: Option<i64>) -> SongListR
     let span = end.saturating_sub(offset).min(MAX_PAGE_LIMIT);
     SongListRequest {
         filter: TrackListFilter::new().with_title(
-            SelectorText::new(title.unwrap_or_default()).expect("valid title selector"),
+            FullTextSelector::new(title.unwrap_or_default()).expect("valid title selector"),
         ),
         order: TrackOrder::Title,
         offset,
@@ -188,12 +206,12 @@ async fn song_page(
     request: &SongListRequest,
 ) -> (Vec<Song>, u32) {
     song_list(
-        library,
-        &CompletionService::disabled(Arc::clone(library)),
+        &CompletionService::disabled(Arc::clone(library), Arc::clone(&auth.search)),
         &auth.service,
         &auth.token,
         request.clone(),
         SourceTags::Off,
+        &auth.context,
     )
     .await
     .expect("song list succeeds")
@@ -202,15 +220,15 @@ async fn song_page(
 #[sqlx::test]
 async fn auth_gates_the_song_list_and_detail(pool: sqlx::PgPool) {
     let library = library(pool.clone());
-    let auth = auth();
+    let auth = auth(pool.clone());
 
     let result = song_list(
-        &library,
-        &CompletionService::disabled(Arc::clone(&library)),
+        &CompletionService::disabled(Arc::clone(&library), Arc::clone(&auth.search)),
         &auth.service,
         "forged",
         query(None, None, None),
         SourceTags::Off,
+        &auth.context,
     )
     .await;
     assert!(matches!(result, Err(SongError::Unauthorized)));
@@ -227,12 +245,12 @@ async fn auth_gates_the_song_list_and_detail(pool: sqlx::PgPool) {
 
     let dead = session::mint(UserId::from_uuid(Uuid::now_v7()), Uuid::now_v7(), &key());
     let result = song_list(
-        &library,
-        &CompletionService::disabled(Arc::clone(&library)),
+        &CompletionService::disabled(Arc::clone(&library), Arc::clone(&auth.search)),
         &auth.service,
         &dead,
         query(Some("song"), None, None),
         SourceTags::Off,
+        &auth.context,
     )
     .await;
     assert!(matches!(result, Err(SongError::Unauthorized)));
@@ -240,7 +258,7 @@ async fn auth_gates_the_song_list_and_detail(pool: sqlx::PgPool) {
 
 #[sqlx::test]
 async fn song_list_enumerates_the_library_in_title_order(pool: sqlx::PgPool) {
-    let auth = auth();
+    let auth = auth(pool.clone());
     let library = library(pool.clone());
     let store = Arc::new(PostgresTrackRepository::new(pool));
     for (index, title) in ["Zebra", "Apple", "Mango"].iter().enumerate() {
@@ -261,7 +279,7 @@ async fn song_list_enumerates_the_library_in_title_order(pool: sqlx::PgPool) {
 
 #[sqlx::test]
 async fn song_list_matches_a_normalised_title_and_treats_blank_as_absent(pool: sqlx::PgPool) {
-    let auth = auth();
+    let auth = auth(pool.clone());
     let library = library(pool.clone());
     let store = Arc::new(PostgresTrackRepository::new(pool));
     add_track(&store, "path-a", "Instant Crush").await;
@@ -288,7 +306,7 @@ async fn song_list_matches_a_normalised_title_and_treats_blank_as_absent(pool: s
 
 #[sqlx::test]
 async fn song_list_window_is_end_exclusive_and_honours_deep_offsets(pool: sqlx::PgPool) {
-    let auth = auth();
+    let auth = auth(pool.clone());
     let library = library(pool.clone());
     let store = Arc::new(PostgresTrackRepository::new(pool));
     seed(&store, 30).await;
@@ -340,7 +358,7 @@ async fn song_list_window_is_end_exclusive_and_honours_deep_offsets(pool: sqlx::
 
 #[sqlx::test]
 async fn song_list_maps_stored_tracks_into_songs(pool: sqlx::PgPool) {
-    let auth = auth();
+    let auth = auth(pool.clone());
     let library = library(pool.clone());
     let store = Arc::new(PostgresTrackRepository::new(pool));
     let album = add_album(&store, "Discovery", Some("Daft Punk")).await;
@@ -378,7 +396,7 @@ async fn song_list_maps_stored_tracks_into_songs(pool: sqlx::PgPool) {
 
 #[sqlx::test]
 async fn detail_returns_songs_and_rejects_unknown_ids(pool: sqlx::PgPool) {
-    let auth = auth();
+    let auth = auth(pool.clone());
     let library = library(pool.clone());
     let store = Arc::new(PostgresTrackRepository::new(pool));
     let stored = add_track(&store, "path-a", "Song One").await;
