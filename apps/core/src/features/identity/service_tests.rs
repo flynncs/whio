@@ -1,5 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -19,6 +22,8 @@ struct StubRepository {
     users: Mutex<HashMap<String, User>>,
     api_keys: Mutex<Vec<([u8; 32], ApiKeyCredential)>>,
     app_passwords: Mutex<Vec<AppPasswordCredential>>,
+    calls: AtomicUsize,
+    fail_user_lookup: AtomicBool,
 }
 
 impl StubRepository {
@@ -63,6 +68,10 @@ impl CredentialRepository for StubRepository {
         &self,
         username: &str,
     ) -> Result<Option<User>, CredentialStoreError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.fail_user_lookup.load(Ordering::Relaxed) {
+            return Err(CredentialStoreError::Unavailable);
+        }
         Ok(self
             .users
             .lock()
@@ -115,6 +124,7 @@ impl CredentialRepository for StubRepository {
         &self,
         user_id: UserId,
     ) -> Result<Vec<AppPasswordCredential>, CredentialStoreError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(self
             .app_passwords
             .lock()
@@ -144,14 +154,21 @@ struct Fixture {
     repository: Arc<StubRepository>,
     key: CredentialKey,
     user_id: UserId,
+    now: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
 }
 
 fn fixture() -> Fixture {
+    fixture_with_burst(10)
+}
+
+fn fixture_with_burst(burst: u32) -> Fixture {
     let key = CredentialKey::from_base64(&STANDARD_NO_PAD.encode([11u8; 32])).expect("valid key");
     let repository = Arc::new(StubRepository {
         users: Mutex::new(HashMap::new()),
         api_keys: Mutex::new(Vec::new()),
         app_passwords: Mutex::new(Vec::new()),
+        calls: AtomicUsize::new(0),
+        fail_user_lookup: AtomicBool::new(false),
     });
     let user_id = UserId::from_uuid(Uuid::now_v7());
     repository.insert_user(User {
@@ -161,13 +178,47 @@ fn fixture() -> Fixture {
         role: UserRole::Member,
     });
 
-    let service = CredentialService::new(repository.clone(), key.clone());
+    let (clock, now) = manual_clock();
+    let service = CredentialService::new_with_clock(
+        repository.clone(),
+        key.clone(),
+        throttle_config(burst),
+        clock,
+    );
     Fixture {
         service,
         repository,
         key,
         user_id,
+        now,
     }
+}
+
+fn throttle_config(burst: u32) -> crate::features::identity::LoginThrottleConfig {
+    crate::features::identity::LoginThrottleConfig {
+        burst: std::num::NonZeroU32::new(burst).unwrap(),
+        replenish: std::time::Duration::from_secs(60),
+    }
+}
+
+fn manual_clock() -> (
+    crate::platform::clock::Clock,
+    Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
+) {
+    let now = Arc::new(Mutex::new(chrono::Utc::now()));
+    let clock_now = Arc::clone(&now);
+    (
+        crate::platform::clock::Clock::from_fn(move || *clock_now.lock().expect("clock lock")),
+        now,
+    )
+}
+
+fn context() -> crate::platform::request::RequestContext {
+    crate::platform::request::RequestContext::new(crate::platform::request::RequestId::generate())
+}
+
+fn context_with_ip(ip: &str) -> crate::platform::request::RequestContext {
+    context().with_client_ip(ip.parse().unwrap())
 }
 
 fn mint(fixture: &Fixture) -> String {
@@ -203,9 +254,12 @@ async fn api_key_authenticates_to_principal() {
 
     let result = fixture
         .service
-        .authenticate(&PresentedAuth::ApiKey {
-            secret: secret.clone(),
-        })
+        .authenticate(
+            &PresentedAuth::ApiKey {
+                secret: secret.clone(),
+            },
+            &context(),
+        )
         .await;
 
     assert_eq!(
@@ -238,9 +292,12 @@ async fn api_key_principal_carries_the_stored_role() {
 
     let result = fixture
         .service
-        .authenticate(&PresentedAuth::ApiKey {
-            secret: secret.clone(),
-        })
+        .authenticate(
+            &PresentedAuth::ApiKey {
+                secret: secret.clone(),
+            },
+            &context(),
+        )
         .await;
 
     assert_eq!(
@@ -258,9 +315,12 @@ async fn api_key_with_unknown_secret_is_rejected() {
 
     let result = fixture
         .service
-        .authenticate(&PresentedAuth::ApiKey {
-            secret: format!("whio_{}", URL_SAFE_NO_PAD.encode([9u8; 32])),
-        })
+        .authenticate(
+            &PresentedAuth::ApiKey {
+                secret: format!("whio_{}", URL_SAFE_NO_PAD.encode([9u8; 32])),
+            },
+            &context(),
+        )
         .await;
 
     assert_eq!(result, Err(AuthError::InvalidCredentials));
@@ -274,11 +334,14 @@ async fn token_authenticates_with_minted_password() {
 
     let result = fixture
         .service
-        .authenticate(&PresentedAuth::Token {
-            username: "flynn".to_string(),
-            token: subsonic_token(&secret, salt),
-            salt: salt.to_string(),
-        })
+        .authenticate(
+            &PresentedAuth::Token {
+                username: "flynn".to_string(),
+                token: subsonic_token(&secret, salt),
+                salt: salt.to_string(),
+            },
+            &context(),
+        )
         .await;
 
     assert_eq!(
@@ -297,11 +360,14 @@ async fn token_with_wrong_salt_is_rejected() {
 
     let result = fixture
         .service
-        .authenticate(&PresentedAuth::Token {
-            username: "flynn".to_string(),
-            token: subsonic_token(&secret, "other-salt"),
-            salt: "real-salt".to_string(),
-        })
+        .authenticate(
+            &PresentedAuth::Token {
+                username: "flynn".to_string(),
+                token: subsonic_token(&secret, "other-salt"),
+                salt: "real-salt".to_string(),
+            },
+            &context(),
+        )
         .await;
 
     assert_eq!(result, Err(AuthError::InvalidCredentials));
@@ -314,21 +380,27 @@ async fn unknown_user_and_wrong_password_are_indistinguishable() {
 
     let unknown_user = fixture
         .service
-        .authenticate(&PresentedAuth::Token {
-            username: "nobody".to_string(),
-            token: subsonic_token("whio_x", "salt"),
-            salt: "salt".to_string(),
-        })
+        .authenticate(
+            &PresentedAuth::Token {
+                username: "nobody".to_string(),
+                token: subsonic_token("whio_x", "salt"),
+                salt: "salt".to_string(),
+            },
+            &context(),
+        )
         .await
         .unwrap_err();
 
     let known_user_bad_secret = fixture
         .service
-        .authenticate(&PresentedAuth::Token {
-            username: "flynn".to_string(),
-            token: subsonic_token("whio_not_the_secret", "salt"),
-            salt: "salt".to_string(),
-        })
+        .authenticate(
+            &PresentedAuth::Token {
+                username: "flynn".to_string(),
+                token: subsonic_token("whio_not_the_secret", "salt"),
+                salt: "salt".to_string(),
+            },
+            &context(),
+        )
         .await
         .unwrap_err();
 
@@ -342,10 +414,13 @@ async fn plaintext_password_authenticates() {
 
     let result = fixture
         .service
-        .authenticate(&PresentedAuth::Password {
-            username: "flynn".to_string(),
-            password: secret,
-        })
+        .authenticate(
+            &PresentedAuth::Password {
+                username: "flynn".to_string(),
+                password: secret,
+            },
+            &context(),
+        )
         .await;
 
     assert_eq!(
@@ -364,14 +439,235 @@ async fn wrong_plaintext_password_is_rejected() {
 
     let result = fixture
         .service
-        .authenticate(&PresentedAuth::Password {
-            username: "flynn".to_string(),
-            password: "whio_definitely_not_it".to_string(),
-        })
+        .authenticate(
+            &PresentedAuth::Password {
+                username: "flynn".to_string(),
+                password: "whio_definitely_not_it".to_string(),
+            },
+            &context(),
+        )
         .await;
 
     assert_eq!(result, Err(AuthError::InvalidCredentials));
 }
+#[tokio::test]
+async fn account_is_refused_after_burst_failures_across_ips() {
+    let fixture = fixture_with_burst(2);
+    let secret = mint(&fixture);
+    for ip in ["192.0.2.1", "192.0.2.2"] {
+        assert_eq!(
+            fixture
+                .service
+                .authenticate_password("flynn", "wrong", &context_with_ip(ip))
+                .await,
+            Err(AuthError::InvalidCredentials)
+        );
+    }
+    let calls = fixture.repository.calls.load(Ordering::Relaxed);
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("flynn", &secret, &context_with_ip("192.0.2.3"))
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+    assert_eq!(fixture.repository.calls.load(Ordering::Relaxed), calls);
+}
+
+#[tokio::test]
+async fn ip_is_refused_after_burst_failures_across_accounts() {
+    let fixture = fixture_with_burst(2);
+    for username in ["first", "second"] {
+        assert_eq!(
+            fixture
+                .service
+                .authenticate_password(username, "wrong", &context_with_ip("192.0.2.10"))
+                .await,
+            Err(AuthError::InvalidCredentials)
+        );
+    }
+    let calls = fixture.repository.calls.load(Ordering::Relaxed);
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("flynn", "not-checked", &context_with_ip("192.0.2.10"))
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+    assert_eq!(fixture.repository.calls.load(Ordering::Relaxed), calls);
+}
+
+#[tokio::test]
+async fn refused_attempt_with_the_right_password_makes_no_repository_call() {
+    let fixture = fixture_with_burst(1);
+    let secret = mint(&fixture);
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("flynn", "wrong", &context())
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+    let calls = fixture.repository.calls.load(Ordering::Relaxed);
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("flynn", &secret, &context())
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+    assert_eq!(fixture.repository.calls.load(Ordering::Relaxed), calls);
+}
+
+#[tokio::test]
+async fn allowance_returns_after_the_replenish_interval() {
+    let fixture = fixture_with_burst(1);
+    let secret = mint(&fixture);
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("flynn", "wrong", &context())
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+    *fixture.now.lock().expect("clock lock") += chrono::Duration::seconds(60);
+    assert!(
+        fixture
+            .service
+            .authenticate_password("flynn", &secret, &context())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn success_consumes_no_allowance() {
+    let fixture = fixture_with_burst(1);
+    let secret = mint(&fixture);
+    assert!(
+        fixture
+            .service
+            .authenticate_password("flynn", &secret, &context())
+            .await
+            .is_ok()
+    );
+    let calls = fixture.repository.calls.load(Ordering::Relaxed);
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("flynn", "wrong", &context())
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+    assert!(fixture.repository.calls.load(Ordering::Relaxed) > calls);
+    *fixture.now.lock().expect("clock lock") += chrono::Duration::seconds(60);
+    assert!(
+        fixture
+            .service
+            .authenticate_password("flynn", &secret, &context())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn storage_error_consumes_no_allowance() {
+    let fixture = fixture_with_burst(1);
+    fixture
+        .repository
+        .fail_user_lookup
+        .store(true, Ordering::Relaxed);
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("flynn", "wrong", &context())
+            .await,
+        Err(AuthError::Storage(CredentialStoreError::Unavailable))
+    );
+    fixture
+        .repository
+        .fail_user_lookup
+        .store(false, Ordering::Relaxed);
+    let secret = mint(&fixture);
+    assert!(
+        fixture
+            .service
+            .authenticate_password("flynn", &secret, &context())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn unknown_username_counts_like_a_wrong_password() {
+    let fixture = fixture_with_burst(1);
+    let secret = mint(&fixture);
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("nobody", "wrong", &context_with_ip("192.0.2.44"))
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("flynn", &secret, &context_with_ip("192.0.2.44"))
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+}
+
+#[tokio::test]
+async fn username_key_is_case_insensitive() {
+    let fixture = fixture_with_burst(1);
+    let secret = mint(&fixture);
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("FLYNN", "wrong", &context())
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("flynn", &secret, &context())
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+}
+
+#[tokio::test]
+async fn api_key_failures_count_against_ip_only() {
+    let fixture = fixture_with_burst(1);
+    let invalid = PresentedAuth::ApiKey {
+        secret: "invalid".to_owned(),
+    };
+    assert_eq!(
+        fixture
+            .service
+            .authenticate(&invalid, &context_with_ip("192.0.2.45"))
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+    let secret = mint(&fixture);
+    assert_eq!(
+        fixture
+            .service
+            .authenticate_password("flynn", &secret, &context_with_ip("192.0.2.45"))
+            .await,
+        Err(AuthError::InvalidCredentials)
+    );
+    assert!(
+        fixture
+            .service
+            .authenticate_password("flynn", &secret, &context_with_ip("192.0.2.46"))
+            .await
+            .is_ok()
+    );
+}
+
 #[tokio::test]
 async fn visible_user_returns_the_viewer() {
     let fixture = fixture();

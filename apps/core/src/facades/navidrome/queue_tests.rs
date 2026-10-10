@@ -255,6 +255,7 @@ mod persistence {
         let credential = Arc::new(CredentialService::new(
             Arc::new(StubCredentials { principals }),
             key,
+            crate::features::identity::LoginThrottleConfig::default(),
         ));
         let state = NavidromeQueueState {
             navidrome: NavidromeState {

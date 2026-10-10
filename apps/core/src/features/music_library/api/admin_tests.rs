@@ -130,7 +130,11 @@ async fn fixture(pool: PgPool) -> Fixture {
         Arc::clone(&store) as Arc<dyn PlaylistStore>,
         library,
     ));
-    let credential = Arc::new(crate::features::identity::credentials(pool.clone(), key));
+    let credential = Arc::new(crate::features::identity::credentials(
+        pool.clone(),
+        key,
+        crate::features::identity::LoginThrottleConfig::default(),
+    ));
     let app = app(AdminState {
         playlists: Arc::clone(&service),
         credential,

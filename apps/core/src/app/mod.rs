@@ -27,6 +27,7 @@ use crate::{
     features::music_library::queue::RestoreQueueService,
     features::playback::StreamingService,
     features::playback::activity::PlaybackActivityService,
+    platform::client_ip::ClientIpPolicy,
 };
 
 #[derive(Clone)]
@@ -52,6 +53,7 @@ pub struct AppState {
     metadata_profile: crate::features::metadata::MetadataProfile,
     metadata_language: String,
     source_tags: SourceTags,
+    pub(crate) client_ip_policy: Arc<ClientIpPolicy>,
 }
 
 impl AppState {
@@ -72,6 +74,11 @@ impl AppState {
         database: Arc<database::Database>,
     ) -> Self {
         Self::build(credential, search, library, streaming, Some(database))
+    }
+
+    pub fn with_client_ip_policy(mut self, policy: ClientIpPolicy) -> Self {
+        self.client_ip_policy = Arc::new(policy);
+        self
     }
 
     pub fn with_artwork(mut self, artwork: Arc<ArtworkService>) -> Self {
@@ -221,6 +228,9 @@ impl AppState {
             metadata_profile: crate::features::metadata::MetadataProfile::artist_display(),
             metadata_language: "en".to_owned(),
             source_tags: SourceTags::Off,
+            client_ip_policy: Arc::new(ClientIpPolicy {
+                trusted_proxies: Vec::new(),
+            }),
         }
     }
 

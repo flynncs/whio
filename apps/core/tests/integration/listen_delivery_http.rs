@@ -411,7 +411,11 @@ fn status_router(principal: Uuid, delivery: Arc<DeliveryService>, pool: &PgPool)
         role: UserRole::Member,
     });
     store.insert_app_password(&key, STATUS_PASSWORD, UserId::from_uuid(principal));
-    let credential = Arc::new(CredentialService::new(store, key));
+    let credential = Arc::new(CredentialService::new(
+        store,
+        key,
+        whio_core::features::identity::LoginThrottleConfig::default(),
+    ));
     let ports = support::StorePorts::new(pool.clone());
     let (search, library) = ports.bare_catalogue();
     let playback = ports.streaming(Vec::new());

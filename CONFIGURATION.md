@@ -58,6 +58,9 @@ keep container mount paths stable between restarts.
 | `WHIO_DATABASE_URL` | required | Postgres connection; embedded migrations run before binding |
 | `WHIO_CREDENTIAL_KEY` | required | base64-encoded 32-byte encryption key |
 | `WHIO_BIND_ADDRESS` | `127.0.0.1:3000` | API listener; container image sets `0.0.0.0:3000` |
+| `WHIO_TRUSTED_PROXIES` | empty | comma-separated proxy IP addresses trusted for `x-forwarded-for`; without this, clients behind the homelab proxy share its IP throttle key |
+| `WHIO_AUTH_FAILURE_BURST` | `10` | failed authentication attempts allowed per account or client IP before throttling |
+| `WHIO_AUTH_FAILURE_REPLENISH_SECONDS` | `60` | interval for replenishing one failed-authentication allowance |
 | `WHIO_LOG_LEVEL` | `info` | tracing level |
 | `WHIO_MEDIA_ROOTS` | absent | local library roots |
 | `WHIO_YOUTUBE_ENABLED` | off | enable YouTube resolution |
@@ -72,6 +75,10 @@ keep container mount paths stable between restarts.
 | `WHIO_METADATA_LANGUAGE` | `en` | metadata language tag |
 | `WHIO_ARTWORK_CACHE_DIR` | absent | enable ready artwork storage at the chosen path |
 | `WHIO_ARTWORK_CACHE_BYTES` | `2147483648` | artwork cache budget when configured |
+
+Set `WHIO_TRUSTED_PROXIES` to the homelab proxy's IP address when requests
+reach Whio through that proxy; only trusted proxies' `x-forwarded-for` headers
+are used to identify client IPs.
 
 YouTube resolver connect/total budgets use
 `WHIO_YOUTUBE_RESOLVER_CONNECT_TIMEOUT_SECONDS` /

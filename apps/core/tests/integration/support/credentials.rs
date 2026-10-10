@@ -11,6 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use uuid::Uuid;
 use whio_core::features::identity::{
+    LoginThrottleConfig,
     domain::{ApiKeyCredential, AppPasswordCredential, User, UserId, UserRole},
     secrets::{CredentialKey, encrypt_secret, generate_app_secret, lookup_digest},
     service::CredentialService,
@@ -33,7 +34,11 @@ pub fn credential_service() -> Arc<CredentialService> {
         role: UserRole::Member,
     });
     store.insert_app_password(&key, TEST_PASSWORD, user_id);
-    Arc::new(CredentialService::new(store, key))
+    Arc::new(CredentialService::new(
+        store,
+        key,
+        LoginThrottleConfig::default(),
+    ))
 }
 
 pub fn credential_service_with_storage_failure() -> Arc<CredentialService> {
@@ -42,6 +47,7 @@ pub fn credential_service_with_storage_failure() -> Arc<CredentialService> {
     Arc::new(CredentialService::new(
         Arc::new(UnavailableCredentialStore),
         key,
+        LoginThrottleConfig::default(),
     ))
 }
 
@@ -244,11 +250,24 @@ pub fn credential_service_with_known_api_key() -> (Arc<CredentialService>, Strin
         &secret,
     );
 
-    (Arc::new(CredentialService::new(store, key)), secret)
+    (
+        Arc::new(CredentialService::new(
+            store,
+            key,
+            LoginThrottleConfig::default(),
+        )),
+        secret,
+    )
 }
 
 // a service whose store knows `flynn` plus one recoverable app password
 pub fn credential_service_with_known_app_password() -> (Arc<CredentialService>, String) {
+    credential_service_with_known_app_password_and_throttle(LoginThrottleConfig::default())
+}
+
+pub fn credential_service_with_known_app_password_and_throttle(
+    throttle: LoginThrottleConfig,
+) -> (Arc<CredentialService>, String) {
     let key = test_credential_key();
     let store = Arc::new(MemoryCredentialStore::new());
     let user_id = UserId::from_uuid(Uuid::now_v7());
@@ -262,7 +281,10 @@ pub fn credential_service_with_known_app_password() -> (Arc<CredentialService>, 
     let secret = generate_app_secret();
     store.insert_app_password(&key, &secret, user_id);
 
-    (Arc::new(CredentialService::new(store, key)), secret)
+    (
+        Arc::new(CredentialService::new(store, key, throttle)),
+        secret,
+    )
 }
 
 pub struct RoleFixture {
@@ -305,7 +327,11 @@ pub fn credential_service_with_roles() -> RoleFixture {
     store.insert_app_password(&key, &admin_secret, admin_id);
 
     RoleFixture {
-        service: Arc::new(CredentialService::new(store, key)),
+        service: Arc::new(CredentialService::new(
+            store,
+            key,
+            LoginThrottleConfig::default(),
+        )),
         member: "flynn",
         member_secret,
         admin: "admin",
@@ -324,7 +350,11 @@ pub async fn database_credential_service(pool: sqlx::PgPool) -> (Arc<CredentialS
         .await
         .unwrap();
     (
-        Arc::new(whio_core::features::identity::credentials(pool, key)),
+        Arc::new(whio_core::features::identity::credentials(
+            pool,
+            key,
+            LoginThrottleConfig::default(),
+        )),
         secret,
     )
 }

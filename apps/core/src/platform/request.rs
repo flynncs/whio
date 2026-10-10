@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use axum::http::HeaderValue;
 use thiserror::Error;
 use uuid::Uuid;
@@ -48,11 +50,24 @@ impl RequestId {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestContext {
     request_id: RequestId,
+    client_ip: Option<IpAddr>,
 }
 
 impl RequestContext {
     pub fn new(request_id: RequestId) -> Self {
-        Self { request_id }
+        Self {
+            request_id,
+            client_ip: None,
+        }
+    }
+
+    pub fn with_client_ip(mut self, client_ip: IpAddr) -> Self {
+        self.client_ip = Some(client_ip);
+        self
+    }
+
+    pub fn client_ip(&self) -> Option<IpAddr> {
+        self.client_ip
     }
 
     pub fn request_id(&self) -> &RequestId {

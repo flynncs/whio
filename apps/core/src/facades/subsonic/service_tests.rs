@@ -1837,6 +1837,7 @@ async fn reporting_fixture(pool: sqlx::PgPool, duration_ms: Option<u64>) -> Repo
         credential: Arc::new(crate::features::identity::credentials(
             pool.clone(),
             reporting_key(),
+            crate::features::identity::LoginThrottleConfig::default(),
         )),
         principal: Principal {
             user_id: UserId::from_uuid(user),
@@ -3202,6 +3203,7 @@ async fn the_native_route_and_the_subsonic_facade_observe_the_same_composed_resu
         Arc::new(crate::features::identity::credentials(
             pool.clone(),
             reporting_key(),
+            crate::features::identity::LoginThrottleConfig::default(),
         )),
         MetadataProfile::artist_display(),
         "en".to_owned(),

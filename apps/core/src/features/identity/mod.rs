@@ -7,6 +7,8 @@ pub mod provisioning;
 pub mod secrets;
 pub mod service;
 mod storage;
+mod throttle;
+pub use throttle::LoginThrottleConfig;
 
 pub use api::destinations::{DestinationState, routes as destinations_router};
 
@@ -15,8 +17,12 @@ pub mod test_support {
     pub use super::storage::repository::{CredentialRepository, CredentialStoreError};
 }
 
-pub fn credentials(pool: sqlx::PgPool, key: secrets::CredentialKey) -> service::CredentialService {
-    storage::credentials(pool, key)
+pub fn credentials(
+    pool: sqlx::PgPool,
+    key: secrets::CredentialKey,
+    throttle: LoginThrottleConfig,
+) -> service::CredentialService {
+    storage::credentials(pool, key, throttle)
 }
 
 pub fn destinations(

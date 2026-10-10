@@ -78,7 +78,11 @@ async fn fixture(pool: PgPool) -> Fixture {
         auth.push(auth_query(username, &secret));
     }
 
-    let credential: Arc<CredentialService> = Arc::new(credentials(pool.clone(), key));
+    let credential: Arc<CredentialService> = Arc::new(credentials(
+        pool.clone(),
+        key,
+        whio_core::features::identity::LoginThrottleConfig::default(),
+    ));
     let ports = StorePorts::new(pool.clone());
     let library = Arc::new(
         LibraryService::new(ports.library(), ports.sources(), ports.state())

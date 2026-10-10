@@ -38,8 +38,9 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let context = parts.extensions.get::<RequestContext>();
+        let context = parts.extensions.get::<RequestContext>().cloned();
         let request_id = context
+            .as_ref()
             .map(|context| context.request_id().as_str().to_owned())
             .unwrap_or_else(|| RequestId::generate().into_string());
 
@@ -54,7 +55,14 @@ where
             )
         })?;
 
-        match NativeState::from_ref(state).0.authenticate(&auth).await {
+        let context = context.unwrap_or_else(|| {
+            RequestContext::new(RequestId::new(request_id.clone()).expect("validated request ID"))
+        });
+        match NativeState::from_ref(state)
+            .0
+            .authenticate(&auth, &context)
+            .await
+        {
             Ok(principal) => Ok(Self(principal)),
             Err(AuthError::InvalidCredentials) => Err(auth_error(
                 StatusCode::UNAUTHORIZED,

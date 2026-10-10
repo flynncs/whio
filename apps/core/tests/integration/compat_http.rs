@@ -35,16 +35,17 @@ use whio_core::{
     features::music_library::queue::{RestoreQueueSave, RestoreQueueService},
     features::playback::providers::ProviderError,
     features::playback::{
-        Clock, PlaybackActivityService, PlaybackProvider, PlaybackSource, ResolvedPlayback,
+        PlaybackActivityService, PlaybackProvider, PlaybackSource, ResolvedPlayback,
         StreamingService,
     },
     integrations::ytm::playback::YtmPlayback,
-    platform::request::RequestContext,
+    platform::{clock::Clock, request::RequestContext},
 };
 
 use support::credentials::credential_service_with_roles;
 use support::{
-    StorePorts, credential_service_with_known_app_password, router, router_with_completion,
+    StorePorts, credential_service_with_known_app_password,
+    credential_service_with_known_app_password_and_throttle, router, router_with_completion,
     router_with_playlists, router_with_queue,
 };
 
@@ -678,6 +679,47 @@ async fn post_login(app: axum::Router, username: &str, password: &str) -> (Statu
     let status = response.status();
     let body = to_bytes(response.into_body(), 8192).await.unwrap();
     (status, serde_json::from_slice(&body).unwrap())
+}
+
+#[sqlx::test]
+async fn subsonic_refuses_after_failed_logins_with_code_40(pool: PgPool) {
+    let throttle = whio_core::features::identity::LoginThrottleConfig {
+        burst: std::num::NonZeroU32::new(2).unwrap(),
+        replenish: std::time::Duration::from_secs(60),
+    };
+    let (service, secret) = credential_service_with_known_app_password_and_throttle(throttle);
+    let app = app(pool, service);
+    for _ in 0..2 {
+        let response = get(
+            app.clone(),
+            "/rest/ping.view?u=flynn&v=1.16.1&c=test-client&p=wrong",
+        )
+        .await;
+        assert_eq!(response["subsonic-response"]["error"]["code"], json!(40));
+    }
+    let response = get(
+        app,
+        &format!("/rest/ping.view?u=flynn&v=1.16.1&c=test-client&p={secret}"),
+    )
+    .await;
+    assert_eq!(response["subsonic-response"]["error"]["code"], json!(40));
+}
+
+#[sqlx::test]
+async fn navidrome_login_refuses_after_failed_logins(pool: PgPool) {
+    let throttle = whio_core::features::identity::LoginThrottleConfig {
+        burst: std::num::NonZeroU32::new(2).unwrap(),
+        replenish: std::time::Duration::from_secs(60),
+    };
+    let (service, secret) = credential_service_with_known_app_password_and_throttle(throttle);
+    let app = app(pool, service);
+    for _ in 0..2 {
+        let (status, _) = post_login(app.clone(), "flynn", "wrong").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, body) = post_login(app, "flynn", &secret).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, json!({"error": "Invalid username or password"}));
 }
 
 #[sqlx::test]
@@ -2457,6 +2499,7 @@ async fn page_routes_and_role_changes_do_not_leak_credentials(pool: PgPool) {
     let service = Arc::new(whio_core::features::identity::credentials(
         pool.clone(),
         key.clone(),
+        whio_core::features::identity::LoginThrottleConfig::default(),
     ));
     let app = app(pool, service);
     let auth = auth_query("flynn", &secret);
@@ -3673,6 +3716,7 @@ async fn reporting_fixture_with_clock(pool: PgPool, clock: Clock) -> ReportingFi
     let credential = Arc::new(whio_core::features::identity::credentials(
         pool.clone(),
         key,
+        whio_core::features::identity::LoginThrottleConfig::default(),
     ));
     let app = whio_core::app::router(
         AppState::new(credential, search, library, playback).with_playback_activity(activity),

@@ -6,10 +6,12 @@ use tracing::warn;
 
 use crate::features::identity::domain::User;
 use crate::features::identity::secrets::{decrypt_secret, lookup_digest};
+use crate::platform::{clock::Clock, request::RequestContext};
 
 use super::domain::{Principal, UserId, UserRole};
 use super::secrets::CredentialKey;
 use super::storage::repository::{CredentialRepository, CredentialStoreError};
+use super::throttle::{LoginThrottle, LoginThrottleConfig};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresentedAuth {
@@ -39,6 +41,7 @@ pub enum AuthError {
 pub struct CredentialService {
     repository: Arc<dyn CredentialRepository>,
     key: Arc<CredentialKey>,
+    throttle: LoginThrottle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,31 +62,60 @@ fn directory_user(user: User) -> DirectoryUser {
 }
 
 impl CredentialService {
-    pub fn new(repository: Arc<dyn CredentialRepository>, key: CredentialKey) -> Self {
+    pub fn new(
+        repository: Arc<dyn CredentialRepository>,
+        key: CredentialKey,
+        throttle_config: LoginThrottleConfig,
+    ) -> Self {
+        Self::new_with_clock(repository, key, throttle_config, Clock::system())
+    }
+
+    pub(crate) fn new_with_clock(
+        repository: Arc<dyn CredentialRepository>,
+        key: CredentialKey,
+        throttle_config: LoginThrottleConfig,
+        clock: Clock,
+    ) -> Self {
         Self {
             repository,
             key: Arc::new(key),
+            throttle: LoginThrottle::new(throttle_config, clock),
         }
     }
 
-    pub async fn authenticate(&self, presented: &PresentedAuth) -> Result<Principal, AuthError> {
-        match presented {
-            PresentedAuth::ApiKey { secret } => self.authenticate_api_key(secret).await,
-            PresentedAuth::Token {
-                username,
-                token,
-                salt,
-            } => self
-                .authenticate_app_password(username, &|candidate_password| {
-                    token_matches(candidate_password, salt, token)
-                })
-                .await
-                .map(|(principal, _)| principal),
-            PresentedAuth::Password { username, password } => self
-                .authenticate_password(username, password)
-                .await
-                .map(|(principal, _)| principal),
-        }
+    pub async fn authenticate(
+        &self,
+        presented: &PresentedAuth,
+        context: &RequestContext,
+    ) -> Result<Principal, AuthError> {
+        let account = match presented {
+            PresentedAuth::ApiKey { .. } => None,
+            PresentedAuth::Token { username, .. } | PresentedAuth::Password { username, .. } => {
+                Some(username.to_lowercase())
+            }
+        };
+        self.throttled(account.as_deref(), context, async {
+            match presented {
+                PresentedAuth::ApiKey { secret } => self.authenticate_api_key(secret).await,
+                PresentedAuth::Token {
+                    username,
+                    token,
+                    salt,
+                } => self
+                    .authenticate_app_password(username, &|candidate_password| {
+                        token_matches(candidate_password, salt, token)
+                    })
+                    .await
+                    .map(|(principal, _)| principal),
+                PresentedAuth::Password { username, password } => self
+                    .authenticate_app_password(username, &|candidate_password| {
+                        constant_time_eq(candidate_password.as_bytes(), password.as_bytes())
+                    })
+                    .await
+                    .map(|(principal, _)| principal),
+            }
+        })
+        .await
     }
 
     async fn authenticate_api_key(&self, secret: &str) -> Result<Principal, AuthError> {
@@ -113,12 +145,38 @@ impl CredentialService {
         &self,
         username: &str,
         password: &str,
+        context: &RequestContext,
     ) -> Result<(Principal, uuid::Uuid), AuthError> {
-        let expected = password.as_bytes().to_vec();
-        self.authenticate_app_password(username, &|candidate_password| {
-            constant_time_eq(candidate_password.as_bytes(), &expected)
+        self.throttled(Some(&username.to_lowercase()), context, async {
+            self.authenticate_app_password(username, &|candidate_password| {
+                constant_time_eq(candidate_password.as_bytes(), password.as_bytes())
+            })
+            .await
         })
         .await
+    }
+
+    async fn throttled<T>(
+        &self,
+        account: Option<&str>,
+        context: &RequestContext,
+        check: impl std::future::Future<Output = Result<T, AuthError>>,
+    ) -> Result<T, AuthError> {
+        let ip = context.client_ip();
+        if !self.throttle.allowed(account, ip) {
+            warn!(
+                request_id = context.request_id().as_str(),
+                "authentication attempt refused by throttle"
+            );
+            return Err(AuthError::InvalidCredentials);
+        }
+        match check.await {
+            Err(AuthError::InvalidCredentials) => {
+                self.throttle.record_failure(account, ip);
+                Err(AuthError::InvalidCredentials)
+            }
+            result => result,
+        }
     }
 
     pub async fn app_password_active(&self, credential_id: uuid::Uuid) -> Result<bool, AuthError> {

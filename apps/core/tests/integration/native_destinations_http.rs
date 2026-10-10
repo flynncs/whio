@@ -58,7 +58,11 @@ fn credential_service(users: &[(Uuid, &str)]) -> Arc<CredentialService> {
         store.insert_app_password(&key, PASSWORD, UserId::from_uuid(*principal));
     }
 
-    Arc::new(CredentialService::new(store, key))
+    Arc::new(CredentialService::new(
+        store,
+        key,
+        whio_core::features::identity::LoginThrottleConfig::default(),
+    ))
 }
 
 fn router(users: &[(Uuid, &str)], pool: &PgPool, destinations: Arc<DestinationService>) -> Router {

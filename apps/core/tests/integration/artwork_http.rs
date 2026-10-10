@@ -50,7 +50,11 @@ fn credentials() -> (Arc<CredentialService>, Uuid, CredentialKey) {
     store.insert_app_password(&key, TEST_PASSWORD, user_id);
 
     (
-        Arc::new(CredentialService::new(store, key.clone())),
+        Arc::new(CredentialService::new(
+            store,
+            key.clone(),
+            whio_core::features::identity::LoginThrottleConfig::default(),
+        )),
         user_uuid,
         key,
     )

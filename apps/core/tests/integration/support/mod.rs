@@ -35,7 +35,9 @@ use whio_core::{
 pub mod credentials;
 pub use credentials::{
     NATIVE_AUTH_QUERY, credential_service, credential_service_with_known_api_key,
-    credential_service_with_known_app_password, credential_service_with_storage_failure,
+    credential_service_with_known_app_password,
+    credential_service_with_known_app_password_and_throttle,
+    credential_service_with_storage_failure,
 };
 
 mod media;

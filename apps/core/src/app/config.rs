@@ -1,4 +1,9 @@
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    num::NonZeroU32,
+    time::Duration,
+};
 
 use crate::facades::SourceTags;
 use crate::features::identity::secrets;
@@ -28,6 +33,9 @@ const KNOWN_METADATA_SOURCES: [&str; 8] = [
 ];
 
 const DATABASE_URL: &str = "WHIO_DATABASE_URL";
+const TRUSTED_PROXIES: &str = "WHIO_TRUSTED_PROXIES";
+const AUTH_FAILURE_BURST: &str = "WHIO_AUTH_FAILURE_BURST";
+const AUTH_FAILURE_REPLENISH_SECONDS: &str = "WHIO_AUTH_FAILURE_REPLENISH_SECONDS";
 const CREDENTIAL_KEY: &str = "WHIO_CREDENTIAL_KEY";
 const METADATA_STORE_BUDGET_BYTES: &str = "WHIO_METADATA_STORE_BUDGET_BYTES";
 const METADATA_ARTIST_PROFILE: &str = "WHIO_METADATA_ARTIST_PROFILE";
@@ -71,6 +79,8 @@ const DEFAULT_YOUTUBE_MEDIA_SUFFIX: &str =
 #[derive(Debug)]
 pub(crate) struct Config {
     pub(crate) bind_address: SocketAddr,
+    pub(crate) trusted_proxies: Vec<IpAddr>,
+    pub(crate) auth_failure_throttle: crate::features::identity::LoginThrottleConfig,
     pub(crate) database_url: String,
     pub(crate) credential_key: secrets::CredentialKey,
     pub(crate) log_level: tracing::Level,
@@ -124,6 +134,8 @@ impl Config {
             .parse()
             .map_err(|_| invalid("WHIO_BIND_ADDRESS", bind_raw, "must be a socket address"))?;
 
+        let trusted_proxies = parse_trusted_proxies(vars)?;
+        let auth_failure_throttle = parse_auth_failure_throttle(vars)?;
         let database_raw = vars
             .get(DATABASE_URL)
             .ok_or(ConfigError::Missing { name: DATABASE_URL })?;
@@ -405,6 +417,8 @@ impl Config {
         Ok(Self {
             dedup_mode,
             bind_address,
+            trusted_proxies,
+            auth_failure_throttle,
             database_url: database_raw.to_owned(),
             log_level,
             credential_key,
@@ -430,6 +444,56 @@ impl Config {
     pub(crate) fn media_roots(&self) -> Vec<std::path::PathBuf> {
         crate::features::music_library::library::deduplicated_roots(&self.libraries)
     }
+}
+
+fn parse_trusted_proxies(vars: &HashMap<String, String>) -> Result<Vec<IpAddr>, ConfigError> {
+    let Some(raw) = vars.get(TRUSTED_PROXIES) else {
+        return Ok(Vec::new());
+    };
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    raw.split(',')
+        .map(|entry| {
+            entry
+                .trim()
+                .parse()
+                .map_err(|_| invalid(TRUSTED_PROXIES, raw, "must be comma-separated IP addresses"))
+        })
+        .collect()
+}
+
+fn parse_auth_failure_throttle(
+    vars: &HashMap<String, String>,
+) -> Result<crate::features::identity::LoginThrottleConfig, ConfigError> {
+    let burst_raw = vars
+        .get(AUTH_FAILURE_BURST)
+        .map(String::as_str)
+        .unwrap_or("10");
+    let burst = burst_raw
+        .parse::<u32>()
+        .ok()
+        .and_then(NonZeroU32::new)
+        .ok_or_else(|| invalid(AUTH_FAILURE_BURST, burst_raw, "must be a positive integer"))?;
+    let replenish_raw = vars
+        .get(AUTH_FAILURE_REPLENISH_SECONDS)
+        .map(String::as_str)
+        .unwrap_or("60");
+    let replenish_seconds = replenish_raw
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| *seconds > 0)
+        .ok_or_else(|| {
+            invalid(
+                AUTH_FAILURE_REPLENISH_SECONDS,
+                replenish_raw,
+                "must be a positive number of seconds",
+            )
+        })?;
+    Ok(crate::features::identity::LoginThrottleConfig {
+        burst,
+        replenish: Duration::from_secs(replenish_seconds),
+    })
 }
 
 fn parse_optional_millis(

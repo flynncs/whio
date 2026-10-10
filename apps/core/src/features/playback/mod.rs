@@ -8,7 +8,7 @@ pub mod providers;
 mod service;
 mod source;
 
-pub use activity::{ActivityError, Clock, PlaybackActivityService};
+pub use activity::{ActivityError, PlaybackActivityService};
 pub use delivery::{DeliveryError, DeliveryResult};
 pub use domain::{
     ActivityInputError, ActivitySession, LocalMedia, MediaMetadata, PlayableMedia, PlaybackClient,

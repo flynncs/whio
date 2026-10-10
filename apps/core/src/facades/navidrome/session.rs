@@ -163,6 +163,7 @@ mod tests {
         let credential = crate::features::identity::service::CredentialService::new(
             Arc::new(UnavailableCredentialStore),
             key.clone(),
+            crate::features::identity::LoginThrottleConfig::default(),
         );
         let token = mint(user, credential_id, &key);
 

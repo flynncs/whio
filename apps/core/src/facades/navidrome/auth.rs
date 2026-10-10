@@ -41,7 +41,7 @@ pub(crate) async fn login(
 ) -> Response {
     let result = state
         .credential()
-        .authenticate_password(&body.username, &body.password)
+        .authenticate_password(&body.username, &body.password, &context)
         .await;
 
     match result {

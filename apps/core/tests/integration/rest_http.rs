@@ -281,6 +281,7 @@ async fn revoked_credentials_still_fail_authentication(pool: PgPool) {
     let service = Arc::new(whio_core::features::identity::credentials(
         pool.clone(),
         key,
+        whio_core::features::identity::LoginThrottleConfig::default(),
     ));
     let app = app(pool, service);
     let auth = format!("u=flynn&v=1.16.1&c=test-client&p={secret}");

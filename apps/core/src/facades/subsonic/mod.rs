@@ -953,7 +953,7 @@ async fn authenticate(
     context: &RequestContext,
     auth: SubsonicAuth,
 ) -> Result<Principal, Response> {
-    match state.credential().authenticate(&auth.0).await {
+    match state.credential().authenticate(&auth.0, context).await {
         Ok(principal) => Ok(principal),
         Err(AuthError::InvalidCredentials) => Err(Json(failed_envelope(
             models::error::Code::Variant40,

@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::{future::Future, net::SocketAddr, sync::Arc};
 
 use tokio::net::TcpListener;
 
@@ -85,9 +85,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    axum::serve(listener, crate::app::router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        crate::app::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     Ok(())
 }
@@ -100,6 +103,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
     let credential = Arc::new(identity::credentials(
         database.pool(),
         config.credential_key.clone(),
+        config.auth_failure_throttle,
     ));
     let (catalogue_providers, enabled_providers): (
         Vec<Arc<dyn CatalogueProvider>>,
@@ -187,7 +191,10 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
                 config.metadata_language.clone(),
             )
             .with_destinations(destinations)
-            .with_source_tags(config.source_tags);
+            .with_source_tags(config.source_tags)
+            .with_client_ip_policy(crate::platform::client_ip::ClientIpPolicy {
+                trusted_proxies: config.trusted_proxies.clone(),
+            });
 
     if let Some(delivery) = music.delivery.as_ref() {
         state = state.with_delivery(Arc::clone(delivery));

@@ -100,6 +100,7 @@ fn auth() -> TestAuth {
     let service = std::sync::Arc::new(CredentialService::new(
         std::sync::Arc::new(StubCredentialStore { user, credential }),
         key.clone(),
+        crate::features::identity::LoginThrottleConfig::default(),
     ));
     let token = session::mint(user, credential, &key);
 

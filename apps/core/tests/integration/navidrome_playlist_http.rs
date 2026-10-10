@@ -70,6 +70,7 @@ async fn fixture(pool: PgPool) -> Fixture {
     let credential = Arc::new(whio_core::features::identity::credentials(
         pool.clone(),
         key,
+        whio_core::features::identity::LoginThrottleConfig::default(),
     ));
     let ports = StorePorts::new(pool);
     let library = Arc::new(LibraryService::new(

@@ -13,12 +13,20 @@ use sqlx::PgPool;
 use super::destinations::{DestinationService, DestinationValidator};
 use super::provisioning::ProvisioningService;
 use super::secrets::CredentialKey;
-use super::service::CredentialService;
+use super::{service::CredentialService, throttle::LoginThrottleConfig};
 
 pub use postgres::PostgresCredentialRepository;
 
-pub(super) fn credentials(pool: PgPool, key: CredentialKey) -> CredentialService {
-    CredentialService::new(Arc::new(PostgresCredentialRepository::new(pool)), key)
+pub(super) fn credentials(
+    pool: PgPool,
+    key: CredentialKey,
+    throttle: LoginThrottleConfig,
+) -> CredentialService {
+    CredentialService::new(
+        Arc::new(PostgresCredentialRepository::new(pool)),
+        key,
+        throttle,
+    )
 }
 
 pub(super) fn disabled_destination_service(

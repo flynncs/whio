@@ -127,6 +127,9 @@ pub(crate) fn router(state: AppState) -> Router {
             )),
         )
         .fallback(routes::not_found)
-        .layer(axum::middleware::from_fn(middleware::request_id))
+        .layer(axum::middleware::from_fn_with_state(
+            std::sync::Arc::clone(&state.client_ip_policy),
+            middleware::request_id,
+        ))
         .with_state(state)
 }

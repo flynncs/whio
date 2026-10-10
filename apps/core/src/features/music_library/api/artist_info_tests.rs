@@ -160,6 +160,7 @@ fn credential_service() -> Arc<CredentialService> {
     Arc::new(CredentialService::new(
         Arc::new(UnavailableCredentials),
         key,
+        crate::features::identity::LoginThrottleConfig::default(),
     ))
 }
 

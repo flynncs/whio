@@ -1,11 +1,24 @@
+use std::{net::SocketAddr, sync::Arc};
+
 use axum::{
-    extract::Request, http::HeaderValue, middleware::Next, response::Response as AxumResponse,
+    extract::{ConnectInfo, Extension, Request, State},
+    http::HeaderValue,
+    middleware::Next,
+    response::Response as AxumResponse,
 };
 use tracing::Instrument;
 
-use crate::platform::request::{RequestContext, RequestId};
+use crate::platform::{
+    client_ip::{self, ClientIpPolicy},
+    request::{RequestContext, RequestId},
+};
 
-pub(crate) async fn request_id(mut request: Request, next: Next) -> AxumResponse {
+pub(crate) async fn request_id(
+    State(policy): State<Arc<ClientIpPolicy>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    mut request: Request,
+    next: Next,
+) -> AxumResponse {
     let request_id = request
         .headers()
         .get("x-request-id")
@@ -13,9 +26,16 @@ pub(crate) async fn request_id(mut request: Request, next: Next) -> AxumResponse
         .and_then(|value| RequestId::new(value.to_owned()).ok())
         .unwrap_or_else(RequestId::generate);
 
-    request
-        .extensions_mut()
-        .insert(RequestContext::new(request_id.clone()));
+    let context = match peer {
+        Some(Extension(ConnectInfo(peer))) => RequestContext::new(request_id.clone())
+            .with_client_ip(client_ip::client_ip(
+                peer,
+                request.headers().get("x-forwarded-for"),
+                &policy,
+            )),
+        None => RequestContext::new(request_id.clone()),
+    };
+    request.extensions_mut().insert(context);
 
     let span = tracing::info_span!("http_request", request_id = %request_id.as_str(),);
 
