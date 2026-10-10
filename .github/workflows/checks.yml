@@ -20,6 +20,12 @@ jobs:
           toolchain: 1.97.1
           components: rustfmt, clippy
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/core
+          shared-key: rust
+
       - name: Check formatting
         run: cargo fmt --manifest-path apps/core/Cargo.toml --all -- --check
 
@@ -54,6 +60,12 @@ jobs:
         with:
           toolchain: 1.97.1
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/core
+          shared-key: postgres
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
 
@@ -77,14 +89,6 @@ jobs:
         env:
           OPENAPI_GENERATOR_JAR: /tmp/openapi-generator-cli.jar
         run: ./tools/generate-subsonic-types.sh --check
-
-      - name: Test the worker and durable jobs as a spawned process
-        env:
-          DATABASE_URL: postgres://whio:whio-test@localhost:5432/whio
-        run: >-
-          cargo test --locked --manifest-path apps/core/Cargo.toml
-          --features postgres-integration
-          --test integration worker_
 
       - name: Test PostgreSQL integration suites
         env:
