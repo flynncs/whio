@@ -14,6 +14,33 @@ const MAX_GENRE: usize = 200;
 const MAX_GENRES: usize = 16;
 const MAX_CREDIT_NAME: usize = 500;
 
+fn isrcs(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    values
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(|character: char| {
+                    character == ';' || character == ',' || character.is_whitespace()
+                })
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter_map(|value| isrc(&value))
+        .collect()
+}
+
+fn isrc(value: &str) -> Option<String> {
+    let normalized = value.trim().replace('-', "").to_ascii_uppercase();
+    let bytes = normalized.as_bytes();
+    let valid = bytes.len() == 12
+        && bytes[..2].iter().all(u8::is_ascii_uppercase)
+        && bytes[2..5]
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        && bytes[5..].iter().all(u8::is_ascii_digit);
+    valid.then_some(normalized)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TagError {
     #[error("audio file could not be read")]
@@ -21,6 +48,9 @@ pub enum TagError {
 
     #[error("audio file carries no usable tags")]
     Untagged,
+
+    #[error("audio file has no usable title")]
+    MissingTitle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +71,7 @@ pub struct TrackTags {
     pub release_id: Option<String>,
     pub recording_id: Option<String>,
     pub isrc: Option<String>,
+    pub invalid_isrc: bool,
     pub track_number: Option<u32>,
     pub track_total: Option<u32>,
     pub disc_number: Option<u32>,
@@ -84,7 +115,7 @@ pub fn read_tags(path: &Path) -> Result<TrackTags, TagError> {
         return Err(TagError::Untagged);
     };
     let Some(title) = text(tag, |tag| tag.title().map(|value| value.into_owned())) else {
-        return Err(TagError::Untagged);
+        return Err(TagError::MissingTitle);
     };
     let artists = artist_credits(tag).unwrap_or_default();
 
@@ -109,7 +140,12 @@ pub fn read_tags(path: &Path) -> Result<TrackTags, TagError> {
         release_group_id: item(tag, &ItemKey::MusicBrainzReleaseGroupId),
         release_id: item(tag, &ItemKey::MusicBrainzReleaseId),
         recording_id: item(tag, &ItemKey::MusicBrainzRecordingId),
-        isrc: item(tag, &ItemKey::Isrc),
+        isrc: isrcs(tag.get_strings(&ItemKey::Isrc).map(str::to_owned))
+            .first()
+            .cloned(),
+        invalid_isrc: tag
+            .get_strings(&ItemKey::Isrc)
+            .any(|value| !value.trim().is_empty() && isrcs([value.to_owned()]).is_empty()),
         track_number: tag.track(),
         track_total: tag.track_total(),
         disc_number: tag.disk(),
@@ -221,6 +257,8 @@ pub struct EmbeddedPicture {
     pub bytes: Vec<u8>,
 }
 
+pub const LOCAL_MAX_PICTURE_BYTES: u64 = 32 * 1024 * 1024;
+
 pub fn read_cover_art(path: &Path) -> Result<Option<EmbeddedPicture>, TagError> {
     let tagged = Probe::open(path)
         .map_err(|_| TagError::Unreadable)?
@@ -235,17 +273,8 @@ pub fn read_cover_art(path: &Path) -> Result<Option<EmbeddedPicture>, TagError> 
 
     let mut fallback = None;
     for picture in tag.pictures() {
-        if picture.data().len() as u64
-            > crate::features::music_library::artwork::remote::MAX_ARTWORK_BYTES
-        {
+        let Some(embedded) = embedded_picture(picture) else {
             continue;
-        }
-        let Some(content_type) = picture_content_type(picture) else {
-            continue;
-        };
-        let embedded = EmbeddedPicture {
-            content_type,
-            bytes: picture.data().to_vec(),
         };
         if picture.pic_type() == PictureType::CoverFront {
             return Ok(Some(embedded));
@@ -258,6 +287,17 @@ pub fn read_cover_art(path: &Path) -> Result<Option<EmbeddedPicture>, TagError> 
     Ok(fallback)
 }
 
+fn embedded_picture(picture: &Picture) -> Option<EmbeddedPicture> {
+    if picture.data().len() as u64 > LOCAL_MAX_PICTURE_BYTES {
+        return None;
+    }
+    let content_type = picture_content_type(picture)?;
+    Some(EmbeddedPicture {
+        content_type,
+        bytes: picture.data().to_vec(),
+    })
+}
+
 fn picture_content_type(picture: &Picture) -> Option<String> {
     if let Some(mime) = picture.mime_type()
         && !matches!(mime, MimeType::Unknown(_))
@@ -268,7 +308,7 @@ fn picture_content_type(picture: &Picture) -> Option<String> {
     sniff_picture(picture.data())
 }
 
-fn sniff_picture(data: &[u8]) -> Option<String> {
+pub(crate) fn sniff_picture(data: &[u8]) -> Option<String> {
     if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some("image/jpeg".to_owned())
     } else if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
@@ -987,6 +1027,38 @@ mod tests {
     }
 
     #[test]
+    fn isrc_values_are_split_normalized_and_validated() {
+        assert_eq!(
+            isrcs(["GBGLM0700129;USJI10900291;USK6G0700001".to_owned()]),
+            vec!["GBGLM0700129", "USJI10900291", "USK6G0700001"]
+        );
+        assert_eq!(
+            isrcs(["bad", "USJI10900291"].map(str::to_owned)),
+            vec!["USJI10900291"]
+        );
+        assert!(isrcs(["not-an-isrc".to_owned()]).is_empty());
+        assert_eq!(isrcs(["gb-glm-07-00129".to_owned()]), vec!["GBGLM0700129"]);
+    }
+
+    #[test]
+    fn read_tags_keeps_the_first_valid_isrc_across_tag_values() {
+        let path = temp_flac("isrcs");
+        tagged_flac(
+            &path,
+            &[
+                (ItemKey::Isrc, "GBGLM0700129;USJI10900291;USK6G0700001"),
+                (ItemKey::Isrc, "USAAA2400001"),
+            ],
+        );
+
+        let tags = read_tags(&path).unwrap();
+        assert_eq!(tags.isrc.as_deref(), Some("GBGLM0700129"));
+        assert!(!tags.invalid_isrc);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
     fn a_file_without_pictures_has_no_cover_art() {
         let fixture =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac");
@@ -1045,20 +1117,11 @@ mod tests {
 
     #[test]
     fn an_oversize_picture_is_skipped() {
-        let path = temp_flac("oversize");
-        write_pictured_flac(
-            &path,
-            vec![cover(
-                vec![
-                    0xFF;
-                    crate::features::music_library::artwork::remote::MAX_ARTWORK_BYTES as usize + 1
-                ],
-                Some(MimeType::Jpeg),
-            )],
+        let picture = cover(
+            vec![0xFF; LOCAL_MAX_PICTURE_BYTES as usize + 1],
+            Some(MimeType::Jpeg),
         );
 
-        assert_eq!(read_cover_art(&path).unwrap(), None);
-
-        std::fs::remove_file(&path).unwrap();
+        assert_eq!(embedded_picture(&picture), None);
     }
 }

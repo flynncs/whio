@@ -153,6 +153,17 @@ impl ScanService {
         self.scanning.store(false, Ordering::SeqCst);
 
         if let Ok(report) = &result {
+            tracing::info!(
+                mode = ?mode,
+                indexed = report.indexed,
+                unchanged = report.unchanged,
+                untagged = report.untagged,
+                failed = report.failed,
+                missing = report.missing,
+                empty = report.empty,
+                unwalked = report.unwalked,
+                "library scan completed"
+            );
             *self.last.lock() = Some(LastScan {
                 at: chrono::Utc::now(),
                 report: report.clone(),

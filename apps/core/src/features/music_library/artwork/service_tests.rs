@@ -166,6 +166,69 @@ async fn an_embedded_picture_is_a_tracks_cover_art(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test]
+async fn folder_artwork_uses_name_and_extension_precedence(pool: sqlx::PgPool) {
+    let root = plain_root("folder-precedence");
+    for (name, bytes) in [
+        ("cover.jpeg", vec![0xFF, 0xD8, 0xFF, 1]),
+        ("Cover.JPG", vec![0xFF, 0xD8, 0xFF, 2]),
+        ("folder.jpg", vec![0xFF, 0xD8, 0xFF, 3]),
+        ("front.webp", b"RIFF0000WEBP".to_vec()),
+    ] {
+        std::fs::write(root.join(name), bytes).unwrap();
+    }
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let track_id = add_local_track(&repository, &root, "folder-precedence").await;
+
+    let ArtworkOutcome::Found(artwork) = service(repository)
+        .load(CoverArtTarget::Track(track_id), None, None)
+        .await
+        .unwrap()
+    else {
+        panic!("expected folder artwork");
+    };
+    let (content_type, bytes, _) = artwork.into_parts();
+    assert_eq!(content_type, "image/jpeg");
+    assert_eq!(bytes.as_ref(), &[0xFF, 0xD8, 0xFF, 2]);
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[sqlx::test]
+async fn embedded_art_beats_folder_art_and_large_local_pictures_are_allowed(pool: sqlx::PgPool) {
+    let root = pictured_root("large-local");
+    std::fs::write(root.join("cover.jpg"), [0xFF, 0xD8, 0xFF, 9]).unwrap();
+    crate::features::music_library::library::write_pictured_flac(
+        &root.join("a.flac"),
+        vec![lofty::picture::Picture::new_unchecked(
+            lofty::picture::PictureType::CoverFront,
+            Some(lofty::picture::MimeType::Jpeg),
+            None,
+            {
+                let mut bytes = vec![0xFF, 0xD8, 0xFF];
+                bytes.resize(9 * 1024 * 1024, 4);
+                bytes
+            },
+        )],
+    );
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let track_id = add_local_track(&repository, &root, "large-local").await;
+
+    let ArtworkOutcome::Found(artwork) = service(repository)
+        .load(CoverArtTarget::Track(track_id), None, None)
+        .await
+        .unwrap()
+    else {
+        panic!("expected embedded artwork");
+    };
+    let (content_type, bytes, _) = artwork.into_parts();
+    assert_eq!(content_type, "image/jpeg");
+    assert_eq!(bytes.len(), 9 * 1024 * 1024);
+    assert_eq!(bytes[3], 4);
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[sqlx::test]
 async fn album_art_walks_members_and_falls_back_to_stored_artwork(pool: sqlx::PgPool) {
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let root = plain_root("plain");

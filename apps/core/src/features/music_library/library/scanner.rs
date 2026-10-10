@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use crate::features::music_library::{
     domain::{
         AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
-        TrackMetadata,
+        TrackMetadata, ValidationError,
     },
     storage::contracts::{CatalogueWrite, SourceFileFacts, SourceLookup, TrackRepositoryError},
 };
@@ -21,7 +21,7 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 
 pub const LOCAL_PROVIDER: &str = "local";
 
-const SOURCE_FACTS_VERSION: u16 = 2;
+const SOURCE_FACTS_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
@@ -52,10 +52,26 @@ struct FoundFile {
 }
 
 enum Prepared {
-    Unchanged { relative: String },
-    Untagged { relative: String },
-    Failed { relative: String },
+    Unchanged {
+        relative: String,
+    },
+    Untagged {
+        relative: String,
+        reason: SkipReason,
+    },
+    Failed {
+        relative: String,
+        reason: SkipReason,
+    },
     Ready(Box<PreparedTrack>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SkipReason {
+    NoTags,
+    MissingTitle,
+    MissingArtist,
+    Unreadable,
 }
 
 struct PreparedTrack {
@@ -129,11 +145,13 @@ pub async fn scan_with(
                     seen.push(relative);
                     report.unchanged += 1;
                 }
-                Prepared::Untagged { relative } => {
+                Prepared::Untagged { relative, reason } => {
+                    tracing::warn!(path = %relative, reason = ?reason, "library scan skipped an untagged file");
                     seen.push(relative);
                     report.untagged += 1;
                 }
-                Prepared::Failed { relative } => {
+                Prepared::Failed { relative, reason } => {
+                    tracing::warn!(path = %relative, reason = ?reason, "library scan failed to read a file");
                     seen.push(relative);
                     report.failed += 1;
                 }
@@ -244,26 +262,41 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
     match read_tags(&file.absolute) {
         Ok(tags) => {
             let external_id = file.relative.clone();
+            if tags.invalid_isrc {
+                tracing::warn!(path = %file.relative, field = "isrc", "library scan dropped an invalid optional tag");
+            }
             let album = match album_metadata(&tags) {
                 Ok(album) => album,
                 Err(()) => {
-                    return Prepared::Untagged {
-                        relative: file.relative,
-                    };
+                    tracing::warn!(path = %file.relative, field = "album", "library scan dropped invalid album metadata");
+                    None
                 }
             };
-            let membership = album_track(&tags);
+            let membership = album.as_ref().and_then(|_| album_track(&tags));
             let acoustid_fingerprint = tags.acoustid_fingerprint.clone();
             let (primary, roles) = track_credits(&tags);
 
-            let Ok(metadata) = TrackMetadata::new(tags.title, primary, tags.duration_ms)
-                .and_then(|metadata| metadata.with_recording_id(tags.recording_id))
-                .and_then(|metadata| metadata.with_isrc(tags.isrc))
-            else {
+            if primary.is_empty() {
                 return Prepared::Untagged {
                     relative: file.relative,
+                    reason: SkipReason::MissingArtist,
                 };
+            }
+            let base = match TrackMetadata::new(tags.title, primary, tags.duration_ms) {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    return Prepared::Untagged {
+                        relative: file.relative,
+                        reason: SkipReason::MissingTitle,
+                    };
+                }
             };
+            let metadata = optional_fact(base, &file.relative, "recording_id", |metadata| {
+                metadata.with_recording_id(tags.recording_id)
+            });
+            let metadata = optional_fact(metadata, &file.relative, "isrc", |metadata| {
+                metadata.with_isrc(tags.isrc)
+            });
             let metadata = metadata
                 .with_genres(tags.genres)
                 .with_credits(roles)
@@ -294,9 +327,15 @@ fn prepare(known: &HashMap<String, SourceFileFacts>, file: FoundFile) -> Prepare
         }
         Err(TagError::Untagged) => Prepared::Untagged {
             relative: file.relative,
+            reason: SkipReason::NoTags,
+        },
+        Err(TagError::MissingTitle) => Prepared::Untagged {
+            relative: file.relative,
+            reason: SkipReason::MissingTitle,
         },
         Err(TagError::Unreadable) => Prepared::Failed {
             relative: file.relative,
+            reason: SkipReason::Unreadable,
         },
     }
 }
@@ -378,6 +417,21 @@ fn track_credits(tags: &super::TrackTags) -> (Vec<ArtistCredit>, Vec<ArtistCredi
         .collect();
 
     (primary, roles)
+}
+
+fn optional_fact(
+    metadata: TrackMetadata,
+    path: &str,
+    field: &'static str,
+    apply: impl FnOnce(TrackMetadata) -> Result<TrackMetadata, ValidationError>,
+) -> TrackMetadata {
+    match apply(metadata.clone()) {
+        Ok(applied) => applied,
+        Err(_) => {
+            tracing::warn!(path = %path, field, "library scan dropped an invalid optional tag");
+            metadata
+        }
+    }
 }
 
 async fn known_paths(
@@ -563,6 +617,80 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn valid_isrc_and_required_facts_survive_invalid_optional_tags(pool: sqlx::PgPool) {
+        use lofty::{
+            config::WriteOptions,
+            file::{AudioFile, TaggedFileExt},
+        };
+
+        let root = temp_root("isrc-ingest");
+        tagged_flac(
+            &root.join("isrc.flac"),
+            &[(ItemKey::Isrc, "GBGLM0700129;USJI10900291;USK6G0700001")],
+        );
+        tagged_flac(
+            &root.join("invalid-isrc.flac"),
+            &[(ItemKey::Isrc, "not-an-isrc")],
+        );
+        let invalid_recording = "x".repeat(65);
+        tagged_flac(
+            &root.join("invalid-recording.flac"),
+            &[(ItemKey::MusicBrainzRecordingId, invalid_recording.as_str())],
+        );
+        let missing_title = root.join("missing-title.flac");
+        std::fs::copy(fixture(), &missing_title).unwrap();
+        let mut tagged = lofty::probe::Probe::open(&missing_title)
+            .unwrap()
+            .read()
+            .unwrap();
+        let has_primary = tagged.primary_tag_mut().is_some();
+        let tag = if has_primary {
+            tagged.primary_tag_mut().unwrap()
+        } else {
+            tagged.first_tag_mut().unwrap()
+        };
+        tag.take(&ItemKey::TrackTitle).count();
+        tagged
+            .save_to_path(&missing_title, WriteOptions::default())
+            .unwrap();
+
+        let store = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let catalogue = Arc::clone(&store) as Arc<dyn CatalogueWrite>;
+        let sources = Arc::clone(&store) as Arc<dyn SourceLookup>;
+        let report = scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        assert_eq!(report.indexed, 3);
+        assert_eq!(report.untagged, 1);
+        let isrc_id = track_id_for(&pool, "isrc.flac").await;
+        let isrc: Option<String> = sqlx::query_scalar("SELECT isrc FROM tracks WHERE id = $1")
+            .bind(isrc_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(isrc.as_deref(), Some("GBGLM0700129"));
+        let no_isrc_id = track_id_for(&pool, "invalid-isrc.flac").await;
+        let no_isrc: Option<String> = sqlx::query_scalar("SELECT isrc FROM tracks WHERE id = $1")
+            .bind(no_isrc_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(no_isrc, None);
+        let invalid_id = track_id_for(&pool, "invalid-recording.flac").await;
+        let recording_id: Option<String> =
+            sqlx::query_scalar("SELECT musicbrainz_recording_id FROM tracks WHERE id = $1")
+                .bind(invalid_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(recording_id, None);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(feature = "postgres-integration")]
@@ -2040,13 +2168,13 @@ mod tests {
             .unwrap()
             .expect("the scanned file is recorded");
         assert_eq!(current.facts_version, SOURCE_FACTS_VERSION);
-        assert_eq!(SOURCE_FACTS_VERSION, 2);
+        assert_eq!(SOURCE_FACTS_VERSION, 3);
 
         catalogue
             .set_source_file_facts(
                 &source,
                 &SourceFileFacts {
-                    facts_version: 1,
+                    facts_version: 2,
                     ..current
                 },
             )

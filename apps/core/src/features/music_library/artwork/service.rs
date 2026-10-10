@@ -4,7 +4,9 @@ use bytes::Bytes;
 use md5::{Digest, Md5};
 
 use crate::{
-    features::music_library::library::{EmbeddedPicture, read_cover_art},
+    features::music_library::library::{
+        EmbeddedPicture, LOCAL_MAX_PICTURE_BYTES, TagError, read_cover_art, sniff_picture,
+    },
     features::music_library::{
         domain::{
             AlbumEntry, AlbumId, ArtistId, ProviderKind, SourceIdentity, SourceScope, TrackId,
@@ -485,13 +487,18 @@ impl ArtworkService {
 
             let read = tokio::task::spawn_blocking({
                 let path = path.clone();
-                move || read_cover_art(&path)
+                move || local_picture(&path)
             })
             .await
             .map_err(|_| ArtworkError::Unavailable)?;
 
             match read {
-                Ok(Some(picture)) => return Ok(Some(Resolved::Local { path, picture })),
+                Ok(Some((picture_path, picture))) => {
+                    return Ok(Some(Resolved::Local {
+                        path: picture_path,
+                        picture,
+                    }));
+                }
                 Ok(None) => continue,
                 Err(error) => {
                     tracing::debug!(%error, path = %path.display(), "embedded cover art could not be read");
@@ -519,6 +526,95 @@ impl ArtworkService {
 
         Ok(Some(Resolved::Remote(artwork.reference().to_owned())))
     }
+}
+
+fn local_picture(path: &Path) -> Result<Option<(std::path::PathBuf, EmbeddedPicture)>, TagError> {
+    let embedded = match read_cover_art(path) {
+        Ok(Some(picture)) => vec![(path.to_path_buf(), picture)],
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            tracing::debug!(%error, path = %path.display(), "embedded cover art could not be read");
+            Vec::new()
+        }
+    };
+
+    Ok(select_local_picture(embedded, || {
+        path.parent().and_then(folder_picture)
+    }))
+}
+
+fn select_local_picture(
+    embedded: impl IntoIterator<Item = (std::path::PathBuf, EmbeddedPicture)>,
+    folder_lookup: impl FnOnce() -> Option<(std::path::PathBuf, EmbeddedPicture)>,
+) -> Option<(std::path::PathBuf, EmbeddedPicture)> {
+    embedded
+        .into_iter()
+        .find(|(_, picture)| picture.bytes.len() as u64 <= LOCAL_MAX_PICTURE_BYTES)
+        .or_else(folder_lookup)
+}
+
+fn folder_picture(directory: &Path) -> Option<(std::path::PathBuf, EmbeddedPicture)> {
+    for name in ["cover", "folder", "front"] {
+        for extension in ["jpg", "jpeg", "png", "webp"] {
+            let candidate = directory.join(format!("{name}.{extension}"));
+            let Some(candidate) = existing_case_insensitive(&candidate, directory, name, extension)
+            else {
+                continue;
+            };
+            let metadata = match std::fs::metadata(&candidate) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    tracing::debug!(%error, path = %candidate.display(), "folder artwork metadata could not be read");
+                    continue;
+                }
+            };
+            if metadata.len() > LOCAL_MAX_PICTURE_BYTES {
+                tracing::debug!(path = %candidate.display(), bytes = metadata.len(), "folder artwork exceeds the local picture limit");
+                continue;
+            }
+            let bytes = match std::fs::read(&candidate) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::debug!(%error, path = %candidate.display(), "folder artwork could not be read");
+                    continue;
+                }
+            };
+            let Some(content_type) = sniff_picture(&bytes) else {
+                tracing::debug!(path = %candidate.display(), "folder artwork has an unknown picture type");
+                continue;
+            };
+            return Some((
+                candidate,
+                EmbeddedPicture {
+                    content_type,
+                    bytes,
+                },
+            ));
+        }
+    }
+
+    None
+}
+
+fn existing_case_insensitive(
+    expected: &Path,
+    directory: &Path,
+    name: &str,
+    extension: &str,
+) -> Option<std::path::PathBuf> {
+    if expected.is_file() {
+        return Some(expected.to_path_buf());
+    }
+    std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let file_name = entry.file_name();
+            let file_name = file_name.to_str()?;
+            let (stem, suffix) = file_name.rsplit_once('.')?;
+            (stem.eq_ignore_ascii_case(name) && suffix.eq_ignore_ascii_case(extension))
+                .then(|| entry.path())
+        })
 }
 
 fn cached_or_absent(
@@ -621,6 +717,33 @@ fn local_etag(path: &Path, metadata: Option<&std::fs::Metadata>) -> String {
     }
 
     etag_for(&basis)
+}
+
+#[cfg(test)]
+mod local_picture_tests {
+    use super::*;
+
+    #[test]
+    fn an_over_limit_embedded_picture_falls_back_to_the_folder_lookup() {
+        let audio_path = std::path::PathBuf::from("album/track.flac");
+        let folder_path = std::path::PathBuf::from("album/cover.jpg");
+        let folder_picture = EmbeddedPicture {
+            content_type: "image/jpeg".to_owned(),
+            bytes: vec![0xFF, 0xD8, 0xFF],
+        };
+        let selected = select_local_picture(
+            [(
+                audio_path,
+                EmbeddedPicture {
+                    content_type: "image/jpeg".to_owned(),
+                    bytes: vec![0; LOCAL_MAX_PICTURE_BYTES as usize + 1],
+                },
+            )],
+            || Some((folder_path.clone(), folder_picture.clone())),
+        );
+
+        assert_eq!(selected, Some((folder_path, folder_picture)));
+    }
 }
 
 #[cfg(all(test, feature = "postgres-integration"))]
