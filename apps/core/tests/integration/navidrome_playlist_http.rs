@@ -108,7 +108,7 @@ async fn login(app: &Router, username: &str, password: &str) -> String {
     let request = Request::builder()
         .method("POST")
         .uri("/compat/navidrome/auth/login")
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .header("content-type", "application/json")
         .body(Body::from(
             json!({"username": username, "password": password}).to_string(),
@@ -132,7 +132,7 @@ async fn send(
     let builder = Request::builder()
         .method(method)
         .uri(path)
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .header("x-nd-authorization", format!("Bearer {token}"));
     let request = match body {
         Some(body) => builder
@@ -269,7 +269,7 @@ async fn native_detail(app: &Router, auth: &str, id: &str) -> Value {
     let request = Request::builder()
         .method("GET")
         .uri(format!("{NATIVE}/{id}{auth}"))
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap();
     let response = app.clone().oneshot(request).await.unwrap();

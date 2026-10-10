@@ -61,7 +61,9 @@ keep container mount paths stable between restarts.
 | `WHIO_TRUSTED_PROXIES` | empty | comma-separated proxy IP addresses trusted for `x-forwarded-for`; without this, clients behind the homelab proxy share its IP throttle key |
 | `WHIO_AUTH_FAILURE_BURST` | `10` | failed authentication attempts allowed per account or client IP before throttling |
 | `WHIO_AUTH_FAILURE_REPLENISH_SECONDS` | `60` | interval for replenishing one failed-authentication allowance |
-| `WHIO_LOG_LEVEL` | `info` | tracing level |
+| `WHIO_LOG_FORMAT` | `text` | log output format: `text` or `json` |
+| `WHIO_LOG` | absent | tracing filter directives; takes precedence over `WHIO_LOG_LEVEL` |
+| `WHIO_LOG_LEVEL` | `info` | fallback tracing filter level |
 | `WHIO_MEDIA_ROOTS` | absent | local library roots |
 | `WHIO_YOUTUBE_ENABLED` | off | enable YouTube resolution |
 | `WHIO_YOUTUBE_RESOLVER_URL` | required when enabled | absolute HTTP(S) resolver URL |

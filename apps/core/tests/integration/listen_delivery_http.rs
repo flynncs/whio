@@ -432,7 +432,7 @@ fn status_request(path: &str) -> Request<Body> {
             "{path}{}u=flynn&v=1.16.1&c=integration-test&p={STATUS_PASSWORD}",
             if path.contains('?') { '&' } else { '?' }
         ))
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap()
 }

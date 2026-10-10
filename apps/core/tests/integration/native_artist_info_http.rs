@@ -31,7 +31,7 @@ mod native_artist_info {
                 Request::builder()
                     .method(method)
                     .uri(uri)
-                    .header("x-request-id", "request-123")
+                    .header("x-request-id", support::TEST_REQUEST_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -103,7 +103,7 @@ mod native_artist_info {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body = json_body(response).await;
-        assert_eq!(body["request_id"], "request-123");
+        assert_eq!(body["request_id"], support::TEST_REQUEST_ID);
     }
 
     #[sqlx::test]

@@ -119,7 +119,7 @@ fn artwork_request(track_id: &str) -> Request<Body> {
         .uri(format!(
             "/playback/tracks/{track_id}/artwork{NATIVE_AUTH_QUERY}"
         ))
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap()
 }
@@ -241,7 +241,7 @@ fn subsonic_cover_art_request(id: &str) -> Request<Body> {
         .uri(format!(
             "/rest/getCoverArt.view?u=test-user&v=1.16.1&c=test&p={TEST_PASSWORD}&id={id}"
         ))
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap()
 }
@@ -252,7 +252,7 @@ fn sized_cover_art_request(id: &str, size: u32, validator: Option<&str>) -> Requ
         .uri(format!(
             "/rest/getCoverArt.view?u=test-user&v=1.16.1&c=test&p={TEST_PASSWORD}&id={id}&size={size}"
         ))
-        .header("x-request-id", "request-123");
+        .header("x-request-id", support::TEST_REQUEST_ID);
     if let Some(validator) = validator {
         builder = builder.header(header::IF_NONE_MATCH, validator);
     }
@@ -377,7 +377,7 @@ async fn album_and_artist_ids_serve_embedded_art_with_validators(pool: PgPool) {
                     .uri(format!(
                         "/rest/getCoverArt.view?u=test-user&v=1.16.1&c=test&p={TEST_PASSWORD}&id={id}"
                     ))
-                    .header("x-request-id", "request-123")
+                    .header("x-request-id", support::TEST_REQUEST_ID)
                     .header(header::IF_NONE_MATCH, etag)
                     .body(Body::empty())
                     .unwrap(),

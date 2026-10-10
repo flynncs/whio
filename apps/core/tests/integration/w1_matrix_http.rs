@@ -119,7 +119,7 @@ async fn get(app: &Router, uri: &str) -> (StatusCode, HeaderMap, Value) {
     let request = Request::builder()
         .method("GET")
         .uri(uri)
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap();
 
@@ -139,7 +139,7 @@ async fn navidrome(app: &Router, token: &str, path: &str) -> (StatusCode, Header
     let request = Request::builder()
         .method("GET")
         .uri(format!("/compat/navidrome{path}"))
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .header("x-nd-authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
@@ -156,7 +156,7 @@ async fn login(app: &Router, username: &str, password: &str) -> (String, Uuid) {
         .method("POST")
         .uri("/compat/navidrome/auth/login")
         .header("content-type", "application/json")
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::from(
             json!({"username": username, "password": password}).to_string(),
         ))
@@ -539,7 +539,7 @@ async fn a_library_scoped_read_is_the_same_everywhere(pool: PgPool) {
         json!({
             "code": "invalid_request",
             "message": "The request is invalid",
-            "request_id": "request-123"
+            "request_id": support::TEST_REQUEST_ID
         })
     );
 

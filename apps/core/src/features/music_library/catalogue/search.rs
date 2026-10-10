@@ -1,6 +1,7 @@
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use tokio::{sync::Semaphore, task::JoinSet};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
@@ -217,6 +218,7 @@ impl SearchService {
         self
     }
 
+    #[tracing::instrument(skip_all, fields(query_len = request.query().as_str().len()))]
     pub async fn search(
         &self,
         request: &SearchRequest,
@@ -261,6 +263,7 @@ impl SearchService {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(kind = "track", window = ?window))]
     pub async fn search_tracks(
         &self,
         query: &SearchQuery,
@@ -312,6 +315,7 @@ impl SearchService {
         .await
     }
 
+    #[tracing::instrument(skip_all, fields(kind = "album", window = ?window))]
     pub async fn search_albums(
         &self,
         query: &SearchQuery,
@@ -344,6 +348,7 @@ impl SearchService {
         Ok(window.slice(albums))
     }
 
+    #[tracing::instrument(skip_all, fields(kind = "artist", window = ?window))]
     pub async fn search_artists(
         &self,
         query: &SearchQuery,
@@ -493,20 +498,26 @@ where
         let permit = Arc::clone(&concurrency);
         let operation = operation.clone();
         tasks.spawn(async move {
-            let _permit = permit
-                .acquire_owned()
-                .await
-                .expect("catalogue concurrency semaphore never closes");
-            match tokio::time::timeout(budget, operation(provider)).await {
-                Ok(result) => (index, result),
-                Err(_) => {
-                    tracing::warn!("catalogue source exceeded its provider budget");
-                    (
-                        index,
-                        Err(CatalogueError::Provider(ProviderError::ProviderUnavailable)),
-                    )
+            let provider_name = std::any::type_name_of_val(provider.as_ref());
+            let span = tracing::info_span!("catalogue_provider", provider = provider_name);
+            async move {
+                let _permit = permit
+                    .acquire_owned()
+                    .await
+                    .expect("catalogue concurrency semaphore never closes");
+                match tokio::time::timeout(budget, operation(provider)).await {
+                    Ok(result) => (index, result),
+                    Err(_) => {
+                        tracing::warn!("catalogue source exceeded its provider budget");
+                        (
+                            index,
+                            Err(CatalogueError::Provider(ProviderError::ProviderUnavailable)),
+                        )
+                    }
                 }
             }
+            .instrument(span)
+            .await
         });
     }
 

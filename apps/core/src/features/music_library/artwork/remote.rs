@@ -6,6 +6,7 @@ use crate::platform::http::FetchError;
 pub(crate) const MAX_ARTWORK_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The caller validates the initial destination; the HTTP client enforces redirects.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn fetch_artwork(
     client: &reqwest::Client,
     url: &reqwest::Url,

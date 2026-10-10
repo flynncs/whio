@@ -403,7 +403,7 @@ mod routes {
                 Request::builder()
                     .method(method)
                     .uri(uri)
-                    .header("x-request-id", "w4-wiring-route-check")
+                    .header("x-request-id", support::TEST_REQUEST_ID)
                     .body(Body::empty())
                     .unwrap(),
             )

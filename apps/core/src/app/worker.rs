@@ -84,9 +84,7 @@ impl WorkerHealth {
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
 
-    tracing_subscriber::fmt()
-        .with_max_level(config.log_level)
-        .init();
+    crate::platform::telemetry::init(&config.telemetry);
 
     let worker = config.worker.clone();
     let registered = jobs::queues();

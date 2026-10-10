@@ -105,7 +105,7 @@ async fn get_status_bounded(app: axum::Router, uri: &str, limit: usize) -> (Stat
     let request = Request::builder()
         .method("GET")
         .uri(uri)
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap();
 
@@ -669,7 +669,7 @@ async fn post_login(app: axum::Router, username: &str, password: &str) -> (Statu
         .method("POST")
         .uri("/compat/navidrome/auth/login")
         .header("content-type", "application/json")
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::from(
             json!({"username": username, "password": password}).to_string(),
         ))
@@ -780,7 +780,7 @@ async fn get_authed(
     let request = Request::builder()
         .method("GET")
         .uri(uri)
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .header("x-nd-authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
@@ -817,7 +817,7 @@ async fn song_list_rejects_missing_and_forged_tokens(pool: PgPool) {
     let request = Request::builder()
         .method("GET")
         .uri("/compat/navidrome/api/song")
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap();
     let response = app(pool.clone(), service.clone())
@@ -3483,7 +3483,7 @@ async fn post_status(
     let mut builder = Request::builder()
         .method("POST")
         .uri(uri)
-        .header("x-request-id", "request-123");
+        .header("x-request-id", support::TEST_REQUEST_ID);
 
     if let Some(content_type) = content_type {
         builder = builder.header("content-type", content_type);

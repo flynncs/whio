@@ -70,6 +70,7 @@ impl CompletionService {
         self
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn artist_detail(
         &self,
         artist_id: &ArtistId,
@@ -167,6 +168,7 @@ impl CompletionService {
         Ok(AlbumPage { albums, total })
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn album_detail(
         &self,
         album_id: &AlbumId,

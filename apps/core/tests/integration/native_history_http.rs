@@ -140,7 +140,7 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<&Value>) -> Re
     let builder = Request::builder()
         .method(method)
         .uri(uri)
-        .header("x-request-id", "request-123");
+        .header("x-request-id", support::TEST_REQUEST_ID);
     let request = match body {
         Some(body) => builder
             .header("content-type", "application/json")

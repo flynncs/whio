@@ -47,6 +47,7 @@ impl<W: Worker + Send + Sync> Worker for RetryableWorker<W> {
         self.worker.kind()
     }
 
+    #[tracing::instrument(skip_all, fields(queue = %ctx.job.queue, attempt = ctx.job.attempt))]
     async fn perform(&self, ctx: &JobContext) -> Result<JobResult, JobError> {
         match self.worker.perform(ctx).await {
             Err(JobError::Retryable(_)) if ctx.job.attempt < ctx.job.max_attempts => {

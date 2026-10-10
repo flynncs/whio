@@ -50,7 +50,7 @@ async fn get(app: axum::Router, uri: &str) -> Value {
     let request = Request::builder()
         .method("GET")
         .uri(uri)
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap();
 
@@ -471,7 +471,7 @@ async fn rest(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     let request = Request::builder()
         .method("GET")
         .uri(uri)
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap();
     let response = app.clone().oneshot(request).await.unwrap();

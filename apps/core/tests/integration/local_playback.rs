@@ -92,7 +92,7 @@ fn stream_request(track_id: &TrackId, range: Option<&str>) -> Request<Body> {
         .uri(format!(
             "/playback/tracks/{track_id}/stream{NATIVE_AUTH_QUERY}"
         ))
-        .header("x-request-id", "request-123");
+        .header("x-request-id", support::TEST_REQUEST_ID);
 
     if let Some(range) = range {
         request = request.header(header::RANGE, range);

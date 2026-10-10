@@ -28,14 +28,15 @@ use crate::{
 };
 pub(crate) use auth::SubsonicAuth;
 use auth::SubsonicError;
+pub(crate) use envelope::{SubsonicFailure, failed_response};
 use envelope::{
     album_envelope, album_list2_envelope, artist_envelope, artist_info_envelope,
     artist_info2_envelope, artists_envelope, create_playlist_envelope, directory_envelope,
-    extensions_envelope, failed_envelope, genres_envelope, indexes_envelope, now_playing_envelope,
-    ok_envelope, play_queue_by_index_envelope, play_queue_envelope, playlist_envelope,
-    playlists_envelope, random_songs_envelope, scan_status_envelope, search3_envelope,
-    similar_songs_envelope, similar_songs2_envelope, song_envelope, songs_by_genre_envelope,
-    starred2_envelope, start_scan_envelope, top_songs_envelope, user_envelope,
+    extensions_envelope, genres_envelope, indexes_envelope, now_playing_envelope, ok_envelope,
+    play_queue_by_index_envelope, play_queue_envelope, playlist_envelope, playlists_envelope,
+    random_songs_envelope, scan_status_envelope, search3_envelope, similar_songs_envelope,
+    similar_songs2_envelope, song_envelope, songs_by_genre_envelope, starred2_envelope,
+    start_scan_envelope, top_songs_envelope, user_envelope,
 };
 use state::SubsonicState;
 
@@ -153,11 +154,9 @@ pub(crate) async fn get_user(
     };
     match state.credential().visible_user(&principal, name).await {
         Ok(Some(user)) => Json(user_envelope(&user)).into_response(),
-        Ok(None) => Json(failed_envelope(
-            models::error::Code::Variant70,
-            "User not found.",
-        ))
-        .into_response(),
+        Ok(None) => {
+            failed_response(models::error::Code::Variant70, "User not found.").into_response()
+        }
         Err(error) => {
             tracing::error!(
                 error = %error,
@@ -165,11 +164,8 @@ pub(crate) async fn get_user(
                 "credential storage failed"
             );
 
-            let mut response = Json(failed_envelope(
-                models::error::Code::Variant0,
-                "Internal error.",
-            ))
-            .into_response();
+            let mut response =
+                failed_response(models::error::Code::Variant0, "Internal error.").into_response();
             *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
             response
         }
@@ -223,11 +219,9 @@ pub(crate) async fn search3(
     match result {
         Ok(result) => Json(search3_envelope(result)).into_response(),
         Err(service::SearchError::InvalidSearch) => {
-            let mut response = Json(failed_envelope(
-                models::error::Code::Variant0,
-                "Invalid search parameters.",
-            ))
-            .into_response();
+            let mut response =
+                failed_response(models::error::Code::Variant0, "Invalid search parameters.")
+                    .into_response();
             *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
             response
         }
@@ -238,11 +232,8 @@ pub(crate) async fn search3(
                 "catalogue search failed"
             );
 
-            let mut response = Json(failed_envelope(
-                models::error::Code::Variant0,
-                "Internal error.",
-            ))
-            .into_response();
+            let mut response =
+                failed_response(models::error::Code::Variant0, "Internal error.").into_response();
             *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
             response
         }
@@ -754,7 +745,7 @@ fn browse_failure_response(context: &RequestContext, error: service::BrowseError
         }
     };
 
-    let mut response = Json(failed_envelope(code, message)).into_response();
+    let mut response = failed_response(code, message).into_response();
     *response.status_mut() = status;
     response
 }
@@ -778,11 +769,8 @@ pub(crate) async fn stream(
         return SubsonicError::MissingParameter.into_response();
     };
     let Ok(track_id) = id.parse::<TrackId>() else {
-        let mut response = Json(failed_envelope(
-            models::error::Code::Variant0,
-            "Invalid track ID.",
-        ))
-        .into_response();
+        let mut response =
+            failed_response(models::error::Code::Variant0, "Invalid track ID.").into_response();
         *response.status_mut() = StatusCode::BAD_REQUEST;
         return response;
     };
@@ -822,11 +810,9 @@ pub(crate) async fn get_cover_art(
     let target = match CoverArtTarget::parse(id) {
         Ok(target) => target,
         Err(_) => {
-            let mut response = Json(failed_envelope(
-                models::error::Code::Variant0,
-                "Invalid cover art ID.",
-            ))
-            .into_response();
+            let mut response =
+                failed_response(models::error::Code::Variant0, "Invalid cover art ID.")
+                    .into_response();
             *response.status_mut() = StatusCode::BAD_REQUEST;
             return response;
         }
@@ -841,11 +827,9 @@ pub(crate) async fn get_cover_art(
         Ok(ArtworkOutcome::Found(artwork)) => response::found_response(artwork),
         Ok(ArtworkOutcome::NotModified(etag)) => response::not_modified_response(etag),
         Ok(ArtworkOutcome::Missing) => {
-            let mut response = Json(failed_envelope(
-                models::error::Code::Variant70,
-                "Cover art was not found.",
-            ))
-            .into_response();
+            let mut response =
+                failed_response(models::error::Code::Variant70, "Cover art was not found.")
+                    .into_response();
             *response.status_mut() = StatusCode::NOT_FOUND;
             response
         }
@@ -854,11 +838,8 @@ pub(crate) async fn get_cover_art(
                 request_id = context.request_id().as_str(),
                 "cover art fetch failed"
             );
-            let mut response = Json(failed_envelope(
-                models::error::Code::Variant0,
-                "Internal error.",
-            ))
-            .into_response();
+            let mut response =
+                failed_response(models::error::Code::Variant0, "Internal error.").into_response();
             *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
             response
         }
@@ -900,10 +881,10 @@ fn stream_failure_response(context: &RequestContext, error: PlaybackError) -> Re
             "The server is busy.",
         ),
         PlaybackError::Delivery(DeliveryError::Range { content_length, .. }) => {
-            let mut response = Json(failed_envelope(
+            let mut response = failed_response(
                 models::error::Code::Variant0,
                 "The requested range is not satisfiable.",
-            ))
+            )
             .into_response();
             *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
             response.headers_mut().insert(
@@ -932,7 +913,7 @@ fn stream_failure_response(context: &RequestContext, error: PlaybackError) -> Re
             "media stream failed"
         ),
     }
-    let mut response = Json(failed_envelope(code, message)).into_response();
+    let mut response = failed_response(code, message).into_response();
     *response.status_mut() = status;
     response
 }
@@ -955,10 +936,10 @@ async fn authenticate(
 ) -> Result<Principal, Response> {
     match state.credential().authenticate(&auth.0, context).await {
         Ok(principal) => Ok(principal),
-        Err(AuthError::InvalidCredentials) => Err(Json(failed_envelope(
+        Err(AuthError::InvalidCredentials) => Err(failed_response(
             models::error::Code::Variant40,
             "Wrong username or password.",
-        ))
+        )
         .into_response()),
         Err(AuthError::Storage(error)) => {
             tracing::error!(
@@ -968,11 +949,8 @@ async fn authenticate(
             );
 
             // storage failures must never surface as auth failures
-            let mut response = Json(failed_envelope(
-                models::error::Code::Variant0,
-                "Internal error.",
-            ))
-            .into_response();
+            let mut response =
+                failed_response(models::error::Code::Variant0, "Internal error.").into_response();
             *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
             Err(response)
         }
@@ -1029,11 +1007,8 @@ fn playlist_failure(context: &RequestContext, error: PlaylistError) -> Response 
         "playlist request failed"
     );
 
-    let mut response = Json(failed_envelope(
-        models::error::Code::Variant0,
-        "Internal error.",
-    ))
-    .into_response();
+    let mut response =
+        failed_response(models::error::Code::Variant0, "Internal error.").into_response();
     *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
     response
 }
@@ -1057,28 +1032,20 @@ fn playlist_request_failure(error: service::PlaylistRequestError) -> Response {
 }
 
 fn playlist_client_error(message: &'static str) -> Response {
-    let mut response =
-        Json(failed_envelope(models::error::Code::Variant0, message)).into_response();
+    let mut response = failed_response(models::error::Code::Variant0, message).into_response();
     *response.status_mut() = StatusCode::BAD_REQUEST;
     response
 }
 
 fn playlist_forbidden() -> Response {
-    let mut response = Json(failed_envelope(
-        models::error::Code::Variant50,
-        "Not authorized.",
-    ))
-    .into_response();
+    let mut response =
+        failed_response(models::error::Code::Variant50, "Not authorized.").into_response();
     *response.status_mut() = StatusCode::FORBIDDEN;
     response
 }
 
 fn playlist_not_found() -> Response {
-    Json(failed_envelope(
-        models::error::Code::Variant70,
-        "Playlist not found.",
-    ))
-    .into_response()
+    failed_response(models::error::Code::Variant70, "Playlist not found.").into_response()
 }
 
 pub(crate) async fn get_playlists(
@@ -1250,11 +1217,8 @@ pub(crate) async fn start_scan(
             Json(start_scan_envelope(&status)).into_response()
         }
         Err(ScanRequestError::Forbidden) => {
-            let mut response = Json(failed_envelope(
-                models::error::Code::Variant50,
-                "Not authorized.",
-            ))
-            .into_response();
+            let mut response =
+                failed_response(models::error::Code::Variant50, "Not authorized.").into_response();
             *response.status_mut() = StatusCode::FORBIDDEN;
             response
         }
@@ -1599,17 +1563,14 @@ fn queue_failure(context: &RequestContext, error: service::PlayQueueError) -> Re
         "play queue request failed"
     );
 
-    let mut response = Json(failed_envelope(
-        models::error::Code::Variant0,
-        "Internal error.",
-    ))
-    .into_response();
+    let mut response =
+        failed_response(models::error::Code::Variant0, "Internal error.").into_response();
     *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
     response
 }
 
 fn queue_client_error(code: models::error::Code, message: &str) -> Response {
-    let mut response = Json(failed_envelope(code, message)).into_response();
+    let mut response = failed_response(code, message).into_response();
     *response.status_mut() = StatusCode::BAD_REQUEST;
     response
 }
@@ -1648,7 +1609,7 @@ fn reporting_failure_response(
         }
     };
 
-    let mut response = Json(failed_envelope(code, message)).into_response();
+    let mut response = failed_response(code, message).into_response();
     *response.status_mut() = status;
     response
 }
@@ -1696,17 +1657,14 @@ fn state_failure_response(context: &RequestContext, error: service::StateError) 
         }
     };
 
-    let mut response = Json(failed_envelope(code, message)).into_response();
+    let mut response = failed_response(code, message).into_response();
     *response.status_mut() = status;
     response
 }
 
 fn invalid_parameter_response() -> Response {
-    let mut response = Json(failed_envelope(
-        models::error::Code::Variant0,
-        "Invalid parameter.",
-    ))
-    .into_response();
+    let mut response =
+        failed_response(models::error::Code::Variant0, "Invalid parameter.").into_response();
     *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
     response
 }
@@ -1718,9 +1676,5 @@ async fn unsupported(Extension(context): Extension<RequestContext>, uri: Origina
         "unsupported subsonic operation"
     );
 
-    Json(failed_envelope(
-        models::error::Code::Variant0,
-        "Unsupported operation.",
-    ))
-    .into_response()
+    failed_response(models::error::Code::Variant0, "Unsupported operation.").into_response()
 }

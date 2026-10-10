@@ -181,7 +181,7 @@ fn request(uri: &str, body: String) -> Request<Body> {
         .method("POST")
         .uri(format!("{uri}{NATIVE_AUTH_QUERY}"))
         .header("content-type", "application/json")
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::from(body))
         .unwrap()
 }
@@ -190,7 +190,7 @@ fn stream_request(uri: &str, range: Option<&str>) -> Request<Body> {
     let mut request = Request::builder()
         .method("GET")
         .uri(format!("{uri}{NATIVE_AUTH_QUERY}"))
-        .header("x-request-id", "request-123");
+        .header("x-request-id", support::TEST_REQUEST_ID);
 
     if let Some(range) = range {
         request = request.header(header::RANGE, range);
@@ -203,7 +203,7 @@ fn unauthenticated_stream_request(uri: &str) -> Request<Body> {
     Request::builder()
         .method("GET")
         .uri(uri)
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap()
 }
@@ -230,7 +230,7 @@ async fn unknown_track_id_returns_not_found(pool: PgPool) {
         json!({
             "code": "track_not_found",
             "message": "The track was not found",
-            "request_id": "request-123"
+            "request_id": support::TEST_REQUEST_ID
         })
     );
     assert!(resolver.resolved_source.lock().is_none());
@@ -266,7 +266,7 @@ async fn invalid_track_id_returns_bad_request(pool: PgPool) {
         json!({
             "code": "invalid_request",
             "message": "The request is invalid",
-            "request_id": "request-123"
+            "request_id": support::TEST_REQUEST_ID
         })
     );
     assert!(resolver.resolved_source.lock().is_none());
@@ -419,7 +419,7 @@ async fn stream_rejects_unsatisfiable_ranges(pool: PgPool) {
         json!({
             "code": "range_not_satisfiable",
             "message": "The requested range is not satisfiable",
-            "request_id": "request-123"
+            "request_id": support::TEST_REQUEST_ID
         })
     );
 }

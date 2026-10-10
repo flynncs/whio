@@ -121,7 +121,7 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<&Value>) -> Re
     let builder = Request::builder()
         .method(method)
         .uri(uri)
-        .header("x-request-id", "request-123");
+        .header("x-request-id", support::TEST_REQUEST_ID);
     let request = match body {
         Some(body) => builder
             .header("content-type", "application/json")
@@ -202,7 +202,7 @@ async fn get_authed(app: &Router, uri: &str, token: &str) -> Value {
     let request = Request::builder()
         .method("GET")
         .uri(uri)
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .header("x-nd-authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
@@ -497,7 +497,7 @@ async fn native_playlist_write_conflicts_on_a_stale_revision(pool: PgPool) {
     );
     let conflict = body_of(response).await;
     assert_eq!(conflict["code"], json!("conflict"));
-    assert_eq!(conflict["request_id"], json!("request-123"));
+    assert_eq!(conflict["request_id"], json!(support::TEST_REQUEST_ID));
     let unchanged = detail_body(&fixture.app, &fixture.owner, &id).await;
     assert_eq!(
         unchanged["name"],

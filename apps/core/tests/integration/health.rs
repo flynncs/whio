@@ -20,7 +20,7 @@ async fn health_routes_return_their_status(pool: PgPool) {
             .oneshot(
                 Request::builder()
                     .uri(uri)
-                    .header("x-request-id", "test-request-id")
+                    .header("x-request-id", support::TEST_REQUEST_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -30,7 +30,7 @@ async fn health_routes_return_their_status(pool: PgPool) {
         assert_eq!(response.status(), StatusCode::OK, "{uri}");
         assert_eq!(
             response.headers().get("x-request-id").unwrap(),
-            "test-request-id",
+            support::TEST_REQUEST_ID,
             "{uri}"
         );
 
@@ -90,7 +90,7 @@ async fn not_found_returns_a_safe_error(pool: PgPool) {
         .oneshot(
             Request::builder()
                 .uri("/missing")
-                .header("x-request-id", "test-request-id")
+                .header("x-request-id", support::TEST_REQUEST_ID)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -100,12 +100,13 @@ async fn not_found_returns_a_safe_error(pool: PgPool) {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(
         response.headers().get("x-request-id").unwrap(),
-        "test-request-id"
+        support::TEST_REQUEST_ID
     );
 
     let body = to_bytes(response.into_body(), 1024).await.unwrap();
-    assert_eq!(
-        body.as_ref(),
-        br#"{"code":"not_found","message":"Not found","request_id":"test-request-id"}"#
+    let expected = format!(
+        r#"{{"code":"not_found","message":"Not found","request_id":"{}"}}"#,
+        support::TEST_REQUEST_ID
     );
+    assert_eq!(body.as_ref(), expected.as_bytes());
 }

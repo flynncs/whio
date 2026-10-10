@@ -15,6 +15,8 @@ use reqwest::Url;
 
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:3000";
 const DEFAULT_LOG_LEVEL: &str = "info";
+const LOG_FORMAT: &str = "WHIO_LOG_FORMAT";
+const LOG_DIRECTIVES: &str = "WHIO_LOG";
 const DEFAULT_METADATA_STORE_BUDGET_BYTES: u64 = 33_554_432;
 const MIN_METADATA_STORE_BUDGET_BYTES: u64 = 1_048_576;
 const DEFAULT_METADATA_LANGUAGE: &str = "en";
@@ -83,7 +85,7 @@ pub(crate) struct Config {
     pub(crate) auth_failure_throttle: crate::features::identity::LoginThrottleConfig,
     pub(crate) database_url: String,
     pub(crate) credential_key: secrets::CredentialKey,
-    pub(crate) log_level: tracing::Level,
+    pub(crate) telemetry: crate::platform::telemetry::TelemetryConfig,
     pub(crate) integrations: crate::integrations::IntegrationsConfig,
     pub(crate) metadata_store_budget_bytes: u64,
     pub(crate) metadata_artist_profile: MetadataProfile,
@@ -171,13 +173,34 @@ impl Config {
                 }
             })?;
 
-        let log_raw = vars
-            .get("WHIO_LOG_LEVEL")
+        let format_raw = vars.get(LOG_FORMAT).map(String::as_str).unwrap_or("text");
+        let format = match format_raw {
+            "text" => crate::platform::telemetry::LogFormat::Text,
+            "json" => crate::platform::telemetry::LogFormat::Json,
+            _ => return Err(invalid(LOG_FORMAT, format_raw, "must be text or json")),
+        };
+        let filter_raw = vars
+            .get(LOG_DIRECTIVES)
             .map(String::as_str)
+            .or_else(|| vars.get("WHIO_LOG_LEVEL").map(String::as_str))
             .unwrap_or(DEFAULT_LOG_LEVEL);
-        let log_level = log_raw
-            .parse()
-            .map_err(|_| invalid("WHIO_LOG_LEVEL", log_raw, "must be a tracing level"))?;
+        if vars.contains_key(LOG_DIRECTIVES) {
+            tracing_subscriber::EnvFilter::try_new(filter_raw).map_err(|_| {
+                invalid(
+                    LOG_DIRECTIVES,
+                    filter_raw,
+                    "must be valid tracing directives",
+                )
+            })?;
+        } else {
+            filter_raw
+                .parse::<tracing::Level>()
+                .map_err(|_| invalid("WHIO_LOG_LEVEL", filter_raw, "must be a tracing level"))?;
+        }
+        let telemetry = crate::platform::telemetry::TelemetryConfig {
+            format,
+            filter: filter_raw.to_owned(),
+        };
 
         let integrations = crate::integrations::IntegrationsConfig::from_vars(vars)?;
 
@@ -420,7 +443,7 @@ impl Config {
             trusted_proxies,
             auth_failure_throttle,
             database_url: database_raw.to_owned(),
-            log_level,
+            telemetry,
             credential_key,
             integrations,
             metadata_store_budget_bytes,
@@ -727,6 +750,53 @@ mod tests {
         vars.entry(CREDENTIAL_KEY.to_owned())
             .or_insert_with(|| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned());
         Config::from_map(&vars)
+    }
+
+    #[test]
+    fn telemetry_defaults_parses_format_and_prioritizes_directives() {
+        let default = parse_config(&[]).unwrap();
+        assert_eq!(
+            default.telemetry.format,
+            crate::platform::telemetry::LogFormat::Text
+        );
+        assert_eq!(default.telemetry.filter, "info");
+
+        let json = parse_config(&[
+            (LOG_FORMAT, "json"),
+            ("WHIO_LOG", "whio_core::facades::subsonic=debug,info"),
+            ("WHIO_LOG_LEVEL", "error"),
+        ])
+        .unwrap();
+        assert_eq!(
+            json.telemetry.format,
+            crate::platform::telemetry::LogFormat::Json
+        );
+        assert_eq!(
+            json.telemetry.filter,
+            "whio_core::facades::subsonic=debug,info"
+        );
+
+        assert!(matches!(
+            parse_config(&[(LOG_FORMAT, "yaml")]),
+            Err(ConfigError::Invalid {
+                name: LOG_FORMAT,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_config(&[("WHIO_LOG", "=debug")]),
+            Err(ConfigError::Invalid {
+                name: LOG_DIRECTIVES,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_config(&[("WHIO_LOG_LEVEL", "verbose")]),
+            Err(ConfigError::Invalid {
+                name: "WHIO_LOG_LEVEL",
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -104,7 +104,7 @@ async fn send(app: &Router, method: &str, uri: &str, body: Option<&Value>) -> Re
     let builder = Request::builder()
         .method(method)
         .uri(uri)
-        .header("x-request-id", "request-123");
+        .header("x-request-id", support::TEST_REQUEST_ID);
     let request = match body {
         Some(body) => builder
             .header("content-type", "application/json")
@@ -554,7 +554,7 @@ async fn an_unknown_parameter_is_rejected(pool: PgPool) {
             json!("The request is invalid"),
             "{method} {uri}"
         );
-        assert_eq!(body["request_id"], json!("request-123"));
+        assert_eq!(body["request_id"], json!(support::TEST_REQUEST_ID));
     }
 }
 

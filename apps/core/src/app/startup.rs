@@ -53,9 +53,7 @@ pub(crate) async fn shutdown_signal() {
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
 
-    tracing_subscriber::fmt()
-        .with_max_level(config.log_level)
-        .init();
+    crate::platform::telemetry::init(&config.telemetry);
 
     let database = Arc::new(Database::connect(&config.database_url).await?);
     let _spool_directory =

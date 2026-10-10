@@ -59,7 +59,7 @@ mod native_library {
         Request::builder()
             .method("GET")
             .uri(uri)
-            .header("x-request-id", "request-123")
+            .header("x-request-id", support::TEST_REQUEST_ID)
             .body(Body::empty())
             .unwrap()
     }
@@ -110,7 +110,7 @@ mod native_library {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body = json_body(response).await;
         assert_eq!(body["code"], "authentication_failed");
-        assert_eq!(body["request_id"], "request-123");
+        assert_eq!(body["request_id"], support::TEST_REQUEST_ID);
     }
 
     #[sqlx::test]
@@ -260,9 +260,13 @@ mod native_library {
                 "the status for {parameter}"
             );
             let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let expected = format!(
+                r#"{{"code":"invalid_request","message":"The request is invalid","request_id":"{}"}}"#,
+                support::TEST_REQUEST_ID
+            );
             assert_eq!(
                 body.as_ref(),
-                br#"{"code":"invalid_request","message":"The request is invalid","request_id":"request-123"}"#,
+                expected.as_bytes(),
                 "the body for {parameter}"
             );
         }
@@ -549,10 +553,14 @@ mod native_library {
                 "the status for {resource}?{parameters}"
             );
             let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let expected = format!(
+                r#"{{"code":"invalid_request","message":"The request is invalid","request_id":"{}"}}"#,
+                support::TEST_REQUEST_ID
+            );
 
             assert_eq!(
                 body.as_ref(),
-                br#"{"code":"invalid_request","message":"The request is invalid","request_id":"request-123"}"#,
+                expected.as_bytes(),
                 "the body for {resource}?{parameters}"
             );
         }

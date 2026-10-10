@@ -62,7 +62,7 @@ fn request(method: &str, uri: &str, body: &str) -> Request<Body> {
         .method(method)
         .uri(format!("{uri}{NATIVE_AUTH_QUERY}"))
         .header("content-type", "application/json")
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::from(body.to_owned()))
         .unwrap()
 }
@@ -90,7 +90,7 @@ async fn disabled_youtube_returns_a_safe_catalogue_error(pool: PgPool) {
         json!({
             "code": "catalogue_unavailable",
             "message": "The catalogue is temporarily unavailable",
-            "request_id": "request-123"
+            "request_id": support::TEST_REQUEST_ID
         })
     );
 }
@@ -113,7 +113,7 @@ async fn disabled_youtube_returns_a_safe_playback_error(pool: PgPool) {
         json!({
             "code": "playback_unavailable",
             "message": "Playback is temporarily unavailable",
-            "request_id": "request-123"
+            "request_id": support::TEST_REQUEST_ID
         })
     );
 }

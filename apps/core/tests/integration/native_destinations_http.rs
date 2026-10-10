@@ -149,7 +149,7 @@ fn request(method: &str, path: &str, username: &str, body: &str) -> Request<Body
             if path.contains('?') { '&' } else { '?' }
         ))
         .header("content-type", "application/json")
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::from(body.to_owned()))
         .unwrap()
 }
@@ -457,7 +457,7 @@ async fn a_two_hundred_valid_false_and_a_401_both_store_nothing(pool: PgPool) {
         body["message"],
         json!("The destination rejected the credential")
     );
-    assert_eq!(body["request_id"], json!("request-123"));
+    assert_eq!(body["request_id"], json!(support::TEST_REQUEST_ID));
     assert!(!body.to_string().contains("bad-token"));
     assert_eq!(account_rows(&pool).await, 0);
 
@@ -817,7 +817,7 @@ async fn an_absent_credential_key_answers_503_without_a_detail_leak(pool: PgPool
     let expected = json!({
         "code": "destination_credentials_unavailable",
         "message": "Destination credentials are not configured",
-        "request_id": "request-123",
+        "request_id": support::TEST_REQUEST_ID,
     });
 
     let requests = vec![

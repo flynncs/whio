@@ -104,7 +104,7 @@ async fn post_login(app: axum::Router, username: &str, password: &str) -> Value 
     let request = Request::builder()
         .method("POST")
         .uri("/compat/navidrome/auth/login")
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .header("content-type", "application/json")
         .body(Body::from(
             json!({"username": username, "password": password}).to_string(),
@@ -121,7 +121,7 @@ async fn get(app: axum::Router, token: &str, query: &str) -> (StatusCode, Header
     let request = Request::builder()
         .method("GET")
         .uri(format!("{API}{query}"))
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .header("x-nd-authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
@@ -139,7 +139,7 @@ async fn get_plain(app: axum::Router, uri: &str) -> Value {
     let request = Request::builder()
         .method("GET")
         .uri(uri)
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::empty())
         .unwrap();
     let response = app.oneshot(request).await.unwrap();

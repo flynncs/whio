@@ -1,9 +1,26 @@
+use axum::{
+    Json,
+    response::{IntoResponse, Response},
+};
 use whio_subsonic_api::models;
 
 pub(crate) const SUBSONIC_API_VERSION: &str = "1.16.1";
 pub(crate) const INDEX_BASED_QUEUE_EXTENSION: &str = "indexBasedQueue";
 pub(crate) const PLAYBACK_REPORT_EXTENSION: &str = "playbackReport";
 const SERVER_TYPE: &str = "whio";
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SubsonicFailure {
+    pub(crate) code: i32,
+}
+
+pub(crate) fn failed_response(code: models::error::Code, message: &str) -> Response {
+    let mut response = Json(failed_envelope(code, message)).into_response();
+    response
+        .extensions_mut()
+        .insert(SubsonicFailure { code: code as i32 });
+    response
+}
 
 pub(crate) fn ok_envelope() -> models::SubsonicResponse {
     models::SubsonicResponse {

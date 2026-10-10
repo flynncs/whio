@@ -134,6 +134,7 @@ impl ScanService {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(mode = if full { "full" } else { "incremental" }))]
     pub async fn run_once(&self, full: bool) -> Result<ScanReport, ScanError> {
         let (Some(catalogue), Some(sources)) = (&self.catalogue, &self.sources) else {
             return Err(ScanError::Unreadable);

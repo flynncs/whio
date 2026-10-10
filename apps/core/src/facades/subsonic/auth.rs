@@ -1,12 +1,11 @@
 use axum::{
-    Json,
     extract::FromRequestParts,
     http::request::Parts,
     response::{IntoResponse, Response as AxumResponse},
 };
 use whio_subsonic_api::models;
 
-use super::envelope::failed_envelope;
+use super::envelope::failed_response;
 use super::query_auth;
 
 use crate::{features::identity::service::PresentedAuth, platform::raw_query::RawQuery};
@@ -39,7 +38,7 @@ impl SubsonicError {
 
 impl IntoResponse for SubsonicError {
     fn into_response(self) -> AxumResponse {
-        Json(failed_envelope(self.code(), self.message())).into_response()
+        failed_response(self.code(), self.message()).into_response()
     }
 }
 

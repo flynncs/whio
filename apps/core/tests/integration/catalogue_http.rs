@@ -39,7 +39,7 @@ fn request(body: &str) -> Request<Body> {
         .method("POST")
         .uri(format!("/catalogue/search{NATIVE_AUTH_QUERY}"))
         .header("content-type", "application/json")
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::from(body.to_owned()))
         .unwrap()
 }
@@ -49,7 +49,7 @@ fn unauthenticated_request(body: &str) -> Request<Body> {
         .method("POST")
         .uri("/catalogue/search")
         .header("content-type", "application/json")
-        .header("x-request-id", "request-123")
+        .header("x-request-id", support::TEST_REQUEST_ID)
         .body(Body::from(body.to_owned()))
         .unwrap()
 }
@@ -80,7 +80,7 @@ async fn credential_storage_failure_is_a_server_error(pool: PgPool) {
             .method("POST")
             .uri(format!("/catalogue/search{NATIVE_AUTH_QUERY}"))
             .header("content-type", "application/json")
-            .header("x-request-id", "request-123")
+            .header("x-request-id", support::TEST_REQUEST_ID)
             .body(Body::from(r#"{"query":"Daft Punk","limit":5}"#))
             .unwrap(),
     )
@@ -98,7 +98,7 @@ async fn search_returns_whio_tracks(pool: PgPool) {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["x-request-id"], "request-123");
+    assert_eq!(response.headers()["x-request-id"], support::TEST_REQUEST_ID);
 
     let body = to_bytes(response.into_body(), 4096).await.unwrap();
     let body: Value = serde_json::from_slice(&body).unwrap();
@@ -125,10 +125,11 @@ async fn malformed_and_invalid_requests_share_the_public_error_shape(pool: PgPoo
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
-        assert_eq!(
-            body.as_ref(),
-            br#"{"code":"invalid_request","message":"The request is invalid","request_id":"request-123"}"#
+        let expected = format!(
+            r#"{{"code":"invalid_request","message":"The request is invalid","request_id":"{}"}}"#,
+            support::TEST_REQUEST_ID
         );
+        assert_eq!(body.as_ref(), expected.as_bytes());
     }
 }
 
@@ -141,10 +142,11 @@ async fn unavailable_resolver_returns_service_unavailable(pool: PgPool) {
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), 4096).await.unwrap();
-    assert_eq!(
-        body.as_ref(),
-        br#"{"code":"catalogue_unavailable","message":"The catalogue is temporarily unavailable","request_id":"request-123"}"#
+    let expected = format!(
+        r#"{{"code":"catalogue_unavailable","message":"The catalogue is temporarily unavailable","request_id":"{}"}}"#,
+        support::TEST_REQUEST_ID
     );
+    assert_eq!(body.as_ref(), expected.as_bytes());
 }
 
 #[sqlx::test]
