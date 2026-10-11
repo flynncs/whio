@@ -433,6 +433,49 @@ async fn re_filing_a_track_replaces_its_membership(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test]
+async fn add_album_track_keeps_other_memberships(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let first = repository
+        .resolve_or_create_album(&album_metadata("First"))
+        .await
+        .unwrap();
+    let second = repository
+        .resolve_or_create_album(&album_metadata("Second"))
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(source("local", "path-a"), metadata("Song"))
+        .await
+        .unwrap();
+
+    repository
+        .set_album_track(first.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    repository
+        .add_album_track(second.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository
+            .find_album_entries(first.id(), None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repository
+            .find_album_entries(second.id(), None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[sqlx::test]
 async fn album_entries_are_ordered_and_totalled(pool: sqlx::PgPool) {
     let repository = PostgresTrackRepository::new(pool.clone());
     let artist = repository

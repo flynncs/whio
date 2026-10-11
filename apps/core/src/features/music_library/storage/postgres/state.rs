@@ -71,7 +71,7 @@ impl StateStore for PgStore {
         .map_err(repository_error)?;
 
         Ok(Starred::new(
-            tracks_by_ids(&self.pool, &track_ids, user).await?,
+            tracks_by_ids(&self.pool, &track_ids, user, &self.library_provider_ids()).await?,
             album_summaries_by_ids(&self.pool, &album_ids, Some(user)).await?,
             artist_summaries_by_ids(&self.pool, &artist_ids, Some(user)).await?,
         ))

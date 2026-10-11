@@ -71,10 +71,10 @@ use super::decode::{
     repository_error, sources_for_tracks, track_states,
 };
 use super::schema::{
-    ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ALBUM_SEARCH_COLUMNS, ARTIST_COLUMNS,
-    AlbumBrowseRow, AlbumEntryRow, AlbumRow, ArtistRow, CREDIT_NORMALIZED, TRACK_COLUMNS,
-    TRACK_ENGAGED, TRACK_OWNED, TrackPageRow, TrackRecord, TrackSearchRow, album_scope,
-    artist_membership, artist_scope, folded, search_folded,
+    ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ARTIST_COLUMNS, AlbumBrowseRow,
+    AlbumEntryRow, AlbumRow, ArtistRow, CREDIT_NORMALIZED, TRACK_COLUMNS, TRACK_ENGAGED,
+    TRACK_OWNED, TrackPageRow, TrackRecord, TrackSearchRow, album_scope, artist_membership,
+    artist_scope, folded, primary_album_order, search_folded,
 };
 use crate::features::music_library::domain::{
     album_quality, normalize_for_matching, track_quality,
@@ -128,10 +128,13 @@ impl LibraryRead for PgStore {
             FROM albums AS a
             JOIN album_tracks AS mt ON mt.album_id = a.id
             WHERE mt.track_id = $1
+            ORDER BY {order}
             LIMIT 1
-            "#
+            "#,
+            order = primary_album_order("a", 2),
         ))
         .bind(track_id.as_uuid())
+        .bind(self.library_provider_ids())
         .fetch_optional(&self.pool)
         .await
         .map_err(repository_error)?;
@@ -604,7 +607,7 @@ impl LibraryRead for PgStore {
         let genres = genres_for_tracks(&self.pool, &ids).await?;
         let sources = sources_for_tracks(&self.pool, &ids).await?;
         let states = track_states(&self.pool, user, &ids).await?;
-        let albums = albums_for_tracks(&self.pool, &ids, None).await?;
+        let albums = albums_for_tracks(&self.pool, &ids, None, &library_ids).await?;
         let representations =
             selected_representations_for_tracks(&self.pool, &library_ids, &ids).await?;
         let views = assemble_track_views(
@@ -671,11 +674,8 @@ impl LibraryRead for PgStore {
         let credit = SearchMatch::new(CREDIT_NORMALIZED, "$1");
         let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
             r#"
-            SELECT {TRACK_COLUMNS},
-                   {ALBUM_SEARCH_COLUMNS}
+            SELECT {TRACK_COLUMNS}
             FROM tracks AS t
-            LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
-            LEFT JOIN albums AS a ON a.id = mt.album_id
             WHERE {title_matches}
                OR EXISTS (
                    SELECT 1
@@ -704,7 +704,7 @@ impl LibraryRead for PgStore {
         .await
         .map_err(repository_error)?;
 
-        let mut hits = hits_from_rows(&self.pool, rows, user).await?;
+        let mut hits = hits_from_rows(&self.pool, rows, user, &self.library_provider_ids()).await?;
         for hit in &mut hits {
             let quality = track_quality(&terms, hit.track().title(), hit.track().artists());
             *hit = hit.clone().with_match_quality(quality);
@@ -883,11 +883,8 @@ impl LibraryRead for PgStore {
 
         let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
             r#"
-            SELECT {TRACK_COLUMNS},
-                   {ALBUM_SEARCH_COLUMNS}
+            SELECT {TRACK_COLUMNS}
             FROM tracks AS t
-            LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
-            LEFT JOIN albums AS a ON a.id = mt.album_id
             WHERE t.title_normalized = ANY(
                 SELECT {key} FROM unnest($1::TEXT[]) AS raw(value)
             )
@@ -902,7 +899,7 @@ impl LibraryRead for PgStore {
         .await
         .map_err(repository_error)?;
 
-        hits_from_rows(&self.pool, rows, None).await
+        hits_from_rows(&self.pool, rows, None, &self.library_provider_ids()).await
     }
 
     async fn dedup_candidates(
@@ -923,11 +920,8 @@ impl LibraryRead for PgStore {
 
         let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
             r#"
-            SELECT {TRACK_COLUMNS},
-                   {ALBUM_SEARCH_COLUMNS}
+            SELECT {TRACK_COLUMNS}
             FROM tracks AS t
-            LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
-            LEFT JOIN albums AS a ON a.id = mt.album_id
             WHERE t.id = ANY($1)
             ORDER BY t.title_normalized, t.id
             "#,
@@ -938,7 +932,7 @@ impl LibraryRead for PgStore {
         .map_err(repository_error)?;
         drop(connection);
 
-        hits_from_rows(&self.pool, rows, None).await
+        hits_from_rows(&self.pool, rows, None, &self.library_provider_ids()).await
     }
 
     async fn list_genres(&self) -> Result<Vec<GenreSummary>, TrackRepositoryError> {
@@ -1081,7 +1075,7 @@ impl PgStore {
         let genres = genres_for_tracks(&self.pool, &ids).await?;
         let sources = sources_for_tracks(&self.pool, &ids).await?;
         let states = track_states(&self.pool, user, &ids).await?;
-        let albums = albums_for_tracks(&self.pool, &ids, album).await?;
+        let albums = albums_for_tracks(&self.pool, &ids, album, &library_ids).await?;
         let representations =
             selected_representations_for_tracks(&self.pool, &library_ids, &ids).await?;
         let records = rows

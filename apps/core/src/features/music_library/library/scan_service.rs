@@ -181,7 +181,7 @@ mod tests {
 
     use super::*;
     use crate::features::music_library::{
-        domain::{SourceIdentity, Track, TrackId, TrackMetadata},
+        domain::{AlbumId, AlbumTrack, SourceIdentity, Track, TrackId, TrackMetadata},
         storage::contracts::{CatalogueWrite, SourceLookup, TrackRepositoryError},
     };
 
@@ -202,6 +202,15 @@ mod tests {
             _source: SourceIdentity,
             _metadata: TrackMetadata,
         ) -> Result<Track, TrackRepositoryError> {
+            panic!("status checks must not write tracks")
+        }
+
+        async fn add_album_track(
+            &self,
+            _album_id: &AlbumId,
+            _track_id: &TrackId,
+            _membership: &AlbumTrack,
+        ) -> Result<(), TrackRepositoryError> {
             panic!("status checks must not write tracks")
         }
     }

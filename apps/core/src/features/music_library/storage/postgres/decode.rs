@@ -13,8 +13,8 @@ use crate::features::music_library::{
 };
 
 use super::schema::{
-    ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_SEARCH_COLUMNS, AlbumBrowseRow, AlbumRow,
-    ArtistRow, StateRow, TRACK_COLUMNS, TrackRecord, TrackSearchRow, artist_membership,
+    ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, AlbumBrowseRow, AlbumRow, ArtistRow, StateRow,
+    TRACK_COLUMNS, TrackRecord, TrackSearchRow, artist_membership, primary_album_order,
 };
 
 pub(crate) fn decode_artist(row: ArtistRow) -> Result<Artist, TrackRepositoryError> {
@@ -567,6 +567,7 @@ pub(crate) async fn tracks_by_ids(
     pool: &PgPool,
     track_ids: &[Uuid],
     user: Uuid,
+    library_ids: &[String],
 ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
     if track_ids.is_empty() {
         return Ok(Vec::new());
@@ -574,11 +575,8 @@ pub(crate) async fn tracks_by_ids(
 
     let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
         r#"
-        SELECT {TRACK_COLUMNS},
-               {ALBUM_SEARCH_COLUMNS}
+        SELECT {TRACK_COLUMNS}
         FROM tracks AS t
-        LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
-        LEFT JOIN albums AS a ON a.id = mt.album_id
         WHERE t.id = ANY($1)
         "#
     ))
@@ -587,7 +585,7 @@ pub(crate) async fn tracks_by_ids(
     .await
     .map_err(repository_error)?;
 
-    let hits = hits_from_rows(pool, rows, Some(user)).await?;
+    let hits = hits_from_rows(pool, rows, Some(user), library_ids).await?;
     let mut by_id = hits
         .into_iter()
         .map(|hit| (*hit.track().id().as_uuid(), hit))
@@ -685,26 +683,18 @@ pub(crate) async fn hits_from_rows(
     pool: &PgPool,
     rows: Vec<TrackSearchRow>,
     user: Option<Uuid>,
+    library_ids: &[String],
 ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
     let track_ids = rows.iter().map(|row| row.track.id).collect::<Vec<_>>();
     let mut credits = credits_for_tracks(pool, &track_ids).await?;
     let mut genres = genres_for_tracks(pool, &track_ids).await?;
     let mut sources = sources_for_tracks(pool, &track_ids).await?;
+    let mut albums = albums_for_tracks(pool, &track_ids, None, library_ids).await?;
     let states = track_states(pool, user, &track_ids).await?;
     let mut hits = Vec::with_capacity(rows.len());
 
     for row in rows {
-        let TrackSearchRow {
-            track,
-            album_id,
-            album_title,
-            album_artist_id,
-            year,
-            release_type,
-            label,
-            musicbrainz_release_group_id: group_id,
-            musicbrainz_release_id: release_id,
-        } = row;
+        let track = row.track;
         let id = track.id;
 
         let track = decode_track(
@@ -712,22 +702,7 @@ pub(crate) async fn hits_from_rows(
             genres.remove(&id).unwrap_or_default(),
             credits.remove(&id).unwrap_or_default(),
         )?;
-        let album = match (album_id, album_title) {
-            (Some(album_id), Some(album_title)) => Some(
-                Album::new(
-                    AlbumId::from_uuid(album_id),
-                    album_title,
-                    album_artist_id.map(ArtistId::from_uuid),
-                    year.map(i32::from),
-                    release_type,
-                    label,
-                    group_id,
-                    release_id,
-                )
-                .map_err(|_| TrackRepositoryError::InvalidData)?,
-            ),
-            _ => None,
-        };
+        let album = albums.remove(&id).map(|(album, _, _)| album);
         let state = states.get(&id).copied().unwrap_or_default();
 
         hits.push(
@@ -840,12 +815,31 @@ pub(crate) async fn albums_for_tracks(
     pool: &PgPool,
     track_ids: &[Uuid],
     requested_album: Option<&AlbumId>,
+    library_ids: &[String],
 ) -> Result<HashMap<Uuid, (Album, AlbumTrack, Option<String>)>, TrackRepositoryError> {
     if track_ids.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let rows = sqlx::query_as::<
+    let order = requested_album.map_or_else(
+        || format!("mt.track_id, {}", primary_album_order("a", 3)),
+        |_| "mt.track_id".to_owned(),
+    );
+    let statement = format!(
+        r#"
+        SELECT mt.track_id, a.id, a.title, a.album_artist_id, a.year, a.release_type, a.label,
+               a.musicbrainz_release_group_id, a.musicbrainz_release_id,
+               mt.disc_number, mt.track_number, mt.position, mt.disc_total, mt.track_total,
+               album_artist.name
+        FROM album_tracks AS mt
+        JOIN albums AS a ON a.id = mt.album_id
+        LEFT JOIN artists AS album_artist ON album_artist.id = a.album_artist_id
+        WHERE mt.track_id = ANY($1)
+          AND ($2::UUID IS NULL OR mt.album_id = $2)
+        ORDER BY {order}
+        "#,
+    );
+    let mut query = sqlx::query_as::<
         _,
         (
             Uuid,
@@ -864,25 +858,13 @@ pub(crate) async fn albums_for_tracks(
             Option<i16>,
             Option<String>,
         ),
-    >(
-        r#"
-        SELECT mt.track_id, a.id, a.title, a.album_artist_id, a.year, a.release_type, a.label,
-               a.musicbrainz_release_group_id, a.musicbrainz_release_id,
-               mt.disc_number, mt.track_number, mt.position, mt.disc_total, mt.track_total,
-               album_artist.name
-        FROM album_tracks AS mt
-        JOIN albums AS a ON a.id = mt.album_id
-        LEFT JOIN artists AS album_artist ON album_artist.id = a.album_artist_id
-        WHERE mt.track_id = ANY($1)
-          AND ($2::UUID IS NULL OR mt.album_id = $2)
-        ORDER BY mt.track_id, a.title_normalized, a.id
-        "#,
-    )
+    >(&statement)
     .bind(track_ids)
-    .bind(requested_album.map(|album_id| *album_id.as_uuid()))
-    .fetch_all(pool)
-    .await
-    .map_err(repository_error)?;
+    .bind(requested_album.map(|album_id| *album_id.as_uuid()));
+    if requested_album.is_none() {
+        query = query.bind(library_ids);
+    }
+    let rows = query.fetch_all(pool).await.map_err(repository_error)?;
 
     let mut by_track: HashMap<Uuid, (Album, AlbumTrack, Option<String>)> = HashMap::new();
     for (

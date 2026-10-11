@@ -919,3 +919,102 @@ async fn text_album_discovery_errors_follow_search3_rules(pool: sqlx::PgPool) {
         CatalogueError::Provider(ProviderError::ProviderUnavailable)
     ));
 }
+
+#[sqlx::test]
+async fn opening_a_provider_single_whose_track_matches_the_library_lists_one_entry(
+    pool: sqlx::PgPool,
+) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let library_track = repository
+        .get_or_create(
+            SourceIdentity::new(
+                ProviderId::new("local".to_owned()).unwrap(),
+                SourceScope::Named("/music".to_owned()),
+                "care.flac".to_owned(),
+            )
+            .unwrap(),
+            TrackMetadata::from_names(
+                "Care".to_owned(),
+                vec!["beabadoobee".to_owned()],
+                Some(1_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let library_album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Fake It Flowers".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("beabadoobee".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            library_album.id(),
+            library_track.id(),
+            &AlbumTrack::unplaced(),
+        )
+        .await
+        .unwrap();
+
+    let single_metadata = AlbumMetadata::new("Care".to_owned())
+        .unwrap()
+        .with_album_artist(ArtistCredit::new("beabadoobee".to_owned(), None).unwrap())
+        .with_provider(Some(provider_source("MPREb_single")));
+    let single = repository
+        .resolve_or_create_album(&single_metadata)
+        .await
+        .unwrap();
+    repository
+        .set_album_source(single.id(), &provider_source("MPREb_single"))
+        .await
+        .unwrap();
+
+    let candidate = CatalogueCandidate::new(
+        provider_source("video-care"),
+        TrackMetadata::from_names(
+            "Care".to_owned(),
+            vec!["beabadoobee".to_owned()],
+            Some(1_000),
+        )
+        .unwrap(),
+    )
+    .with_album(Some(single_metadata));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(StubAlbumProvider {
+        result: Mutex::new(Ok(FetchedAlbum::new(vec![candidate], Some(1)))),
+        calls: Arc::clone(&calls),
+    });
+    let (completion, sources) = service(&repository, provider).await;
+
+    let detail = completion
+        .album_detail(single.id(), None)
+        .await
+        .unwrap()
+        .expect("the single is found");
+    assert_eq!(detail.entries.len(), 1);
+    assert_eq!(detail.entries[0].track().id(), library_track.id());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let state = sources
+        .find_provider_entity_state(&provider_source("MPREb_single"))
+        .await
+        .unwrap()
+        .expect("completion records its freshness");
+    assert_eq!(state.reported_count(), Some(1));
+    assert!(!state.is_partial(1));
+
+    let again = completion
+        .album_detail(single.id(), None)
+        .await
+        .unwrap()
+        .expect("the single is found");
+    assert_eq!(again.entries.len(), 1);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a settled single is not fetched again"
+    );
+}

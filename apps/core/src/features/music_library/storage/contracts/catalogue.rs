@@ -104,6 +104,13 @@ pub trait CatalogueWrite: Send + Sync {
         Ok(())
     }
 
+    async fn add_album_track(
+        &self,
+        _album_id: &AlbumId,
+        _track_id: &TrackId,
+        _membership: &AlbumTrack,
+    ) -> Result<(), TrackRepositoryError>;
+
     async fn clear_album_track(&self, _track_id: &TrackId) -> Result<(), TrackRepositoryError> {
         Ok(())
     }

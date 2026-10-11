@@ -48,14 +48,6 @@ pub(crate) struct TrackRecord {
 pub(crate) struct TrackSearchRow {
     #[sqlx(flatten)]
     pub(crate) track: TrackRecord,
-    pub(crate) album_id: Option<Uuid>,
-    pub(crate) album_title: Option<String>,
-    pub(crate) album_artist_id: Option<Uuid>,
-    pub(crate) year: Option<i16>,
-    pub(crate) release_type: Option<String>,
-    pub(crate) label: Option<String>,
-    pub(crate) musicbrainz_release_group_id: Option<String>,
-    pub(crate) musicbrainz_release_id: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -89,10 +81,6 @@ pub(crate) const TRACK_COLUMNS: &str = "t.id, t.title, t.duration_ms, t.musicbra
      t.original_date_precision";
 pub(crate) const ALBUM_COLUMNS: &str = "id, title, album_artist_id, year, release_type, label, \
      musicbrainz_release_group_id, musicbrainz_release_id";
-pub(crate) const ALBUM_SEARCH_COLUMNS: &str = "a.id AS album_id, a.title AS album_title, \
-     a.album_artist_id AS album_artist_id, a.year AS year, a.release_type AS release_type, \
-     a.label AS label, a.musicbrainz_release_group_id AS musicbrainz_release_group_id, \
-     a.musicbrainz_release_id AS musicbrainz_release_id";
 pub(crate) const ALBUM_BROWSE_COLUMNS: &str = "a.id, a.title, a.album_artist_id, a.year, a.release_type, \
      a.label, a.musicbrainz_release_group_id, a.musicbrainz_release_id, a.created_at, \
      ar.id AS artist_id, ar.name AS artist_name, ar.sort_name AS artist_sort_name, \
@@ -117,6 +105,20 @@ pub(crate) fn folded(value: &str) -> String {
 pub(crate) fn search_folded(value: &str) -> String {
     let decomposed = format!("normalize({}, NFD)", folded(value));
     format!("normalize(regexp_replace({decomposed}, U&'[\\0300-\\036F]', '', 'g'), NFC)")
+}
+
+pub(crate) fn primary_album_order(album: &str, library_bind: u8) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM album_sources AS library_album \
+         WHERE library_album.album_id = {album}.id \
+           AND library_album.provider_id = ANY(${library_bind}::TEXT[])), \
+         NOT EXISTS (SELECT 1 FROM album_tracks AS library_member \
+         JOIN track_sources AS library_member_source \
+           ON library_member_source.track_id = library_member.track_id \
+         WHERE library_member.album_id = {album}.id \
+           AND library_member_source.provider_id = ANY(${library_bind}::TEXT[])), \
+         {album}.id"
+    )
 }
 
 // the browse scope. a provider entity is browsable when it is engaged: owned,

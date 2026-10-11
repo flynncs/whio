@@ -444,6 +444,16 @@ mod tests {
         > {
             Err(crate::features::music_library::storage::contracts::TrackRepositoryError::Unavailable)
         }
+
+        async fn add_album_track(
+            &self,
+            _: &crate::features::music_library::domain::AlbumId,
+            _: &crate::features::music_library::domain::TrackId,
+            _: &crate::features::music_library::domain::AlbumTrack,
+        ) -> Result<(), crate::features::music_library::storage::contracts::TrackRepositoryError>
+        {
+            Err(crate::features::music_library::storage::contracts::TrackRepositoryError::Unavailable)
+        }
     }
     #[async_trait::async_trait]
     impl crate::features::music_library::storage::contracts::SourceLookup for UnusableCandidates {

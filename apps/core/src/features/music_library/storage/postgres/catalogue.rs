@@ -271,6 +271,33 @@ impl CatalogueWrite for PgStore {
         Ok(())
     }
 
+    async fn add_album_track(
+        &self,
+        album_id: &AlbumId,
+        track_id: &TrackId,
+        membership: &AlbumTrack,
+    ) -> Result<(), TrackRepositoryError> {
+        sqlx::query(
+            r#"
+            INSERT INTO album_tracks
+                (album_id, track_id, disc_number, track_number, position, disc_total, track_total)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (album_id, track_id) DO NOTHING
+            "#,
+        )
+        .bind(album_id.as_uuid())
+        .bind(track_id.as_uuid())
+        .bind(encode_smallint(membership.disc_number())?)
+        .bind(encode_smallint(membership.track_number())?)
+        .bind(i32::try_from(membership.position()).map_err(|_| TrackRepositoryError::InvalidData)?)
+        .bind(encode_smallint(membership.disc_total())?)
+        .bind(encode_smallint(membership.track_total())?)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(repository_error)
+    }
+
     async fn clear_album_track(&self, track_id: &TrackId) -> Result<(), TrackRepositoryError> {
         sqlx::query("DELETE FROM album_tracks WHERE track_id = $1")
             .bind(track_id.as_uuid())

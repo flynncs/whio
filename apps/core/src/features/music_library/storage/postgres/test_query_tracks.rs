@@ -3012,3 +3012,124 @@ async fn full_text_track_filters_match_song_album_and_credit_fields(pool: PgPool
         .with_genre(Some(text_set(&["Rock"])));
     assert_eq!(total(&repository, &combined, None).await, 0);
 }
+
+#[sqlx::test]
+async fn a_track_on_two_albums_reports_its_library_album_without_context(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let track = repository
+        .get_or_create(
+            source("local", "care.flac"),
+            metadata_by("Care", "beabadoobee"),
+        )
+        .await
+        .unwrap();
+    let library_album = repository
+        .resolve_or_create_album(
+            &album("Zzz Library").with_album_artist(credit("beabadoobee", None)),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_source(library_album.id(), &source("local", "care.flac"))
+        .await
+        .unwrap();
+    repository
+        .set_album_track(library_album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let provider_album = repository
+        .resolve_or_create_album(
+            &album("Aaa Single")
+                .with_album_artist(credit("beabadoobee", None))
+                .with_provider(Some(source("youtube_music", "MPREb_care"))),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_source(provider_album.id(), &source("youtube_music", "MPREb_care"))
+        .await
+        .unwrap();
+    repository
+        .add_album_track(provider_album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository
+            .find_album_for_track(track.id())
+            .await
+            .unwrap()
+            .expect("the track is filed")
+            .id(),
+        library_album.id()
+    );
+    let views = repository
+        .track_views(&[track.id().clone()], None)
+        .await
+        .unwrap();
+    assert_eq!(
+        views[0].album().map(|album| album.id()),
+        Some(library_album.id())
+    );
+    let hits = repository.search_tracks("Care", 10, None).await.unwrap();
+    assert_eq!(hits.len(), 1, "the track is reported once");
+    assert_eq!(
+        hits[0].album().map(|album| album.id()),
+        Some(library_album.id())
+    );
+}
+
+#[sqlx::test]
+async fn the_primary_album_uses_the_supplied_library_provider_ids(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let plain_album = repository
+        .resolve_or_create_album(&album("Aaa Plain").with_album_artist(credit("beabadoobee", None)))
+        .await
+        .unwrap();
+    let archive_album = repository
+        .resolve_or_create_album(
+            &album("Zzz Archive").with_album_artist(credit("beabadoobee", None)),
+        )
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(
+            source("archive", "care.flac"),
+            metadata_by("Care", "beabadoobee"),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(plain_album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    repository
+        .add_album_track(archive_album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    repository
+        .set_album_source(archive_album.id(), &source("archive", "care.flac"))
+        .await
+        .unwrap();
+
+    let ids = vec![*track.id().as_uuid()];
+    let archive_ids = vec!["archive".to_owned()];
+    let supplied = super::decode::albums_for_tracks(&pool, &ids, None, &archive_ids)
+        .await
+        .unwrap();
+    assert_eq!(
+        supplied.get(track.id().as_uuid()).unwrap().0.id(),
+        archive_album.id()
+    );
+
+    let empty = super::decode::albums_for_tracks(&pool, &ids, None, &[])
+        .await
+        .unwrap();
+    let smaller = if plain_album.id().as_uuid() <= archive_album.id().as_uuid() {
+        plain_album.id()
+    } else {
+        archive_album.id()
+    };
+    assert_eq!(empty.get(track.id().as_uuid()).unwrap().0.id(), smaller);
+}

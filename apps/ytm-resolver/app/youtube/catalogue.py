@@ -107,11 +107,14 @@ class YouTubeMusicCatalogue:
                     raise ProviderUnavailableError(
                         "The provider is temporarily unavailable"
                     ) from error
-                if not isinstance(expanded, Mapping):
+                if isinstance(expanded, list):
+                    rows = expanded
+                elif isinstance(expanded, Mapping):
+                    rows = expanded.get("results", [])
+                else:
                     raise ProviderUnavailableError(
                         "The provider returned an invalid artist shelf"
                     )
-                rows = expanded.get("results", [])
             if not isinstance(rows, list):
                 continue
             for row in rows[:100]:

@@ -22,8 +22,8 @@ use crate::{
     },
     features::music_library::{
         domain::{
-            AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope,
-            Track, TrackMetadata,
+            AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity,
+            SourceScope, Track, TrackMetadata,
         },
         storage::contracts::TrackRepositoryError,
         storage::postgres::PostgresTrackRepository,
@@ -61,6 +61,15 @@ impl CatalogueWrite for FailingTrackRepository {
         _source: SourceIdentity,
         _metadata: TrackMetadata,
     ) -> Result<Track, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    async fn add_album_track(
+        &self,
+        _album_id: &AlbumId,
+        _track_id: &TrackId,
+        _membership: &AlbumTrack,
+    ) -> Result<(), TrackRepositoryError> {
         Err(TrackRepositoryError::Unavailable)
     }
 }
@@ -1129,6 +1138,155 @@ async fn provider_materialization_joins_the_library_artist_album_and_track(pool:
             .await
             .unwrap(),
         artwork_id
+    );
+}
+
+#[sqlx::test]
+async fn a_matched_track_joins_the_provider_album_too(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let library_track = repository
+        .get_or_create(
+            local_source_at("care.flac"),
+            TrackMetadata::from_names(
+                "Care".to_owned(),
+                vec!["beabadoobee".to_owned()],
+                Some(200_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let artist = ArtistCredit::new("beabadoobee".to_owned(), None).unwrap();
+    let library_album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Fake It Flowers".to_owned())
+                .unwrap()
+                .with_album_artist(artist.clone()),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            library_album.id(),
+            library_track.id(),
+            &AlbumTrack::unplaced(),
+        )
+        .await
+        .unwrap();
+
+    let candidate = CatalogueCandidate::new(
+        provider_source_for_test("video-care"),
+        TrackMetadata::from_names(
+            "Care".to_owned(),
+            vec!["beabadoobee".to_owned()],
+            Some(200_000),
+        )
+        .unwrap(),
+    )
+    .with_album(Some(
+        AlbumMetadata::new("Care".to_owned())
+            .unwrap()
+            .with_album_artist(artist)
+            .with_provider(Some(provider_source_for_test("MPREb_care"))),
+    ));
+
+    let write = Arc::clone(&repository) as Arc<dyn CatalogueWrite>;
+    let lookup = Arc::clone(&repository) as Arc<dyn SourceLookup>;
+    let hits = super::super::materialize::materialize(&write, &lookup, vec![candidate])
+        .await
+        .unwrap();
+
+    let provider_album_id = hits[0].album().expect("the single is materialized").id();
+    assert_ne!(provider_album_id, library_album.id());
+    assert_eq!(hits[0].track().id(), library_track.id());
+
+    let mut memberships = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT album_id, track_id FROM album_tracks WHERE track_id = $1",
+    )
+    .bind(library_track.id().as_uuid())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    memberships.sort();
+    let mut expected = vec![
+        (*library_album.id().as_uuid(), *library_track.id().as_uuid()),
+        (*provider_album_id.as_uuid(), *library_track.id().as_uuid()),
+    ];
+    expected.sort();
+    assert_eq!(memberships, expected);
+    assert_eq!(
+        repository.find_sources(library_track.id()).await.unwrap(),
+        vec![
+            local_source_at("care.flac"),
+            provider_source_for_test("video-care")
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn a_matched_track_without_an_incoming_album_keeps_its_memberships(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let library_track = repository
+        .get_or_create(
+            local_source_at("care.flac"),
+            TrackMetadata::from_names(
+                "Care".to_owned(),
+                vec!["beabadoobee".to_owned()],
+                Some(200_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let library_album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Fake It Flowers".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("beabadoobee".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            library_album.id(),
+            library_track.id(),
+            &AlbumTrack::unplaced(),
+        )
+        .await
+        .unwrap();
+
+    let candidate = CatalogueCandidate::new(
+        provider_source_for_test("video-care"),
+        TrackMetadata::from_names(
+            "Care".to_owned(),
+            vec!["beabadoobee".to_owned()],
+            Some(200_000),
+        )
+        .unwrap(),
+    );
+
+    let write = Arc::clone(&repository) as Arc<dyn CatalogueWrite>;
+    let lookup = Arc::clone(&repository) as Arc<dyn SourceLookup>;
+    let hits = super::super::materialize::materialize(&write, &lookup, vec![candidate])
+        .await
+        .unwrap();
+
+    assert_eq!(hits[0].track().id(), library_track.id());
+    assert!(hits[0].album().is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>("SELECT album_id FROM album_tracks WHERE track_id = $1")
+            .bind(library_track.id().as_uuid())
+            .fetch_all(&pool)
+            .await
+            .unwrap(),
+        vec![*library_album.id().as_uuid()]
+    );
+    assert_eq!(
+        repository.find_sources(library_track.id()).await.unwrap(),
+        vec![
+            local_source_at("care.flac"),
+            provider_source_for_test("video-care")
+        ]
     );
 }
 

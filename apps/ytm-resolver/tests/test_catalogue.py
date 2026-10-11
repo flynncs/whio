@@ -163,12 +163,42 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
         client.get_artist.return_value = {
             "albums": {"results": [], "browseId": "VL1", "params": "album-params"}
         }
-        client.get_artist_albums.return_value = []
+        client.get_artist_albums.return_value = None
 
         with self.assertRaises(ProviderUnavailableError):
             YouTubeMusicCatalogue(client).fetch_artist(
                 SourceIdentity(provider_id="youtube_music", external_id="UCartist")
             )
+
+    def test_artist_fetch_accepts_a_list_expanded_shelf(self) -> None:
+        client = Mock()
+        client.get_artist.return_value = {
+            "albums": {
+                "results": [
+                    {"browseId": "MPREb_1", "title": "First", "artists": [{"name": "Artist"}]}
+                ],
+                "browseId": "VL1",
+                "params": "album-params",
+            },
+        }
+        client.get_artist_albums.return_value = [
+            {"browseId": "MPREb_1", "title": "Duplicate", "artists": [{"name": "Artist"}]},
+            {"browseId": "MPREb_2", "title": "Second", "artists": [{"name": "Artist"}]},
+            {"browseId": "MPREb_2", "title": "Duplicate", "artists": [{"name": "Artist"}]},
+        ]
+
+        result = YouTubeMusicCatalogue(client).fetch_artist(
+            SourceIdentity(provider_id="youtube_music", external_id="UCartist")
+        )
+
+        self.assertEqual(
+            [album.source.external_id for album in result.results],
+            ["MPREb_1", "MPREb_2"],
+        )
+        self.assertEqual(
+            [album.title for album in result.results], ["Duplicate", "Second"]
+        )
+        client.get_artist_albums.assert_called_once_with("VL1", "album-params")
 
     def test_artist_fetch_expands_shelves_and_deduplicates_in_order(self) -> None:
         client = Mock()

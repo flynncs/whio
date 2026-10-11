@@ -95,7 +95,12 @@ pub(crate) async fn materialize(
         let album = match &album_metadata {
             Some(album_metadata) => {
                 let album = materialize_album(catalogue, sources, album_metadata).await?;
-                if !preserve_membership {
+                if preserve_membership {
+                    catalogue
+                        .add_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+                } else {
                     catalogue
                         .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
                         .await
