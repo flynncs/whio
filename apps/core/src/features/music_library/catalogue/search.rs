@@ -1,6 +1,6 @@
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -32,7 +32,9 @@ pub struct SearchService {
     dedup_mode: DedupMode,
     dedup_budget: Duration,
     search_budget: Duration,
+    response_budget: Duration,
     concurrency: Arc<Semaphore>,
+    outstanding: Arc<Semaphore>,
 }
 
 pub struct SearchOutcome {
@@ -64,9 +66,14 @@ pub struct Discovery {
     first_error: Option<CatalogueError>,
     any_success: bool,
     tracks: Option<Vec<SearchHit>>,
+    pending: usize,
 }
 
 impl Discovery {
+    pub fn pending(&self) -> usize {
+        self.pending
+    }
+
     pub fn failure(self, found_results: bool) -> Option<CatalogueError> {
         match self.first_error {
             Some(error @ CatalogueError::Provider(ProviderError::Access)) => Some(error),
@@ -206,7 +213,9 @@ impl SearchService {
             dedup_mode: DedupMode::Suppress,
             dedup_budget: super::dedup::DEFAULT_DEDUP_BUDGET,
             search_budget: DEFAULT_SEARCH_BUDGET,
+            response_budget: DEFAULT_RESPONSE_BUDGET,
             concurrency: Arc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY)),
+            outstanding: Arc::new(Semaphore::new(MAX_OUTSTANDING_TASKS)),
         }
     }
 
@@ -226,7 +235,9 @@ impl SearchService {
             dedup_mode: DedupMode::Suppress,
             dedup_budget: super::dedup::DEFAULT_DEDUP_BUDGET,
             search_budget: DEFAULT_SEARCH_BUDGET,
+            response_budget: DEFAULT_RESPONSE_BUDGET,
             concurrency: Arc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY)),
+            outstanding: Arc::new(Semaphore::new(MAX_OUTSTANDING_TASKS)),
         }
     }
 
@@ -242,6 +253,11 @@ impl SearchService {
 
     pub fn with_search_budget(mut self, budget: Duration) -> Self {
         self.search_budget = budget;
+        self
+    }
+
+    pub fn with_response_budget(mut self, budget: Duration) -> Self {
+        self.response_budget = budget;
         self
     }
 
@@ -306,46 +322,37 @@ impl SearchService {
                 Ok(discovery)
             }
             SearchKind::Albums => {
-                let (albums, discovery) = self
-                    .discover_page_kind(
-                        query,
-                        target,
-                        context,
-                        |provider, search, context| async move {
-                            provider.search_albums(&search, &context).await
-                        },
-                    )
-                    .await?;
-                for album in &albums {
-                    super::materialize::materialize_album(
-                        &self.catalogue,
-                        &self.source_lookup,
-                        album,
-                    )
-                    .await?;
-                }
-                Ok(discovery)
+                self.discover_page_kind(
+                    kind,
+                    query,
+                    target,
+                    context,
+                    |provider, search, context| async move {
+                        provider.search_albums(&search, &context).await
+                    },
+                    |catalogue, sources, album| async move {
+                        super::materialize::materialize_album(&catalogue, &sources, &album).await?;
+                        Ok(())
+                    },
+                )
+                .await
             }
             SearchKind::Artists => {
-                let (artists, discovery) = self
-                    .discover_page_kind(
-                        query,
-                        target,
-                        context,
-                        |provider, search, context| async move {
-                            provider.search_artists(&search, &context).await
-                        },
-                    )
-                    .await?;
-                for artist in &artists {
-                    super::materialize::materialize_artist(
-                        &self.catalogue,
-                        &self.source_lookup,
-                        artist,
-                    )
-                    .await?;
-                }
-                Ok(discovery)
+                self.discover_page_kind(
+                    kind,
+                    query,
+                    target,
+                    context,
+                    |provider, search, context| async move {
+                        provider.search_artists(&search, &context).await
+                    },
+                    |catalogue, sources, artist| async move {
+                        super::materialize::materialize_artist(&catalogue, &sources, &artist)
+                            .await?;
+                        Ok(())
+                    },
+                )
+                .await
             }
         }
     }
@@ -461,7 +468,10 @@ impl SearchService {
         run_provider_tasks(
             self.providers.clone(),
             Arc::clone(&self.concurrency),
+            Arc::clone(&self.outstanding),
             self.search_budget,
+            self.response_budget,
+            SearchKind::Tracks,
             move |provider| {
                 let query = query.clone();
                 let context = context.clone();
@@ -475,40 +485,62 @@ impl SearchService {
         .await
     }
 
-    async fn discover_page_kind<T, F, Fut>(
+    async fn discover_page_kind<P, F, Fut, M, MFut>(
         &self,
+        kind: SearchKind,
         query: &SearchQuery,
         target: u32,
         context: &RequestContext,
         fetch: F,
-    ) -> Result<(Vec<T>, Discovery), CatalogueError>
+        materialize: M,
+    ) -> Result<Discovery, CatalogueError>
     where
-        T: Send + 'static,
+        P: Send + 'static,
         F: Fn(Arc<dyn CatalogueProvider>, CatalogueSearch, RequestContext) -> Fut
             + Clone
             + Send
             + Sync
             + 'static,
-        Fut: Future<Output = Result<super::domain::CataloguePage<T>, ProviderError>>
+        Fut: Future<Output = Result<super::domain::CataloguePage<P>, ProviderError>>
             + Send
             + 'static,
+        M: Fn(Arc<dyn CatalogueWrite>, Arc<dyn SourceLookup>, P) -> MFut
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        MFut: Future<Output = Result<(), CatalogueError>> + Send + 'static,
     {
         let query = query.clone();
         let context = context.clone();
-        run_provider_tasks(
+        let catalogue = Arc::clone(&self.catalogue);
+        let sources = Arc::clone(&self.source_lookup);
+        let (_, discovery) = run_provider_tasks(
             self.providers.clone(),
             Arc::clone(&self.concurrency),
+            Arc::clone(&self.outstanding),
             self.search_budget,
+            self.response_budget,
+            kind,
             move |provider| {
                 let query = query.clone();
                 let context = context.clone();
+                let catalogue = Arc::clone(&catalogue);
+                let sources = Arc::clone(&sources);
                 let fetch = fetch.clone();
+                let materialize = materialize.clone();
                 async move {
-                    fetch_catalogue_pages(provider, &query, target, &context, fetch).await
+                    let page =
+                        fetch_catalogue_pages(provider, &query, target, &context, fetch).await?;
+                    for item in page {
+                        materialize(Arc::clone(&catalogue), Arc::clone(&sources), item).await?;
+                    }
+                    Ok(Vec::<()>::new())
                 }
             },
         )
-        .await
+        .await?;
+        Ok(discovery)
     }
 
     async fn search_source(
@@ -546,7 +578,10 @@ impl SearchService {
 async fn run_provider_tasks<T, F, Fut>(
     providers: Vec<Arc<dyn CatalogueProvider>>,
     concurrency: Arc<Semaphore>,
-    budget: Duration,
+    outstanding: Arc<Semaphore>,
+    search_budget: Duration,
+    response_budget: Duration,
+    kind: SearchKind,
     operation: F,
 ) -> Result<(Vec<T>, Discovery), CatalogueError>
 where
@@ -554,41 +589,83 @@ where
     F: Fn(Arc<dyn CatalogueProvider>) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Result<Vec<T>, CatalogueError>> + Send + 'static,
 {
-    let mut tasks = JoinSet::new();
+    let provider_count = providers.len();
+    let deadline = tokio::time::Instant::now() + response_budget;
+    let (finished_tx, mut finished_rx) =
+        mpsc::unbounded_channel::<(usize, Result<Vec<T>, CatalogueError>)>();
+    let mut acknowledgements = (0..provider_count)
+        .map(|_| None)
+        .collect::<Vec<Option<oneshot::Sender<()>>>>();
+    let mut admitted = 0usize;
     for (index, provider) in providers.iter().cloned().enumerate() {
+        let Ok(outstanding_permit) = Arc::clone(&outstanding).try_acquire_owned() else {
+            tracing::debug!(kind = ?kind, "catalogue provider is pending: outstanding work is saturated");
+            continue;
+        };
+        admitted += 1;
         let permit = Arc::clone(&concurrency);
+        let finished = finished_tx.clone();
+        let (acknowledge, acknowledged) = oneshot::channel();
+        acknowledgements[index] = Some(acknowledge);
         let operation = operation.clone();
-        tasks.spawn(async move {
-            let provider_name = std::any::type_name_of_val(provider.as_ref());
-            let span = tracing::info_span!("catalogue_provider", provider = provider_name);
+        let provider_name = std::any::type_name_of_val(provider.as_ref());
+        let span =
+            tracing::info_span!("catalogue_provider", provider = provider_name, kind = ?kind);
+        let provider_deadline = tokio::time::Instant::now() + search_budget;
+        tokio::spawn(
             async move {
-                let _permit = permit
-                    .acquire_owned()
-                    .await
-                    .expect("catalogue concurrency semaphore never closes");
-                match tokio::time::timeout(budget, operation(provider)).await {
-                    Ok(result) => (index, result),
-                    Err(_) => {
-                        tracing::warn!("catalogue source exceeded its provider budget");
-                        (
-                            index,
-                            Err(CatalogueError::Provider(ProviderError::ProviderUnavailable)),
-                        )
+                let result = match tokio::time::timeout_at(provider_deadline, async {
+                    let _permit = permit
+                        .acquire_owned()
+                        .await
+                        .expect("catalogue concurrency semaphore never closes");
+                    if tokio::time::Instant::now() >= provider_deadline {
+                        return Err(CatalogueError::Provider(ProviderError::ProviderUnavailable));
                     }
+                    operation(provider).await
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(CatalogueError::Provider(ProviderError::ProviderUnavailable)),
+                };
+                drop(outstanding_permit);
+                let outcome = result.as_ref().err().map(failure_outcome);
+                let delivered = finished.send((index, result)).is_ok();
+                if delivered && acknowledged.await.is_ok() {
+                    return;
+                }
+                if let Some(outcome) = outcome {
+                    tracing::warn!(
+                        kind = ?kind,
+                        outcome,
+                        "catalogue source failed after the response budget",
+                    );
                 }
             }
-            .instrument(span)
-            .await
-        });
+            .instrument(span),
+        );
     }
+    drop(finished_tx);
 
-    let mut results = (0..providers.len())
+    let mut results = (0..provider_count)
         .map(|_| None)
         .collect::<Vec<Option<Result<Vec<T>, CatalogueError>>>>();
-    while let Some(result) = tasks.join_next().await {
-        let (index, result) = result.expect("search tasks never panic");
-        results[index] = Some(result);
+    let mut finished = 0usize;
+    while finished < admitted {
+        match tokio::time::timeout_at(deadline, finished_rx.recv()).await {
+            Ok(Some((index, result))) => {
+                results[index] = Some(result);
+                finished += 1;
+                if let Some(acknowledge) = acknowledgements[index].take() {
+                    let _ = acknowledge.send(());
+                }
+            }
+            Ok(None) | Err(_) => break,
+        }
     }
+    finished_rx.close();
+    drop(acknowledgements);
 
     let mut items = Vec::new();
     let mut first_error = None;
@@ -622,8 +699,22 @@ where
             first_error: access_error.or(first_error),
             any_success,
             tracks: None,
+            pending: provider_count - finished,
         },
     ))
+}
+
+fn failure_outcome(error: &CatalogueError) -> &'static str {
+    match error {
+        CatalogueError::Provider(ProviderError::Access) => "access",
+        CatalogueError::Provider(ProviderError::CredentialsRejected) => "credentials_rejected",
+        CatalogueError::Provider(ProviderError::UnsupportedProvider) => "unsupported",
+        CatalogueError::Provider(ProviderError::SourceNotFound) => "source_not_found",
+        CatalogueError::Provider(ProviderError::ProviderUnavailable) => "provider_unavailable",
+        CatalogueError::Provider(_) => "provider_error",
+        CatalogueError::Repository(_) => "repository",
+        CatalogueError::Invalid(_) => "invalid",
+    }
 }
 
 async fn fetch_catalogue_pages<T, F, Fut>(
@@ -770,8 +861,10 @@ where
 }
 
 const DEFAULT_SEARCH_BUDGET: Duration = Duration::from_secs(45);
+const DEFAULT_RESPONSE_BUDGET: Duration = Duration::from_secs(3);
 const MAX_SOURCE_CONCURRENCY: usize = 4;
-const PROVIDER_PAGE_LIMIT: u32 = 25;
+const MAX_OUTSTANDING_TASKS: usize = MAX_SOURCE_CONCURRENCY * 4;
+pub(super) const PROVIDER_PAGE_LIMIT: u32 = 25;
 const PROVIDER_WINDOW_DIVISOR: u32 = 4;
 
 #[cfg(all(test, feature = "postgres-integration"))]

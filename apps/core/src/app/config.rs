@@ -59,6 +59,10 @@ const YOUTUBE_MEDIA_SUFFIX: &str = "WHIO_YOUTUBE_MEDIA_SUFFIX";
 const ARTWORK_HOST_SUFFIXES: &str = "WHIO_ARTWORK_HOST_SUFFIXES";
 const SOURCE_TAGS: &str = "WHIO_SOURCE_TAGS";
 const MEDIA_ROOTS: &str = "WHIO_MEDIA_ROOTS";
+const SEARCH_RESPONSE_BUDGET_MS: &str = "WHIO_SEARCH_RESPONSE_BUDGET_MS";
+const DEFAULT_SEARCH_RESPONSE_BUDGET_MS: u64 = 3_000;
+const MIN_SEARCH_RESPONSE_BUDGET_MS: u64 = 100;
+const MAX_SEARCH_RESPONSE_BUDGET_MS: u64 = 60_000;
 
 const WORKER_QUEUES: &str = "WHIO_WORKER_QUEUES";
 const WORKER_BIND_ADDRESS: &str = "WHIO_WORKER_BIND_ADDRESS";
@@ -110,6 +114,7 @@ pub(crate) struct Config {
     pub(crate) artwork_host_suffixes: Vec<String>,
     pub(crate) source_tags: SourceTags,
     pub(crate) dedup_mode: crate::features::music_library::catalogue::DedupMode,
+    pub(crate) search_response_budget: Duration,
     pub(crate) libraries: Vec<crate::features::music_library::library::LibraryRegistration>,
     pub(crate) worker: WorkerConfig,
 }
@@ -407,6 +412,29 @@ impl Config {
             }
         };
 
+        let search_response_budget = {
+            let raw = vars
+                .get(SEARCH_RESPONSE_BUDGET_MS)
+                .map(String::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| DEFAULT_SEARCH_RESPONSE_BUDGET_MS.to_string());
+            let millis = raw.parse::<u64>().map_err(|_| {
+                invalid(
+                    SEARCH_RESPONSE_BUDGET_MS,
+                    &raw,
+                    "must be a whole number of milliseconds",
+                )
+            })?;
+            if !(MIN_SEARCH_RESPONSE_BUDGET_MS..=MAX_SEARCH_RESPONSE_BUDGET_MS).contains(&millis) {
+                return Err(invalid(
+                    SEARCH_RESPONSE_BUDGET_MS,
+                    &raw,
+                    "must be between 100 and 60000 milliseconds",
+                ));
+            }
+            Duration::from_millis(millis)
+        };
+
         let worker = WorkerConfig {
             queues: match vars.get(WORKER_QUEUES) {
                 None => Vec::new(),
@@ -507,6 +535,7 @@ impl Config {
             artwork_host_suffixes,
             source_tags,
             libraries,
+            search_response_budget,
             worker,
         })
     }
@@ -863,6 +892,39 @@ mod tests {
             DedupMode::Shadow
         );
         assert!(parse_config(&[("WHIO_DEDUP_MODE", "unknown")]).is_err());
+    }
+
+    #[test]
+    fn search_response_budget_defaults_and_rejects_out_of_range_values() {
+        assert_eq!(
+            parse_config(&[]).unwrap().search_response_budget,
+            Duration::from_millis(3_000)
+        );
+        assert_eq!(
+            parse_config(&[(SEARCH_RESPONSE_BUDGET_MS, "100")])
+                .unwrap()
+                .search_response_budget,
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            parse_config(&[(SEARCH_RESPONSE_BUDGET_MS, "60000")])
+                .unwrap()
+                .search_response_budget,
+            Duration::from_millis(60_000)
+        );
+
+        for value in ["0", "99", "60001", "later"] {
+            assert!(
+                matches!(
+                    parse_config(&[(SEARCH_RESPONSE_BUDGET_MS, value)]),
+                    Err(ConfigError::Invalid {
+                        name: SEARCH_RESPONSE_BUDGET_MS,
+                        ..
+                    })
+                ),
+                "{value}"
+            );
+        }
     }
 
     #[test]

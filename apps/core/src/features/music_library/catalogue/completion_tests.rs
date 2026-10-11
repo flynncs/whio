@@ -672,6 +672,60 @@ async fn text_list_pages_discover_before_reading_and_widen_each_scope(pool: sqlx
     );
 }
 
+#[sqlx::test]
+async fn a_list_request_discovers_one_provider_page(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let completion = list_completion(
+        &repository,
+        Arc::new(ListSearchProvider {
+            outcome: ListSearchOutcome::Results,
+            calls: Arc::clone(&calls),
+        }),
+    );
+    let context = RequestContext::new(crate::platform::request::RequestId::generate());
+    let limit = PageLimit::new(100).unwrap();
+
+    completion
+        .album_page(
+            0,
+            limit,
+            AlbumOrder::Name,
+            &AlbumListFilter::new().with_name(selector("beabadoobee")),
+            None,
+            &context,
+        )
+        .await
+        .unwrap();
+    completion
+        .artist_page(
+            0,
+            limit,
+            ArtistSort::Name,
+            &ArtistListFilter::new().with_name(selector("bea")),
+            None,
+            &context,
+        )
+        .await
+        .unwrap();
+    completion
+        .track_page(
+            0,
+            limit,
+            TrackOrder::Title,
+            &TrackListFilter::new().with_title(selector("glue")),
+            None,
+            &context,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["albums:beabadoobee:25", "artists:bea:25", "tracks:glue:25"]
+    );
+}
+
 struct FullPageTrackProvider {
     offsets: Arc<Mutex<Vec<u32>>>,
 }
@@ -702,7 +756,7 @@ impl CatalogueProvider for FullPageTrackProvider {
 }
 
 #[sqlx::test]
-async fn deep_text_track_page_stops_provider_offsets_at_the_search_bound(pool: sqlx::PgPool) {
+async fn deep_text_track_page_discovers_one_provider_page(pool: sqlx::PgPool) {
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let offsets = Arc::new(Mutex::new(Vec::new()));
     let completion = list_completion(
@@ -727,19 +781,9 @@ async fn deep_text_track_page_stops_provider_offsets_at_the_search_bound(pool: s
         .unwrap()
         .unwrap();
 
-    assert_eq!(
-        page.total(),
-        crate::features::music_library::catalogue::MAX_SEARCH_OFFSET
-    );
+    assert_eq!(page.total(), 25);
     assert!(page.items().is_empty());
-    let offsets = offsets.lock().unwrap();
-    assert_eq!(offsets.len(), 40);
-    assert!(
-        offsets.iter().all(|offset| {
-            *offset <= crate::features::music_library::catalogue::MAX_SEARCH_OFFSET
-        })
-    );
-    assert_eq!(offsets.last(), Some(&975));
+    assert_eq!(offsets.lock().unwrap().as_slice(), [0]);
 }
 
 #[sqlx::test]

@@ -5,7 +5,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc as StdArc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -13,17 +13,19 @@ use std::{
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use tokio::sync::{Semaphore, mpsc};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::{Layer, layer::SubscriberExt};
 
 use super::*;
 use crate::{
     features::music_library::catalogue::{
-        ArtistListFilter, CatalogueCandidate, SearchLimit, SearchOffset, SearchQuery,
-        SearchRequest, SearchWindow, SearchWindows,
+        ArtistListFilter, CatalogueCandidate, CataloguePage, SearchKind, SearchLimit, SearchOffset,
+        SearchQuery, SearchRequest, SearchWindow, SearchWindows,
     },
     features::music_library::{
         domain::{
-            AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity,
-            SourceScope, Track, TrackMetadata,
+            Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, ProviderId,
+            SourceIdentity, SourceScope, Track, TrackMetadata,
         },
         storage::contracts::TrackRepositoryError,
         storage::postgres::PostgresTrackRepository,
@@ -1836,4 +1838,1172 @@ fn the_default_search_budget_is_unchanged() {
         Vec::new(),
     );
     assert_eq!(with_providers.search_budget, Duration::from_secs(45));
+}
+
+#[test]
+fn the_default_response_budget_is_unchanged() {
+    let store = Arc::new(FailingTrackRepository);
+    let bare = SearchService::new(
+        Arc::clone(&store) as Arc<dyn LibraryRead>,
+        Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&store) as Arc<dyn SourceLookup>,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+    );
+    assert_eq!(bare.response_budget, Duration::from_secs(3));
+    let with_providers = SearchService::with_providers(
+        Arc::clone(&store) as Arc<dyn LibraryRead>,
+        Arc::clone(&store) as Arc<dyn CatalogueWrite>,
+        Arc::clone(&store) as Arc<dyn SourceLookup>,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        Vec::new(),
+    );
+    assert_eq!(with_providers.response_budget, Duration::from_secs(3));
+}
+
+const RESPONSE_BUDGET: Duration = Duration::from_secs(3);
+const PROVIDER_BUDGET: Duration = Duration::from_secs(45);
+const HANG: Duration = Duration::from_secs(1);
+const EDGE: Duration = Duration::from_millis(10);
+
+async fn response_at_budget<T>(task: &mut tokio::task::JoinHandle<Result<T, CatalogueError>>) -> T {
+    tokio::time::advance(RESPONSE_BUDGET - EDGE).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), &mut *task)
+            .await
+            .is_err(),
+        "the response returned before the response budget"
+    );
+    tokio::time::advance(EDGE - Duration::from_millis(1)).await;
+    tokio::time::timeout(HANG, &mut *task)
+        .await
+        .expect("the response did not return at the response budget")
+        .expect("the response task joins")
+        .expect("the response is a success")
+}
+
+async fn wait_for_materialised(
+    receiver: &mut mpsc::UnboundedReceiver<Materialised>,
+) -> Materialised {
+    tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("materialisation before the hang deadline")
+        .expect("a materialisation signal")
+}
+
+async fn wait_for_settled(receiver: &mut mpsc::UnboundedReceiver<()>) {
+    tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("settlement before the hang deadline")
+        .expect("a settlement signal");
+}
+
+enum Materialised {
+    Track(TrackId),
+    Album,
+    Artist,
+}
+
+struct MemoryStore {
+    hits: Mutex<Vec<SearchHit>>,
+    albums: Mutex<Vec<Album>>,
+    artists: Mutex<Vec<Artist>>,
+    materialized: mpsc::UnboundedSender<Materialised>,
+    fail_tracks: AtomicBool,
+    fail_albums: AtomicBool,
+}
+
+impl MemoryStore {
+    fn new(materialized: mpsc::UnboundedSender<Materialised>) -> Self {
+        Self {
+            hits: Mutex::new(Vec::new()),
+            albums: Mutex::new(Vec::new()),
+            artists: Mutex::new(Vec::new()),
+            materialized,
+            fail_tracks: AtomicBool::new(false),
+            fail_albums: AtomicBool::new(false),
+        }
+    }
+
+    fn insert(&self, hit: SearchHit) {
+        self.hits.lock().push(hit);
+    }
+
+    fn by_title(&self, title: &str) -> Vec<SearchHit> {
+        self.hits
+            .lock()
+            .iter()
+            .filter(|hit| hit.track().title() == title)
+            .cloned()
+            .collect()
+    }
+
+    fn album_titles(&self) -> Vec<String> {
+        self.albums
+            .lock()
+            .iter()
+            .map(|album| album.title().to_owned())
+            .collect()
+    }
+
+    fn artist_names(&self) -> Vec<String> {
+        self.artists
+            .lock()
+            .iter()
+            .map(|artist| artist.name().to_owned())
+            .collect()
+    }
+
+    fn fail_tracks(&self) {
+        self.fail_tracks.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_albums(&self) {
+        self.fail_albums.store(true, Ordering::SeqCst);
+    }
+
+    fn store(
+        &self,
+        source: SourceIdentity,
+        metadata: TrackMetadata,
+    ) -> Result<Track, TrackRepositoryError> {
+        if self.fail_tracks.load(Ordering::SeqCst) {
+            return Err(TrackRepositoryError::Unavailable);
+        }
+        let track = Track::new(TrackId::new(), metadata);
+        self.hits
+            .lock()
+            .push(SearchHit::new(track.clone(), None, vec![source]));
+        let _ = self
+            .materialized
+            .send(Materialised::Track(track.id().clone()));
+        Ok(track)
+    }
+}
+
+#[async_trait]
+impl CatalogueWrite for MemoryStore {
+    async fn get_or_create(
+        &self,
+        source: SourceIdentity,
+        metadata: TrackMetadata,
+    ) -> Result<Track, TrackRepositoryError> {
+        self.store(source, metadata)
+    }
+
+    async fn get_or_create_provider(
+        &self,
+        source: SourceIdentity,
+        metadata: TrackMetadata,
+    ) -> Result<Track, TrackRepositoryError> {
+        self.store(source, metadata)
+    }
+
+    async fn resolve_or_create_album(
+        &self,
+        metadata: &AlbumMetadata,
+    ) -> Result<Album, TrackRepositoryError> {
+        if self.fail_albums.load(Ordering::SeqCst) {
+            return Err(TrackRepositoryError::Unavailable);
+        }
+        let album = Album::new(
+            AlbumId::new(),
+            metadata.title().to_owned(),
+            None,
+            metadata.year(),
+            metadata.release_type().map(str::to_owned),
+            metadata.label().map(str::to_owned),
+            metadata.musicbrainz_release_group_id().map(str::to_owned),
+            metadata.musicbrainz_release_id().map(str::to_owned),
+        )
+        .map_err(|_| TrackRepositoryError::InvalidData)?;
+        self.albums.lock().push(album.clone());
+        let _ = self.materialized.send(Materialised::Album);
+        Ok(album)
+    }
+
+    async fn resolve_or_create_artist(
+        &self,
+        credit: &ArtistCredit,
+    ) -> Result<Artist, TrackRepositoryError> {
+        let artist = Artist::new(
+            ArtistId::new(),
+            credit.name().to_owned(),
+            None,
+            credit.musicbrainz_artist_id().map(str::to_owned),
+        )
+        .map_err(|_| TrackRepositoryError::InvalidData)?;
+        self.artists.lock().push(artist.clone());
+        let _ = self.materialized.send(Materialised::Artist);
+        Ok(artist)
+    }
+
+    async fn add_album_track(
+        &self,
+        _album_id: &AlbumId,
+        _track_id: &TrackId,
+        _membership: &AlbumTrack,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl LibraryRead for MemoryStore {
+    async fn find_track(&self, track_id: &TrackId) -> Result<Option<Track>, TrackRepositoryError> {
+        Ok(self
+            .hits
+            .lock()
+            .iter()
+            .find(|hit| hit.track().id() == track_id)
+            .map(|hit| hit.track().clone()))
+    }
+
+    async fn page_tracks(
+        &self,
+        _offset: u32,
+        _limit: u32,
+        _order: crate::features::music_library::domain::TrackOrder,
+        _filter: &crate::features::music_library::domain::TrackListFilter,
+        _user: Option<Uuid>,
+    ) -> Result<crate::features::music_library::domain::TrackPage, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    async fn track_views(
+        &self,
+        _track_ids: &[TrackId],
+        _user: Option<Uuid>,
+    ) -> Result<Vec<crate::features::music_library::domain::TrackView>, TrackRepositoryError> {
+        Ok(Vec::new())
+    }
+
+    async fn search_tracks(
+        &self,
+        query: &str,
+        limit: u32,
+        _user: Option<Uuid>,
+    ) -> Result<Vec<SearchHit>, TrackRepositoryError> {
+        let needle = query.to_lowercase();
+        Ok(self
+            .hits
+            .lock()
+            .iter()
+            .filter(|hit| {
+                hit.track().title().to_lowercase().contains(&needle)
+                    || hit
+                        .track()
+                        .artists()
+                        .iter()
+                        .any(|artist| artist.name().to_lowercase().contains(&needle))
+            })
+            .take(limit as usize)
+            .cloned()
+            .collect())
+    }
+}
+
+#[async_trait]
+impl SourceLookup for MemoryStore {
+    async fn find_sources(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
+        Ok(self
+            .hits
+            .lock()
+            .iter()
+            .find(|hit| hit.track().id() == track_id)
+            .map(|hit| hit.sources().to_vec())
+            .unwrap_or_default())
+    }
+}
+
+#[async_trait]
+impl StateStore for MemoryStore {}
+
+#[async_trait]
+impl DuplicateReport for MemoryStore {}
+
+fn owned_hit(title: &str, artist: &str) -> SearchHit {
+    let track = Track::new(
+        TrackId::new(),
+        TrackMetadata::from_names(title.to_owned(), vec![artist.to_owned()], Some(1_000)).unwrap(),
+    );
+    SearchHit::new(track, None, vec![local_source_at("memory")])
+}
+
+fn album_metadata() -> AlbumMetadata {
+    AlbumMetadata::new("Beatopia".to_owned())
+        .unwrap()
+        .with_provider(Some(provider_source_for_test("album-1")))
+}
+
+fn artist_credit() -> ArtistCredit {
+    ArtistCredit::new("beabadoobee".to_owned(), None)
+        .unwrap()
+        .with_provider(Some(provider_source_for_test("artist-1")))
+}
+
+fn memory_service(
+    store: &StdArc<MemoryStore>,
+    providers: Vec<StdArc<dyn CatalogueProvider>>,
+) -> SearchService {
+    SearchService::with_providers(
+        StdArc::clone(store) as StdArc<dyn LibraryRead>,
+        StdArc::clone(store) as StdArc<dyn CatalogueWrite>,
+        StdArc::clone(store) as StdArc<dyn SourceLookup>,
+        StdArc::clone(store) as StdArc<dyn StateStore>,
+        providers,
+    )
+}
+
+fn held_service(
+    store: &StdArc<MemoryStore>,
+    providers: Vec<StdArc<dyn CatalogueProvider>>,
+) -> SearchService {
+    memory_service(store, providers).with_response_budget(RESPONSE_BUDGET)
+}
+
+fn track_search() -> SearchRequest {
+    SearchRequest::new(
+        SearchQuery::new("Daft Punk".to_owned()).unwrap(),
+        SearchWindows::new(Some(window(10, 0)), None, None),
+        ArtistListFilter::default(),
+    )
+}
+
+struct Gate {
+    started: mpsc::UnboundedSender<()>,
+    finished: Option<mpsc::UnboundedSender<()>>,
+    release: StdArc<Semaphore>,
+    gated_calls: usize,
+    calls: AtomicUsize,
+    active: AtomicUsize,
+    maximum: AtomicUsize,
+}
+
+struct GateCall(Option<mpsc::UnboundedSender<()>>);
+
+impl Drop for GateCall {
+    fn drop(&mut self) {
+        if let Some(finished) = &self.0 {
+            let _ = finished.send(());
+        }
+    }
+}
+
+impl Gate {
+    fn new(
+        started: mpsc::UnboundedSender<()>,
+        release: StdArc<Semaphore>,
+        gated_calls: usize,
+    ) -> Self {
+        Self {
+            started,
+            finished: None,
+            release,
+            gated_calls,
+            calls: AtomicUsize::new(0),
+            active: AtomicUsize::new(0),
+            maximum: AtomicUsize::new(0),
+        }
+    }
+
+    fn with_finished(mut self, finished: mpsc::UnboundedSender<()>) -> Self {
+        self.finished = Some(finished);
+        self
+    }
+
+    async fn enter(&self) {
+        let _call = GateCall(self.finished.clone());
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.maximum.fetch_max(active, Ordering::SeqCst);
+        let _ = self.started.send(());
+        if call < self.gated_calls {
+            self.release.clone().acquire_owned().await.unwrap().forget();
+        }
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn maximum(&self) -> usize {
+        self.maximum.load(Ordering::SeqCst)
+    }
+}
+
+struct HeldTrackProvider {
+    gate: StdArc<Gate>,
+    responses: Mutex<VecDeque<Result<Vec<CatalogueCandidate>, ProviderError>>>,
+    settled: Option<mpsc::UnboundedSender<()>>,
+}
+
+impl HeldTrackProvider {
+    fn new(
+        gate: StdArc<Gate>,
+        responses: Vec<Result<Vec<CatalogueCandidate>, ProviderError>>,
+    ) -> Self {
+        Self {
+            gate,
+            responses: Mutex::new(responses.into()),
+            settled: None,
+        }
+    }
+
+    fn with_settled(mut self, settled: mpsc::UnboundedSender<()>) -> Self {
+        self.settled = Some(settled);
+        self
+    }
+}
+
+#[async_trait]
+impl CatalogueProvider for HeldTrackProvider {
+    async fn search_tracks(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        self.gate.enter().await;
+        let result = self.responses.lock().pop_front().unwrap_or(Ok(Vec::new()));
+        if let Some(settled) = &self.settled {
+            let _ = settled.send(());
+        }
+        result
+    }
+}
+
+struct HeldAlbumProvider {
+    gate: StdArc<Gate>,
+    responses: Mutex<VecDeque<Result<CataloguePage<AlbumMetadata>, ProviderError>>>,
+    settled: Option<mpsc::UnboundedSender<()>>,
+}
+
+impl HeldAlbumProvider {
+    fn new(
+        gate: StdArc<Gate>,
+        responses: Vec<Result<CataloguePage<AlbumMetadata>, ProviderError>>,
+    ) -> Self {
+        Self {
+            gate,
+            responses: Mutex::new(responses.into()),
+            settled: None,
+        }
+    }
+
+    fn with_settled(mut self, settled: mpsc::UnboundedSender<()>) -> Self {
+        self.settled = Some(settled);
+        self
+    }
+}
+
+#[async_trait]
+impl CatalogueProvider for HeldAlbumProvider {
+    async fn search_tracks(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn search_albums(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<CataloguePage<AlbumMetadata>, ProviderError> {
+        self.gate.enter().await;
+        let result = self
+            .responses
+            .lock()
+            .pop_front()
+            .unwrap_or(Ok(CataloguePage::new(Vec::new(), None)));
+        if let Some(settled) = &self.settled {
+            let _ = settled.send(());
+        }
+        result
+    }
+}
+
+struct HeldArtistProvider {
+    gate: StdArc<Gate>,
+    responses: Mutex<VecDeque<Result<CataloguePage<ArtistCredit>, ProviderError>>>,
+    settled: Option<mpsc::UnboundedSender<()>>,
+}
+
+impl HeldArtistProvider {
+    fn new(
+        gate: StdArc<Gate>,
+        responses: Vec<Result<CataloguePage<ArtistCredit>, ProviderError>>,
+    ) -> Self {
+        Self {
+            gate,
+            responses: Mutex::new(responses.into()),
+            settled: None,
+        }
+    }
+}
+
+#[async_trait]
+impl CatalogueProvider for HeldArtistProvider {
+    async fn search_tracks(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn search_artists(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<CataloguePage<ArtistCredit>, ProviderError> {
+        self.gate.enter().await;
+        let result = self
+            .responses
+            .lock()
+            .pop_front()
+            .unwrap_or(Ok(CataloguePage::new(Vec::new(), None)));
+        if let Some(settled) = &self.settled {
+            let _ = settled.send(());
+        }
+        result
+    }
+}
+
+#[derive(Clone, Default)]
+struct LogCapture {
+    entries: StdArc<Mutex<Vec<String>>>,
+    recorded: StdArc<tokio::sync::Notify>,
+}
+
+impl LogCapture {
+    fn entries(&self) -> Vec<String> {
+        self.entries.lock().clone()
+    }
+
+    fn entries_matching(&self, needle: &str) -> Vec<String> {
+        self.entries()
+            .into_iter()
+            .filter(|entry| entry.contains(needle))
+            .collect()
+    }
+
+    async fn recorded(&self, needle: &str) {
+        loop {
+            let notified = self.recorded.notified();
+            if !self.entries_matching(needle).is_empty() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct FieldVisitor {
+    entries: Vec<String>,
+}
+
+impl Visit for FieldVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.entries.push(format!("{}={:?}", field.name(), value));
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for LogCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = FieldVisitor {
+            entries: Vec::new(),
+        };
+        event.record(&mut visitor);
+        self.entries.lock().push(format!(
+            "{} {}",
+            event.metadata().level(),
+            visitor.entries.join(" ")
+        ));
+        self.recorded.notify_waiters();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_provider_inside_the_budget_is_unchanged() {
+    let (materialized, _receiver) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let catalogue = memory_service(
+        &store,
+        vec![provider(StubProvider::new(vec![Ok(vec![candidate(
+            "ytm-1", "YTM Song",
+        )])]))],
+    );
+
+    let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
+
+    assert_eq!(outcome.tracks.len(), 1);
+    assert_eq!(outcome.tracks[0].track().title(), "YTM Song");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_provider_returns_library_results_at_the_budget() {
+    let (materialized, mut materialized_rx) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    store.insert(owned_hit("Zebra", "Daft Punk"));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(Gate::new(started_tx, StdArc::clone(&release), 1));
+    let held = HeldTrackProvider::new(gate, vec![Ok(vec![candidate("ytm-1", "YTM Song")])]);
+    let catalogue = StdArc::new(held_service(&store, vec![provider(held)]));
+    let request = track_search();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let mut task =
+        tokio::spawn(async move { service.search(&request, None, &request_context).await });
+    wait_for_provider_start(&mut started_rx).await;
+
+    let outcome = response_at_budget(&mut task).await;
+
+    assert_eq!(outcome.tracks.len(), 1);
+    assert_eq!(outcome.tracks[0].track().title(), "Zebra");
+    assert!(is_owned(outcome.tracks[0].sources()));
+
+    release.add_permits(1);
+    assert!(matches!(
+        wait_for_materialised(&mut materialized_rx).await,
+        Materialised::Track(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_provider_materialises_after_the_response() {
+    let (materialized, mut materialized_rx) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(Gate::new(started_tx, StdArc::clone(&release), 1));
+    let held = HeldTrackProvider::new(gate, vec![Ok(vec![candidate("ytm-1", "YTM Song")])]);
+    let catalogue = StdArc::new(held_service(&store, vec![provider(held)]));
+    let request = track_search();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let mut task =
+        tokio::spawn(async move { service.search(&request, None, &request_context).await });
+    wait_for_provider_start(&mut started_rx).await;
+    assert!(response_at_budget(&mut task).await.tracks.is_empty());
+
+    release.add_permits(1);
+    let stored = wait_for_materialised(&mut materialized_rx).await;
+
+    let Materialised::Track(stored) = stored else {
+        panic!("expected a materialised track");
+    };
+    let hits = store.by_title("YTM Song");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].track().id(), &stored);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_next_search_reads_background_results() {
+    let (materialized, mut materialized_rx) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(Gate::new(started_tx, StdArc::clone(&release), 1));
+    let held = HeldTrackProvider::new(
+        gate,
+        vec![Ok(vec![candidate("ytm-1", "YTM Song")]), Ok(Vec::new())],
+    );
+    let catalogue = StdArc::new(held_service(&store, vec![provider(held)]));
+    let request = track_search();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let mut task =
+        tokio::spawn(async move { service.search(&request, None, &request_context).await });
+    wait_for_provider_start(&mut started_rx).await;
+    assert!(response_at_budget(&mut task).await.tracks.is_empty());
+
+    release.add_permits(1);
+    wait_for_materialised(&mut materialized_rx).await;
+
+    let outcome = catalogue.search(&search(), None, &context()).await.unwrap();
+
+    assert_eq!(outcome.tracks.len(), 1);
+    assert_eq!(outcome.tracks[0].track().title(), "YTM Song");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_provider_failure_is_logged_exactly_once() {
+    let (materialized, _receiver) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(Gate::new(started_tx, StdArc::clone(&release), 1));
+    let held = HeldTrackProvider::new(gate, vec![Err(ProviderError::ProviderUnavailable)])
+        .with_settled(settled_tx);
+    let catalogue = StdArc::new(held_service(&store, vec![provider(held)]));
+    let capture = LogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+    let request = track_search();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let mut task =
+        tokio::spawn(async move { service.search(&request, None, &request_context).await });
+    wait_for_provider_start(&mut started_rx).await;
+    assert!(response_at_budget(&mut task).await.tracks.is_empty());
+
+    release.add_permits(1);
+    wait_for_settled(&mut settled_rx).await;
+
+    let warns = capture.entries_matching("catalogue source failed after the response budget");
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    assert!(warns[0].starts_with("WARN "), "{warns:?}");
+    assert!(warns[0].contains("kind=Tracks"), "{warns:?}");
+    assert!(
+        warns[0].contains("outcome=\"provider_unavailable\""),
+        "{warns:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_repository_error_is_logged_exactly_once() {
+    let (materialized, _receiver) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    store.fail_tracks();
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(Gate::new(started_tx, StdArc::clone(&release), 1));
+    let held = HeldTrackProvider::new(gate, vec![Ok(vec![candidate("ytm-1", "YTM Song")])])
+        .with_settled(settled_tx);
+    let catalogue = StdArc::new(held_service(&store, vec![provider(held)]));
+    let capture = LogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+    let request = track_search();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let mut task =
+        tokio::spawn(async move { service.search(&request, None, &request_context).await });
+    wait_for_provider_start(&mut started_rx).await;
+    assert!(response_at_budget(&mut task).await.tracks.is_empty());
+
+    release.add_permits(1);
+    wait_for_settled(&mut settled_rx).await;
+
+    let warns = capture.entries_matching("catalogue source failed after the response budget");
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    assert!(warns[0].starts_with("WARN "), "{warns:?}");
+    assert!(warns[0].contains("outcome=\"repository\""), "{warns:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_invalid_error_is_logged_exactly_once() {
+    let capture = LogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+    let release = StdArc::new(Semaphore::new(0));
+    let operation_release = StdArc::clone(&release);
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
+    let operation = move |_provider: StdArc<dyn CatalogueProvider>| {
+        let release = StdArc::clone(&operation_release);
+        let started = started_tx.clone();
+        let settled = settled_tx.clone();
+        async move {
+            let _ = started.send(());
+            release.acquire_owned().await.unwrap().forget();
+            let _ = settled.send(());
+            Err::<Vec<()>, CatalogueError>(CatalogueError::Invalid(ValidationError::Invalid {
+                field: "test",
+            }))
+        }
+    };
+    let mut task = tokio::spawn(super::run_provider_tasks(
+        vec![provider(StubProvider::new(vec![]))],
+        StdArc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY)),
+        StdArc::new(Semaphore::new(MAX_OUTSTANDING_TASKS)),
+        PROVIDER_BUDGET,
+        RESPONSE_BUDGET,
+        SearchKind::Tracks,
+        operation,
+    ));
+    wait_for_provider_start(&mut started_rx).await;
+    let (items, discovery) = response_at_budget(&mut task).await;
+    assert!(items.is_empty());
+    assert_eq!(discovery.pending(), 1);
+
+    release.add_permits(1);
+    wait_for_settled(&mut settled_rx).await;
+
+    let warns = capture.entries_matching("catalogue source failed after the response budget");
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    assert!(warns[0].starts_with("WARN "), "{warns:?}");
+    assert!(warns[0].contains("outcome=\"invalid\""), "{warns:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_handled_finished_error_is_logged_once() {
+    let (materialized, _receiver) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let catalogue = held_service(
+        &store,
+        vec![provider(StubProvider::new(vec![Err(
+            ProviderError::ProviderUnavailable,
+        )]))],
+    );
+    let capture = LogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+
+    let result = catalogue.search(&track_search(), None, &context()).await;
+
+    assert!(matches!(
+        result,
+        Err(CatalogueError::Provider(ProviderError::ProviderUnavailable))
+    ));
+    let skipped = capture.entries_matching("catalogue source skipped");
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert!(skipped[0].starts_with("WARN "), "{skipped:?}");
+    assert_eq!(
+        capture
+            .entries_matching("catalogue source failed after the response budget")
+            .len(),
+        0
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_delivered_error_dropped_without_acknowledgement_is_logged_exactly_once() {
+    let capture = LogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
+    let operation = move |_provider: StdArc<dyn CatalogueProvider>| {
+        let settled = settled_tx.clone();
+        async move {
+            let _ = settled.send(());
+            Err::<Vec<()>, CatalogueError>(CatalogueError::Provider(
+                ProviderError::ProviderUnavailable,
+            ))
+        }
+    };
+    let mut caller = Box::pin(super::run_provider_tasks(
+        vec![provider(StubProvider::new(vec![]))],
+        StdArc::new(Semaphore::new(MAX_SOURCE_CONCURRENCY)),
+        StdArc::new(Semaphore::new(MAX_OUTSTANDING_TASKS)),
+        PROVIDER_BUDGET,
+        RESPONSE_BUDGET,
+        SearchKind::Tracks,
+        operation,
+    ));
+    assert!(
+        tokio::time::timeout(Duration::ZERO, caller.as_mut())
+            .await
+            .is_err(),
+        "the caller waits for the provider"
+    );
+
+    wait_for_settled(&mut settled_rx).await;
+    drop(caller);
+    tokio::time::timeout(
+        HANG,
+        capture.recorded("catalogue source failed after the response budget"),
+    )
+    .await
+    .expect("the late warning is recorded");
+
+    let warns = capture.entries_matching("catalogue source failed after the response budget");
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    assert!(warns[0].starts_with("WARN "), "{warns:?}");
+    assert!(
+        warns[0].contains("outcome=\"provider_unavailable\""),
+        "{warns:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_album_provider_materialises_after_the_response() {
+    let (materialized, mut materialized_rx) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(Gate::new(started_tx, StdArc::clone(&release), 1));
+    let held = HeldAlbumProvider::new(
+        gate,
+        vec![Ok(CataloguePage::new(vec![album_metadata()], None))],
+    );
+    let catalogue = StdArc::new(held_service(&store, vec![provider(held)]));
+    let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let mut task = tokio::spawn(async move {
+        service
+            .discover(SearchKind::Albums, &query, 10, &request_context)
+            .await
+    });
+    wait_for_provider_start(&mut started_rx).await;
+    assert_eq!(response_at_budget(&mut task).await.pending(), 1);
+    assert!(store.album_titles().is_empty());
+
+    release.add_permits(1);
+    assert!(matches!(
+        wait_for_materialised(&mut materialized_rx).await,
+        Materialised::Album
+    ));
+    assert_eq!(store.album_titles(), vec!["Beatopia".to_owned()]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_artist_provider_materialises_after_the_response() {
+    let (materialized, mut materialized_rx) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(Gate::new(started_tx, StdArc::clone(&release), 1));
+    let held = HeldArtistProvider::new(
+        gate,
+        vec![Ok(CataloguePage::new(vec![artist_credit()], None))],
+    );
+    let catalogue = StdArc::new(held_service(&store, vec![provider(held)]));
+    let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let mut task = tokio::spawn(async move {
+        service
+            .discover(SearchKind::Artists, &query, 10, &request_context)
+            .await
+    });
+    wait_for_provider_start(&mut started_rx).await;
+    assert_eq!(response_at_budget(&mut task).await.pending(), 1);
+    assert!(store.artist_names().is_empty());
+
+    release.add_permits(1);
+    assert!(matches!(
+        wait_for_materialised(&mut materialized_rx).await,
+        Materialised::Artist
+    ));
+    assert_eq!(store.artist_names(), vec!["beabadoobee".to_owned()]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_album_provider_materialises_after_caller_cancellation() {
+    let (materialized, mut materialized_rx) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(Gate::new(started_tx, StdArc::clone(&release), 1));
+    let held = HeldAlbumProvider::new(
+        gate,
+        vec![Ok(CataloguePage::new(vec![album_metadata()], None))],
+    );
+    let catalogue = StdArc::new(held_service(&store, vec![provider(held)]));
+    let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let task = tokio::spawn(async move {
+        service
+            .discover(SearchKind::Albums, &query, 10, &request_context)
+            .await
+    });
+    wait_for_provider_start(&mut started_rx).await;
+
+    task.abort();
+    assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+
+    release.add_permits(1);
+    assert!(matches!(
+        wait_for_materialised(&mut materialized_rx).await,
+        Materialised::Album
+    ));
+    assert_eq!(store.album_titles(), vec!["Beatopia".to_owned()]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_album_storage_failure_is_logged() {
+    let (materialized, _receiver) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    store.fail_albums();
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(Gate::new(started_tx, StdArc::clone(&release), 1));
+    let held = HeldAlbumProvider::new(
+        gate,
+        vec![Ok(CataloguePage::new(vec![album_metadata()], None))],
+    )
+    .with_settled(settled_tx);
+    let catalogue = StdArc::new(held_service(&store, vec![provider(held)]));
+    let capture = LogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+    let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let mut task = tokio::spawn(async move {
+        service
+            .discover(SearchKind::Albums, &query, 10, &request_context)
+            .await
+    });
+    wait_for_provider_start(&mut started_rx).await;
+    assert_eq!(response_at_budget(&mut task).await.pending(), 1);
+
+    release.add_permits(1);
+    wait_for_settled(&mut settled_rx).await;
+
+    let warns = capture.entries_matching("catalogue source failed after the response budget");
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    assert!(warns[0].starts_with("WARN "), "{warns:?}");
+    assert!(warns[0].contains("outcome=\"repository\""), "{warns:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn all_providers_pending_is_an_empty_success() {
+    let (materialized, _receiver) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (settled_tx, mut settled_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(Gate::new(started_tx, StdArc::clone(&release), usize::MAX));
+    let providers = vec![
+        provider(
+            HeldTrackProvider::new(StdArc::clone(&gate), vec![Ok(Vec::new())])
+                .with_settled(settled_tx.clone()),
+        ),
+        provider(
+            HeldTrackProvider::new(StdArc::clone(&gate), vec![Ok(Vec::new())])
+                .with_settled(settled_tx.clone()),
+        ),
+    ];
+    let catalogue = StdArc::new(held_service(&store, providers));
+    let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let mut task =
+        tokio::spawn(async move { service.discover_tracks(&query, 10, &request_context).await });
+    wait_for_provider_start(&mut started_rx).await;
+    wait_for_provider_start(&mut started_rx).await;
+
+    let (hits, discovery) = response_at_budget(&mut task).await;
+
+    assert!(hits.is_empty());
+    assert_eq!(discovery.pending(), 2);
+
+    release.add_permits(2);
+    wait_for_settled(&mut settled_rx).await;
+    wait_for_settled(&mut settled_rx).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_beyond_the_outstanding_limit_is_pending_not_an_error() {
+    let (materialized, _receiver) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (finished_tx, mut finished_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(
+        Gate::new(started_tx, StdArc::clone(&release), MAX_SOURCE_CONCURRENCY)
+            .with_finished(finished_tx),
+    );
+    let providers = (0..MAX_OUTSTANDING_TASKS)
+        .map(|_| {
+            provider(HeldTrackProvider::new(
+                StdArc::clone(&gate),
+                vec![Ok(Vec::new())],
+            ))
+        })
+        .collect::<Vec<_>>();
+    let catalogue = StdArc::new(held_service(&store, providers));
+    let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let spawned_query = query.clone();
+    let mut task = tokio::spawn(async move {
+        service
+            .discover_tracks(&spawned_query, 10, &request_context)
+            .await
+    });
+    for _ in 0..MAX_SOURCE_CONCURRENCY {
+        wait_for_provider_start(&mut started_rx).await;
+    }
+
+    let (_, blocked) = catalogue
+        .discover_tracks(&query, 10, &context())
+        .await
+        .unwrap();
+    assert_eq!(blocked.pending(), MAX_OUTSTANDING_TASKS);
+    assert_eq!(gate.call_count(), MAX_SOURCE_CONCURRENCY);
+
+    let (_, held) = response_at_budget(&mut task).await;
+    assert_eq!(held.pending(), MAX_OUTSTANDING_TASKS);
+
+    release.add_permits(MAX_SOURCE_CONCURRENCY);
+    for _ in 0..MAX_OUTSTANDING_TASKS {
+        wait_for_settled(&mut finished_rx).await;
+    }
+
+    let (_, reused) = catalogue
+        .discover_tracks(&query, 10, &context())
+        .await
+        .unwrap();
+    assert_eq!(reused.pending(), 0);
+    assert_eq!(gate.call_count(), MAX_OUTSTANDING_TASKS * 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_task_whose_provider_deadline_passes_while_waiting_ends_without_calling_the_provider() {
+    let (materialized, _receiver) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialized));
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (finished_tx, mut finished_rx) = mpsc::unbounded_channel();
+    let release = StdArc::new(Semaphore::new(0));
+    let gate = StdArc::new(
+        Gate::new(started_tx, StdArc::clone(&release), MAX_SOURCE_CONCURRENCY)
+            .with_finished(finished_tx),
+    );
+    let providers = (0..MAX_OUTSTANDING_TASKS)
+        .map(|_| {
+            provider(HeldTrackProvider::new(
+                StdArc::clone(&gate),
+                vec![Ok(Vec::new())],
+            ))
+        })
+        .collect::<Vec<_>>();
+    let catalogue = StdArc::new(held_service(&store, providers));
+    let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let spawned_query = query.clone();
+    let mut task = tokio::spawn(async move {
+        service
+            .discover_tracks(&spawned_query, 10, &request_context)
+            .await
+    });
+    for _ in 0..MAX_SOURCE_CONCURRENCY {
+        wait_for_provider_start(&mut started_rx).await;
+    }
+
+    let (_, discovery) = response_at_budget(&mut task).await;
+    assert_eq!(discovery.pending(), MAX_OUTSTANDING_TASKS);
+    assert_eq!(gate.call_count(), MAX_SOURCE_CONCURRENCY);
+    assert_eq!(gate.maximum(), MAX_SOURCE_CONCURRENCY);
+
+    tokio::time::advance(PROVIDER_BUDGET - RESPONSE_BUDGET + Duration::from_millis(1)).await;
+    for _ in 0..MAX_SOURCE_CONCURRENCY {
+        wait_for_settled(&mut finished_rx).await;
+    }
+    assert_eq!(gate.call_count(), MAX_SOURCE_CONCURRENCY);
+    assert_eq!(gate.maximum(), MAX_SOURCE_CONCURRENCY);
+
+    let (_, reused) = catalogue
+        .discover_tracks(&query, 10, &context())
+        .await
+        .unwrap();
+    assert_eq!(reused.pending(), 0);
 }

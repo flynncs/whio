@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use sqlx::PgPool;
 
@@ -30,6 +30,7 @@ pub struct LibraryWiring {
     pub providers: Vec<Arc<dyn CatalogueProvider>>,
     pub enabled_providers: Vec<&'static str>,
     pub dedup_mode: DedupMode,
+    pub search_response_budget: Duration,
     pub media_roots: Vec<PathBuf>,
     pub artwork_host_suffixes: Vec<String>,
     pub w4: W4Dependencies,
@@ -87,6 +88,7 @@ pub fn construct(wiring: LibraryWiring) -> MusicServices {
         providers,
         enabled_providers,
         dedup_mode,
+        search_response_budget,
         media_roots,
         artwork_host_suffixes,
         w4,
@@ -135,7 +137,8 @@ pub fn construct(wiring: LibraryWiring) -> MusicServices {
             Arc::clone(&state),
             providers.clone(),
         )
-        .with_dedup_mode(dedup_mode),
+        .with_dedup_mode(dedup_mode)
+        .with_response_budget(search_response_budget),
     );
     let library_service = LibraryService::new(
         Arc::clone(&library),

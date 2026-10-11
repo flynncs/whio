@@ -68,6 +68,7 @@ keep container mount paths stable between restarts.
 | `WHIO_YOUTUBE_ENABLED` | off | enable YouTube resolution |
 | `WHIO_YOUTUBE_RESOLVER_URL` | required when enabled | absolute HTTP(S) resolver URL |
 | `WHIO_DEDUP_MODE` | `suppress` | substitute conservative local matches; `shadow` logs, `off` skips |
+| `WHIO_SEARCH_RESPONSE_BUDGET_MS` | `3000` | response budget for provider discovery; between `100` and `60000` milliseconds |
 | `WHIO_SOURCE_TAGS` | `off` | `artist` adds provider prefixes to search display; no stored changes |
 | `WHIO_PLAYBACK_MAX_SESSIONS` | `16` | concurrent spool playbacks before overload |
 | `WHIO_PLAYBACK_PREFETCH_TRACKS` | `1` | next tracks warmed after a remote stream starts; `0` disables, maximum `3` |

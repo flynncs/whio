@@ -580,6 +580,7 @@ mod postgres {
             providers: Vec::new(),
             enabled_providers: Vec::new(),
             dedup_mode: DedupMode::Off,
+            search_response_budget: std::time::Duration::from_secs(3),
             media_roots: Vec::new(),
             artwork_host_suffixes: Vec::new(),
             w4,
@@ -656,6 +657,7 @@ mod postgres {
             providers: Vec::new(),
             enabled_providers: Vec::new(),
             dedup_mode: DedupMode::Off,
+            search_response_budget: std::time::Duration::from_secs(3),
             media_roots: Vec::new(),
             artwork_host_suffixes: Vec::new(),
             w4: W4Dependencies {

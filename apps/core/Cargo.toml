@@ -79,6 +79,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }
+tokio = { version = "1.53.1", features = ["test-util"] }
 
 [profile.dev]
 debug = "line-tables-only"

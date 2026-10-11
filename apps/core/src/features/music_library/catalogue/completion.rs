@@ -17,6 +17,7 @@ use crate::{
     platform::request::{RequestContext, RequestId},
 };
 
+use super::search::PROVIDER_PAGE_LIMIT;
 use super::{
     AlbumDetail, ArtistDetail, CatalogueError, CatalogueProvider, Discovery, FetchedAlbum,
     LibraryService, SearchKind, SearchQuery, SearchService,
@@ -283,7 +284,7 @@ impl CompletionService {
         };
         let query = SearchQuery::from_full_text_selector(text);
         self.search
-            .discover(kind, &query, target, context)
+            .discover(kind, &query, target.min(PROVIDER_PAGE_LIMIT), context)
             .await
             .map(Some)
     }
