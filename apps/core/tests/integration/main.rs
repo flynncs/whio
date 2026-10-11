@@ -4,6 +4,8 @@ mod support;
 #[path = "support/dedup.rs"]
 mod dedup_fixture;
 
+#[cfg(feature = "postgres-integration")]
+mod acquisition_http;
 mod app_wiring;
 #[cfg(feature = "postgres-integration")]
 mod artwork_http;

@@ -20,6 +20,7 @@ use crate::{
     features::playback::{CatalogueNextTracks, PlaybackProvider, StreamingService},
     integrations::{
         listenbrainz::ListenBrainzAdapter,
+        musicbrainz::client::MusicBrainzClient,
         ytm::{catalogue::YtmCatalogue, playback::YtmPlayback},
     },
 };
@@ -119,6 +120,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         crate::integrations::listenbrainz::ListenBrainzAdapter::new()
             .map_err(ProviderError::request)?,
     );
+    let musicbrainz = musicbrainz_client(config)?;
     let destinations = Arc::new(identity::destinations(
         database.pool(),
         Some(config.credential_key.clone()),
@@ -131,6 +133,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         &transport,
         &listenbrainz,
         &destinations,
+        musicbrainz.as_ref(),
     )?;
 
     let music = music_library::construct(music_library::LibraryWiring {
@@ -183,6 +186,13 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         Arc::clone(&music.listen),
         Arc::clone(&music.library),
     ));
+    let acquisition = crate::app::acquisition::build(
+        config,
+        database.pool(),
+        Arc::clone(&music.library),
+        Arc::clone(&music.completion),
+        musicbrainz.as_ref(),
+    )?;
     let mut state =
         AppState::with_database(credential, music.search, music.library, streaming, database)
             .with_completion(music.completion)
@@ -201,6 +211,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             )
             .with_destinations(destinations)
             .with_source_tags(config.source_tags)
+            .with_acquisition(acquisition)
             .with_client_ip_policy(crate::platform::client_ip::ClientIpPolicy {
                 trusted_proxies: config.trusted_proxies.clone(),
             });
@@ -219,6 +230,7 @@ pub(crate) struct WorkerState {
     pub(crate) metadata: Arc<crate::features::metadata::MetadataService>,
     pub(crate) subjects: Option<Arc<dyn crate::features::metadata::SubjectSource>>,
     pub(crate) delivery: Option<Arc<crate::features::music_library::delivery::DeliveryService>>,
+    pub(crate) acquisition: Option<Arc<crate::features::acquisition::service::AcquisitionService>>,
 }
 
 pub(crate) fn worker_state(
@@ -227,6 +239,7 @@ pub(crate) fn worker_state(
 ) -> Result<WorkerState, ProviderError> {
     let youtube_transport = ytm_transport(config)?;
     let listenbrainz = Arc::new(ListenBrainzAdapter::new().map_err(ProviderError::request)?);
+    let musicbrainz = musicbrainz_client(config)?;
     let destinations = Arc::new(identity::destinations(
         pool.clone(),
         Some(config.credential_key.clone()),
@@ -238,23 +251,60 @@ pub(crate) fn worker_state(
         &youtube_transport,
         &listenbrainz,
         &destinations,
+        musicbrainz.as_ref(),
     )?;
+    let catalogue_providers: Vec<
+        Arc<dyn crate::features::music_library::catalogue::CatalogueProvider>,
+    > = youtube_transport
+        .as_ref()
+        .map(|transport| {
+            vec![
+                Arc::new(crate::integrations::ytm::catalogue::YtmCatalogue::new(
+                    Some(Arc::clone(transport)),
+                ))
+                    as Arc<dyn crate::features::music_library::catalogue::CatalogueProvider>,
+            ]
+        })
+        .unwrap_or_default();
+    let enabled_providers: Vec<&'static str> = if youtube_transport.is_some() {
+        vec![crate::features::music_library::domain::YOUTUBE_MUSIC_PROVIDER_ID]
+    } else {
+        Vec::new()
+    };
     let music = music_library::construct(music_library::LibraryWiring {
-        pool,
-        providers: Vec::new(),
-        enabled_providers: Vec::new(),
+        pool: pool.clone(),
+        providers: catalogue_providers,
+        enabled_providers,
         dedup_mode: config.dedup_mode,
         search_response_budget: config.search_response_budget,
         media_roots: Vec::new(),
         artwork_host_suffixes: config.artwork_host_suffixes.clone(),
         w4,
     });
+    let acquisition = crate::app::acquisition::build(
+        config,
+        pool,
+        Arc::clone(&music.library),
+        Arc::clone(&music.completion),
+        musicbrainz.as_ref(),
+    )?;
 
     Ok(WorkerState {
         metadata: music.metadata.ok_or_else(missing_metadata)?,
         subjects: Some(music.subjects),
         delivery: music.delivery,
+        acquisition,
     })
+}
+
+fn musicbrainz_client(config: &Config) -> Result<Option<Arc<MusicBrainzClient>>, ProviderError> {
+    config
+        .integrations
+        .musicbrainz
+        .as_ref()
+        .map(|musicbrainz| MusicBrainzClient::new(musicbrainz).map(Arc::new))
+        .transpose()
+        .map_err(ProviderError::request)
 }
 
 fn ytm_transport(
@@ -312,6 +362,7 @@ fn build_w4(
     youtube_transport: &Option<Arc<whio_resolver_api::apis::configuration::Configuration>>,
     listenbrainz: &Arc<ListenBrainzAdapter>,
     destinations: &Arc<identity::destinations::DestinationService>,
+    musicbrainz: Option<&Arc<MusicBrainzClient>>,
 ) -> Result<music_library::W4Dependencies, ProviderError> {
     let mut providers: Vec<Arc<dyn crate::features::metadata::DocumentProvider>> = Vec::new();
     if let Some(transport) = youtube_transport {
@@ -322,16 +373,16 @@ fn build_w4(
             ),
         ));
     }
-    if let Some(config) = config.integrations.musicbrainz.as_ref() {
-        let musicbrainz =
-            crate::integrations::musicbrainz::artist::MusicBrainzDocuments::new(config)
-                .map_err(ProviderError::request)?;
+    if let Some(client) = musicbrainz {
+        let documents = crate::integrations::musicbrainz::artist::MusicBrainzDocuments::with_client(
+            Arc::clone(client),
+        );
         for provider_id in [
             crate::features::metadata::selection::MUSICBRAINZ,
             crate::features::metadata::selection::WIKIPEDIA,
             crate::features::metadata::selection::COMMONS,
         ] {
-            providers.push(Arc::new(musicbrainz.for_provider(provider_id)));
+            providers.push(Arc::new(documents.for_provider(provider_id)));
         }
     }
     if let Some(config) = config.integrations.audiodb.as_ref() {

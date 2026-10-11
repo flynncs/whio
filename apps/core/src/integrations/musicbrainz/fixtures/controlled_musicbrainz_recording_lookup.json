@@ -1,0 +1,6 @@
+{
+  "id": "30000000-0000-0000-0000-000000000001",
+  "title": "A Track",
+  "length": 210000,
+  "artist-credit": [{"name": "An Artist", "artist": {"id": "22222222-2222-2222-2222-222222222222", "name": "An Artist"}}]
+}

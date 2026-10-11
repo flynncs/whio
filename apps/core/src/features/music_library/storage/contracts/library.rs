@@ -194,6 +194,14 @@ pub trait LibraryRead: Send + Sync {
     async fn list_genres(&self) -> Result<Vec<GenreSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }
+
+    async fn owns_release(&self, _release_id: &str) -> Result<bool, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unsupported)
+    }
+
+    async fn owns_recording(&self, _recording_id: &str) -> Result<bool, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unsupported)
+    }
 }
 
 #[async_trait]

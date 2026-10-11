@@ -60,3 +60,20 @@ EXPOSE 3000
 USER 65532:65532
 
 ENTRYPOINT ["/usr/local/bin/whio-api"]
+
+FROM python:3.13-slim-bookworm AS importer
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir beets==2.14.1
+
+COPY --from=builder /workspace/apps/core/target/release/whio-worker /usr/local/bin/whio-worker
+COPY docker/importer/beets.yaml /etc/whio/beets.yaml
+
+ENV HOME=/tmp \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+USER 65532:65532
+
+ENTRYPOINT ["/usr/local/bin/whio-worker"]

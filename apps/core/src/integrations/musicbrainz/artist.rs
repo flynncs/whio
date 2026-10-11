@@ -52,7 +52,6 @@ impl MusicBrainzDocuments {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn with_client(client: std::sync::Arc<MusicBrainzClient>) -> Self {
         Self {
             client,

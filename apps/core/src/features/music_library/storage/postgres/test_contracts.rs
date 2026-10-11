@@ -2223,3 +2223,69 @@ async fn reconciliation_statement_count_does_not_follow_the_row_count(pool: sqlx
     assert_eq!(rows.len(), 40);
     assert!(rows.iter().all(|(_, stored)| stored.missing_at.is_none()));
 }
+
+#[sqlx::test]
+async fn a_release_is_owned_only_with_a_local_source(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let album = repository
+        .resolve_or_create_album(
+            &album_metadata("Owned")
+                .with_release_id(Some("rel-1".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let local = repository
+        .get_or_create(source("local", "owned-song"), identified("One", "rec-1"))
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), local.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    assert!(repository.owns_release("rel-1").await.unwrap());
+    assert!(!repository.owns_release("rel-2").await.unwrap());
+
+    let provider_album = repository
+        .resolve_or_create_album(
+            &album_metadata("Provider Only")
+                .with_release_id(Some("rel-2".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let provider = repository
+        .get_or_create(
+            source("audiodb", "provider-song"),
+            identified("Two", "rec-2"),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(provider_album.id(), provider.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    assert!(!repository.owns_release("rel-2").await.unwrap());
+}
+
+#[sqlx::test]
+async fn a_recording_is_owned_only_with_a_local_source(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let _local = repository
+        .get_or_create(source("local", "owned-song"), identified("One", "rec-1"))
+        .await
+        .unwrap();
+    let _provider = repository
+        .get_or_create(
+            source("audiodb", "provider-song"),
+            identified("Two", "rec-2"),
+        )
+        .await
+        .unwrap();
+
+    assert!(repository.owns_recording("rec-1").await.unwrap());
+    assert!(!repository.owns_recording("rec-2").await.unwrap());
+    assert!(!repository.owns_recording("rec-3").await.unwrap());
+}

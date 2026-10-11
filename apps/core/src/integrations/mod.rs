@@ -1,7 +1,9 @@
 pub mod audiodb;
+pub mod beets;
 pub(crate) mod document_http;
 pub mod listenbrainz;
 pub mod musicbrainz;
+pub mod slskd;
 pub mod ytm;
 
 use crate::platform::config::{ConfigError, Vars};
@@ -12,6 +14,8 @@ pub struct IntegrationsConfig {
     pub musicbrainz: Option<musicbrainz::config::Config>,
     pub audiodb: Option<audiodb::config::Config>,
     pub listenbrainz_documents: Option<listenbrainz::documents_config::Config>,
+    pub slskd: Option<slskd::config::Config>,
+    pub beets: Option<beets::config::Config>,
 }
 
 impl IntegrationsConfig {
@@ -21,6 +25,8 @@ impl IntegrationsConfig {
             musicbrainz: musicbrainz::config::from_vars(vars)?,
             audiodb: audiodb::config::from_vars(vars)?,
             listenbrainz_documents: listenbrainz::documents_config::from_vars(vars)?,
+            slskd: slskd::config::from_vars(vars)?,
+            beets: beets::config::from_vars(vars)?,
         })
     }
 
@@ -43,6 +49,8 @@ mod tests {
             musicbrainz: None,
             audiodb: None,
             listenbrainz_documents: None,
+            slskd: None,
+            beets: None,
         };
         assert!(!empty.has_document_provider());
         let musicbrainz = IntegrationsConfig {
@@ -62,6 +70,8 @@ mod tests {
             musicbrainz: None,
             audiodb: None,
             listenbrainz_documents: None,
+            slskd: None,
+            beets: None,
         };
         assert!(ytm.has_document_provider());
         let audiodb = IntegrationsConfig {
@@ -73,6 +83,8 @@ mod tests {
                 musicbrainz: None,
                 audiodb: None,
                 listenbrainz_documents: None,
+                slskd: None,
+                beets: None,
             }
         };
         assert!(audiodb.has_document_provider());
@@ -86,6 +98,8 @@ mod tests {
                 musicbrainz: None,
                 audiodb: None,
                 listenbrainz_documents: None,
+                slskd: None,
+                beets: None,
             }
         };
         assert!(listenbrainz.has_document_provider());

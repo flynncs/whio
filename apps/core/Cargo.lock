@@ -3474,6 +3474,7 @@ dependencies = [
  "hex",
  "image",
  "jwalk",
+ "libc",
  "lofty",
  "md-5",
  "notify",

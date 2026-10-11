@@ -101,6 +101,12 @@ pub(crate) fn router(state: AppState) -> Router {
                 credential: std::sync::Arc::clone(&state.credential),
             },
         ))
+        .merge(crate::features::acquisition::api::routes().with_state(
+            crate::features::acquisition::api::AcquisitionState {
+                service: state.acquisition(),
+                credential: std::sync::Arc::clone(&state.credential),
+            },
+        ))
         .merge(music_library::api::artist_info::routes().with_state(
             music_library::api::artist_info::ArtistInfoState::with_defaults(
                 std::sync::Arc::clone(&state.library),

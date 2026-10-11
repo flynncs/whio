@@ -961,6 +961,47 @@ impl LibraryRead for PgStore {
             })
             .collect()
     }
+
+    async fn owns_release(&self, release_id: &str) -> Result<bool, TrackRepositoryError> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM albums AS album
+                JOIN album_tracks AS membership ON membership.album_id = album.id
+                JOIN track_sources AS source ON source.track_id = membership.track_id
+                WHERE album.musicbrainz_release_id = $1 AND source.provider_id = $2
+            )
+            "#,
+        )
+        .bind(release_id)
+        .bind(LOCAL_PROVIDER_ID)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        Ok(exists)
+    }
+
+    async fn owns_recording(&self, recording_id: &str) -> Result<bool, TrackRepositoryError> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM tracks AS track
+                JOIN track_sources AS source ON source.track_id = track.id
+                WHERE track.musicbrainz_recording_id = $1 AND source.provider_id = $2
+            )
+            "#,
+        )
+        .bind(recording_id)
+        .bind(LOCAL_PROVIDER_ID)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        Ok(exists)
+    }
 }
 
 struct TrackPageRequest<'a> {

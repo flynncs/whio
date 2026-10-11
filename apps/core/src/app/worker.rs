@@ -89,11 +89,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let worker = config.worker.clone();
     let registered = jobs::queues();
     let queues = check_queues(&worker.queues, &registered)?;
-    check_queue_dependencies(&queues, &config.integrations)?;
+    check_queue_dependencies(&queues, &config.integrations, config.acquisition.enabled)?;
     let database = Database::connect(&config.database_url).await?;
     let state =
         super::startup::worker_state(&config, database.pool()).map_err(WorkerError::Dependency)?;
-    let client = build(&database.pool(), &queues, &worker, state)?;
+    let client = build(&database.pool(), &queues, &worker, &config, state)?;
 
     tracing::info!(queues = ?worker.queues, "awa worker starting");
 
@@ -134,16 +134,22 @@ fn check_queues<'a>(
 fn check_queue_dependencies(
     queues: &[&QueueRegistration],
     integrations: &crate::integrations::IntegrationsConfig,
+    acquisition_enabled: bool,
 ) -> Result<(), WorkerError> {
-    if integrations.has_document_provider() {
-        return Ok(());
-    }
-
     for queue in queues {
-        if queue.name == jobs::metadata_refresh::METADATA_REFRESH_QUEUE {
+        if queue.name == jobs::metadata_refresh::METADATA_REFRESH_QUEUE
+            && !integrations.has_document_provider()
+        {
             return Err(WorkerError::UnavailableDependency {
                 queue: queue.name.to_owned(),
                 dependency: "a metadata document provider (WHIO_MUSICBRAINZ_ENABLED, WHIO_AUDIODB_ENABLED, WHIO_LISTENBRAINZ_METADATA_ENABLED or WHIO_YOUTUBE_ENABLED)",
+            });
+        }
+
+        if queue.name == jobs::acquisition::ACQUISITION_QUEUE && !acquisition_enabled {
+            return Err(WorkerError::UnavailableDependency {
+                queue: queue.name.to_owned(),
+                dependency: "WHIO_ACQUISITION_ENABLED",
             });
         }
     }
@@ -151,20 +157,27 @@ fn check_queue_dependencies(
     Ok(())
 }
 
-fn queue_config(worker: &WorkerConfig, queue: &QueueRegistration) -> awa::QueueConfig {
+fn queue_config(
+    worker: &WorkerConfig,
+    queue: &QueueRegistration,
+    beets_deadline: Option<Duration>,
+) -> awa::QueueConfig {
     awa::QueueConfig {
         max_workers: worker.max_workers,
         poll_interval: worker.poll_interval,
-        deadline_duration: queue_deadline(queue.name),
+        deadline_duration: queue_deadline(queue.name, beets_deadline),
         ..awa::QueueConfig::default()
     }
 }
 
-fn queue_deadline(name: &str) -> Duration {
+fn queue_deadline(name: &str, beets_deadline: Option<Duration>) -> Duration {
     match name {
         jobs::listening_delivery::LISTEN_DELIVERY_QUEUE => {
             jobs::listening_delivery::LISTEN_DELIVERY_DEADLINE
         }
+        jobs::acquisition::ACQUISITION_QUEUE => beets_deadline
+            .map(|deadline| deadline + Duration::from_secs(120))
+            .unwrap_or_else(|| awa::QueueConfig::default().deadline_duration),
         _ => awa::QueueConfig::default().deadline_duration,
     }
 }
@@ -173,6 +186,7 @@ fn build(
     pool: &PgPool,
     queues: &[&QueueRegistration],
     worker: &WorkerConfig,
+    config: &Config,
     state: WorkerState,
 ) -> Result<awa::Client, WorkerError> {
     let mut builder = awa::Client::builder(pool.clone())
@@ -192,6 +206,9 @@ fn build(
     if let Some(delivery) = state.delivery.as_ref() {
         builder = builder.state(Arc::clone(delivery));
     }
+    if let Some(acquisition) = state.acquisition.as_ref() {
+        builder = builder.state(Arc::clone(acquisition));
+    }
 
     queues
         .iter()
@@ -199,7 +216,15 @@ fn build(
             jobs::register(
                 builder,
                 std::slice::from_ref(queue),
-                &queue_config(worker, queue),
+                &queue_config(
+                    worker,
+                    queue,
+                    config
+                        .integrations
+                        .beets
+                        .as_ref()
+                        .map(|beets| beets.deadline),
+                ),
                 worker.retry_policy,
             )
         })
@@ -360,6 +385,7 @@ mod tests {
                 jobs::probe::PROBE_QUEUE,
                 jobs::metadata_refresh::METADATA_REFRESH_QUEUE,
                 jobs::listening_delivery::LISTEN_DELIVERY_QUEUE,
+                jobs::acquisition::ACQUISITION_QUEUE,
             ]
         );
         assert!(queues.iter().all(|queue| !queue.kinds.is_empty()));
@@ -383,6 +409,8 @@ mod tests {
             }),
             audiodb: None,
             listenbrainz_documents: None,
+            slskd: None,
+            beets: None,
         }
     }
 
@@ -397,7 +425,10 @@ mod tests {
                 musicbrainz: None,
                 audiodb: None,
                 listenbrainz_documents: None,
+                slskd: None,
+                beets: None,
             },
+            false,
         )
         .expect_err("a metadata refresh queue needs the metadata transport");
 
@@ -415,7 +446,7 @@ mod tests {
         let metadata = registry_queue(jobs::metadata_refresh::METADATA_REFRESH_QUEUE);
         let probe = registry_queue(jobs::probe::PROBE_QUEUE);
 
-        assert!(check_queue_dependencies(&[&metadata], &enabled_integrations()).is_ok());
+        assert!(check_queue_dependencies(&[&metadata], &enabled_integrations(), false).is_ok());
         assert!(
             check_queue_dependencies(
                 &[&probe],
@@ -424,10 +455,42 @@ mod tests {
                     musicbrainz: None,
                     audiodb: None,
                     listenbrainz_documents: None,
-                }
+                    slskd: None,
+                    beets: None,
+                },
+                false,
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn the_acquisition_queue_requires_acquisition() {
+        let queue = registry_queue(jobs::acquisition::ACQUISITION_QUEUE);
+
+        let error = check_queue_dependencies(&[&queue], &enabled_integrations(), false)
+            .expect_err("the acquisition queue needs acquisition");
+
+        assert!(matches!(
+            &error,
+            WorkerError::UnavailableDependency { queue, dependency }
+                if queue == jobs::acquisition::ACQUISITION_QUEUE
+                    && *dependency == "WHIO_ACQUISITION_ENABLED"
+        ));
+        assert!(
+            check_queue_dependencies(&[&queue], &enabled_integrations(), true).is_ok(),
+            "an enabled acquisition accepts the queue"
+        );
+    }
+
+    #[test]
+    fn the_acquisition_queue_deadline_covers_the_beets_run() {
+        let deadline = queue_deadline(
+            jobs::acquisition::ACQUISITION_QUEUE,
+            Some(Duration::from_secs(600)),
+        );
+
+        assert_eq!(deadline, Duration::from_secs(600 + 120));
     }
 
     #[test]
@@ -447,7 +510,7 @@ mod tests {
         let delivery = registry_queue(jobs::listening_delivery::LISTEN_DELIVERY_QUEUE);
         let probe = registry_queue(jobs::probe::PROBE_QUEUE);
 
-        let configured = queue_config(&worker, &delivery);
+        let configured = queue_config(&worker, &delivery, None);
 
         assert_eq!(
             configured.deadline_duration,
@@ -458,7 +521,7 @@ mod tests {
                 < crate::features::music_library::delivery::SNOOZE_DEADLINE
         );
         assert_eq!(
-            queue_config(&worker, &probe).deadline_duration,
+            queue_config(&worker, &probe, None).deadline_duration,
             awa::QueueConfig::default().deadline_duration
         );
     }

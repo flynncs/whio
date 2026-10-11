@@ -1,0 +1,26 @@
+plugins: musicbrainz inline ftintitle
+import:
+  copy: yes
+  write: yes
+  quiet_fallback: skip
+  duplicate_action: skip
+  resume: no
+  incremental: no
+match:
+  strong_rec_thresh: 0.15
+ftintitle:
+  auto: yes
+  format: "feat. {}"
+album_fields:
+  primary_artist: |
+    names = albumartists if isinstance(albumartists, list) and albumartists else [albumartist]
+    return names[0]
+item_fields:
+  disc_pad: |
+    return f"{disc:02d}" if disc else "01"
+paths:
+  default: $primary_artist/%if{$original_year,$original_year,undated} - $album%aunique{}/$disc_pad-$track - $title
+  comp: Various Artists/%if{$original_year,$original_year,undated} - $album%aunique{}/$disc_pad-$track - $artist - $title
+  singleton: Non-Album/$artist/$title
+musicbrainz:
+  ratelimit: 1.0

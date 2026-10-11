@@ -32,6 +32,29 @@ use whio_core::{
     platform::request::RequestContext,
 };
 
+#[derive(Clone, Default)]
+pub struct Capture(pub Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+    type Writer = Capture;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
 pub const TEST_REQUEST_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 pub mod credentials;
@@ -263,4 +286,45 @@ pub fn app(
     let (search, library, playback) = services(pool, responses);
 
     router(credential_service(), search, library, playback)
+}
+
+pub fn keep_callsites_interested() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::subscriber::set_global_default(SometimesInterested)
+            .expect("no other test installs a global subscriber");
+    });
+}
+
+struct SometimesInterested;
+
+impl tracing::Subscriber for SometimesInterested {
+    fn register_callsite(
+        &self,
+        _metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
+    }
+
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+
+    fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, _event: &tracing::Event<'_>) {}
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
 }

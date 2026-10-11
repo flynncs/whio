@@ -3,17 +3,25 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug)]
 pub struct CallLimiter {
     interval: Duration,
     earliest: Mutex<Option<Instant>>,
+    now: Box<dyn Fn() -> Instant + Send + Sync>,
 }
 
 impl CallLimiter {
     pub fn new(interval: Duration) -> Self {
+        Self::with_clock(interval, Instant::now)
+    }
+
+    pub fn with_clock(
+        interval: Duration,
+        now: impl Fn() -> Instant + Send + Sync + 'static,
+    ) -> Self {
         Self {
             interval,
             earliest: Mutex::new(None),
+            now: Box::new(now),
         }
     }
 
@@ -26,7 +34,7 @@ impl CallLimiter {
     }
 
     fn reserve(&self) -> Duration {
-        self.reserve_at(Instant::now())
+        self.reserve_at((self.now)())
     }
 
     pub(crate) fn reserve_at(&self, now: Instant) -> Duration {

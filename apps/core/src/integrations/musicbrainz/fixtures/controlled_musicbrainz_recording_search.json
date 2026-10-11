@@ -1,0 +1,8 @@
+{
+  "count": 2,
+  "offset": 0,
+  "recordings": [
+    {"id": "30000000-0000-0000-0000-000000000001", "title": "A Track", "length": 210000, "artist-credit": [{"name": "An Artist"}]},
+    {"id": "30000000-0000-0000-0000-000000000002", "title": "A Track (Live)", "length": 240000, "artist-credit": [{"name": "An Artist"}]}
+  ]
+}

@@ -1,7 +1,12 @@
 pub mod artist;
 pub mod client;
 pub mod config;
+pub mod release;
 pub mod wikipedia;
+
+#[cfg(test)]
+#[path = "release_tests.rs"]
+mod release_tests;
 
 use crate::features::{
     metadata::{

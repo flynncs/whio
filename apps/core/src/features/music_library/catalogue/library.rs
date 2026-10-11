@@ -116,6 +116,20 @@ impl LibraryService {
             .map_err(CatalogueError::Repository)
     }
 
+    pub async fn owns_release(&self, release_id: &str) -> Result<bool, CatalogueError> {
+        self.library
+            .owns_release(release_id)
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
+    pub async fn owns_recording(&self, recording_id: &str) -> Result<bool, CatalogueError> {
+        self.library
+            .owns_recording(recording_id)
+            .await
+            .map_err(CatalogueError::Repository)
+    }
+
     pub async fn track_detail(
         &self,
         track_id: &TrackId,

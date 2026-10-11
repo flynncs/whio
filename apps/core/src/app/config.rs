@@ -116,6 +116,7 @@ pub(crate) struct Config {
     pub(crate) dedup_mode: crate::features::music_library::catalogue::DedupMode,
     pub(crate) search_response_budget: Duration,
     pub(crate) libraries: Vec<crate::features::music_library::library::LibraryRegistration>,
+    pub(crate) acquisition: crate::features::acquisition::config::AcquisitionConfig,
     pub(crate) worker: WorkerConfig,
 }
 
@@ -395,6 +396,14 @@ impl Config {
             Some(raw) => parse_media_roots(raw)?,
         };
 
+        let media_roots = crate::features::music_library::library::deduplicated_roots(&libraries);
+        let acquisition = crate::features::acquisition::config::AcquisitionConfig::from_vars(
+            vars,
+            integrations.slskd.is_some(),
+            integrations.musicbrainz.is_some(),
+            &media_roots,
+        )?;
+
         let dedup_mode = match vars
             .get("WHIO_DEDUP_MODE")
             .map(String::as_str)
@@ -536,6 +545,7 @@ impl Config {
             source_tags,
             libraries,
             search_response_budget,
+            acquisition,
             worker,
         })
     }

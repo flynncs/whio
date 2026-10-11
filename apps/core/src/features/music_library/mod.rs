@@ -1,3 +1,4 @@
+pub(crate) use storage::contracts::TrackRepositoryError;
 pub use storage::contracts::{ArtworkStore, DeliveryStore, EnrichmentGuard, ListenStore};
 pub use storage::postgres::PostgresTrackRepository;
 pub use storage::{

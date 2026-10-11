@@ -141,3 +141,41 @@ to those services only. Every enabled variable accepts exactly `true` or
 | `WHIO_LISTENBRAINZ_ALGORITHM` | pinned session-based default | ListenBrainz similar-artist algorithm |
 
 core reads cached metadata; the worker runs provider refreshes.
+
+## acquisition
+
+acquisition lets an admin request an album or track; whio pins the
+MusicBrainz id, downloads a complete copy through slskd, and imports it with
+beets pinned to that id. It is off unless `WHIO_ACQUISITION_ENABLED=true`, and
+enabling it requires slskd and MusicBrainz.
+
+the importer image (`docker/importer/beets.yaml`) runs `whio-worker` with
+`WHIO_WORKER_QUEUES=whio.acquisition`. It is the only process with the library
+writable and slskd's download directory mounted as staging. `WHIO_BEETS_CONFIG`
+must point at that image's config.
+
+slskd settings are read by core and worker when acquisition is enabled. The API
+key can be supplied directly or through `WHIO_SLSKD_API_KEY_FILE`; do not set
+both.
+
+| variable | default / requirement | use |
+| --- | --- | --- |
+| `WHIO_SLSKD_ENABLED` | `false` | enable the slskd search and transfer adapter |
+| `WHIO_SLSKD_URL` | required when enabled | absolute HTTP(S) slskd base URL |
+| `WHIO_SLSKD_API_KEY` / `WHIO_SLSKD_API_KEY_FILE` | required when enabled | slskd API key, sent as `X-API-Key` |
+| `WHIO_SLSKD_SEARCH_TIMEOUT_SECONDS` | `15` | Soulseek search timeout, 1..=120 |
+| `WHIO_ACQUISITION_ENABLED` | `false` | enable the acquisition API and worker queue |
+| `WHIO_ACQUISITION_STAGING_DIR` | required when enabled | absolute path where this process sees slskd's download directory; must not overlap a media root |
+| `WHIO_ACQUISITION_LIBRARY_DIR` | required when enabled | absolute import destination; must equal one of `WHIO_MEDIA_ROOTS` |
+| `WHIO_ACQUISITION_CANDIDATE_BUDGET` | `3` | ranked candidates tried per request, 1..=10 |
+| `WHIO_ACQUISITION_TRANSFER_TIMEOUT_SECONDS` | `1800` | per-attempt transfer budget, 60..=86400 |
+| `WHIO_ACQUISITION_POLL_SECONDS` | `10` | job snooze while a transfer runs, 1..=300 |
+| `WHIO_BEETS_COMMAND` | `beet` | beets executable |
+| `WHIO_BEETS_CONFIG` | `/etc/whio/beets.yaml` | beets config read when acquisition is enabled |
+| `WHIO_BEETS_DEADLINE_SECONDS` | `600` | per-import deadline, 30..=7200; the queue deadline is this plus 120 seconds |
+| `WHIO_BEETS_STALL_SECONDS` | `120` | maximum silence before the beets process group is killed, 5..=3600 |
+
+an admin requests a release or recording id, or an existing whio album/track
+id, at `POST /api/v1/acquisition/requests`. `GET /api/v1/acquisition/requests`
+lists the most recent request per `origin` id. Both are admin-only; while
+acquisition is disabled every route answers 503 `acquisition_disabled`.

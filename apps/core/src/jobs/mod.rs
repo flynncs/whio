@@ -1,3 +1,4 @@
+pub mod acquisition;
 pub mod listening_delivery;
 pub mod metadata_refresh;
 pub mod probe;
@@ -27,6 +28,10 @@ pub(crate) fn queues() -> Vec<QueueRegistration> {
         QueueRegistration {
             name: listening_delivery::LISTEN_DELIVERY_QUEUE,
             kinds: &[listening_delivery::register],
+        },
+        QueueRegistration {
+            name: acquisition::ACQUISITION_QUEUE,
+            kinds: &[acquisition::register],
         },
     ]
 }

@@ -10,3 +10,4 @@ pub(crate) mod redact;
 pub mod request;
 pub(crate) mod source_path;
 pub(crate) mod telemetry;
+pub mod timer;

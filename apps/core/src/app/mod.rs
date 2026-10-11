@@ -1,3 +1,4 @@
+mod acquisition;
 pub mod cli;
 mod config;
 mod startup;
@@ -53,6 +54,7 @@ pub struct AppState {
     metadata_profile: crate::features::metadata::MetadataProfile,
     metadata_language: String,
     source_tags: SourceTags,
+    acquisition: Option<Arc<crate::features::acquisition::service::AcquisitionService>>,
     pub(crate) client_ip_policy: Arc<ClientIpPolicy>,
 }
 
@@ -159,6 +161,20 @@ impl AppState {
         self
     }
 
+    pub fn with_acquisition(
+        mut self,
+        acquisition: Option<Arc<crate::features::acquisition::service::AcquisitionService>>,
+    ) -> Self {
+        self.acquisition = acquisition;
+        self
+    }
+
+    pub(crate) fn acquisition(
+        &self,
+    ) -> Option<Arc<crate::features::acquisition::service::AcquisitionService>> {
+        self.acquisition.clone()
+    }
+
     pub fn with_scanner(mut self, scanner: Arc<ScanService>) -> Self {
         self.scanner = scanner;
         self
@@ -231,6 +247,7 @@ impl AppState {
             metadata_profile: crate::features::metadata::MetadataProfile::artist_display(),
             metadata_language: "en".to_owned(),
             source_tags: SourceTags::Off,
+            acquisition: None,
             client_ip_policy: Arc::new(ClientIpPolicy {
                 trusted_proxies: Vec::new(),
             }),
@@ -288,6 +305,15 @@ impl FromRef<AppState> for crate::features::playback::api::native::NativeState {
 impl FromRef<AppState> for crate::features::identity::api::native::NativeState {
     fn from_ref(state: &AppState) -> Self {
         Self(Arc::clone(&state.credential))
+    }
+}
+
+impl FromRef<AppState> for crate::features::acquisition::api::AcquisitionState {
+    fn from_ref(state: &AppState) -> Self {
+        Self {
+            service: state.acquisition(),
+            credential: Arc::clone(&state.credential),
+        }
     }
 }
 

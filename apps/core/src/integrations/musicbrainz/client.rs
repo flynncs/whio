@@ -83,6 +83,80 @@ impl MusicBrainzClient {
             url,
             &[("inc", "url-rels+tags+genres"), ("fmt", "json")],
             &self.musicbrainz_agent,
+            NotFoundIs::SourceNotFound,
+            true,
+        )
+        .await
+    }
+
+    pub async fn search_releases(
+        &self,
+        artist: &str,
+        title: &str,
+        limit: u16,
+    ) -> Result<Value, DocumentError> {
+        self.search("release", artist, title, limit).await
+    }
+
+    pub async fn search_recordings(
+        &self,
+        artist: &str,
+        title: &str,
+        limit: u16,
+    ) -> Result<Value, DocumentError> {
+        self.search("recording", artist, title, limit).await
+    }
+
+    pub async fn fetch_release(&self, id: &str) -> Result<Value, DocumentError> {
+        self.lookup("release", "recordings+artist-credits", id)
+            .await
+    }
+
+    pub async fn fetch_recording(&self, id: &str) -> Result<Value, DocumentError> {
+        self.lookup("recording", "artist-credits", id).await
+    }
+
+    async fn search(
+        &self,
+        entity: &str,
+        artist: &str,
+        title: &str,
+        limit: u16,
+    ) -> Result<Value, DocumentError> {
+        let url = self
+            .musicbrainz
+            .join(&format!("ws/2/{entity}"))
+            .map_err(|_| DocumentError::Malformed)?;
+        let query = format!(
+            "{entity}:\"{}\" AND artist:\"{}\"",
+            escape(title),
+            escape(artist)
+        );
+        let limit = limit.to_string();
+        self.get(
+            url,
+            &[("query", &query), ("limit", &limit), ("fmt", "json")],
+            &self.musicbrainz_agent,
+            NotFoundIs::ResolutionFailed,
+            true,
+        )
+        .await
+    }
+
+    async fn lookup(&self, entity: &str, includes: &str, id: &str) -> Result<Value, DocumentError> {
+        let mut url = self
+            .musicbrainz
+            .join(&format!("ws/2/{entity}/"))
+            .map_err(|_| DocumentError::Malformed)?;
+        url.path_segments_mut()
+            .map_err(|_| DocumentError::Malformed)?
+            .pop_if_empty()
+            .push(id);
+        self.get(
+            url,
+            &[("inc", includes), ("fmt", "json")],
+            &self.musicbrainz_agent,
+            NotFoundIs::SourceNotFound,
             true,
         )
         .await
@@ -103,6 +177,7 @@ impl MusicBrainzClient {
                 ("maxlag", "5"),
             ],
             &self.wikimedia_agent,
+            NotFoundIs::ResolutionFailed,
             false,
         )
         .await
@@ -124,6 +199,7 @@ impl MusicBrainzClient {
                 ("maxlag", "5"),
             ],
             &self.wikimedia_agent,
+            NotFoundIs::ResolutionFailed,
             false,
         )
         .await
@@ -147,7 +223,14 @@ impl MusicBrainzClient {
             .map_err(|_| DocumentError::Malformed)?
             .pop_if_empty()
             .push(&title.replace(' ', "_"));
-        self.get(url, &[], &self.wikimedia_agent, false).await
+        self.get(
+            url,
+            &[],
+            &self.wikimedia_agent,
+            NotFoundIs::ResolutionFailed,
+            false,
+        )
+        .await
     }
 
     pub async fn fetch_wikipedia_extract(
@@ -175,6 +258,7 @@ impl MusicBrainzClient {
                 ("maxlag", "5"),
             ],
             &self.wikimedia_agent,
+            NotFoundIs::ResolutionFailed,
             false,
         )
         .await
@@ -185,9 +269,10 @@ impl MusicBrainzClient {
         url: Url,
         params: &[(&str, &str)],
         user_agent: &str,
-        artist: bool,
+        not_found: NotFoundIs,
+        paced: bool,
     ) -> Result<Value, DocumentError> {
-        if artist {
+        if paced {
             self.limiter.acquire().await;
         }
         let mut request = self.client.get(url).header(header::USER_AGENT, user_agent);
@@ -195,14 +280,10 @@ impl MusicBrainzClient {
             request = request.query(&[(name, value)]);
         }
         let sent = request.send().await.map_err(|error| error.without_url());
-        document_http::json(
-            sent,
-            if artist {
-                NotFoundIs::SourceNotFound
-            } else {
-                NotFoundIs::ResolutionFailed
-            },
-        )
-        .await
+        document_http::json(sent, not_found).await
     }
+}
+
+fn escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
