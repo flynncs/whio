@@ -1,12 +1,12 @@
 use async_trait::async_trait;
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::features::music_library::{
     domain::{
         Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, CreditRole,
-        ProviderEntityState, ProviderId, SourceIdentity, SourceScope, Track, TrackId,
-        TrackMetadata,
+        MatchRecord, MatchStatus, ProviderEntityState, ProviderId, RecordingIndex, SourceIdentity,
+        SourceKind, SourceScope, Track, TrackId, TrackMetadata,
     },
     storage::contracts::{ReconcileReport, SourceFileFacts, TrackRepositoryError},
 };
@@ -19,9 +19,14 @@ use super::decode::{
     encode_duration_ms, encode_facts_version, encode_integer, encode_smallint, encode_source_scope,
     repository_error,
 };
+use super::library::dedup_candidate_ids;
 use super::schema::{ALBUM_COLUMNS, ARTIST_COLUMNS, AlbumRow, ArtistRow, folded};
 
-type ResolvedCredit = (String, ArtistId, Option<CreditRole>);
+pub(super) struct ResolvedCredit {
+    pub(super) name: String,
+    pub(super) artist_id: ArtistId,
+    pub(super) role: Option<CreditRole>,
+}
 
 #[async_trait]
 impl CatalogueWrite for PgStore {
@@ -33,7 +38,28 @@ impl CatalogueWrite for PgStore {
         let credits = resolve_credits(&self.pool, &metadata).await?;
 
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
-        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits).await?;
+        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits, false, &[]).await?;
+        tx.commit().await.map_err(repository_error)?;
+
+        Ok(Track::new(track_id, metadata))
+    }
+
+    async fn get_or_create_provider(
+        &self,
+        source: SourceIdentity,
+        metadata: TrackMetadata,
+    ) -> Result<Track, TrackRepositoryError> {
+        let credits = resolve_credits(&self.pool, &metadata).await?;
+        let mut tx = self.pool.begin().await.map_err(repository_error)?;
+        let track_id = get_or_create_in(
+            &mut tx,
+            &source,
+            &metadata,
+            &credits,
+            true,
+            &self.library_provider_ids(),
+        )
+        .await?;
         tx.commit().await.map_err(repository_error)?;
 
         Ok(Track::new(track_id, metadata))
@@ -48,7 +74,7 @@ impl CatalogueWrite for PgStore {
         let credits = resolve_credits(&self.pool, &metadata).await?;
 
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
-        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits).await?;
+        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits, false, &[]).await?;
         set_source_file_facts_in(&mut tx, &source, facts).await?;
         tx.commit().await.map_err(repository_error)?;
 
@@ -291,12 +317,15 @@ async fn find_or_attach_artist(
         return Ok(Some(artist));
     }
 
-    let Some(existing) = find_artist_by_name(pool, credit.name()).await? else {
-        return Ok(None);
+    let Some(identifier) = credit.musicbrainz_artist_id() else {
+        if let Some(artist) = find_unique_artist_by_name(pool, credit.name()).await? {
+            return Ok(Some(artist));
+        }
+        return find_artist_by_name(pool, credit.name()).await;
     };
 
-    let Some(identifier) = credit.musicbrainz_artist_id() else {
-        return Ok(Some(existing));
+    let Some(existing) = find_artist_by_name(pool, credit.name()).await? else {
+        return Ok(None);
     };
 
     let row = sqlx::query_as::<_, ArtistRow>(&format!(
@@ -348,6 +377,79 @@ async fn find_artist_by_identifier(
     .map_err(repository_error)?;
 
     row.map(decode_artist).transpose()
+}
+
+pub(super) async fn find_unique_artist_by_name<'e, E>(
+    executor: E,
+    name: &str,
+) -> Result<Option<Artist>, TrackRepositoryError>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let rows = sqlx::query_as::<_, ArtistRow>(&format!(
+        "SELECT {ARTIST_COLUMNS} FROM artists WHERE name_normalized = {} ORDER BY id LIMIT 2",
+        folded("$1"),
+    ))
+    .bind(name)
+    .fetch_all(executor)
+    .await
+    .map_err(repository_error)?;
+
+    unique_artist(rows)
+}
+
+pub(super) async fn find_unique_library_artist_by_name(
+    connection: &mut PgConnection,
+    name: &str,
+    candidate_artist_ids: &[Uuid],
+) -> Result<Option<Artist>, TrackRepositoryError> {
+    let rows = sqlx::query_as::<_, ArtistRow>(&format!(
+        "SELECT {ARTIST_COLUMNS} FROM artists WHERE name_normalized = {} AND id <> ALL($2::UUID[]) ORDER BY id LIMIT 2",
+        folded("$1"),
+    ))
+    .bind(name)
+    .bind(candidate_artist_ids)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+
+    unique_artist(rows)
+}
+
+pub(super) async fn resolve_cleanup_artist(
+    connection: &mut PgConnection,
+    artist_id: Uuid,
+    candidate_artist_ids: &[Uuid],
+) -> Result<Option<ArtistId>, TrackRepositoryError> {
+    let Some(artist) = sqlx::query_as::<_, ArtistRow>(&format!(
+        "SELECT {ARTIST_COLUMNS} FROM artists WHERE id = $1"
+    ))
+    .bind(artist_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(repository_error)?
+    .map(decode_artist)
+    .transpose()?
+    else {
+        return Ok(None);
+    };
+
+    if artist.musicbrainz_artist_id().is_some() {
+        return Ok(Some(artist.id().clone()));
+    }
+
+    Ok(
+        find_unique_library_artist_by_name(connection, artist.name(), candidate_artist_ids)
+            .await?
+            .map(|resolved| resolved.id().clone()),
+    )
+}
+
+fn unique_artist(rows: Vec<ArtistRow>) -> Result<Option<Artist>, TrackRepositoryError> {
+    match rows.as_slice() {
+        [row] => Ok(Some(decode_artist(row.clone())?)),
+        _ => Ok(None),
+    }
 }
 
 async fn find_artist_by_name(
@@ -431,7 +533,14 @@ async fn find_or_attach_album(
         return apply_observed_album_facts(pool, album.id(), metadata).await;
     }
 
-    let Some(existing) = find_album_by_text(pool, metadata.title(), album_artist_id).await? else {
+    let existing = if metadata.musicbrainz_release_group_id().is_none()
+        && metadata.musicbrainz_release_id().is_none()
+    {
+        find_unique_album_by_text(pool, metadata.title(), album_artist_id).await?
+    } else {
+        find_album_by_text(pool, metadata.title(), album_artist_id).await?
+    };
+    let Some(existing) = existing else {
         return Ok(None);
     };
 
@@ -537,6 +646,76 @@ async fn find_album_by_release(
     .map_err(repository_error)?;
 
     row.map(decode_album).transpose()
+}
+
+pub(super) async fn find_unique_album_by_text<'e, E>(
+    executor: E,
+    title: &str,
+    album_artist_id: Option<&ArtistId>,
+) -> Result<Option<Album>, TrackRepositoryError>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let rows = sqlx::query_as::<_, AlbumRow>(&format!(
+        r#"
+        SELECT {ALBUM_COLUMNS}
+        FROM albums
+        WHERE album_artist_id IS NOT DISTINCT FROM $1
+          AND title_normalized = {key}
+        ORDER BY (musicbrainz_release_group_id IS NOT NULL), id
+        LIMIT 2
+        "#,
+        key = folded("$2"),
+    ))
+    .bind(album_artist_id.map(|id| *id.as_uuid()))
+    .bind(title)
+    .fetch_all(executor)
+    .await
+    .map_err(repository_error)?;
+
+    unique_album(rows)
+}
+
+pub(super) async fn find_unique_library_album(
+    connection: &mut PgConnection,
+    title: &str,
+    album_artist_id: Option<&ArtistId>,
+    candidate_album_ids: &[Uuid],
+) -> Result<Option<Album>, TrackRepositoryError> {
+    let rows = sqlx::query_as::<_, AlbumRow>(&format!(
+        r#"
+        SELECT {ALBUM_COLUMNS}
+        FROM albums
+        WHERE album_artist_id IS NOT DISTINCT FROM $1
+          AND title_normalized = {key}
+          AND id <> ALL($3::UUID[])
+        ORDER BY (musicbrainz_release_group_id IS NOT NULL), id
+        LIMIT 2
+        "#,
+        key = folded("$2"),
+    ))
+    .bind(album_artist_id.map(|id| *id.as_uuid()))
+    .bind(title)
+    .bind(candidate_album_ids)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+
+    unique_album(rows)
+}
+
+fn unique_album(rows: Vec<AlbumRow>) -> Result<Option<Album>, TrackRepositoryError> {
+    let selected = match rows.as_slice() {
+        [only] => Some(only),
+        [first, second] => match (first.6.is_none(), second.6.is_none()) {
+            (true, false) => Some(first),
+            (false, true) => Some(second),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    selected.map(|row| decode_album(row.clone())).transpose()
 }
 
 async fn find_album_by_text(
@@ -646,6 +825,8 @@ async fn get_or_create_in(
     source: &SourceIdentity,
     metadata: &TrackMetadata,
     credits: &[ResolvedCredit],
+    match_provider_track: bool,
+    library_provider_ids: &[String],
 ) -> Result<TrackId, TrackRepositoryError> {
     let track_id = match resolve_identified_track(connection, metadata).await? {
         Some(identified) => {
@@ -662,7 +843,24 @@ async fn get_or_create_in(
         }
         None => match find_track_id_by_source_for_update(connection, source).await? {
             Some(current) => current,
-            None => create_with_source(connection, source, metadata).await?,
+            None => match if match_provider_track {
+                find_provider_track_match(
+                    connection,
+                    source,
+                    metadata,
+                    credits,
+                    library_provider_ids,
+                )
+                .await?
+            } else {
+                None
+            } {
+                Some(track_id) => {
+                    attach_source(connection, &track_id, source).await?;
+                    track_id
+                }
+                None => create_with_source(connection, source, metadata).await?,
+            },
         },
     };
 
@@ -671,6 +869,124 @@ async fn get_or_create_in(
     replace_track_genres(connection, &track_id, metadata.genres()).await?;
 
     Ok(track_id)
+}
+
+pub(super) async fn find_provider_track_match(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+    metadata: &TrackMetadata,
+    credits: &[ResolvedCredit],
+    library_provider_ids: &[String],
+) -> Result<Option<TrackId>, TrackRepositoryError> {
+    if SourceKind::of(source.provider_id()).is_library()
+        || metadata.musicbrainz_recording_id().is_some()
+        || metadata.isrc().is_some()
+    {
+        return Ok(None);
+    }
+    let Some(credit) = credits.first() else {
+        return Ok(None);
+    };
+
+    let candidate_ids = dedup_candidate_ids(
+        connection,
+        &[metadata.title().to_owned()],
+        crate::features::music_library::catalogue::CANDIDATE_LIMIT + 1,
+        library_provider_ids,
+    )
+    .await?;
+    if candidate_ids.len() > crate::features::music_library::catalogue::CANDIDATE_LIMIT as usize
+        || candidate_ids.is_empty()
+    {
+        return Ok(None);
+    }
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Vec<String>,
+        ),
+    >(&format!(
+        r#"
+        SELECT t.id, t.title, t.duration_ms,
+               t.musicbrainz_recording_id, t.isrc,
+               ARRAY(
+                   SELECT artist_credit.name
+                   FROM track_artist_credits AS artist_credit
+                   WHERE artist_credit.track_id = t.id
+                     AND artist_credit.role IS NULL
+                   ORDER BY artist_credit.position
+               )
+        FROM tracks AS t
+        WHERE t.id = ANY($1)
+          AND t.title_normalized = {title_key}
+          AND EXISTS (
+              SELECT 1 FROM track_artist_credits AS primary_credit
+              WHERE primary_credit.track_id = t.id
+                AND primary_credit.position = 0
+                AND primary_credit.role IS NULL
+                AND primary_credit.artist_id = $3
+          )
+        ORDER BY t.id
+        "#,
+        title_key = folded("$2"),
+    ))
+    .bind(candidate_ids)
+    .bind(metadata.title())
+    .bind(credit.artist_id.as_uuid())
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+
+    let remote = MatchRecord::new(
+        "provider-candidate",
+        metadata.title(),
+        metadata
+            .artists()
+            .iter()
+            .map(|artist| artist.name().to_owned())
+            .collect(),
+        metadata.duration_ms(),
+        "",
+        None,
+        None,
+        None,
+        true,
+    );
+    let candidates = rows
+        .iter()
+        .map(|(id, title, duration, recording_id, isrc, artists)| {
+            MatchRecord::new(
+                id.to_string(),
+                title,
+                artists.clone(),
+                duration.and_then(|value| u64::try_from(value).ok()),
+                "",
+                recording_id.clone(),
+                isrc.clone(),
+                None,
+                true,
+            )
+        })
+        .collect();
+    let decision = RecordingIndex::new(candidates).match_record(&remote, 0);
+    if !matches!(
+        decision.status(),
+        MatchStatus::Verified | MatchStatus::MetadataCandidate
+    ) {
+        return Ok(None);
+    }
+
+    Ok(decision.target().and_then(|target| {
+        rows.iter()
+            .find(|(id, ..)| id.to_string() == target)
+            .map(|(id, ..)| TrackId::from_uuid(*id))
+    }))
 }
 
 async fn resolve_identified_track(
@@ -998,7 +1314,7 @@ async fn replace_artist_credits(
     .await
     .map_err(repository_error)?;
 
-    for (position, (name, artist_id, role)) in credits.iter().enumerate() {
+    for (position, credit) in credits.iter().enumerate() {
         let position = i32::try_from(position).map_err(|_| TrackRepositoryError::InvalidData)?;
 
         sqlx::query(
@@ -1009,9 +1325,9 @@ async fn replace_artist_credits(
         )
         .bind(track_id.as_uuid())
         .bind(position)
-        .bind(name)
-        .bind(artist_id.as_uuid())
-        .bind(role.map(|role| role.as_str()))
+        .bind(&credit.name)
+        .bind(credit.artist_id.as_uuid())
+        .bind(credit.role.map(|role| role.as_str()))
         .execute(&mut *connection)
         .await
         .map_err(repository_error)?;
@@ -1029,7 +1345,11 @@ async fn resolve_credits(
 
     for credit in credits {
         let artist = resolve_artist(pool, credit).await?;
-        resolved.push((credit.name().to_owned(), artist.id().clone(), credit.role()));
+        resolved.push(ResolvedCredit {
+            name: credit.name().to_owned(),
+            artist_id: artist.id().clone(),
+            role: credit.role(),
+        });
     }
 
     Ok(resolved)

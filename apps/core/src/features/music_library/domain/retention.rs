@@ -1,5 +1,41 @@
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicateKind {
+    Track,
+    Album,
+    Artist,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderDuplicate {
+    pub kind: DuplicateKind,
+    pub id: Uuid,
+    pub name: String,
+    pub duplicate_of: Uuid,
+    pub listens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    PlaylistEntry,
+    QueueEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedDuplicate {
+    pub kind: DuplicateKind,
+    pub id: Uuid,
+    pub name: String,
+    pub reason: SkipReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProviderDuplicateReport {
+    pub duplicates: Vec<ProviderDuplicate>,
+    pub skipped: Vec<SkippedDuplicate>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RetentionReport {
     pub evictable_tracks: u64,

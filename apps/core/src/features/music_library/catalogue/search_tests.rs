@@ -55,6 +55,14 @@ impl CatalogueWrite for FailingTrackRepository {
     ) -> Result<Track, TrackRepositoryError> {
         Err(TrackRepositoryError::Unavailable)
     }
+
+    async fn get_or_create_provider(
+        &self,
+        _source: SourceIdentity,
+        _metadata: TrackMetadata,
+    ) -> Result<Track, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
 }
 
 #[async_trait]
@@ -932,6 +940,301 @@ fn provider_source_for_test(external_id: &str) -> SourceIdentity {
         external_id.to_owned(),
     )
     .unwrap()
+}
+
+#[sqlx::test]
+async fn provider_materialization_joins_the_library_artist_album_and_track(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let library = repository
+        .get_or_create(
+            local_source_at("glue-song.flac"),
+            TrackMetadata::new(
+                "Glue Song".to_owned(),
+                vec![
+                    ArtistCredit::new("beabadoobee".to_owned(), Some("mb-bea".to_owned())).unwrap(),
+                ],
+                Some(180_000),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let library_artist_id: Uuid = sqlx::query_scalar(
+        "SELECT artist_id FROM track_artist_credits WHERE track_id = $1 AND position = 0",
+    )
+    .bind(library.id().as_uuid())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut library_albums = Vec::new();
+    let mut library_memberships = Vec::new();
+    for (index, title) in [
+        "Beatopia",
+        "Fake It Flowers",
+        "This Is How Tomorrow Moves",
+        "Switchblade",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let album = repository
+            .resolve_or_create_album(
+                &AlbumMetadata::new(title.to_owned())
+                    .unwrap()
+                    .with_album_artist(
+                        ArtistCredit::new("beabadoobee".to_owned(), Some("mb-bea".to_owned()))
+                            .unwrap(),
+                    ),
+            )
+            .await
+            .unwrap();
+        let album_track = if index == 0 {
+            library.id().clone()
+        } else {
+            repository
+                .get_or_create(
+                    local_source_at(&format!("{title}.flac")),
+                    TrackMetadata::new(
+                        format!("{title} track"),
+                        vec![
+                            ArtistCredit::new("beabadoobee".to_owned(), Some("mb-bea".to_owned()))
+                                .unwrap(),
+                        ],
+                        Some(180_000),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap()
+                .id()
+                .clone()
+        };
+        repository
+            .set_album_track(
+                album.id(),
+                &album_track,
+                &crate::features::music_library::domain::AlbumTrack::unplaced(),
+            )
+            .await
+            .unwrap();
+        library_memberships.push((album.id().clone(), album_track));
+        library_albums.push(album);
+    }
+    let artwork_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO artwork_assets (id, subject_kind, subject_id, role, source_provider_id, source_external_id, revision, variant, content_digest, content_type, width, height, byte_size, file_name, fetched_at, last_used_at) VALUES ($1, 'artist', $2, 'wide', 'local', 'legacy-art', 1, 'original', repeat('a', 64), 'image/jpeg', 1, 1, 1, 'legacy.jpg', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    )
+    .bind(artwork_id)
+    .bind(library_artist_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let video_source = provider_source_for_test("video-glue-song");
+    let mut provider_candidates = Vec::new();
+    for (index, library_album) in library_albums.iter().enumerate() {
+        let album_title = library_album.title().to_owned();
+        let track_title = if index == 0 {
+            "Glue Song".to_owned()
+        } else {
+            format!("{album_title} track")
+        };
+        let artist_source = provider_source_for_test(&format!("artist-bea-{index}"));
+        let album_external_id = if index == 0 {
+            "album-beatopia".to_owned()
+        } else {
+            format!("album-{index}")
+        };
+        let album_source = provider_source_for_test(&album_external_id);
+        let credit = ArtistCredit::new("beabadoobee".to_owned(), None)
+            .unwrap()
+            .with_provider(Some(artist_source));
+        let duration = if index == 0 { 181_000 } else { 180_000 };
+        let metadata =
+            TrackMetadata::new(track_title, vec![credit.clone()], Some(duration)).unwrap();
+        let album = AlbumMetadata::new(album_title)
+            .unwrap()
+            .with_album_artist(credit)
+            .with_provider(Some(album_source));
+        let source = if index == 0 {
+            video_source.clone()
+        } else {
+            provider_source_for_test(&format!("video-album-{index}"))
+        };
+        provider_candidates.push(CatalogueCandidate::new(source, metadata).with_album(Some(album)));
+    }
+    let catalogue = Fixture {
+        store: repository.clone(),
+    }
+    .service(vec![provider(StubProvider::new(vec![Ok(
+        provider_candidates,
+    )]))]);
+    let request = SearchRequest::uniform(
+        SearchQuery::new("beabadoobee".to_owned()).unwrap(),
+        window(10, 0),
+    );
+
+    catalogue.search(&request, None, &context()).await.unwrap();
+
+    assert_eq!(
+        repository.find_sources(library.id()).await.unwrap(),
+        vec![local_source_at("glue-song.flac"), video_source]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM artists")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM albums")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        4
+    );
+    for (index, library_album) in library_albums.iter().enumerate() {
+        let source_id = if index == 0 {
+            "album-beatopia".to_owned()
+        } else {
+            format!("album-{index}")
+        };
+        assert_eq!(
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT album_id FROM album_sources WHERE external_id = $1",
+            )
+            .bind(source_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            *library_album.id().as_uuid()
+        );
+    }
+    let memberships = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT album_id, track_id FROM album_tracks ORDER BY album_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut expected_memberships = library_memberships
+        .iter()
+        .map(|(album_id, track_id)| (*album_id.as_uuid(), *track_id.as_uuid()))
+        .collect::<Vec<_>>();
+    expected_memberships.sort();
+    assert_eq!(memberships, expected_memberships);
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM artwork_assets WHERE id = $1")
+            .bind(artwork_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        artwork_id
+    );
+}
+
+#[sqlx::test]
+async fn identified_provider_candidates_keep_the_existing_album_membership_rules(
+    pool: sqlx::PgPool,
+) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let with_album = repository
+        .get_or_create(
+            local_source_at("identified-with-album.flac"),
+            TrackMetadata::new(
+                "Identified With Album".to_owned(),
+                vec![ArtistCredit::new("Artist".to_owned(), None).unwrap()],
+                Some(180_000),
+            )
+            .unwrap()
+            .with_recording_id(Some("recording-with-album".to_owned()))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let without_album = repository
+        .get_or_create(
+            local_source_at("identified-without-album.flac"),
+            TrackMetadata::new(
+                "Identified Without Album".to_owned(),
+                vec![ArtistCredit::new("Artist".to_owned(), None).unwrap()],
+                Some(180_000),
+            )
+            .unwrap()
+            .with_isrc(Some("ISRC-KEEP-RULE".to_owned()))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let previous_album = repository
+        .resolve_or_create_album(&AlbumMetadata::new("Previous".to_owned()).unwrap())
+        .await
+        .unwrap();
+    repository
+        .set_album_track(
+            previous_album.id(),
+            without_album.id(),
+            &crate::features::music_library::domain::AlbumTrack::unplaced(),
+        )
+        .await
+        .unwrap();
+
+    let with_album_candidate = CatalogueCandidate::new(
+        provider_source_for_test("identified-with-album-video"),
+        TrackMetadata::new(
+            "Identified With Album".to_owned(),
+            vec![ArtistCredit::new("Artist".to_owned(), None).unwrap()],
+            Some(180_000),
+        )
+        .unwrap()
+        .with_recording_id(Some("recording-with-album".to_owned()))
+        .unwrap(),
+    )
+    .with_album(Some(
+        AlbumMetadata::new("Incoming".to_owned())
+            .unwrap()
+            .with_album_artist(ArtistCredit::new("Artist".to_owned(), None).unwrap()),
+    ));
+    let without_album_candidate = CatalogueCandidate::new(
+        provider_source_for_test("identified-without-album-video"),
+        TrackMetadata::new(
+            "Identified Without Album".to_owned(),
+            vec![ArtistCredit::new("Artist".to_owned(), None).unwrap()],
+            Some(180_000),
+        )
+        .unwrap()
+        .with_isrc(Some("ISRC-KEEP-RULE".to_owned()))
+        .unwrap(),
+    );
+    let catalogue = Fixture {
+        store: repository.clone(),
+    }
+    .service(vec![provider(StubProvider::new(vec![Ok(vec![
+        with_album_candidate,
+        without_album_candidate,
+    ])]))]);
+    let request = SearchRequest::uniform(
+        SearchQuery::new("Identified".to_owned()).unwrap(),
+        window(10, 0),
+    );
+
+    catalogue.search(&request, None, &context()).await.unwrap();
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM album_tracks WHERE track_id = $1")
+            .bind(with_album.id().as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM album_tracks WHERE track_id = $1")
+            .bind(without_album.id().as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[sqlx::test]

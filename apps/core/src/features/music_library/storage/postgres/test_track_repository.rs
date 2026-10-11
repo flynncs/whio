@@ -9,8 +9,8 @@ use crate::features::music_library::domain::{
 use crate::features::music_library::library_state::test_support::seed_play;
 use crate::features::music_library::sources::SourceQueries;
 use crate::features::music_library::storage::contracts::{
-    CatalogueWrite, DuplicateReport, LibraryRead, SourceFileFacts, SourceLookup, StateStore,
-    TrackRepositoryError,
+    CatalogueWrite, DuplicateReport, LibraryRead, Retention, SourceFileFacts, SourceLookup,
+    StateStore, TrackRepositoryError,
 };
 use sqlx::PgPool;
 use tokio::sync::Barrier;
@@ -416,6 +416,44 @@ async fn insert_user(pool: &PgPool, id: Uuid, username: &str) {
 }
 
 #[sqlx::test]
+async fn a_name_only_credit_joins_one_identified_artist(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let identified = repository
+        .resolve_or_create_artist(&credit("beabadoobee", Some("mb-bea")))
+        .await
+        .unwrap();
+
+    let provider = repository
+        .resolve_or_create_artist(&credit("beabadoobee", None))
+        .await
+        .unwrap();
+
+    assert_eq!(provider.id(), identified.id());
+    assert_eq!(provider.musicbrainz_artist_id(), Some("mb-bea"));
+}
+
+#[sqlx::test]
+async fn a_name_only_credit_does_not_choose_between_same_named_artists(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let identified = repository
+        .resolve_or_create_artist(&credit("beabadoobee", Some("mb-bea")))
+        .await
+        .unwrap();
+    repository
+        .resolve_or_create_artist(&credit("beabadoobee", Some("mb-bea-alt")))
+        .await
+        .unwrap();
+
+    let provider = repository
+        .resolve_or_create_artist(&credit("beabadoobee", None))
+        .await
+        .unwrap();
+
+    assert_ne!(provider.id(), identified.id());
+    assert_eq!(provider.musicbrainz_artist_id(), None);
+}
+
+#[sqlx::test]
 
 async fn artist_ladder_is_identifier_then_normalised_name(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool);
@@ -441,10 +479,10 @@ async fn artist_ladder_is_identifier_then_normalised_name(pool: PgPool) {
         .resolve_or_create_artist(&credit("Daft Punk", None))
         .await
         .unwrap();
-    assert_ne!(
+    assert_eq!(
         plain.id(),
         attached.id(),
-        "an id-bearing artist and a name-only artist coexist"
+        "a unique normalised name resolves to the identified artist"
     );
 }
 
@@ -491,6 +529,53 @@ async fn typographic_variants_resolve_to_one_album(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(curly.id(), straight.id());
+}
+
+#[sqlx::test]
+async fn a_text_album_joins_one_album_with_a_release_group(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let identified = repository
+        .resolve_or_create_album(
+            &album("Beatopia")
+                .with_album_artist(credit("beabadoobee", Some("mb-bea")))
+                .with_release_group_id(Some("rg-beatopia".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let provider = repository
+        .resolve_or_create_album(&album("Beatopia").with_album_artist(credit("beabadoobee", None)))
+        .await
+        .unwrap();
+
+    assert_eq!(provider.id(), identified.id());
+}
+
+#[sqlx::test]
+async fn a_text_album_chooses_the_only_edition_without_a_release_group(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let artist = credit("Daft Punk", None);
+    let plain = repository
+        .resolve_or_create_album(&album("Discovery").with_album_artist(artist.clone()))
+        .await
+        .unwrap();
+    repository
+        .resolve_or_create_album(
+            &album("Discovery")
+                .with_album_artist(artist.clone())
+                .with_release_group_id(Some("rg-remaster".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let provider = repository
+        .resolve_or_create_album(&album("Discovery").with_album_artist(artist))
+        .await
+        .unwrap();
+
+    assert_eq!(provider.id(), plain.id());
 }
 
 #[sqlx::test]
@@ -1433,6 +1518,162 @@ async fn a_moved_file_keeps_its_track(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_provider_source_attaches_to_one_matching_library_track(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let local = repository
+        .get_or_create(
+            local_source("glue-song.flac"),
+            metadata("Glue Song", &["beabadoobee"], Some(180_000)),
+        )
+        .await
+        .unwrap();
+
+    let provider = repository
+        .get_or_create_provider(
+            source("glue-song-video"),
+            metadata("Glue Song", &["beabadoobee"], Some(181_000)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(provider.id(), local.id());
+    assert_eq!(repository.find_sources(local.id()).await.unwrap().len(), 2);
+}
+
+#[sqlx::test]
+async fn provider_matching_rejects_mismatched_secondary_artists(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let library = repository
+        .get_or_create(
+            local_source("secondary-credit.flac"),
+            metadata("Shared Song", &["Primary", "Library Guest"], Some(180_000)),
+        )
+        .await
+        .unwrap();
+
+    let provider = repository
+        .get_or_create_provider(
+            source("secondary-credit-video"),
+            metadata(
+                "Shared Song",
+                &["Primary", "Different Guest"],
+                Some(180_000),
+            ),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(provider.id(), library.id());
+}
+
+#[sqlx::test]
+async fn provider_feature_superset_uses_the_stricter_duration_tolerance(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let library = repository
+        .get_or_create(
+            local_source("feature-superset.flac"),
+            metadata("Shared Song", &["Primary"], Some(180_000)),
+        )
+        .await
+        .unwrap();
+
+    let provider = repository
+        .get_or_create_provider(
+            source("feature-superset-video"),
+            metadata("Shared Song", &["Primary", "Guest"], Some(181_500)),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(provider.id(), library.id());
+}
+
+#[sqlx::test]
+async fn a_provider_source_outside_duration_tolerance_stays_separate(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let local = repository
+        .get_or_create(
+            local_source("glue-song.flac"),
+            metadata("Glue Song", &["beabadoobee"], Some(180_000)),
+        )
+        .await
+        .unwrap();
+
+    let provider = repository
+        .get_or_create_provider(
+            source("glue-song-video"),
+            metadata("Glue Song", &["beabadoobee"], Some(182_001)),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(provider.id(), local.id());
+}
+
+#[sqlx::test]
+async fn one_matching_track_is_selected_among_similar_library_tracks(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let matching = repository
+        .get_or_create(
+            local_source("matching-similar.flac"),
+            metadata("Shared Song", &["Matching Artist"], Some(180_000)),
+        )
+        .await
+        .unwrap();
+    repository
+        .get_or_create(
+            local_source("other-similar.flac"),
+            metadata("Shared Song", &["Other Artist"], Some(180_000)),
+        )
+        .await
+        .unwrap();
+
+    let provider = repository
+        .get_or_create_provider(
+            source("unique-match-video"),
+            metadata("Shared Song", &["Matching Artist"], Some(180_000)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(provider.id(), matching.id());
+}
+
+#[sqlx::test]
+async fn several_library_matches_do_not_attach_a_provider_source(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    for path in ["glue-song-a.flac", "glue-song-b.flac"] {
+        repository
+            .get_or_create(
+                local_source(path),
+                metadata("Glue Song", &["beabadoobee"], Some(180_000)),
+            )
+            .await
+            .unwrap();
+    }
+
+    let provider = repository
+        .get_or_create_provider(
+            source("glue-song-video"),
+            metadata("Glue Song", &["beabadoobee"], Some(180_000)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository.find_sources(provider.id()).await.unwrap().len(),
+        1
+    );
+    let library_tracks: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT track_id) FROM track_sources WHERE provider_id = 'local'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(library_tracks, 2);
+}
+
+#[sqlx::test]
 
 async fn an_unidentified_file_keeps_its_own_track(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool);
@@ -1619,14 +1860,17 @@ async fn duplicate_candidates_report_local_copies(pool: PgPool) {
 #[sqlx::test]
 
 async fn split_artists_report_rows_sharing_a_name(pool: PgPool) {
-    let repository = PostgresTrackRepository::new(pool);
+    let repository = PostgresTrackRepository::new(pool.clone());
 
     let identified = repository
         .resolve_or_create_artist(&credit("Daft Punk", Some("mb-1")))
         .await
         .unwrap();
-    let plain = repository
-        .resolve_or_create_artist(&credit("Daft Punk", None))
+    let plain_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO artists (id, name) VALUES ($1, $2)")
+        .bind(plain_id)
+        .bind("Daft Punk")
+        .execute(&pool)
         .await
         .unwrap();
     repository
@@ -1654,7 +1898,7 @@ async fn split_artists_report_rows_sharing_a_name(pool: PgPool) {
         .iter()
         .find(|row| !row.is_identified())
         .expect("the name-only row is reported");
-    assert_eq!(without_id.artist_id(), plain.id());
+    assert_eq!(without_id.artist_id().as_uuid(), &plain_id);
 }
 
 #[sqlx::test]
@@ -1946,6 +2190,97 @@ async fn dedup_candidates_return_local_matches_and_strip_qualifiers(pool: PgPool
         "the trigram branch reaches a qualifier"
     );
     assert_eq!(ids.len(), 2, "the provider track is not a dedup candidate");
+}
+
+#[sqlx::test]
+async fn provider_matching_rejects_candidate_overflow_for_attach_and_prune(pool: PgPool) {
+    let target_artist = Uuid::now_v7();
+    let other_artist = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO artists (id, name) VALUES ($1, 'Overflow Target'), ($2, 'Overflow Other')",
+    )
+    .bind(target_artist)
+    .bind(other_artist)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let track_ids = (1..=502).map(Uuid::from_u128).collect::<Vec<_>>();
+    let artist_ids = (1..=502)
+        .map(|index| {
+            if index == 1 || index == 502 {
+                target_artist
+            } else {
+                other_artist
+            }
+        })
+        .collect::<Vec<_>>();
+    sqlx::query(
+        "INSERT INTO tracks (id, title, duration_ms) SELECT id, 'Overflow Song', 180000 FROM unnest($1::UUID[]) AS tracks(id)",
+    )
+    .bind(&track_ids)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO track_artist_credits (track_id, position, name, artist_id) SELECT item.track_id, 0, artist.name, artist.id FROM unnest($1::UUID[], $2::UUID[]) AS item(track_id, artist_id) JOIN artists AS artist ON artist.id = item.artist_id",
+    )
+    .bind(&track_ids)
+    .bind(&artist_ids)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO track_sources (id, track_id, provider_id, source_scope, external_id) SELECT id, id, 'local', 'named:/music', 'overflow-' || id::TEXT FROM unnest($1::UUID[]) AS tracks(id)",
+    )
+    .bind(&track_ids)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let provider = repository
+        .get_or_create_provider(
+            source("overflow-provider"),
+            metadata("Overflow Song", &["Overflow Target"], Some(180_000)),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(provider.id().as_uuid(), &track_ids[0]);
+    let report = repository.provider_duplicates().await.unwrap();
+    assert!(
+        !report
+            .duplicates
+            .iter()
+            .any(|duplicate| duplicate.id == *provider.id().as_uuid())
+    );
+}
+
+#[sqlx::test]
+async fn dedup_candidates_hydrate_with_a_one_connection_pool(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    repository
+        .get_or_create(
+            local_source("single-connection.flac"),
+            metadata("Single Connection", &["Artist"], Some(240_000)),
+        )
+        .await
+        .unwrap();
+    let single_connection_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let single_connection_repository = PostgresTrackRepository::new(single_connection_pool);
+
+    let hits = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        single_connection_repository.dedup_candidates(&["Single Connection".to_owned()], 10),
+    )
+    .await
+    .expect("candidate hydration completes")
+    .unwrap();
+
+    assert_eq!(hits.len(), 1);
 }
 
 #[sqlx::test]

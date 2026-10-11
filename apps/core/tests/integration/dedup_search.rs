@@ -334,7 +334,7 @@ async fn fresh_provider_result_uses_local_state_without_changing_album_or_source
     );
     assert_eq!(
         f.repository.find_sources(local.id()).await.unwrap().len(),
-        1
+        2
     );
 }
 

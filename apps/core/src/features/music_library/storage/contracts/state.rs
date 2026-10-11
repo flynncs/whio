@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::features::music_library::domain::{
-    EvictionReport, LibraryState, RetentionReport, Starred, StateTarget, TrackId,
+    EvictionReport, LibraryState, ProviderDuplicateReport, RetentionReport, Starred, StateTarget,
+    TrackId,
 };
 
 use super::TrackRepositoryError;
@@ -76,4 +77,10 @@ pub trait Retention: Send + Sync {
     async fn evict_unengaged(&self) -> Result<EvictionReport, TrackRepositoryError> {
         Ok(EvictionReport::default())
     }
+
+    async fn provider_duplicates(&self) -> Result<ProviderDuplicateReport, TrackRepositoryError>;
+
+    async fn delete_provider_duplicates(
+        &self,
+    ) -> Result<ProviderDuplicateReport, TrackRepositoryError>;
 }

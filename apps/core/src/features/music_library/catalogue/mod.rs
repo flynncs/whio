@@ -8,6 +8,8 @@ mod ports;
 mod provider_error;
 mod search;
 
+pub(crate) const CANDIDATE_LIMIT: u32 = 500;
+
 pub use dedup::DedupMode;
 
 pub use completion::CompletionService;

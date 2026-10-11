@@ -8,7 +8,7 @@ use crate::{
     platform::request::RequestContext,
 };
 
-const CANDIDATE_LIMIT: u32 = 500;
+use super::CANDIDATE_LIMIT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DedupMode {
@@ -424,6 +424,17 @@ mod tests {
     #[async_trait::async_trait]
     impl crate::features::music_library::storage::contracts::CatalogueWrite for UnusableCandidates {
         async fn get_or_create(
+            &self,
+            _: crate::features::music_library::domain::SourceIdentity,
+            _: crate::features::music_library::domain::TrackMetadata,
+        ) -> Result<
+            crate::features::music_library::domain::Track,
+            crate::features::music_library::storage::contracts::TrackRepositoryError,
+        > {
+            Err(crate::features::music_library::storage::contracts::TrackRepositoryError::Unavailable)
+        }
+
+        async fn get_or_create_provider(
             &self,
             _: crate::features::music_library::domain::SourceIdentity,
             _: crate::features::music_library::domain::TrackMetadata,

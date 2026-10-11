@@ -309,7 +309,7 @@ async fn artist_ladder_prefers_identifiers_then_normalised_names(pool: sqlx::PgP
 }
 
 #[sqlx::test]
-async fn an_id_bearing_and_a_name_only_artist_coexist(pool: sqlx::PgPool) {
+async fn a_name_only_credit_joins_the_unique_id_bearing_artist(pool: sqlx::PgPool) {
     let repository = PostgresTrackRepository::new(pool.clone());
 
     let named = repository
@@ -321,9 +321,8 @@ async fn an_id_bearing_and_a_name_only_artist_coexist(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    assert_ne!(named.id(), plain.id());
-    assert_eq!(named.musicbrainz_artist_id(), Some("mb-1"));
-    assert_eq!(plain.musicbrainz_artist_id(), None);
+    assert_eq!(named.id(), plain.id());
+    assert_eq!(plain.musicbrainz_artist_id(), Some("mb-1"));
 }
 
 #[sqlx::test]

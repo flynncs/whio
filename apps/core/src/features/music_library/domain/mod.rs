@@ -59,7 +59,10 @@ pub use queue::{
     RestoreQueueEntry, RestoreQueueEntryId, RestoreQueueSnapshot, RestoreQueueValidationError,
     RestoreQueueWrite, RestoreQueueWriteOutcome,
 };
-pub use retention::{EvictionReport, RetentionReport};
+pub use retention::{
+    DuplicateKind, EvictionReport, ProviderDuplicate, ProviderDuplicateReport, RetentionReport,
+    SkipReason, SkippedDuplicate,
+};
 pub use search::{MatchQuality, SearchConfidence, SearchTerms};
 pub(crate) use search::{album_quality, best_field_quality, track_quality};
 pub use source::{

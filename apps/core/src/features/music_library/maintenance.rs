@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use super::{
-    domain::{DuplicateCandidate, EvictionReport, RetentionReport, SplitArtist},
+    domain::{
+        DuplicateCandidate, EvictionReport, ProviderDuplicateReport, RetentionReport, SplitArtist,
+    },
     storage::contracts::{DuplicateReport, Retention, TrackRepositoryError},
 };
 
@@ -54,5 +56,23 @@ impl MaintenanceService {
 
     pub async fn evict_unengaged(&self) -> Result<EvictionReport, MaintenanceError> {
         self.retention.evict_unengaged().await.map_err(Into::into)
+    }
+
+    #[tracing::instrument(skip_all, fields(operation = "provider_duplicate_scan"))]
+    pub async fn provider_duplicates(&self) -> Result<ProviderDuplicateReport, MaintenanceError> {
+        self.retention
+            .provider_duplicates()
+            .await
+            .map_err(Into::into)
+    }
+
+    #[tracing::instrument(skip_all, fields(operation = "provider_duplicate_delete"))]
+    pub async fn delete_provider_duplicates(
+        &self,
+    ) -> Result<ProviderDuplicateReport, MaintenanceError> {
+        self.retention
+            .delete_provider_duplicates()
+            .await
+            .map_err(Into::into)
     }
 }

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -22,6 +22,46 @@ use crate::features::music_library::{
 use crate::features::music_library::storage::contracts::LibraryRead;
 
 use super::PgStore;
+
+pub(super) async fn dedup_candidate_ids(
+    connection: &mut PgConnection,
+    keys: &[String],
+    limit: u32,
+    library_provider_ids: &[String],
+) -> Result<Vec<Uuid>, TrackRepositoryError> {
+    if keys.is_empty() || library_provider_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_scalar::<_, Uuid>(&format!(
+        r#"
+        SELECT matched.id
+        FROM tracks AS matched
+        WHERE EXISTS (
+            SELECT 1
+            FROM unnest($1::TEXT[]) AS key(value)
+            WHERE matched.title_normalized = {key}
+               OR matched.title_normalized % {key}
+        )
+          AND EXISTS (
+            SELECT 1
+            FROM track_sources AS source
+            WHERE source.track_id = matched.id
+              AND source.provider_id = ANY($2::TEXT[])
+        )
+        ORDER BY matched.title_normalized, matched.id
+        LIMIT $3
+        "#,
+        key = folded("key.value"),
+    ))
+    .bind(keys)
+    .bind(library_provider_ids)
+    .bind(i64::from(limit))
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)
+}
+
 use super::PostgresLibraryStore;
 use super::decode::{
     album_states, albums_for_tracks, artist_count_expressions, attach_album_state,
@@ -874,6 +914,13 @@ impl LibraryRead for PgStore {
             return Ok(Vec::new());
         }
 
+        let mut connection = self.pool.acquire().await.map_err(repository_error)?;
+        let candidate_ids =
+            dedup_candidate_ids(&mut connection, keys, limit, &self.library_provider_ids()).await?;
+        if candidate_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
             r#"
             SELECT {TRACK_COLUMNS},
@@ -881,28 +928,15 @@ impl LibraryRead for PgStore {
             FROM tracks AS t
             LEFT JOIN album_tracks AS mt ON mt.track_id = t.id
             LEFT JOIN albums AS a ON a.id = mt.album_id
-            WHERE t.id IN (
-                SELECT DISTINCT matched.id
-                FROM tracks AS matched
-                JOIN unnest($1::TEXT[]) AS k(value)
-                  ON matched.title_normalized = {key}
-                  OR matched.title_normalized % {key}
-                WHERE EXISTS (
-                    SELECT 1 FROM track_sources AS sources
-                    WHERE sources.track_id = matched.id AND sources.provider_id = $2
-                )
-            )
+            WHERE t.id = ANY($1)
             ORDER BY t.title_normalized, t.id
-            LIMIT $3
             "#,
-            key = folded("k.value"),
         ))
-        .bind(keys)
-        .bind(LOCAL_PROVIDER_ID)
-        .bind(i64::from(limit))
-        .fetch_all(&self.pool)
+        .bind(candidate_ids)
+        .fetch_all(&mut *connection)
         .await
         .map_err(repository_error)?;
+        drop(connection);
 
         hits_from_rows(&self.pool, rows, None).await
     }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::features::music_library::{
-    domain::{Album, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, TrackHit},
+    domain::{Album, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, SourceKind, TrackHit},
     storage::contracts::{CatalogueWrite, SourceLookup},
 };
 
@@ -77,27 +77,40 @@ pub(crate) async fn materialize(
         let album_metadata = candidate.album().cloned();
         let metadata = candidate.metadata().clone();
         let credits = metadata.artists().to_vec();
+        let preserve_membership_for_match =
+            metadata.musicbrainz_recording_id().is_none() && metadata.isrc().is_none();
 
         let track = catalogue
-            .get_or_create(source.clone(), metadata)
+            .get_or_create_provider(source.clone(), metadata)
             .await
             .map_err(CatalogueError::Repository)?;
+        let has_library_source = sources
+            .find_sources(track.id())
+            .await
+            .map_err(CatalogueError::Repository)?
+            .iter()
+            .any(|source| SourceKind::of(source.provider_id()).is_library());
+        let preserve_membership = preserve_membership_for_match && has_library_source;
 
         let album = match &album_metadata {
             Some(album_metadata) => {
                 let album = materialize_album(catalogue, sources, album_metadata).await?;
-                catalogue
-                    .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
-                    .await
-                    .map_err(CatalogueError::Repository)?;
+                if !preserve_membership {
+                    catalogue
+                        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+                }
 
                 Some(album)
             }
             None => {
-                catalogue
-                    .clear_album_track(track.id())
-                    .await
-                    .map_err(CatalogueError::Repository)?;
+                if !preserve_membership {
+                    catalogue
+                        .clear_album_track(track.id())
+                        .await
+                        .map_err(CatalogueError::Repository)?;
+                }
 
                 None
             }

@@ -21,6 +21,12 @@ pub trait CatalogueWrite: Send + Sync {
         metadata: TrackMetadata,
     ) -> Result<Track, TrackRepositoryError>;
 
+    async fn get_or_create_provider(
+        &self,
+        source: SourceIdentity,
+        metadata: TrackMetadata,
+    ) -> Result<Track, TrackRepositoryError>;
+
     async fn set_source_file_facts(
         &self,
         _source: &SourceIdentity,

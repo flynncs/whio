@@ -108,6 +108,10 @@ pub async fn run() -> Result<(), CliError> {
             ensure_no_extra_args(&mut args)?;
             Operation::Duplicates { limit }
         }
+        "prune-provider-duplicates" => {
+            let apply = parse_prune_provider_duplicates(&mut args)?;
+            Operation::PruneProviderDuplicates { apply }
+        }
         "retention" => {
             let evict = match args.next() {
                 Some(flag) if flag == "--evict" => true,
@@ -183,6 +187,13 @@ pub async fn run() -> Result<(), CliError> {
             )
             .await?
         }
+        Operation::PruneProviderDuplicates { apply } => {
+            music_cli::prune_provider_duplicates(
+                &crate::features::music_library::maintenance(database.pool()),
+                apply,
+            )
+            .await?
+        }
     }
 
     Ok(())
@@ -208,6 +219,9 @@ enum Operation {
     },
     Retention {
         evict: bool,
+    },
+    PruneProviderDuplicates {
+        apply: bool,
     },
 }
 
@@ -261,6 +275,22 @@ fn resolve_config(
     Err(CliError::MissingConfig(name))
 }
 
+fn parse_prune_provider_duplicates(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<bool, CliError> {
+    let apply = match args.next() {
+        Some(flag) if flag == "--apply" => true,
+        Some(other) => {
+            return Err(CliError::Usage(format!(
+                "unknown prune-provider-duplicates flag `{other}` (try --apply)"
+            )));
+        }
+        None => false,
+    };
+    ensure_no_extra_args(args)?;
+    Ok(apply)
+}
+
 fn required_arg(
     args: &mut impl Iterator<Item = String>,
     message: &str,
@@ -285,10 +315,15 @@ fn print_help() {
          \\twhio-cli [--database-url <url>] revoke <credential-id>\n\
          \\twhio-cli [--database-url <url>] assign-admin <username>\n\
          \\twhio-cli [--database-url <url>] duplicates [limit]\n\
-         \\twhio-cli [--database-url <url>] retention [--evict]\n\n\
+         \\twhio-cli [--database-url <url>] retention [--evict]\n\
+         \\twhio-cli [--database-url <url>] prune-provider-duplicates [--apply]\n\n\
          Configuration (first match wins):\n\
          \\t--database-url / --credential-key flags\n\
          \\tWHIO_DATABASE_URL / WHIO_CREDENTIAL_KEY environment variables\n\
          \t.env in the current directory"
     );
 }
+
+#[cfg(test)]
+#[path = "cli_tests.rs"]
+mod tests;

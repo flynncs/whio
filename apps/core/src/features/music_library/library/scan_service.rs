@@ -196,6 +196,14 @@ mod tests {
         ) -> Result<Track, TrackRepositoryError> {
             panic!("status checks must not write tracks")
         }
+
+        async fn get_or_create_provider(
+            &self,
+            _source: SourceIdentity,
+            _metadata: TrackMetadata,
+        ) -> Result<Track, TrackRepositoryError> {
+            panic!("status checks must not write tracks")
+        }
     }
 
     #[async_trait::async_trait]

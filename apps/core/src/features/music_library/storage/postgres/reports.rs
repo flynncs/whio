@@ -3,8 +3,9 @@ use uuid::Uuid;
 
 use crate::features::music_library::{
     domain::{
-        ArtistId, DuplicateCandidate, DuplicateSource, EvictionReport, LOCAL_PROVIDER_ID,
-        RetentionReport, SplitArtist, SplitArtistRow, TrackId,
+        ArtistCredit, ArtistId, DuplicateCandidate, DuplicateKind, DuplicateSource, EvictionReport,
+        LOCAL_PROVIDER_ID, ProviderDuplicate, ProviderDuplicateReport, RetentionReport, SkipReason,
+        SkippedDuplicate, SplitArtist, SplitArtistRow, TrackId, TrackMetadata,
     },
     storage::contracts::TrackRepositoryError,
 };
@@ -12,7 +13,9 @@ use crate::features::music_library::{
 use crate::features::music_library::storage::contracts::{DuplicateReport, Retention};
 
 use super::PgStore;
+use super::catalogue::{find_provider_track_match, resolve_cleanup_artist};
 use super::decode::{decode_source, repository_error};
+use sqlx::PgConnection;
 
 fn track_engaged(id: &str) -> String {
     format!(
@@ -49,6 +52,448 @@ fn artist_unengaged(member_engaged: &str) -> String {
           AND NOT EXISTS (SELECT 1 FROM artist_favorites AS af WHERE af.artist_id = ar.id)
           AND NOT EXISTS (SELECT 1 FROM artist_ratings AS arv WHERE arv.artist_id = ar.id))"
     )
+}
+
+#[derive(sqlx::FromRow)]
+struct TrackDuplicateCandidate {
+    id: Uuid,
+    title: String,
+    duration_ms: Option<i64>,
+    primary_artist_id: Uuid,
+    artist_names: Vec<String>,
+    provider_id: String,
+    source_scope: String,
+    external_id: String,
+    listens: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct AlbumDuplicateCandidate {
+    id: Uuid,
+    title: String,
+    album_artist_id: Option<Uuid>,
+}
+
+async fn provider_duplicate_report(
+    connection: &mut PgConnection,
+    library_ids: &[String],
+) -> Result<ProviderDuplicateReport, TrackRepositoryError> {
+    let candidate_artist_ids = cleanup_candidate_artist_ids(connection, library_ids).await?;
+    let mut report = ProviderDuplicateReport::default();
+    let track_ids = collect_provider_track_duplicates(
+        connection,
+        library_ids,
+        &candidate_artist_ids,
+        &mut report,
+    )
+    .await?;
+    let candidate_album_ids = cleanup_candidate_album_ids(connection, library_ids).await?;
+    let deletable_album_candidates =
+        deletable_provider_album_ids(connection, &candidate_album_ids, &track_ids).await?;
+    let album_ids = collect_provider_album_duplicates(
+        connection,
+        &candidate_artist_ids,
+        &candidate_album_ids,
+        &deletable_album_candidates,
+        &mut report,
+    )
+    .await?;
+    collect_provider_artist_duplicates(
+        connection,
+        library_ids,
+        &candidate_artist_ids,
+        &track_ids,
+        &album_ids,
+        &mut report,
+    )
+    .await?;
+    Ok(report)
+}
+
+async fn cleanup_candidate_artist_ids(
+    connection: &mut PgConnection,
+    library_ids: &[String],
+) -> Result<Vec<Uuid>, TrackRepositoryError> {
+    sqlx::query_scalar(
+        r#"
+        SELECT artist.id
+        FROM artists AS artist
+        WHERE EXISTS (
+            SELECT 1 FROM artist_sources AS source
+            WHERE source.artist_id = artist.id
+              AND source.provider_id <> ALL($1::TEXT[])
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM artist_sources AS source
+            WHERE source.artist_id = artist.id
+              AND source.provider_id = ANY($1::TEXT[])
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM track_artist_credits AS credit
+            JOIN track_sources AS source ON source.track_id = credit.track_id
+            WHERE credit.artist_id = artist.id
+              AND source.provider_id = ANY($1::TEXT[])
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM albums AS album
+            WHERE album.album_artist_id = artist.id
+              AND (
+                  EXISTS (
+                      SELECT 1 FROM album_sources AS source
+                      WHERE source.album_id = album.id
+                        AND source.provider_id = ANY($1::TEXT[])
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM album_tracks AS membership
+                      JOIN track_sources AS source ON source.track_id = membership.track_id
+                      WHERE membership.album_id = album.id
+                        AND source.provider_id = ANY($1::TEXT[])
+                  )
+              )
+        )
+        ORDER BY artist.id
+        "#,
+    )
+    .bind(library_ids)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)
+}
+
+async fn collect_provider_track_duplicates(
+    connection: &mut PgConnection,
+    library_ids: &[String],
+    candidate_artist_ids: &[Uuid],
+    report: &mut ProviderDuplicateReport,
+) -> Result<Vec<Uuid>, TrackRepositoryError> {
+    let rows = sqlx::query_as::<_, TrackDuplicateCandidate>(
+        r#"
+        SELECT t.id, t.title, t.duration_ms,
+               primary_credit.artist_id AS primary_artist_id,
+               ARRAY(
+                   SELECT credit.name FROM track_artist_credits AS credit
+                   WHERE credit.track_id = t.id AND credit.role IS NULL
+                   ORDER BY credit.position
+               ) AS artist_names,
+               source.provider_id, source.source_scope, source.external_id,
+               (SELECT count(*) FROM listens WHERE track_id = t.id) AS listens
+        FROM tracks AS t
+        JOIN track_artist_credits AS primary_credit
+          ON primary_credit.track_id = t.id
+         AND primary_credit.position = 0
+         AND primary_credit.role IS NULL
+        JOIN LATERAL (
+            SELECT provider_id, source_scope, external_id
+            FROM track_sources
+            WHERE track_id = t.id AND provider_id <> ALL($1::TEXT[])
+            ORDER BY provider_id, source_scope, external_id
+            LIMIT 1
+        ) AS source ON TRUE
+        WHERE t.musicbrainz_recording_id IS NULL AND t.isrc IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM track_sources AS library_source
+              WHERE library_source.track_id = t.id
+                AND library_source.provider_id = ANY($1::TEXT[])
+          )
+        ORDER BY t.id
+        "#,
+    )
+    .bind(library_ids)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+
+    let mut deletable_ids = Vec::new();
+    for row in rows {
+        let source = decode_source(row.provider_id, row.source_scope, row.external_id)?;
+        let Some(primary_artist_id) =
+            resolve_cleanup_artist(connection, row.primary_artist_id, candidate_artist_ids).await?
+        else {
+            continue;
+        };
+        let artists = row
+            .artist_names
+            .iter()
+            .map(|name| {
+                ArtistCredit::new(name.clone(), None).map_err(|_| TrackRepositoryError::InvalidData)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let metadata = TrackMetadata::new(
+            row.title.clone(),
+            artists,
+            row.duration_ms.and_then(|value| u64::try_from(value).ok()),
+        )
+        .map_err(|_| TrackRepositoryError::InvalidData)?;
+        let credit = super::catalogue::ResolvedCredit {
+            name: metadata
+                .artists()
+                .first()
+                .map(|artist| artist.name().to_owned())
+                .unwrap_or_default(),
+            artist_id: primary_artist_id,
+            role: None,
+        };
+        let Some(duplicate_of) = find_provider_track_match(
+            connection,
+            &source,
+            &metadata,
+            std::slice::from_ref(&credit),
+            library_ids,
+        )
+        .await?
+        else {
+            continue;
+        };
+
+        if let Some(reason) = track_skip_reason(connection, row.id).await? {
+            report.skipped.push(SkippedDuplicate {
+                kind: DuplicateKind::Track,
+                id: row.id,
+                name: row.title,
+                reason,
+            });
+            continue;
+        }
+
+        deletable_ids.push(row.id);
+        report.duplicates.push(ProviderDuplicate {
+            kind: DuplicateKind::Track,
+            id: row.id,
+            name: row.title,
+            duplicate_of: *duplicate_of.as_uuid(),
+            listens: row.listens.max(0) as u64,
+        });
+    }
+    Ok(deletable_ids)
+}
+
+async fn cleanup_candidate_album_ids(
+    connection: &mut PgConnection,
+    library_ids: &[String],
+) -> Result<Vec<Uuid>, TrackRepositoryError> {
+    sqlx::query_scalar(
+        r#"
+        SELECT album.id
+        FROM albums AS album
+        WHERE EXISTS (
+            SELECT 1 FROM album_sources AS source
+            WHERE source.album_id = album.id
+              AND source.provider_id <> ALL($1::TEXT[])
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM album_sources AS source
+            WHERE source.album_id = album.id
+              AND source.provider_id = ANY($1::TEXT[])
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM album_tracks AS membership
+            JOIN track_sources AS source ON source.track_id = membership.track_id
+            WHERE membership.album_id = album.id
+              AND source.provider_id = ANY($1::TEXT[])
+        )
+        ORDER BY album.id
+        "#,
+    )
+    .bind(library_ids)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)
+}
+
+async fn deletable_provider_album_ids(
+    connection: &mut PgConnection,
+    candidate_album_ids: &[Uuid],
+    deletable_track_ids: &[Uuid],
+) -> Result<Vec<Uuid>, TrackRepositoryError> {
+    sqlx::query_scalar(
+        r#"
+        SELECT album.id
+        FROM albums AS album
+        WHERE album.id = ANY($1::UUID[])
+          AND album.musicbrainz_release_group_id IS NULL
+          AND album.musicbrainz_release_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM album_tracks AS membership
+              WHERE membership.album_id = album.id
+                AND membership.track_id <> ALL($2::UUID[])
+          )
+        ORDER BY album.id
+        "#,
+    )
+    .bind(candidate_album_ids)
+    .bind(deletable_track_ids)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)
+}
+
+async fn collect_provider_album_duplicates(
+    connection: &mut PgConnection,
+    candidate_artist_ids: &[Uuid],
+    candidate_album_ids: &[Uuid],
+    deletable_album_candidates: &[Uuid],
+    report: &mut ProviderDuplicateReport,
+) -> Result<Vec<Uuid>, TrackRepositoryError> {
+    if candidate_album_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_as::<_, AlbumDuplicateCandidate>(
+        r#"
+        SELECT album.id, album.title, album.album_artist_id
+        FROM albums AS album
+        WHERE album.id = ANY($1::UUID[])
+        ORDER BY album.id
+        "#,
+    )
+    .bind(deletable_album_candidates)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+
+    let mut deletable_ids = Vec::new();
+    for row in rows {
+        let resolved_artist_id = match row.album_artist_id {
+            Some(id) => {
+                let Some(artist_id) =
+                    resolve_cleanup_artist(connection, id, candidate_artist_ids).await?
+                else {
+                    continue;
+                };
+                Some(artist_id)
+            }
+            None => None,
+        };
+        let Some(duplicate) = super::catalogue::find_unique_library_album(
+            connection,
+            &row.title,
+            resolved_artist_id.as_ref(),
+            candidate_album_ids,
+        )
+        .await?
+        else {
+            continue;
+        };
+        if duplicate.id().as_uuid() == &row.id {
+            continue;
+        }
+        deletable_ids.push(row.id);
+        report.duplicates.push(ProviderDuplicate {
+            kind: DuplicateKind::Album,
+            id: row.id,
+            name: row.title,
+            duplicate_of: *duplicate.id().as_uuid(),
+            listens: 0,
+        });
+    }
+    Ok(deletable_ids)
+}
+
+async fn collect_provider_artist_duplicates(
+    connection: &mut PgConnection,
+    library_ids: &[String],
+    candidate_artist_ids: &[Uuid],
+    deletable_track_ids: &[Uuid],
+    deletable_album_ids: &[Uuid],
+    report: &mut ProviderDuplicateReport,
+) -> Result<(), TrackRepositoryError> {
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT artist.id, artist.name
+        FROM artists AS artist
+        WHERE artist.musicbrainz_artist_id IS NULL
+          AND artist.id = ANY($2::UUID[])
+          AND EXISTS (
+              SELECT 1 FROM artist_sources AS source
+              WHERE source.artist_id = artist.id
+                AND source.provider_id <> ALL($1::TEXT[])
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM artist_sources AS source
+              WHERE source.artist_id = artist.id
+                AND source.provider_id = ANY($1::TEXT[])
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM track_artist_credits AS credit
+              WHERE credit.artist_id = artist.id
+                AND credit.track_id <> ALL($3::UUID[])
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM albums AS album
+              WHERE album.album_artist_id = artist.id
+                AND album.id <> ALL($4::UUID[])
+          )
+        ORDER BY artist.id
+        "#,
+    )
+    .bind(library_ids)
+    .bind(candidate_artist_ids)
+    .bind(deletable_track_ids)
+    .bind(deletable_album_ids)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+
+    for (id, name) in rows {
+        let Some(duplicate) = super::catalogue::find_unique_library_artist_by_name(
+            connection,
+            &name,
+            candidate_artist_ids,
+        )
+        .await?
+        else {
+            continue;
+        };
+        report.duplicates.push(ProviderDuplicate {
+            kind: DuplicateKind::Artist,
+            id,
+            name,
+            duplicate_of: *duplicate.id().as_uuid(),
+            listens: 0,
+        });
+    }
+    Ok(())
+}
+
+async fn delete_provider_duplicate_rows(
+    connection: &mut PgConnection,
+    table: &str,
+    ids: &[Uuid],
+) -> Result<u64, TrackRepositoryError> {
+    sqlx::query(&format!("DELETE FROM {table} WHERE id = ANY($1::UUID[])"))
+        .bind(ids)
+        .execute(&mut *connection)
+        .await
+        .map(|result| result.rows_affected())
+        .map_err(repository_error)
+}
+
+async fn track_skip_reason(
+    connection: &mut PgConnection,
+    track_id: Uuid,
+) -> Result<Option<SkipReason>, TrackRepositoryError> {
+    let playlist = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM playlist_entries WHERE track_id = $1)",
+    )
+    .bind(track_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+    if playlist {
+        return Ok(Some(SkipReason::PlaylistEntry));
+    }
+
+    let queued = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM restore_queue_entries WHERE track_id = $1)",
+    )
+    .bind(track_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+    Ok(queued.then_some(SkipReason::QueueEntry))
 }
 
 #[async_trait]
@@ -168,6 +613,48 @@ impl Retention for PgStore {
             artists: artists.len() as u64,
             evicted_artist_ids: artists,
         })
+    }
+
+    async fn provider_duplicates(&self) -> Result<ProviderDuplicateReport, TrackRepositoryError> {
+        let mut connection = self.pool.acquire().await.map_err(repository_error)?;
+        provider_duplicate_report(&mut connection, &self.library_provider_ids()).await
+    }
+
+    async fn delete_provider_duplicates(
+        &self,
+    ) -> Result<ProviderDuplicateReport, TrackRepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *transaction)
+            .await
+            .map_err(repository_error)?;
+        let report =
+            provider_duplicate_report(&mut transaction, &self.library_provider_ids()).await?;
+        let ids_of = |kind| {
+            report
+                .duplicates
+                .iter()
+                .filter(|duplicate| duplicate.kind == kind)
+                .map(|duplicate| duplicate.id)
+                .collect::<Vec<_>>()
+        };
+        let track_ids = ids_of(DuplicateKind::Track);
+        let album_ids = ids_of(DuplicateKind::Album);
+        let artist_ids = ids_of(DuplicateKind::Artist);
+
+        let tracks = delete_provider_duplicate_rows(&mut transaction, "tracks", &track_ids).await?;
+        let albums = delete_provider_duplicate_rows(&mut transaction, "albums", &album_ids).await?;
+        let artists =
+            delete_provider_duplicate_rows(&mut transaction, "artists", &artist_ids).await?;
+        if tracks != track_ids.len() as u64
+            || albums != album_ids.len() as u64
+            || artists != artist_ids.len() as u64
+        {
+            return Err(TrackRepositoryError::InvalidData);
+        }
+
+        transaction.commit().await.map_err(repository_error)?;
+        Ok(report)
     }
 }
 

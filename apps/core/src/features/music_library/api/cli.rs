@@ -1,5 +1,8 @@
 use crate::features::music_library::{
-    domain::{DuplicateCandidate, EvictionReport, RetentionReport, SplitArtist, SplitArtistRow},
+    domain::{
+        DuplicateCandidate, DuplicateKind, EvictionReport, ProviderDuplicateReport,
+        RetentionReport, SkipReason, SplitArtist, SplitArtistRow,
+    },
     maintenance::{MaintenanceError, MaintenanceService},
 };
 
@@ -9,6 +12,19 @@ pub(crate) async fn duplicates(
 ) -> Result<(), MaintenanceError> {
     print_duplicates(&maintenance.duplicates(limit).await?);
     print_split_artists(&maintenance.split_artists(limit).await?);
+    Ok(())
+}
+
+pub(crate) async fn prune_provider_duplicates(
+    maintenance: &MaintenanceService,
+    apply: bool,
+) -> Result<(), MaintenanceError> {
+    let report = if apply {
+        maintenance.delete_provider_duplicates().await?
+    } else {
+        maintenance.provider_duplicates().await?
+    };
+    print_provider_duplicate_report(&report, apply);
     Ok(())
 }
 
@@ -101,6 +117,64 @@ fn print_split_artists(artists: &[SplitArtist]) {
     println!("\nA-046 keeps these rows apart on purpose; merging them is a decision, not a fix.");
 }
 
+fn print_provider_duplicate_report(report: &ProviderDuplicateReport, applied: bool) {
+    print!("{}", format_provider_duplicate_report(report, applied));
+}
+
+fn format_provider_duplicate_report(report: &ProviderDuplicateReport, applied: bool) -> String {
+    let mut output = String::new();
+    for duplicate in &report.duplicates {
+        output.push_str(&format!(
+            "duplicate {} {} {:?} -> {} listens={}\n",
+            duplicate_kind(duplicate.kind),
+            duplicate.id,
+            duplicate.name,
+            duplicate.duplicate_of,
+            duplicate.listens
+        ));
+    }
+    for skipped in &report.skipped {
+        output.push_str(&format!(
+            "skipped {} {} {:?} {}\n",
+            duplicate_kind(skipped.kind),
+            skipped.id,
+            skipped.name,
+            skip_reason(skipped.reason)
+        ));
+    }
+    let mut tracks = 0;
+    let mut albums = 0;
+    let mut artists = 0;
+    for duplicate in &report.duplicates {
+        match duplicate.kind {
+            DuplicateKind::Track => tracks += 1,
+            DuplicateKind::Album => albums += 1,
+            DuplicateKind::Artist => artists += 1,
+        }
+    }
+    output.push_str(&format!(
+        "{}: tracks={tracks} albums={albums} artists={artists} skipped={}\n",
+        if applied { "deleted" } else { "would delete" },
+        report.skipped.len()
+    ));
+    output
+}
+
+fn duplicate_kind(kind: DuplicateKind) -> &'static str {
+    match kind {
+        DuplicateKind::Track => "track",
+        DuplicateKind::Album => "album",
+        DuplicateKind::Artist => "artist",
+    }
+}
+
+fn skip_reason(reason: SkipReason) -> &'static str {
+    match reason {
+        SkipReason::PlaylistEntry => "playlist_entry",
+        SkipReason::QueueEntry => "queue_entry",
+    }
+}
+
 fn print_retention(report: &RetentionReport) {
     println!(
         "{} tracks, {} albums and {} artists are provider-only and unengaged",
@@ -144,5 +218,38 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::features::music_library::domain::{
+        ProviderDuplicate, ProviderDuplicateReport, SkipReason, SkippedDuplicate,
+    };
+    use uuid::Uuid;
+
+    #[test]
+    fn prune_without_apply_prints_would_delete() {
+        let report = ProviderDuplicateReport {
+            duplicates: vec![ProviderDuplicate {
+                kind: DuplicateKind::Track,
+                id: Uuid::nil(),
+                name: "Glue Song".to_owned(),
+                duplicate_of: Uuid::from_u128(1),
+                listens: 3,
+            }],
+            skipped: vec![SkippedDuplicate {
+                kind: DuplicateKind::Track,
+                id: Uuid::from_u128(2),
+                name: "Queue Song".to_owned(),
+                reason: SkipReason::QueueEntry,
+            }],
+        };
+
+        assert_eq!(
+            format_provider_duplicate_report(&report, false),
+            "duplicate track 00000000-0000-0000-0000-000000000000 \"Glue Song\" -> 00000000-0000-0000-0000-000000000001 listens=3\nskipped track 00000000-0000-0000-0000-000000000002 \"Queue Song\" queue_entry\nwould delete: tracks=1 albums=0 artists=0 skipped=1\n"
+        );
     }
 }
