@@ -1,4 +1,5 @@
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use super::PostgresTrackRepository;
 use crate::features::music_library::domain::{
@@ -588,4 +589,70 @@ async fn a_padded_stored_title_is_still_reachable(pool: PgPool) {
     assert_eq!(track_count(&pool).await, 1);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].track().id(), stored.id());
+}
+
+async fn identified_artist(repository: &PostgresTrackRepository, name: &str, identifier: &str) {
+    repository
+        .resolve_or_create_artist(
+            &ArtistCredit::new(name.to_owned(), Some(identifier.to_owned())).unwrap(),
+        )
+        .await
+        .unwrap();
+}
+
+async fn insert_id_less_artist(pool: &PgPool, name: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO artists (id, name) VALUES ($1, $2)")
+        .bind(id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+#[sqlx::test]
+async fn a_name_only_credit_joins_its_unique_identified_namesake(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    identified_artist(&repository, "beabadoobee", "mb-bea").await;
+    insert_id_less_artist(&pool, "beabadoobee").await;
+
+    let resolved = repository
+        .resolve_or_create_artist(&credit("beabadoobee"))
+        .await
+        .unwrap();
+
+    assert_eq!(resolved.musicbrainz_artist_id(), Some("mb-bea"));
+    assert_eq!(artist_count(&pool).await, 2);
+}
+
+#[sqlx::test]
+async fn two_identified_namesakes_leave_a_name_only_credit_to_a_new_row(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    identified_artist(&repository, "beabadoobee", "mb-bea-one").await;
+    identified_artist(&repository, "beabadoobee", "mb-bea-two").await;
+
+    let resolved = repository
+        .resolve_or_create_artist(&credit("beabadoobee"))
+        .await
+        .unwrap();
+
+    assert_eq!(resolved.musicbrainz_artist_id(), None);
+    assert_eq!(artist_count(&pool).await, 3);
+}
+
+#[sqlx::test]
+async fn two_identified_namesakes_fall_back_to_the_id_less_row(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    identified_artist(&repository, "beabadoobee", "mb-bea-one").await;
+    identified_artist(&repository, "beabadoobee", "mb-bea-two").await;
+    let id_less = insert_id_less_artist(&pool, "beabadoobee").await;
+
+    let resolved = repository
+        .resolve_or_create_artist(&credit("beabadoobee"))
+        .await
+        .unwrap();
+
+    assert_eq!(*resolved.id().as_uuid(), id_less);
+    assert_eq!(artist_count(&pool).await, 3);
 }

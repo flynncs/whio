@@ -30,8 +30,19 @@ pub struct SkippedDuplicate {
     pub reason: SkipReason,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistMerge {
+    pub id: Uuid,
+    pub name: String,
+    pub into: Uuid,
+    pub credits: u64,
+    pub albums_moved: u64,
+    pub albums_merged: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderDuplicateReport {
+    pub merges: Vec<ArtistMerge>,
     pub duplicates: Vec<ProviderDuplicate>,
     pub skipped: Vec<SkippedDuplicate>,
 }

@@ -887,3 +887,602 @@ async fn provider_duplicates_changes_nothing(pool: PgPool) {
     assert_eq!(before, after);
     assert!(repository.find_track(&provider).await.unwrap().is_some());
 }
+
+async fn insert_artist(pool: &PgPool, id: Uuid, name: &str, mbid: Option<&str>) {
+    sqlx::query("INSERT INTO artists (id, name, musicbrainz_artist_id) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(name)
+        .bind(mbid)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn insert_track(pool: &PgPool, id: Uuid, title: &str, duration_ms: i32) {
+    sqlx::query("INSERT INTO tracks (id, title, duration_ms) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(title)
+        .bind(duration_ms)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn insert_credit(
+    pool: &PgPool,
+    track_id: Uuid,
+    position: i32,
+    name: &str,
+    artist_id: Uuid,
+    role: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO track_artist_credits (track_id, position, name, artist_id, role) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(track_id)
+    .bind(position)
+    .bind(name)
+    .bind(artist_id)
+    .bind(role)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_track_source(
+    pool: &PgPool,
+    track_id: Uuid,
+    provider_id: &str,
+    source_scope: &str,
+    external_id: &str,
+) {
+    sqlx::query(
+        "INSERT INTO track_sources (id, track_id, provider_id, source_scope, external_id) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(track_id)
+    .bind(provider_id)
+    .bind(source_scope)
+    .bind(external_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_artist_source(pool: &PgPool, artist_id: Uuid, external_id: &str) {
+    sqlx::query(
+        "INSERT INTO artist_sources (id, artist_id, provider_id, source_scope, external_id) VALUES ($1, $2, 'youtube_music', 'global', $3)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(artist_id)
+    .bind(external_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_album(
+    pool: &PgPool,
+    id: Uuid,
+    title: &str,
+    album_artist_id: Uuid,
+    release_group: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO albums (id, title, album_artist_id, musicbrainz_release_group_id) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(title)
+    .bind(album_artist_id)
+    .bind(release_group)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_album_track(pool: &PgPool, album_id: Uuid, track_id: Uuid, position: i32) {
+    sqlx::query("INSERT INTO album_tracks (album_id, track_id, position) VALUES ($1, $2, $3)")
+        .bind(album_id)
+        .bind(track_id)
+        .bind(position)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn insert_artist_favorite(
+    pool: &PgPool,
+    user: Uuid,
+    artist_id: Uuid,
+    starred_at: chrono::DateTime<chrono::Utc>,
+) {
+    sqlx::query(
+        "INSERT INTO artist_favorites (user_id, artist_id, starred_at) VALUES ($1, $2, $3)",
+    )
+    .bind(user)
+    .bind(artist_id)
+    .bind(starred_at)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_artist_rating(pool: &PgPool, user: Uuid, artist_id: Uuid, rating: i16) {
+    sqlx::query("INSERT INTO artist_ratings (user_id, artist_id, rating) VALUES ($1, $2, $3)")
+        .bind(user)
+        .bind(artist_id)
+        .bind(rating)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn insert_album_favorite(
+    pool: &PgPool,
+    user: Uuid,
+    album_id: Uuid,
+    starred_at: chrono::DateTime<chrono::Utc>,
+) {
+    sqlx::query("INSERT INTO album_favorites (user_id, album_id, starred_at) VALUES ($1, $2, $3)")
+        .bind(user)
+        .bind(album_id)
+        .bind(starred_at)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn insert_album_rating(pool: &PgPool, user: Uuid, album_id: Uuid, rating: i16) {
+    sqlx::query("INSERT INTO album_ratings (user_id, album_id, rating) VALUES ($1, $2, $3)")
+        .bind(user)
+        .bind(album_id)
+        .bind(rating)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn row_count(pool: &PgPool, table: &str, column: &str, id: Uuid) -> i64 {
+    sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE {column} = $1"))
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn artist_source_owner(pool: &PgPool, external_id: &str) -> Uuid {
+    sqlx::query_scalar("SELECT artist_id FROM artist_sources WHERE external_id = $1")
+        .bind(external_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn album_artist_of(pool: &PgPool, album_id: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT album_artist_id FROM albums WHERE id = $1")
+        .bind(album_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn credit_artist_at(pool: &PgPool, track_id: Uuid, position: i32) -> Option<Uuid> {
+    sqlx::query_scalar(
+        "SELECT artist_id FROM track_artist_credits WHERE track_id = $1 AND position = $2",
+    )
+    .bind(track_id)
+    .bind(position)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn album_members(pool: &PgPool, album_id: Uuid) -> Vec<Uuid> {
+    sqlx::query_scalar("SELECT track_id FROM album_tracks WHERE album_id = $1 ORDER BY track_id")
+        .bind(album_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+async fn album_source_owners(pool: &PgPool, album_id: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT external_id FROM album_sources WHERE album_id = $1 ORDER BY external_id",
+    )
+    .bind(album_id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn favorite_starred_at(
+    pool: &PgPool,
+    table: &str,
+    column: &str,
+    user: Uuid,
+    target: Uuid,
+) -> chrono::DateTime<chrono::Utc> {
+    sqlx::query_scalar(&format!(
+        "SELECT starred_at FROM {table} WHERE user_id = $1 AND {column} = $2"
+    ))
+    .bind(user)
+    .bind(target)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn snapshot_rows(pool: &PgPool, table: &str) -> Vec<String> {
+    sqlx::query_scalar(&format!(
+        "SELECT to_jsonb(t)::text FROM {table} AS t ORDER BY to_jsonb(t)::text"
+    ))
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn snapshot_tables(pool: &PgPool) -> Vec<(String, Vec<String>)> {
+    let mut snapshot = Vec::new();
+    for table in [
+        "artists",
+        "track_artist_credits",
+        "artist_sources",
+        "artist_favorites",
+        "artist_ratings",
+        "albums",
+        "album_tracks",
+        "album_sources",
+        "album_favorites",
+        "album_ratings",
+        "tracks",
+        "track_sources",
+    ] {
+        snapshot.push((table.to_owned(), snapshot_rows(pool, table).await));
+    }
+    snapshot
+}
+
+#[sqlx::test]
+async fn prune_merges_a_credited_name_only_artist_into_its_identified_namesake(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let identified = Uuid::now_v7();
+    let id_less = Uuid::now_v7();
+    insert_artist(&pool, identified, "beabadoobee", Some("mb-bea")).await;
+    insert_artist(&pool, id_less, "beabadoobee", None).await;
+    insert_artist_source(&pool, id_less, "bea-provider").await;
+
+    let library_track = Uuid::now_v7();
+    insert_track(&pool, library_track, "Glue Song", 240_000).await;
+    insert_credit(&pool, library_track, 0, "beabadoobee", identified, None).await;
+    insert_credit(
+        &pool,
+        library_track,
+        1,
+        "beabadoobee",
+        id_less,
+        Some("composer"),
+    )
+    .await;
+    insert_track_source(&pool, library_track, "local", "named:/music", "glue.flac").await;
+
+    let provider_track = Uuid::now_v7();
+    insert_track(&pool, provider_track, "Glue Song", 240_000).await;
+    insert_credit(&pool, provider_track, 0, "beabadoobee", id_less, None).await;
+    insert_track_source(
+        &pool,
+        provider_track,
+        "youtube_music",
+        "global",
+        "glue-video",
+    )
+    .await;
+
+    let library_album = Uuid::now_v7();
+    insert_album(
+        &pool,
+        library_album,
+        "Beatopia",
+        identified,
+        Some("rg-beatopia"),
+    )
+    .await;
+    insert_album_track(&pool, library_album, library_track, 0).await;
+
+    let provider_album = Uuid::now_v7();
+    insert_album(&pool, provider_album, "Beatopia", id_less, None).await;
+    seed_album_source(&pool, provider_album, "beatopia-provider").await;
+    insert_album_track(&pool, provider_album, provider_track, 0).await;
+
+    let before = snapshot_tables(&pool).await;
+    let preview = repository.provider_duplicates().await.unwrap();
+
+    assert_eq!(preview.merges.len(), 1);
+    assert_eq!(preview.merges[0].id, id_less);
+    assert_eq!(preview.merges[0].name, "beabadoobee");
+    assert_eq!(preview.merges[0].into, identified);
+    assert_eq!(preview.merges[0].credits, 2);
+    assert_eq!(preview.merges[0].albums_moved, 1);
+    assert_eq!(preview.merges[0].albums_merged, 0);
+    assert!(
+        preview
+            .duplicates
+            .iter()
+            .any(|row| row.id == provider_track && row.duplicate_of == library_track)
+    );
+    assert!(
+        preview
+            .duplicates
+            .iter()
+            .any(|row| row.id == provider_album && row.duplicate_of == library_album)
+    );
+
+    assert_eq!(row_count(&pool, "artists", "id", id_less).await, 1);
+    assert_eq!(album_artist_of(&pool, provider_album).await, Some(id_less));
+    assert_eq!(
+        credit_artist_at(&pool, library_track, 1).await,
+        Some(id_less)
+    );
+    assert_eq!(artist_source_owner(&pool, "bea-provider").await, id_less);
+    assert_eq!(
+        snapshot_tables(&pool).await,
+        before,
+        "the dry run rolls every table back"
+    );
+
+    let applied = repository.delete_provider_duplicates().await.unwrap();
+
+    assert_eq!(applied, preview, "apply returns the previewed report");
+    assert_eq!(row_count(&pool, "artists", "id", id_less).await, 0);
+    assert_eq!(row_count(&pool, "tracks", "id", provider_track).await, 0);
+    assert_eq!(row_count(&pool, "albums", "id", provider_album).await, 0);
+    assert_eq!(
+        credit_artist_at(&pool, library_track, 1).await,
+        Some(identified)
+    );
+    assert_eq!(artist_source_owner(&pool, "bea-provider").await, identified);
+}
+
+#[sqlx::test]
+async fn colliding_albums_merge_into_the_identified_artists_row(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let identified = Uuid::now_v7();
+    let id_less = Uuid::now_v7();
+    insert_artist(&pool, identified, "Shared Name", Some("mb-shared")).await;
+    insert_artist(&pool, id_less, "Shared Name", None).await;
+    insert_artist_source(&pool, id_less, "shared-provider").await;
+
+    let library_track = Uuid::now_v7();
+    insert_track(&pool, library_track, "Library Song", 180_000).await;
+    insert_credit(&pool, library_track, 0, "Shared Name", identified, None).await;
+    insert_credit(
+        &pool,
+        library_track,
+        1,
+        "Shared Name",
+        id_less,
+        Some("composer"),
+    )
+    .await;
+    insert_track_source(
+        &pool,
+        library_track,
+        "local",
+        "named:/music",
+        "library-song.flac",
+    )
+    .await;
+
+    let provider_track = Uuid::now_v7();
+    insert_track(&pool, provider_track, "Provider Song", 200_000).await;
+    insert_credit(&pool, provider_track, 0, "Shared Name", id_less, None).await;
+
+    let target_album = Uuid::now_v7();
+    insert_album(&pool, target_album, "Switchblade", identified, None).await;
+    seed_album_source(&pool, target_album, "target-album").await;
+    insert_album_track(&pool, target_album, library_track, 0).await;
+
+    let source_album = Uuid::now_v7();
+    insert_album(&pool, source_album, "Switchblade", id_less, None).await;
+    seed_album_source(&pool, source_album, "source-album").await;
+    insert_album_track(&pool, source_album, library_track, 0).await;
+    insert_album_track(&pool, source_album, provider_track, 1).await;
+
+    let first = Uuid::now_v7();
+    let second = Uuid::now_v7();
+    insert_user(&pool, first, "first").await;
+    insert_user(&pool, second, "second").await;
+    let source_starred_at = "2026-01-01T00:00:00Z".parse().unwrap();
+    let target_starred_at = "2026-01-02T00:00:00Z".parse().unwrap();
+    let moved_starred_at = "2026-03-03T00:00:00Z".parse().unwrap();
+    insert_artist_favorite(&pool, first, id_less, source_starred_at).await;
+    insert_artist_favorite(&pool, first, identified, target_starred_at).await;
+    insert_artist_favorite(&pool, second, id_less, moved_starred_at).await;
+    insert_artist_rating(&pool, first, id_less, 5).await;
+    insert_artist_rating(&pool, first, identified, 3).await;
+    insert_artist_rating(&pool, second, id_less, 4).await;
+    insert_album_favorite(&pool, first, source_album, source_starred_at).await;
+    insert_album_favorite(&pool, first, target_album, target_starred_at).await;
+    insert_album_favorite(&pool, second, source_album, moved_starred_at).await;
+    insert_album_rating(&pool, first, source_album, 5).await;
+    insert_album_rating(&pool, first, target_album, 3).await;
+    insert_album_rating(&pool, second, source_album, 4).await;
+
+    let before = snapshot_tables(&pool).await;
+    let preview = repository.provider_duplicates().await.unwrap();
+    assert_eq!(
+        snapshot_tables(&pool).await,
+        before,
+        "the dry run rolls every table back"
+    );
+
+    let report = repository.delete_provider_duplicates().await.unwrap();
+    assert_eq!(report, preview, "apply returns the previewed report");
+
+    assert_eq!(report.merges.len(), 1);
+    assert_eq!(report.merges[0].credits, 2);
+    assert_eq!(report.merges[0].albums_moved, 0);
+    assert_eq!(report.merges[0].albums_merged, 1);
+    assert_eq!(row_count(&pool, "artists", "id", id_less).await, 0);
+    assert_eq!(row_count(&pool, "albums", "id", source_album).await, 0);
+    assert_eq!(album_artist_of(&pool, target_album).await, Some(identified));
+    let members = album_members(&pool, target_album).await;
+    assert_eq!(members.len(), 2, "each membership is held once");
+    assert!(members.contains(&library_track));
+    assert!(members.contains(&provider_track));
+    assert_eq!(
+        credit_artist_at(&pool, library_track, 1).await,
+        Some(identified)
+    );
+    assert_eq!(
+        artist_source_owner(&pool, "shared-provider").await,
+        identified
+    );
+    assert_eq!(
+        row_count(&pool, "album_sources", "album_id", source_album).await,
+        0
+    );
+    assert_eq!(
+        album_source_owners(&pool, target_album).await,
+        vec!["source-album".to_owned(), "target-album".to_owned()]
+    );
+
+    assert_eq!(
+        row_count(&pool, "artist_favorites", "artist_id", id_less).await,
+        0
+    );
+    assert_eq!(
+        row_count(&pool, "artist_ratings", "artist_id", id_less).await,
+        0
+    );
+    assert_eq!(
+        row_count(&pool, "artist_favorites", "artist_id", identified).await,
+        2
+    );
+    assert_eq!(
+        row_count(&pool, "artist_ratings", "artist_id", identified).await,
+        2
+    );
+    let kept_artist_rating: i16 = sqlx::query_scalar(
+        "SELECT rating FROM artist_ratings WHERE user_id = $1 AND artist_id = $2",
+    )
+    .bind(first)
+    .bind(identified)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept_artist_rating, 3, "the identified artist's rating wins");
+    let moved_artist_rating: i16 = sqlx::query_scalar(
+        "SELECT rating FROM artist_ratings WHERE user_id = $1 AND artist_id = $2",
+    )
+    .bind(second)
+    .bind(identified)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(moved_artist_rating, 4, "the moved rating keeps its value");
+    assert_eq!(
+        favorite_starred_at(&pool, "artist_favorites", "artist_id", first, identified).await,
+        target_starred_at
+    );
+    assert_eq!(
+        favorite_starred_at(&pool, "artist_favorites", "artist_id", second, identified).await,
+        moved_starred_at,
+        "the moved favourite keeps its timestamp"
+    );
+
+    assert_eq!(
+        row_count(&pool, "album_favorites", "album_id", source_album).await,
+        0
+    );
+    assert_eq!(
+        row_count(&pool, "album_ratings", "album_id", source_album).await,
+        0
+    );
+    assert_eq!(
+        row_count(&pool, "album_favorites", "album_id", target_album).await,
+        2
+    );
+    assert_eq!(
+        row_count(&pool, "album_ratings", "album_id", target_album).await,
+        2
+    );
+    let kept_album_rating: i16 =
+        sqlx::query_scalar("SELECT rating FROM album_ratings WHERE user_id = $1 AND album_id = $2")
+            .bind(first)
+            .bind(target_album)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kept_album_rating, 3, "the identified album's rating wins");
+    let moved_album_rating: i16 =
+        sqlx::query_scalar("SELECT rating FROM album_ratings WHERE user_id = $1 AND album_id = $2")
+            .bind(second)
+            .bind(target_album)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(moved_album_rating, 4, "the moved rating keeps its value");
+    assert_eq!(
+        favorite_starred_at(&pool, "album_favorites", "album_id", first, target_album).await,
+        target_starred_at
+    );
+    assert_eq!(
+        favorite_starred_at(&pool, "album_favorites", "album_id", second, target_album).await,
+        moved_starred_at,
+        "the moved favourite keeps its timestamp"
+    );
+}
+
+#[sqlx::test]
+async fn two_identified_namesakes_leave_a_credited_name_only_artist_alone(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let first_identified = Uuid::now_v7();
+    let second_identified = Uuid::now_v7();
+    let id_less = Uuid::now_v7();
+    insert_artist(&pool, first_identified, "Shared Name", Some("mb-one")).await;
+    insert_artist(&pool, second_identified, "Shared Name", Some("mb-two")).await;
+    insert_artist(&pool, id_less, "Shared Name", None).await;
+
+    let library_track = Uuid::now_v7();
+    insert_track(&pool, library_track, "Library Song", 180_000).await;
+    insert_credit(
+        &pool,
+        library_track,
+        0,
+        "Shared Name",
+        first_identified,
+        None,
+    )
+    .await;
+    insert_credit(
+        &pool,
+        library_track,
+        1,
+        "Shared Name",
+        id_less,
+        Some("composer"),
+    )
+    .await;
+    insert_track_source(
+        &pool,
+        library_track,
+        "local",
+        "named:/music",
+        "library-song.flac",
+    )
+    .await;
+
+    let report = repository.delete_provider_duplicates().await.unwrap();
+
+    assert!(report.merges.is_empty());
+    assert_eq!(row_count(&pool, "artists", "id", id_less).await, 1);
+    assert_eq!(row_count(&pool, "artists", "id", first_identified).await, 1);
+    assert_eq!(
+        row_count(&pool, "artists", "id", second_identified).await,
+        1
+    );
+    assert_eq!(
+        credit_artist_at(&pool, library_track, 1).await,
+        Some(id_less)
+    );
+}

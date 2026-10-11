@@ -123,6 +123,17 @@ fn print_provider_duplicate_report(report: &ProviderDuplicateReport, applied: bo
 
 fn format_provider_duplicate_report(report: &ProviderDuplicateReport, applied: bool) -> String {
     let mut output = String::new();
+    for merge in &report.merges {
+        output.push_str(&format!(
+            "merge artist {} \"{}\" -> {} credits={} albums_moved={} albums_merged={}\n",
+            merge.id,
+            merge.name,
+            merge.into,
+            merge.credits,
+            merge.albums_moved,
+            merge.albums_merged
+        ));
+    }
     for duplicate in &report.duplicates {
         output.push_str(&format!(
             "duplicate {} {} {:?} -> {} listens={}\n",
@@ -153,8 +164,9 @@ fn format_provider_duplicate_report(report: &ProviderDuplicateReport, applied: b
         }
     }
     output.push_str(&format!(
-        "{}: tracks={tracks} albums={albums} artists={artists} skipped={}\n",
+        "{}: merges={} tracks={tracks} albums={albums} artists={artists} skipped={}\n",
         if applied { "deleted" } else { "would delete" },
+        report.merges.len(),
         report.skipped.len()
     ));
     output
@@ -225,13 +237,14 @@ fn human_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use crate::features::music_library::domain::{
-        ProviderDuplicate, ProviderDuplicateReport, SkipReason, SkippedDuplicate,
+        ArtistMerge, ProviderDuplicate, ProviderDuplicateReport, SkipReason, SkippedDuplicate,
     };
     use uuid::Uuid;
 
     #[test]
     fn prune_without_apply_prints_would_delete() {
         let report = ProviderDuplicateReport {
+            merges: vec![],
             duplicates: vec![ProviderDuplicate {
                 kind: DuplicateKind::Track,
                 id: Uuid::nil(),
@@ -249,7 +262,28 @@ mod tests {
 
         assert_eq!(
             format_provider_duplicate_report(&report, false),
-            "duplicate track 00000000-0000-0000-0000-000000000000 \"Glue Song\" -> 00000000-0000-0000-0000-000000000001 listens=3\nskipped track 00000000-0000-0000-0000-000000000002 \"Queue Song\" queue_entry\nwould delete: tracks=1 albums=0 artists=0 skipped=1\n"
+            "duplicate track 00000000-0000-0000-0000-000000000000 \"Glue Song\" -> 00000000-0000-0000-0000-000000000001 listens=3\nskipped track 00000000-0000-0000-0000-000000000002 \"Queue Song\" queue_entry\nwould delete: merges=0 tracks=1 albums=0 artists=0 skipped=1\n"
+        );
+    }
+
+    #[test]
+    fn prune_prints_merges_before_duplicates() {
+        let report = ProviderDuplicateReport {
+            merges: vec![ArtistMerge {
+                id: Uuid::from_u128(1),
+                name: "beabadoobee".to_owned(),
+                into: Uuid::from_u128(2),
+                credits: 14,
+                albums_moved: 35,
+                albums_merged: 1,
+            }],
+            duplicates: vec![],
+            skipped: vec![],
+        };
+
+        assert_eq!(
+            format_provider_duplicate_report(&report, true),
+            "merge artist 00000000-0000-0000-0000-000000000001 \"beabadoobee\" -> 00000000-0000-0000-0000-000000000002 credits=14 albums_moved=35 albums_merged=1\ndeleted: merges=1 tracks=0 albums=0 artists=0 skipped=0\n"
         );
     }
 }

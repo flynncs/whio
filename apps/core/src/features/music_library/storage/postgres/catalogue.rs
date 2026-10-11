@@ -311,20 +311,19 @@ async fn find_or_attach_artist(
     pool: &PgPool,
     credit: &ArtistCredit,
 ) -> Result<Option<Artist>, TrackRepositoryError> {
+    let mut connection = pool.acquire().await.map_err(repository_error)?;
+
     if let Some(identifier) = credit.musicbrainz_artist_id()
-        && let Some(artist) = find_artist_by_identifier(pool, identifier).await?
+        && let Some(artist) = find_artist_by_identifier(&mut connection, identifier).await?
     {
         return Ok(Some(artist));
     }
 
     let Some(identifier) = credit.musicbrainz_artist_id() else {
-        if let Some(artist) = find_unique_artist_by_name(pool, credit.name()).await? {
-            return Ok(Some(artist));
-        }
-        return find_artist_by_name(pool, credit.name()).await;
+        return find_unique_artist_by_name(&mut connection, credit.name(), &[]).await;
     };
 
-    let Some(existing) = find_artist_by_name(pool, credit.name()).await? else {
+    let Some(existing) = find_artist_by_name(&mut connection, credit.name(), &[]).await? else {
         return Ok(None);
     };
 
@@ -338,13 +337,13 @@ async fn find_or_attach_artist(
     ))
     .bind(identifier)
     .bind(existing.id().as_uuid())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(repository_error)?;
 
     match row {
         Some(row) => Ok(Some(decode_artist(row)?)),
-        None => find_artist_by_identifier(pool, identifier).await,
+        None => find_artist_by_identifier(&mut connection, identifier).await,
     }
 }
 
@@ -365,50 +364,45 @@ pub(super) async fn find_artist_by_source(
 }
 
 async fn find_artist_by_identifier(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     identifier: &str,
 ) -> Result<Option<Artist>, TrackRepositoryError> {
     let row = sqlx::query_as::<_, ArtistRow>(&format!(
         "SELECT {ARTIST_COLUMNS} FROM artists WHERE musicbrainz_artist_id = $1"
     ))
     .bind(identifier)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(repository_error)?;
 
     row.map(decode_artist).transpose()
 }
 
-pub(super) async fn find_unique_artist_by_name<'e, E>(
-    executor: E,
-    name: &str,
-) -> Result<Option<Artist>, TrackRepositoryError>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    let rows = sqlx::query_as::<_, ArtistRow>(&format!(
-        "SELECT {ARTIST_COLUMNS} FROM artists WHERE name_normalized = {} ORDER BY id LIMIT 2",
-        folded("$1"),
-    ))
-    .bind(name)
-    .fetch_all(executor)
-    .await
-    .map_err(repository_error)?;
-
-    unique_artist(rows)
-}
-
-pub(super) async fn find_unique_library_artist_by_name(
+pub(super) async fn find_unique_artist_by_name(
     connection: &mut PgConnection,
     name: &str,
-    candidate_artist_ids: &[Uuid],
+    excluded_ids: &[Uuid],
+) -> Result<Option<Artist>, TrackRepositoryError> {
+    if let Some(artist) =
+        find_unique_identified_artist_by_name(&mut *connection, name, excluded_ids).await?
+    {
+        return Ok(Some(artist));
+    }
+
+    find_artist_by_name(&mut *connection, name, excluded_ids).await
+}
+
+async fn find_unique_identified_artist_by_name(
+    connection: &mut PgConnection,
+    name: &str,
+    excluded_ids: &[Uuid],
 ) -> Result<Option<Artist>, TrackRepositoryError> {
     let rows = sqlx::query_as::<_, ArtistRow>(&format!(
-        "SELECT {ARTIST_COLUMNS} FROM artists WHERE name_normalized = {} AND id <> ALL($2::UUID[]) ORDER BY id LIMIT 2",
+        "SELECT {ARTIST_COLUMNS} FROM artists WHERE musicbrainz_artist_id IS NOT NULL AND name_normalized = {} AND id <> ALL($2::UUID[]) ORDER BY id LIMIT 2",
         folded("$1"),
     ))
     .bind(name)
-    .bind(candidate_artist_ids)
+    .bind(excluded_ids)
     .fetch_all(&mut *connection)
     .await
     .map_err(repository_error)?;
@@ -439,7 +433,7 @@ pub(super) async fn resolve_cleanup_artist(
     }
 
     Ok(
-        find_unique_library_artist_by_name(connection, artist.name(), candidate_artist_ids)
+        find_unique_artist_by_name(connection, artist.name(), candidate_artist_ids)
             .await?
             .map(|resolved| resolved.id().clone()),
     )
@@ -453,8 +447,9 @@ fn unique_artist(rows: Vec<ArtistRow>) -> Result<Option<Artist>, TrackRepository
 }
 
 async fn find_artist_by_name(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     name: &str,
+    excluded_ids: &[Uuid],
 ) -> Result<Option<Artist>, TrackRepositoryError> {
     let row = sqlx::query_as::<_, ArtistRow>(&format!(
         r#"
@@ -462,11 +457,13 @@ async fn find_artist_by_name(
         FROM artists
         WHERE musicbrainz_artist_id IS NULL
           AND name_normalized = {key}
+          AND id <> ALL($2::UUID[])
         "#,
         key = folded("$1"),
     ))
     .bind(name)
-    .fetch_optional(pool)
+    .bind(excluded_ids)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(repository_error)?;
 
