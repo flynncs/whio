@@ -70,6 +70,8 @@ keep container mount paths stable between restarts.
 | `WHIO_DEDUP_MODE` | `suppress` | substitute conservative local matches; `shadow` logs, `off` skips |
 | `WHIO_SOURCE_TAGS` | `off` | `artist` adds provider prefixes to search display; no stored changes |
 | `WHIO_PLAYBACK_MAX_SESSIONS` | `16` | concurrent spool playbacks before overload |
+| `WHIO_PLAYBACK_PREFETCH_TRACKS` | `1` | next tracks warmed after a remote stream starts; `0` disables, maximum `3` |
+| `WHIO_PLAYBACK_SPOOL_IDLE_SECONDS` | `900` | idle time before an unread cached spool is evicted; `0` evicts as soon as it is unread, maximum `86400` |
 | `WHIO_SPOOL_DIR` | temp directory / `whio-spools` | playback files; stale parts are purged at startup |
 | `WHIO_YOUTUBE_MEDIA_SUFFIX` | `googlevideo.com` | accepted resolved-media host suffix |
 | `WHIO_ARTWORK_HOST_SUFFIXES` | `googleusercontent.com,ytimg.com` | comma-separated public artwork host suffixes |

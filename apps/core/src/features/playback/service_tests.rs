@@ -11,7 +11,7 @@ use super::*;
 use crate::{
     features::music_library::domain::{ProviderId, SourceIdentity, SourceScope},
     features::playback::media::MediaFetchError,
-    features::playback::{MediaMetadata, PlayableMedia, PlaybackUrl},
+    features::playback::{MediaMetadata, PlayableMedia, PlaybackUrl, SourceKey},
     platform::request::RequestId,
 };
 
@@ -45,6 +45,8 @@ impl PlaybackProvider for QueueProvider {
 struct FakeDelivery {
     outcomes: Mutex<VecDeque<Result<(), DeliveryError>>>,
     attempts: Mutex<usize>,
+    cached_hits: Mutex<VecDeque<bool>>,
+    cached_attempts: Mutex<usize>,
 }
 
 impl FakeDelivery {
@@ -52,6 +54,14 @@ impl FakeDelivery {
         Self {
             outcomes: Mutex::new(outcomes.into()),
             attempts: Mutex::new(0),
+            ..Self::default()
+        }
+    }
+
+    fn with_cached_hits(hits: Vec<bool>) -> Self {
+        Self {
+            cached_hits: Mutex::new(hits.into()),
+            ..Self::default()
         }
     }
 }
@@ -60,6 +70,7 @@ impl FakeDelivery {
 impl PlaybackDelivery for FakeDelivery {
     async fn deliver(
         &self,
+        _key: &SourceKey,
         _resolved: &ResolvedPlayback,
         _client_range: Option<String>,
     ) -> Result<DeliveryResult, DeliveryError> {
@@ -77,6 +88,34 @@ impl PlaybackDelivery for FakeDelivery {
             }),
             Err(error) => Err(error),
         }
+    }
+
+    async fn cached(
+        &self,
+        _key: &SourceKey,
+        _client_range: Option<String>,
+    ) -> Option<Result<DeliveryResult, DeliveryError>> {
+        *self.cached_attempts.lock() += 1;
+        match self.cached_hits.lock().pop_front().unwrap_or(false) {
+            true => Some(Ok(DeliveryResult {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                body: Body::empty(),
+            })),
+            false => None,
+        }
+    }
+
+    fn is_cached(&self, _key: &SourceKey) -> bool {
+        self.cached_hits.lock().front().copied().unwrap_or(false)
+    }
+
+    async fn warm(
+        &self,
+        _key: &SourceKey,
+        _resolved: &ResolvedPlayback,
+    ) -> Result<(), DeliveryError> {
+        Ok(())
     }
 }
 
@@ -332,6 +371,26 @@ async fn provider_access_failure_is_internal_and_does_not_try_another_source() {
         Err(PlaybackError::Internal(ProviderError::Access))
     ));
     assert_eq!(provider.seen.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn a_cached_hit_does_not_resolve() {
+    let delivery = Arc::new(FakeDelivery::with_cached_hits(vec![true]));
+    let provider = responses(vec![Ok(playable_media())]);
+    let service = StreamingService::new(
+        queries(sources(vec![global("vid-1")])),
+        vec![Arc::clone(&provider) as Arc<dyn PlaybackProvider>],
+        Arc::clone(&delivery) as Arc<dyn PlaybackDelivery>,
+    );
+
+    let result = service
+        .stream(&TrackId::new(), None, &context(), None)
+        .await;
+
+    assert!(result.is_ok());
+    assert!(provider.seen.lock().is_empty());
+    assert_eq!(*delivery.attempts.lock(), 0);
+    assert_eq!(*delivery.cached_attempts.lock(), 1);
 }
 
 #[tokio::test]

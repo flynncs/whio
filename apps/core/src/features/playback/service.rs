@@ -10,11 +10,12 @@ use crate::{
     features::playback::providers::ProviderError,
     features::playback::{
         DeliveryError, DeliveryResult, LocalMedia, PlayableMedia, PlaybackDelivery, PlaybackSource,
+        SourceKey,
     },
     platform::request::RequestContext,
 };
 
-use super::PlaybackProvider;
+use super::{PlaybackProvider, next::NextTracks, prefetch::Prefetch};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlaybackError {
@@ -74,17 +75,16 @@ pub enum ResolvedPlayback {
 
 const MAX_MEDIA_ATTEMPTS: usize = 3;
 
-pub struct StreamingService {
+#[derive(Clone)]
+pub(super) struct SourceResolver {
     providers: HashMap<ProviderKind, Arc<dyn PlaybackProvider>>,
     sources: Arc<SourceQueries>,
-    delivery: Arc<dyn PlaybackDelivery>,
 }
 
-impl StreamingService {
-    pub fn new(
+impl SourceResolver {
+    pub(super) fn new(
         sources: Arc<SourceQueries>,
         providers: Vec<Arc<dyn PlaybackProvider>>,
-        delivery: Arc<dyn PlaybackDelivery>,
     ) -> Self {
         Self {
             providers: providers
@@ -92,11 +92,10 @@ impl StreamingService {
                 .map(|provider| (provider.kind(), provider))
                 .collect(),
             sources,
-            delivery,
         }
     }
 
-    pub async fn candidates(
+    pub(super) async fn candidates(
         &self,
         track_id: &TrackId,
     ) -> Result<Vec<PlaybackSource>, PlaybackError> {
@@ -113,7 +112,7 @@ impl StreamingService {
         Ok(candidates)
     }
 
-    pub async fn resolve_source(
+    pub(super) async fn resolve_source(
         &self,
         source: &PlaybackSource,
         user: Option<&Uuid>,
@@ -127,6 +126,52 @@ impl StreamingService {
             .await
             .map_err(PlaybackError::Provider)
     }
+}
+
+pub struct StreamingService {
+    resolver: SourceResolver,
+    delivery: Arc<dyn PlaybackDelivery>,
+    prefetch: Option<Arc<Prefetch>>,
+}
+
+impl StreamingService {
+    pub fn new(
+        sources: Arc<SourceQueries>,
+        providers: Vec<Arc<dyn PlaybackProvider>>,
+        delivery: Arc<dyn PlaybackDelivery>,
+    ) -> Self {
+        Self {
+            resolver: SourceResolver::new(sources, providers),
+            delivery,
+            prefetch: None,
+        }
+    }
+
+    pub fn with_prefetch(mut self, next: Arc<dyn NextTracks>, count: usize) -> Self {
+        self.prefetch = Some(Arc::new(Prefetch::new(
+            next,
+            self.resolver.clone(),
+            Arc::clone(&self.delivery),
+            count,
+        )));
+        self
+    }
+
+    pub async fn candidates(
+        &self,
+        track_id: &TrackId,
+    ) -> Result<Vec<PlaybackSource>, PlaybackError> {
+        self.resolver.candidates(track_id).await
+    }
+
+    pub async fn resolve_source(
+        &self,
+        source: &PlaybackSource,
+        user: Option<&Uuid>,
+        context: &RequestContext,
+    ) -> Result<Option<ResolvedPlayback>, PlaybackError> {
+        self.resolver.resolve_source(source, user, context).await
+    }
 
     /// select eligible sources in preference order and deliver the first one
     /// that answers, retrying and falling back as needed.
@@ -139,7 +184,10 @@ impl StreamingService {
     ) -> Result<DeliveryResult, PlaybackError> {
         let mut failure = PlaybackError::TrackNotFound;
         for source in self.candidates(track_id).await? {
-            match self.try_source(&source, user, context, range.clone()).await {
+            match self
+                .try_source(track_id, &source, user, context, range.clone())
+                .await
+            {
                 Ok(Some(delivery)) => return Ok(delivery),
                 Ok(None) => continue,
                 Err(error) if error.allows_fallback() => failure = error,
@@ -151,11 +199,18 @@ impl StreamingService {
 
     async fn try_source(
         &self,
+        track_id: &TrackId,
         source: &PlaybackSource,
         user: Option<&Uuid>,
         context: &RequestContext,
         range: Option<String>,
     ) -> Result<Option<DeliveryResult>, PlaybackError> {
+        let key = SourceKey::new(source);
+        if let Some(delivery) = self.delivery.cached(&key, range.clone()).await {
+            let delivery = delivery.map_err(playback_delivery_error)?;
+            self.prefetch_next(track_id, user, context);
+            return Ok(Some(delivery));
+        }
         for attempt in 1..=MAX_MEDIA_ATTEMPTS {
             let resolved = match self.resolve_source(source, user, context).await {
                 Ok(resolved) => resolved,
@@ -167,16 +222,32 @@ impl StreamingService {
             let Some(resolved) = resolved else {
                 return Ok(None);
             };
-            match self.delivery.deliver(&resolved, range.clone()).await {
-                Ok(delivery) => return Ok(Some(delivery)),
-                Err(error) if attempt < MAX_MEDIA_ATTEMPTS && error.allows_retry() => continue,
-                Err(DeliveryError::Overloaded) => {
-                    return Err(PlaybackError::Unavailable);
+            match self.delivery.deliver(&key, &resolved, range.clone()).await {
+                Ok(delivery) => {
+                    if matches!(resolved, ResolvedPlayback::Remote(_)) {
+                        self.prefetch_next(track_id, user, context);
+                    }
+                    return Ok(Some(delivery));
                 }
-                Err(error) => return Err(PlaybackError::Delivery(error)),
+                Err(error) if attempt < MAX_MEDIA_ATTEMPTS && error.allows_retry() => continue,
+                Err(error) => return Err(playback_delivery_error(error)),
             }
         }
         unreachable!("last attempt returns")
+    }
+
+    fn prefetch_next(&self, track_id: &TrackId, user: Option<&Uuid>, context: &RequestContext) {
+        let Some(prefetch) = self.prefetch.as_ref() else {
+            return;
+        };
+        prefetch.after(track_id.clone(), user.copied(), context.clone());
+    }
+}
+
+fn playback_delivery_error(error: DeliveryError) -> PlaybackError {
+    match error {
+        DeliveryError::Overloaded => PlaybackError::Unavailable,
+        error => PlaybackError::Delivery(error),
     }
 }
 #[cfg(test)]

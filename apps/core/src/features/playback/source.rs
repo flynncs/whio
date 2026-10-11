@@ -8,6 +8,15 @@ pub enum PlaybackSource {
     Youtube(YoutubeSource),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceKey(SourceIdentity);
+
+impl SourceKey {
+    pub fn new(source: &PlaybackSource) -> Self {
+        Self(source.identity().clone())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalSource {
     identity: SourceIdentity,

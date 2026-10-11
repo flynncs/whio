@@ -46,8 +46,15 @@ const METADATA_SOURCE_ORDER: &str = "WHIO_METADATA_SOURCE_ORDER";
 const ARTWORK_CACHE_DIR: &str = "WHIO_ARTWORK_CACHE_DIR";
 const ARTWORK_CACHE_BYTES: &str = "WHIO_ARTWORK_CACHE_BYTES";
 const PLAYBACK_MAX_SESSIONS: &str = "WHIO_PLAYBACK_MAX_SESSIONS";
+const PLAYBACK_PREFETCH_TRACKS: &str = "WHIO_PLAYBACK_PREFETCH_TRACKS";
+const PLAYBACK_SPOOL_IDLE_SECONDS: &str = "WHIO_PLAYBACK_SPOOL_IDLE_SECONDS";
 const SPOOL_DIR: &str = "WHIO_SPOOL_DIR";
 const DEFAULT_MAX_PLAYBACK_SESSIONS: usize = 16;
+const DEFAULT_PLAYBACK_PREFETCH_TRACKS: usize = 1;
+const MAX_PLAYBACK_PREFETCH_TRACKS: usize = 3;
+const DEFAULT_PLAYBACK_SPOOL_IDLE_SECONDS: u64 =
+    crate::features::playback::delivery::DEFAULT_SPOOL_IDLE_SECONDS;
+const MAX_PLAYBACK_SPOOL_IDLE_SECONDS: u64 = 86_400;
 const YOUTUBE_MEDIA_SUFFIX: &str = "WHIO_YOUTUBE_MEDIA_SUFFIX";
 const ARTWORK_HOST_SUFFIXES: &str = "WHIO_ARTWORK_HOST_SUFFIXES";
 const SOURCE_TAGS: &str = "WHIO_SOURCE_TAGS";
@@ -95,6 +102,8 @@ pub(crate) struct Config {
     pub(crate) artwork_cache_bytes: u64,
     pub(crate) spool_dir: std::path::PathBuf,
     pub(crate) max_playback_sessions: usize,
+    pub(crate) playback_prefetch_tracks: usize,
+    pub(crate) playback_spool_idle_seconds: u64,
     pub(crate) max_spool_bytes: u64,
     pub(crate) spool_budget_bytes: u64,
     pub(crate) youtube_media_suffix: String,
@@ -287,6 +296,42 @@ impl Config {
             ));
         }
 
+        let playback_prefetch_tracks = match vars.get(PLAYBACK_PREFETCH_TRACKS) {
+            None => DEFAULT_PLAYBACK_PREFETCH_TRACKS,
+            Some(raw) => raw.parse::<usize>().map_err(|_| {
+                invalid(
+                    PLAYBACK_PREFETCH_TRACKS,
+                    raw,
+                    "must be a track count between 0 and 3",
+                )
+            })?,
+        };
+        if playback_prefetch_tracks > MAX_PLAYBACK_PREFETCH_TRACKS {
+            return Err(invalid(
+                PLAYBACK_PREFETCH_TRACKS,
+                &playback_prefetch_tracks.to_string(),
+                "must be a track count between 0 and 3",
+            ));
+        }
+
+        let playback_spool_idle_seconds = match vars.get(PLAYBACK_SPOOL_IDLE_SECONDS) {
+            None => DEFAULT_PLAYBACK_SPOOL_IDLE_SECONDS,
+            Some(raw) => raw.parse::<u64>().map_err(|_| {
+                invalid(
+                    PLAYBACK_SPOOL_IDLE_SECONDS,
+                    raw,
+                    "must be a number of seconds between 0 and 86400",
+                )
+            })?,
+        };
+        if playback_spool_idle_seconds > MAX_PLAYBACK_SPOOL_IDLE_SECONDS {
+            return Err(invalid(
+                PLAYBACK_SPOOL_IDLE_SECONDS,
+                &playback_spool_idle_seconds.to_string(),
+                "must be a number of seconds between 0 and 86400",
+            ));
+        }
+
         let spool_limit = |name: &'static str, default: u64| -> Result<u64, ConfigError> {
             let value = match vars.get(name) {
                 Some(raw) => raw
@@ -454,6 +499,8 @@ impl Config {
             artwork_cache_bytes,
             spool_dir,
             max_playback_sessions,
+            playback_prefetch_tracks,
+            playback_spool_idle_seconds,
             max_spool_bytes,
             spool_budget_bytes,
             youtube_media_suffix,
@@ -1361,7 +1408,40 @@ mod tests {
     fn playback_sessions_and_spool_dir_have_sane_defaults() {
         let config = parse_config(&[]).unwrap();
         assert_eq!(config.max_playback_sessions, 16);
+        assert_eq!(config.playback_prefetch_tracks, 1);
+        assert_eq!(config.playback_spool_idle_seconds, 900);
         assert_eq!(config.spool_dir, std::env::temp_dir().join("whio-spools"));
+    }
+
+    #[test]
+    fn playback_prefetch_and_spool_idle_accept_overrides_and_reject_out_of_range() {
+        let config = parse_config(&[
+            (PLAYBACK_PREFETCH_TRACKS, "3"),
+            (PLAYBACK_SPOOL_IDLE_SECONDS, "0"),
+        ])
+        .unwrap();
+        assert_eq!(config.playback_prefetch_tracks, 3);
+        assert_eq!(config.playback_spool_idle_seconds, 0);
+
+        for value in ["4", "-1", "many"] {
+            assert!(matches!(
+                parse_config(&[(PLAYBACK_PREFETCH_TRACKS, value)]),
+                Err(ConfigError::Invalid {
+                    name: PLAYBACK_PREFETCH_TRACKS,
+                    ..
+                })
+            ));
+        }
+
+        for value in ["86401", "-1", "many"] {
+            assert!(matches!(
+                parse_config(&[(PLAYBACK_SPOOL_IDLE_SECONDS, value)]),
+                Err(ConfigError::Invalid {
+                    name: PLAYBACK_SPOOL_IDLE_SECONDS,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

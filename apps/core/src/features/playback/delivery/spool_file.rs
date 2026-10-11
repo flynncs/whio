@@ -64,6 +64,10 @@ impl ActiveSpool {
         self.id
     }
 
+    pub fn failed(&self) -> bool {
+        matches!(*self.updates.borrow(), SpoolStatus::Failed { .. })
+    }
+
     pub async fn reader(
         self: &Arc<Self>,
         offset: u64,
@@ -95,25 +99,19 @@ impl Drop for ActiveSpool {
         if let Some(task) = &task {
             task.abort();
         }
+        drop(self.reservation.take());
         let path = self.path.clone();
         let id = self.id;
-        let reservation = self.reservation.take();
         tokio::spawn(async move {
-            // Keep disk charged until the writer has stopped and the file is removed.
             if let Some(task) = task {
                 let _ = task.await;
             }
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => tracing::info!(spool_id = %id, "playback spool removed"),
                 Err(error) => {
-                    tracing::warn!(%error, spool_id = %id, "playback spool not removed; retaining reservation");
-                    if let Some(reservation) = reservation {
-                        reservation.forget();
-                    }
-                    return;
+                    tracing::warn!(%error, spool_id = %id, "playback spool not removed");
                 }
             }
-            drop(reservation);
         });
     }
 }

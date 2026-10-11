@@ -7,7 +7,7 @@ use tokio_stream::Stream;
 use crate::features::playback::PlayableMedia;
 use crate::platform::http::FetchError as MediaFetchError;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MediaInfo {
     pub content_length: u64,
     pub supports_ranges: bool,

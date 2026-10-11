@@ -1,4 +1,4 @@
-use std::{future::Future, net::SocketAddr, sync::Arc};
+use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::net::TcpListener;
 
@@ -17,7 +17,7 @@ use crate::{
     features::playback::delivery::StreamDelivery,
     features::playback::media::{self, HttpMediaFetcher},
     features::playback::providers::{LocalPlaybackProvider, ProviderError},
-    features::playback::{PlaybackProvider, StreamingService},
+    features::playback::{CatalogueNextTracks, PlaybackProvider, StreamingService},
     integrations::{
         listenbrainz::ListenBrainzAdapter,
         ytm::{catalogue::YtmCatalogue, playback::YtmPlayback},
@@ -156,17 +156,27 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             config.spool_dir.clone(),
             config.max_playback_sessions,
         )
-        .with_spool_limits(config.max_spool_bytes, config.spool_budget_bytes),
+        .with_spool_limits(config.max_spool_bytes, config.spool_budget_bytes)
+        .with_spool_idle(Duration::from_secs(config.playback_spool_idle_seconds)),
     );
     let local = Arc::new(LocalPlaybackProvider::new(Arc::clone(&music.sources)));
-    let streaming = Arc::new(StreamingService::new(
-        Arc::clone(&music.sources),
-        vec![
-            local as Arc<dyn PlaybackProvider>,
-            ytm_playback as Arc<dyn PlaybackProvider>,
-        ],
-        delivery,
-    ));
+    let streaming = Arc::new(
+        StreamingService::new(
+            Arc::clone(&music.sources),
+            vec![
+                local as Arc<dyn PlaybackProvider>,
+                ytm_playback as Arc<dyn PlaybackProvider>,
+            ],
+            delivery,
+        )
+        .with_prefetch(
+            Arc::new(CatalogueNextTracks::new(
+                Arc::clone(&music.queue),
+                Arc::clone(&music.library),
+            )),
+            config.playback_prefetch_tracks,
+        ),
+    );
 
     let playback_activity = Arc::new(PlaybackActivityService::new(
         Arc::clone(&music.listen),
