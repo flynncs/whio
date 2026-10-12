@@ -391,11 +391,16 @@ fn total(value: Option<u32>) -> Option<u16> {
 
 fn track_credits(tags: &super::TrackTags) -> (Vec<ArtistCredit>, Vec<ArtistCredit>) {
     let primary = if !tags.artists.is_empty() {
+        let ids = if tags.artists.len() == tags.artist_ids.len() {
+            tags.artist_ids.as_slice()
+        } else {
+            &[]
+        };
         tags.artists
             .iter()
             .enumerate()
             .filter_map(|(index, name)| {
-                ArtistCredit::new(name.clone(), tags.artist_ids.get(index).cloned()).ok()
+                ArtistCredit::new(name.clone(), ids.get(index).cloned()).ok()
             })
             .collect()
     } else {
@@ -1682,6 +1687,20 @@ mod tests {
     }
 
     #[cfg(feature = "postgres-integration")]
+    async fn stored_credit_ids(pool: &sqlx::PgPool, track_id: Uuid) -> Vec<(i32, Option<String>)> {
+        sqlx::query_as(
+            "SELECT credits.position, artists.musicbrainz_artist_id \
+             FROM track_artist_credits AS credits \
+             JOIN artists ON artists.id = credits.artist_id \
+             WHERE credits.track_id = $1 ORDER BY credits.position",
+        )
+        .bind(track_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[cfg(feature = "postgres-integration")]
     async fn stored_dates(
         pool: &sqlx::PgPool,
         track_id: Uuid,
@@ -1867,6 +1886,79 @@ mod tests {
                 (4, "Bill Evans".to_owned(), Some("performer".to_owned())),
                 (5, "Bill Evans".to_owned(), Some("producer".to_owned())),
             ]
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[sqlx::test]
+    async fn a_multi_artist_file_credits_every_artist(pool: sqlx::PgPool) {
+        let root = temp_root("multi-artist");
+        let multi = root.join("a.flac");
+        tagged_flac(
+            &multi,
+            &[
+                (ItemKey::TrackArtist, "beabadoobee & Hayley Williams"),
+                (ItemKey::TrackArtists, "beabadoobee"),
+                (ItemKey::TrackArtists, "Hayley Williams"),
+                (ItemKey::MusicBrainzArtistId, "mb-beabadoobee"),
+                (ItemKey::MusicBrainzArtistId, "mb-hayley"),
+            ],
+        );
+        tagged_flac(
+            &root.join("b.flac"),
+            &[
+                (ItemKey::TrackArtists, "Alice Coltrane"),
+                (ItemKey::TrackArtists, "Pharoah Sanders"),
+                (ItemKey::MusicBrainzArtistId, "mb-alice"),
+            ],
+        );
+        let (catalogue, sources) = store(&pool).await;
+
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+
+        let matched = track_id_for(&pool, "a.flac").await;
+        assert_eq!(
+            stored_credits(&pool, matched).await,
+            vec![
+                (0, "beabadoobee".to_owned(), None),
+                (1, "Hayley Williams".to_owned(), None),
+            ],
+            "the credited display string is not a performer"
+        );
+        assert_eq!(
+            stored_credit_ids(&pool, matched).await,
+            vec![
+                (0, Some("mb-beabadoobee".to_owned())),
+                (1, Some("mb-hayley".to_owned())),
+            ]
+        );
+
+        let mismatched = track_id_for(&pool, "b.flac").await;
+        assert_eq!(
+            stored_credits(&pool, mismatched).await,
+            vec![
+                (0, "Alice Coltrane".to_owned(), None),
+                (1, "Pharoah Sanders".to_owned(), None),
+            ]
+        );
+        assert_eq!(
+            stored_credit_ids(&pool, mismatched).await,
+            vec![(0, None), (1, None)],
+            "an id count that does not match the performers leaves every performer unnamed"
+        );
+
+        tagged_flac(&multi, &[(ItemKey::TrackArtist, "beabadoobee")]);
+        scan(&catalogue, &sources, std::slice::from_ref(&root))
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_credits(&pool, matched).await,
+            vec![(0, "beabadoobee".to_owned(), None)],
+            "a rescan replaces the stored credits"
         );
 
         std::fs::remove_dir_all(&root).unwrap();

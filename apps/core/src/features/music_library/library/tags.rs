@@ -119,12 +119,7 @@ pub fn read_tags(path: &Path) -> Result<TrackTags, TagError> {
     };
     let artists = artist_credits(tag).unwrap_or_default();
 
-    let artist_ids = tag
-        .get_strings(&ItemKey::MusicBrainzArtistId)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let artist_ids = non_empty_strings(tag, &ItemKey::MusicBrainzArtistId);
 
     let compilation = tag
         .get_string(&ItemKey::FlagCompilation)
@@ -428,27 +423,24 @@ fn text(tag: &Tag, read: impl Fn(&Tag) -> Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn artist_credits(tag: &Tag) -> Option<Vec<String>> {
-    let mut names: Vec<String> = tag
-        .get_strings(&ItemKey::TrackArtist)
+fn non_empty_strings(tag: &Tag, key: &ItemKey) -> Vec<String> {
+    tag.get_strings(key)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .collect();
+        .collect()
+}
 
-    if names.is_empty() {
-        names = tag
-            .get_strings(&ItemKey::TrackArtists)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .collect();
+fn artist_credits(tag: &Tag) -> Option<Vec<String>> {
+    let credited = non_empty_strings(tag, &ItemKey::TrackArtists);
+    if !credited.is_empty() {
+        return Some(credited);
     }
 
-    match names.len() {
-        0 => None,
-        1 => Some(split_credits(&names[0])),
-        _ => Some(names),
+    match non_empty_strings(tag, &ItemKey::TrackArtist).as_slice() {
+        [] => None,
+        [artist] => Some(split_credits(artist)),
+        artists => Some(artists.to_vec()),
     }
 }
 
@@ -865,6 +857,68 @@ mod tests {
 
     fn temp_flac(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("whio-{label}-{}.flac", uuid::Uuid::now_v7()))
+    }
+
+    #[test]
+    fn the_multi_valued_artist_list_is_the_performer_list() {
+        let path = temp_flac("multi-artists");
+        tagged_flac(
+            &path,
+            &[
+                (ItemKey::TrackArtist, "beabadoobee & Hayley Williams"),
+                (ItemKey::TrackArtists, "beabadoobee"),
+                (ItemKey::TrackArtists, "Hayley Williams"),
+                (ItemKey::MusicBrainzArtistId, "mb-beabadoobee"),
+                (ItemKey::MusicBrainzArtistId, "mb-hayley"),
+            ],
+        );
+
+        let tags = read_tags(&path).unwrap();
+        assert_eq!(tags.artists, vec!["beabadoobee", "Hayley Williams"]);
+        assert_eq!(tags.artist_ids, vec!["mb-beabadoobee", "mb-hayley"]);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_multi_valued_artist_list_with_a_single_id_keeps_every_performer() {
+        let path = temp_flac("multi-artists-one-id");
+        tagged_flac(
+            &path,
+            &[
+                (ItemKey::TrackArtists, "Alice Coltrane"),
+                (ItemKey::TrackArtists, "Pharoah Sanders"),
+                (ItemKey::MusicBrainzArtistId, "mb-alice"),
+            ],
+        );
+
+        let tags = read_tags(&path).unwrap();
+        assert_eq!(tags.artists, vec!["Alice Coltrane", "Pharoah Sanders"]);
+        assert_eq!(tags.artist_ids, vec!["mb-alice"]);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_semicolon_credited_artist_is_split_without_artists() {
+        let path = temp_flac("credited-semicolon");
+        tagged_flac(&path, &[(ItemKey::TrackArtist, "A; B")]);
+
+        let tags = read_tags(&path).unwrap();
+        assert_eq!(tags.artists, vec!["A", "B"]);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn an_ampersand_credited_artist_is_one_performer_without_artists() {
+        let path = temp_flac("credited-ampersand");
+        tagged_flac(&path, &[(ItemKey::TrackArtist, "A & B")]);
+
+        let tags = read_tags(&path).unwrap();
+        assert_eq!(tags.artists, vec!["A & B"]);
+
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
