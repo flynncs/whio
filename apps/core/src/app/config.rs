@@ -142,7 +142,7 @@ impl Config {
         Self::from_map(&vars)
     }
 
-    fn from_map(vars: &HashMap<String, String>) -> Result<Self, ConfigError> {
+    pub(super) fn from_map(vars: &HashMap<String, String>) -> Result<Self, ConfigError> {
         let bind_raw = vars
             .get("WHIO_BIND_ADDRESS")
             .map(String::as_str)

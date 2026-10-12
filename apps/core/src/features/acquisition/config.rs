@@ -38,20 +38,24 @@ pub struct AcquisitionConfig {
 }
 
 impl AcquisitionConfig {
+    pub(crate) fn enabled_from_vars(vars: &Vars) -> Result<bool, ConfigError> {
+        match vars.get(ENABLED) {
+            None => Ok(false),
+            Some(raw) => match raw.trim() {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => Err(invalid(ENABLED, raw, "must be true or false")),
+            },
+        }
+    }
+
     pub(crate) fn from_vars(
         vars: &Vars,
         slskd_enabled: bool,
         musicbrainz_enabled: bool,
         media_roots: &[PathBuf],
     ) -> Result<Self, ConfigError> {
-        let enabled = match vars.get(ENABLED) {
-            None => false,
-            Some(raw) => match raw.trim() {
-                "true" => true,
-                "false" => false,
-                _ => return Err(invalid(ENABLED, raw, "must be true or false")),
-            },
-        };
+        let enabled = Self::enabled_from_vars(vars)?;
 
         let candidate_budget = bounded_number(
             vars,

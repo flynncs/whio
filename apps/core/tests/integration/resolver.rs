@@ -53,6 +53,8 @@ fn candidate_dto() -> CatalogueCandidateDto {
             ))),
         }],
         duration_ms: Some(Some(337_000)),
+        track_number: None,
+        disc_number: None,
         album: Some(Box::new(CatalogueAlbumDto {
             title: "Random Access Memories".to_owned(),
             source: Some(Box::new(SourceIdentityDto::new(

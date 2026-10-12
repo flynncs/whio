@@ -33,6 +33,7 @@ pub use artist_information::{ArtistInformation, RefreshDemand, RefreshStatus};
 pub use artwork::ArtworkRef;
 pub use dedup::{
     MATCHER_VERSION, MatchDecision, MatchRecord, MatchStatus, ParsedTitle, RecordingIndex,
+    strict_recording_match,
 };
 pub use duplicate_report::{
     DuplicateCandidate, DuplicateSource, KeepReason, SplitArtist, SplitArtistRow,
@@ -60,8 +61,8 @@ pub use queue::{
     RestoreQueueWrite, RestoreQueueWriteOutcome,
 };
 pub use retention::{
-    ArtistMerge, DuplicateKind, EvictionReport, ProviderDuplicate, ProviderDuplicateReport,
-    RetentionReport, SkipReason, SkippedDuplicate,
+    AlbumRefetch, ArtistMerge, DuplicateKind, EvictionReport, ProviderDuplicate,
+    ProviderDuplicateReport, RetentionReport, SkipReason, SkippedDuplicate, TrackMerge,
 };
 pub use search::{MatchQuality, SearchConfidence, SearchTerms};
 pub(crate) use search::{album_quality, best_field_quality, track_quality};

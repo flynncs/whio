@@ -1,6 +1,74 @@
 use super::ports::{ExpectedTrack, MbRecording, MbRelease};
 use super::selection::{lengths_agree, normalise};
 
+use crate::features::music_library::domain::{
+    AlbumEntry, MatchRecord, normalize_for_matching, strict_recording_match,
+};
+
+pub(super) fn collapse_album_entries(entries: &[AlbumEntry]) -> Vec<&AlbumEntry> {
+    let mut kept: Vec<&AlbumEntry> = Vec::new();
+    for (position, entry) in entries.iter().enumerate() {
+        let remote = album_record(entry);
+        let candidates = entries
+            .iter()
+            .enumerate()
+            .filter(|(candidate_position, candidate)| {
+                *candidate_position != position && same_primary_artist(candidate, entry)
+            })
+            .map(|(_, candidate)| album_record(candidate))
+            .collect();
+        let unidentified = entry
+            .track()
+            .metadata()
+            .musicbrainz_recording_id()
+            .is_none()
+            && entry.track().metadata().isrc().is_none();
+        let duplicate = strict_recording_match(&remote, candidates).is_some_and(|target| {
+            kept.iter()
+                .any(|candidate| candidate.track().id().to_string() == target)
+        });
+        if !unidentified || !duplicate {
+            kept.push(entry);
+        }
+    }
+    kept
+}
+
+fn same_primary_artist(left: &AlbumEntry, right: &AlbumEntry) -> bool {
+    match (
+        left.track().artists().first(),
+        right.track().artists().first(),
+    ) {
+        (Some(left), Some(right)) => {
+            left.musicbrainz_artist_id() == right.musicbrainz_artist_id()
+                && normalize_for_matching(left.name()) == normalize_for_matching(right.name())
+        }
+        _ => false,
+    }
+}
+
+fn album_record(entry: &AlbumEntry) -> MatchRecord {
+    let track = entry.track();
+    MatchRecord::new(
+        track.id().to_string(),
+        track.title(),
+        track
+            .artists()
+            .iter()
+            .map(|artist| artist.name().to_owned())
+            .collect(),
+        track.duration_ms(),
+        "",
+        track
+            .metadata()
+            .musicbrainz_recording_id()
+            .map(str::to_owned),
+        track.metadata().isrc().map(str::to_owned),
+        None,
+        true,
+    )
+}
+
 const PIN_LENGTH_TOLERANCE_MS: i64 = 3_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +190,113 @@ mod tests {
             title: title.to_owned(),
             length_ms,
         }
+    }
+
+    fn album_entry(title: &str, duration: Option<u64>) -> AlbumEntry {
+        use crate::features::music_library::domain::{AlbumTrack, Track, TrackId, TrackMetadata};
+        AlbumEntry::new(
+            Track::new(
+                TrackId::new(),
+                TrackMetadata::from_names(title.to_owned(), vec!["An Artist".to_owned()], duration)
+                    .unwrap(),
+            ),
+            AlbumTrack::unplaced(),
+        )
+    }
+
+    #[test]
+    fn collapse_keeps_first_occurrences_in_album_order() {
+        let entries = vec![
+            album_entry("Spark", Some(200_000)),
+            album_entry("Satellite", Some(180_000)),
+            album_entry("Spark", Some(201_000)),
+            album_entry("Satellite", Some(180_000)),
+        ];
+        let collapsed = collapse_album_entries(&entries);
+        assert_eq!(collapsed.len(), 2);
+        assert_eq!(collapsed[0].track().id(), entries[0].track().id());
+        assert_eq!(collapsed[1].track().id(), entries[1].track().id());
+    }
+
+    #[test]
+    fn collapse_preserves_outside_tolerance_missing_duration_and_versions() {
+        let entries = vec![
+            album_entry("Spark", Some(200_000)),
+            album_entry("Spark", Some(202_001)),
+            album_entry("Spark", None),
+            album_entry("Spark (Live)", Some(200_000)),
+        ];
+        assert_eq!(collapse_album_entries(&entries).len(), 4);
+    }
+
+    #[test]
+    fn collapse_keeps_same_named_identified_artists_separate() {
+        use crate::features::music_library::domain::{
+            AlbumTrack, ArtistCredit, Track, TrackId, TrackMetadata,
+        };
+        let entries = ["artist-one", "artist-two"]
+            .into_iter()
+            .map(|identifier| {
+                AlbumEntry::new(
+                    Track::new(
+                        TrackId::new(),
+                        TrackMetadata::new(
+                            "Spark".to_owned(),
+                            vec![
+                                ArtistCredit::new(
+                                    "An Artist".to_owned(),
+                                    Some(identifier.to_owned()),
+                                )
+                                .unwrap(),
+                            ],
+                            Some(200_000),
+                        )
+                        .unwrap(),
+                    ),
+                    AlbumTrack::unplaced(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(collapse_album_entries(&entries).len(), 2);
+    }
+
+    #[test]
+    fn collapse_preserves_full_album_ambiguity_for_feature_titles() {
+        let entries = vec![
+            album_entry("Song", Some(200_000)),
+            album_entry("Song (feat. Guest)", Some(200_000)),
+            album_entry("Song (feat. Guest)", Some(200_000)),
+        ];
+        assert_eq!(
+            collapse_album_entries(&entries)
+                .iter()
+                .map(|entry| entry.track().id())
+                .collect::<Vec<_>>(),
+            entries
+                .iter()
+                .map(|entry| entry.track().id())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn collapse_keeps_three_indistinguishable_tracks_when_the_matcher_abstains() {
+        let entries = vec![
+            album_entry("Song", Some(200_000)),
+            album_entry("Song", Some(200_000)),
+            album_entry("Song", Some(200_000)),
+        ];
+        assert_eq!(collapse_album_entries(&entries).len(), 3);
+    }
+
+    #[test]
+    fn collapse_does_not_choose_among_several_matches() {
+        let entries = vec![
+            album_entry("Spark", Some(200_000)),
+            album_entry("Spark", Some(203_000)),
+            album_entry("Spark", Some(201_500)),
+        ];
+        assert_eq!(collapse_album_entries(&entries).len(), 3);
     }
 
     #[test]

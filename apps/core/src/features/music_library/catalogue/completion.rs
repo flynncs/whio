@@ -333,8 +333,12 @@ impl CompletionService {
             match self.fetch(&provider_source).await {
                 Ok(fetched) => {
                     let reported_count = fetched.reported_count();
-                    super::materialize::materialize(catalogue, sources, fetched.into_candidates())
-                        .await?;
+                    super::materialize::materialize_album_tracks(
+                        catalogue,
+                        sources,
+                        fetched.into_candidates(),
+                    )
+                    .await?;
                     let state = self.state(reported_count, None)?;
                     catalogue
                         .set_provider_entity_state(&provider_source, &state)

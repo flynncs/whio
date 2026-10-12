@@ -68,6 +68,20 @@ impl PostgresAcquisitionStore {
         self
     }
 
+    pub async fn live_track_origins(
+        &self,
+    ) -> Result<Vec<crate::features::music_library::domain::TrackId>, StorageError> {
+        let ids = sqlx::query_scalar::<_, String>(&format!(
+            "SELECT DISTINCT origin_id FROM acquisition_requests WHERE origin_kind = 'track' AND state NOT IN ({TERMINAL_STATES}) ORDER BY origin_id"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::Database)?;
+        ids.into_iter()
+            .map(|id| id.parse().map_err(|_| StorageError::Inconsistent))
+            .collect()
+    }
+
     pub async fn find_request(&self, id: Uuid) -> Result<Option<Request>, StorageError> {
         let row = sqlx::query(&format!(
             "SELECT {REQUEST_COLUMNS} FROM acquisition_requests WHERE id = $1"

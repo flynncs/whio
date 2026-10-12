@@ -87,9 +87,30 @@ enum Phase {
     Done,
 }
 
+#[derive(Default)]
+struct PinSummary {
+    origin_entries: usize,
+    candidate_track_counts: Vec<usize>,
+}
+
+impl PinSummary {
+    fn reason(&self, code: &str) -> String {
+        let counts = self
+            .candidate_track_counts
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{code}: origin {} tracks; candidates {counts}",
+            self.origin_entries
+        )
+    }
+}
+
 enum Pinned {
-    NotFound,
-    Ambiguous,
+    NotFound(Option<PinSummary>),
+    Ambiguous(Option<PinSummary>),
     Unique {
         target: AcquisitionTarget,
         artist: String,
@@ -218,6 +239,11 @@ impl AcquisitionService {
         Ok(self.store.find_request(id).await?)
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "live_track_origins"))]
+    pub async fn live_track_origins(&self) -> Result<Vec<TrackId>, AcquisitionError> {
+        Ok(self.store.live_track_origins().await?)
+    }
+
     pub async fn list_by_origin(
         &self,
         origin_ids: &[String],
@@ -300,25 +326,23 @@ impl AcquisitionService {
         };
 
         match pinned {
-            Pinned::NotFound => {
-                self.store
-                    .set_terminal(
-                        request.id,
-                        RequestState::ReleaseNotFound,
-                        Some("release_not_found"),
-                    )
-                    .await?;
-                Ok(Phase::Done)
+            Pinned::NotFound(summary) => {
+                self.pin_failed(
+                    request.id,
+                    RequestState::ReleaseNotFound,
+                    "release_not_found",
+                    summary,
+                )
+                .await
             }
-            Pinned::Ambiguous => {
-                self.store
-                    .set_terminal(
-                        request.id,
-                        RequestState::ReleaseAmbiguous,
-                        Some("release_ambiguous"),
-                    )
-                    .await?;
-                Ok(Phase::Done)
+            Pinned::Ambiguous(summary) => {
+                self.pin_failed(
+                    request.id,
+                    RequestState::ReleaseAmbiguous,
+                    "release_ambiguous",
+                    summary,
+                )
+                .await
             }
             Pinned::Unique {
                 target,
@@ -353,6 +377,28 @@ impl AcquisitionService {
         }
     }
 
+    async fn pin_failed(
+        &self,
+        id: Uuid,
+        state: RequestState,
+        code: &'static str,
+        summary: Option<PinSummary>,
+    ) -> Result<Phase, AcquisitionError> {
+        let reason = summary
+            .as_ref()
+            .map_or_else(|| code.to_owned(), |summary| summary.reason(code));
+        let summary = summary.unwrap_or_default();
+        tracing::info!(
+            reason = code,
+            origin_entries = summary.origin_entries,
+            candidate_releases = summary.candidate_track_counts.len(),
+            candidate_track_counts = ?summary.candidate_track_counts,
+            "acquisition pin failed"
+        );
+        self.store.set_terminal(id, state, Some(&reason)).await?;
+        Ok(Phase::Done)
+    }
+
     async fn pin_album(&self, id: &AlbumId) -> Result<Pinned, AcquisitionError> {
         let Some(detail) = self
             .ports
@@ -361,7 +407,7 @@ impl AcquisitionService {
             .await
             .map_err(|_| AcquisitionError::Failed)?
         else {
-            return Ok(Pinned::NotFound);
+            return Ok(Pinned::NotFound(None));
         };
         let artist = detail
             .album
@@ -369,8 +415,8 @@ impl AcquisitionService {
             .map(|artist| artist.name().to_owned())
             .unwrap_or_default();
         let title = detail.album.album().title().to_owned();
-        let expected = detail
-            .entries
+        let entries = super::pin::collapse_album_entries(&detail.entries);
+        let expected = entries
             .iter()
             .map(|entry| ExpectedTrack {
                 disc: entry.membership().disc_number().unwrap_or(1),
@@ -386,6 +432,13 @@ impl AcquisitionService {
             })
             .collect::<Vec<_>>();
         let candidates = self.lookup_releases(&artist, &title).await?;
+        let summary = PinSummary {
+            origin_entries: expected.len(),
+            candidate_track_counts: candidates
+                .iter()
+                .map(|release| release.tracks.len())
+                .collect(),
+        };
 
         Ok(match super::pin::pin_release(candidates, &expected) {
             super::pin::Pinned::Unique(release) => Pinned::Unique {
@@ -394,8 +447,8 @@ impl AcquisitionService {
                 title: release.title,
                 expected: release.tracks,
             },
-            super::pin::Pinned::NotFound => Pinned::NotFound,
-            super::pin::Pinned::Ambiguous => Pinned::Ambiguous,
+            super::pin::Pinned::NotFound => Pinned::NotFound(Some(summary)),
+            super::pin::Pinned::Ambiguous => Pinned::Ambiguous(Some(summary)),
         })
     }
 
@@ -406,7 +459,7 @@ impl AcquisitionService {
             .await
             .map_err(|_| AcquisitionError::Failed)?
         else {
-            return Ok(Pinned::NotFound);
+            return Ok(Pinned::NotFound(None));
         };
         let artist = track
             .artists()
@@ -422,15 +475,15 @@ impl AcquisitionService {
         Ok(
             match super::pin::pin_recording(candidates, &title, length_ms) {
                 super::pin::Pinned::Unique(recording) => recording_pinned(recording),
-                super::pin::Pinned::NotFound => Pinned::NotFound,
-                super::pin::Pinned::Ambiguous => Pinned::Ambiguous,
+                super::pin::Pinned::NotFound => Pinned::NotFound(None),
+                super::pin::Pinned::Ambiguous => Pinned::Ambiguous(None),
             },
         )
     }
 
     async fn pin_release(&self, id: MbId) -> Result<Pinned, AcquisitionError> {
         let Some(release) = self.ports.lookup.release(&id).await.map_err(map_lookup)? else {
-            return Ok(Pinned::NotFound);
+            return Ok(Pinned::NotFound(None));
         };
 
         Ok(Pinned::Unique {
@@ -443,7 +496,7 @@ impl AcquisitionService {
 
     async fn pin_recording(&self, id: MbId) -> Result<Pinned, AcquisitionError> {
         let Some(recording) = self.ports.lookup.recording(&id).await.map_err(map_lookup)? else {
-            return Ok(Pinned::NotFound);
+            return Ok(Pinned::NotFound(None));
         };
 
         Ok(recording_pinned(recording))

@@ -22,7 +22,7 @@ CHANNEL_ID = "UCIaFw5VBEK8qaW6nRpx_qnw"
 LARGEST_THUMBNAIL = (
     "https://lh3.googleusercontent.com/"
     "IOKuXtp8PCQ_Fc-vaRKm3sKIXBxFV51gZheLTH5br-YGnWHFQf_Jywcuk7wbprYRoEbQyS_XZY6-nMJX"
-    "=w2048-h853-p-l90-rj"
+    "=w1200-h1200"
 )
 ALL_FIELDS = [
     "biography.content",

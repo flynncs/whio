@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::features::music_library::{
     domain::{
         Album, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtworkRef, SourceIdentity,
         SourceKind, TrackHit,
     },
-    storage::contracts::{CatalogueWrite, SourceLookup},
+    storage::contracts::{CatalogueWrite, SourceLookup, TrackRepositoryError},
 };
 
 use super::CatalogueError;
@@ -88,8 +88,33 @@ pub(crate) async fn materialize(
     sources: &Arc<dyn SourceLookup>,
     candidates: Vec<CatalogueCandidate>,
 ) -> Result<Vec<TrackHit>, CatalogueError> {
+    materialize_candidates(catalogue, sources, candidates, false).await
+}
+
+pub(crate) async fn materialize_album_tracks(
+    catalogue: &Arc<dyn CatalogueWrite>,
+    sources: &Arc<dyn SourceLookup>,
+    candidates: Vec<CatalogueCandidate>,
+) -> Result<Vec<TrackHit>, CatalogueError> {
+    materialize_candidates(catalogue, sources, candidates, true).await
+}
+
+async fn materialize_candidates(
+    catalogue: &Arc<dyn CatalogueWrite>,
+    sources: &Arc<dyn SourceLookup>,
+    candidates: Vec<CatalogueCandidate>,
+    placed: bool,
+) -> Result<Vec<TrackHit>, CatalogueError> {
     let mut hits = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
+    let mut memberships = HashSet::new();
+    for (position, candidate) in candidates.into_iter().enumerate() {
+        let position = u32::try_from(position)
+            .map_err(|_| CatalogueError::Repository(TrackRepositoryError::InvalidData))?;
+        let membership = if placed {
+            candidate.album_track(position)
+        } else {
+            AlbumTrack::unplaced()
+        };
         let source = candidate.source().clone();
         let artwork = candidate.artwork().cloned();
         let album_metadata = candidate.album().cloned();
@@ -98,8 +123,12 @@ pub(crate) async fn materialize(
         let preserve_membership_for_match =
             metadata.musicbrainz_recording_id().is_none() && metadata.isrc().is_none();
 
+        let album = match &album_metadata {
+            Some(metadata) => Some(materialize_album(catalogue, sources, metadata).await?),
+            None => None,
+        };
         let track = catalogue
-            .get_or_create_provider(source.clone(), metadata)
+            .get_or_create_provider(source.clone(), metadata, album.as_ref().map(Album::id))
             .await
             .map_err(CatalogueError::Repository)?;
         let has_library_source = sources
@@ -110,33 +139,25 @@ pub(crate) async fn materialize(
             .any(|source| SourceKind::of(source.provider_id()).is_library());
         let preserve_membership = preserve_membership_for_match && has_library_source;
 
-        let album = match &album_metadata {
-            Some(album_metadata) => {
-                let album = materialize_album(catalogue, sources, album_metadata).await?;
-                if preserve_membership {
-                    catalogue
-                        .add_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
-                        .await
-                        .map_err(CatalogueError::Repository)?;
-                } else {
-                    catalogue
-                        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
-                        .await
-                        .map_err(CatalogueError::Repository)?;
+        let album = match album {
+            Some(album) => {
+                if memberships.insert((album.id().clone(), track.id().clone())) {
+                    if !placed || preserve_membership {
+                        catalogue
+                            .add_album_track(album.id(), track.id(), &membership)
+                            .await
+                            .map_err(CatalogueError::Repository)?;
+                    } else {
+                        catalogue
+                            .set_album_track(album.id(), track.id(), &membership)
+                            .await
+                            .map_err(CatalogueError::Repository)?;
+                    }
                 }
 
                 Some(album)
             }
-            None => {
-                if !preserve_membership {
-                    catalogue
-                        .clear_album_track(track.id())
-                        .await
-                        .map_err(CatalogueError::Repository)?;
-                }
-
-                None
-            }
+            None => None,
         };
 
         for credit in &credits {

@@ -62,6 +62,7 @@ impl CatalogueWrite for FailingTrackRepository {
         &self,
         _source: SourceIdentity,
         _metadata: TrackMetadata,
+        _album_id: Option<&crate::features::music_library::domain::AlbumId>,
     ) -> Result<Track, TrackRepositoryError> {
         Err(TrackRepositoryError::Unavailable)
     }
@@ -1308,7 +1309,7 @@ async fn a_matched_track_without_an_incoming_album_keeps_its_memberships(pool: s
 }
 
 #[sqlx::test]
-async fn identified_provider_candidates_keep_the_existing_album_membership_rules(
+async fn identified_provider_candidates_preserve_membership_when_album_metadata_is_absent(
     pool: sqlx::PgPool,
 ) {
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
@@ -1403,12 +1404,14 @@ async fn identified_provider_candidates_keep_the_existing_album_membership_rules
         1
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM album_tracks WHERE track_id = $1")
+        sqlx::query_as::<_, (Uuid, Option<i16>, Option<i16>, i32, Option<i16>, Option<i16>)>(
+            "SELECT album_id, disc_number, track_number, position, disc_total, track_total FROM album_tracks WHERE track_id = $1",
+        )
             .bind(without_album.id().as_uuid())
-            .fetch_one(&pool)
+            .fetch_all(&pool)
             .await
             .unwrap(),
-        0
+        vec![(*previous_album.id().as_uuid(), None, None, 0, None, None)]
     );
 }
 
@@ -2015,6 +2018,7 @@ impl CatalogueWrite for MemoryStore {
         &self,
         source: SourceIdentity,
         metadata: TrackMetadata,
+        _album_id: Option<&AlbumId>,
     ) -> Result<Track, TrackRepositoryError> {
         self.store(source, metadata)
     }

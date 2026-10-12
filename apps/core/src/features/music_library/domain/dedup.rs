@@ -19,6 +19,8 @@ const VERSION_WORDS: &str = "live remix rmx mix edit acoustic instrumental demo 
 
 const UNDETERMINED_QUALIFIERS: &str = "mix remix demo session sessions cover karaoke";
 
+const FEATURE_WORDS: &[&str] = &["feat", "ft", "featuring", "with"];
+
 const ALIASES: &[(&str, &str)] = &[
     ("acoustic version", "acoustic"),
     ("live version", "live"),
@@ -313,6 +315,26 @@ struct VerifiedLink {
     local_fingerprint: String,
     version: String,
     expires: i64,
+}
+
+pub fn strict_recording_match(
+    remote: &MatchRecord,
+    candidates: Vec<MatchRecord>,
+) -> Option<String> {
+    let title = remote.parsed().core();
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| candidate.parsed().core() == title)
+        .collect();
+    let index = RecordingIndex::new(candidates);
+    let decision = index.match_record(remote, 0);
+    if !matches!(
+        decision.status(),
+        MatchStatus::Verified | MatchStatus::MetadataCandidate
+    ) {
+        return None;
+    }
+    decision.target().map(str::to_owned)
 }
 
 #[derive(Default)]
@@ -730,7 +752,7 @@ fn consume(
 }
 
 fn feature_credit(value: &str) -> Option<&str> {
-    ["feat", "ft", "featuring"].iter().find_map(|keyword| {
+    FEATURE_WORDS.iter().find_map(|keyword| {
         let rest = value.strip_prefix(keyword)?;
         let rest = rest.strip_prefix('.').unwrap_or(rest);
         rest.strip_prefix(' ').filter(|rest| !rest.is_empty())
@@ -808,7 +830,7 @@ fn find_feature(value: &str) -> Option<(usize, &str)> {
         while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
             cursor += 1;
         }
-        for keyword in ["feat", "ft", "featuring"] {
+        for keyword in FEATURE_WORDS {
             let Some(rest) = value[cursor..].strip_prefix(keyword) else {
                 continue;
             };
@@ -1332,6 +1354,70 @@ mod tests {
             index.match_record(&remote, 101).reason(),
             "verified_video_id"
         );
+    }
+
+    #[test]
+    fn pylon_feature_titles_share_base_keys_and_performers_but_not_versions() {
+        let record = |id: &str, title: &str, artists: Vec<&str>, duration| {
+            MatchRecord::new(
+                id,
+                title,
+                artists.into_iter().map(str::to_owned).collect(),
+                Some(duration),
+                "",
+                None,
+                None,
+                None,
+                true,
+            )
+        };
+        for (title, provider_title, guest, local_ms, provider_ms) in [
+            (
+                "Nothing to Prove",
+                "Nothing To Prove",
+                "Hayley Williams",
+                144_316,
+                145_000,
+            ),
+            (
+                "Powerlines",
+                "Powerlines",
+                "Brendan Yates",
+                178_391,
+                179_000,
+            ),
+        ] {
+            let provider = record(
+                "provider",
+                provider_title,
+                vec!["beabadoobee", guest],
+                provider_ms,
+            );
+            for feature in ["feat.", "ft.", "featuring", "with"] {
+                let local_title = format!("{title} {feature} {guest}");
+                let local = record("local", &local_title, vec!["beabadoobee"], local_ms);
+                assert_eq!(local.parsed().core(), provider.parsed().core());
+                assert_eq!(local.parsed().artists(), provider.parsed().artists());
+                assert_eq!(
+                    strict_recording_match(&provider, vec![local.clone()]).as_deref(),
+                    Some("local")
+                );
+                assert_eq!(
+                    strict_recording_match(&local, vec![provider.clone()]).as_deref(),
+                    Some("provider")
+                );
+                for version in ["Remix", "Live"] {
+                    let version = record(
+                        "version",
+                        &format!("{local_title} ({version})"),
+                        vec!["beabadoobee"],
+                        local_ms,
+                    );
+                    assert!(strict_recording_match(&provider, vec![version.clone()]).is_none());
+                    assert!(strict_recording_match(&version, vec![provider.clone()]).is_none());
+                }
+            }
+        }
     }
 
     #[test]

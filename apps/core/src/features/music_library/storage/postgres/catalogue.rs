@@ -1,12 +1,13 @@
 use async_trait::async_trait;
 use sqlx::{Executor, PgConnection, PgPool, Postgres};
+use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use crate::features::music_library::{
     domain::{
         Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, CreditRole,
-        MatchRecord, MatchStatus, ProviderEntityState, ProviderId, RecordingIndex, SourceIdentity,
-        SourceKind, SourceScope, Track, TrackId, TrackMetadata,
+        MatchRecord, ParsedTitle, ProviderEntityState, ProviderId, SourceIdentity, SourceKind,
+        SourceScope, Track, TrackId, TrackMetadata, strict_recording_match,
     },
     storage::contracts::{ReconcileReport, SourceFileFacts, TrackRepositoryError},
 };
@@ -19,7 +20,6 @@ use super::decode::{
     encode_duration_ms, encode_facts_version, encode_integer, encode_smallint, encode_source_scope,
     repository_error,
 };
-use super::library::dedup_candidate_ids;
 use super::schema::{ALBUM_COLUMNS, ARTIST_COLUMNS, AlbumRow, ArtistRow, folded};
 
 pub(super) struct ResolvedCredit {
@@ -38,7 +38,7 @@ impl CatalogueWrite for PgStore {
         let credits = resolve_credits(&self.pool, &metadata).await?;
 
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
-        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits, false, &[]).await?;
+        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits, None).await?;
         tx.commit().await.map_err(repository_error)?;
 
         Ok(Track::new(track_id, metadata))
@@ -48,6 +48,7 @@ impl CatalogueWrite for PgStore {
         &self,
         source: SourceIdentity,
         metadata: TrackMetadata,
+        album_id: Option<&AlbumId>,
     ) -> Result<Track, TrackRepositoryError> {
         let credits = resolve_credits(&self.pool, &metadata).await?;
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
@@ -56,8 +57,7 @@ impl CatalogueWrite for PgStore {
             &source,
             &metadata,
             &credits,
-            true,
-            &self.library_provider_ids(),
+            Some((&self.library_provider_ids(), album_id)),
         )
         .await?;
         tx.commit().await.map_err(repository_error)?;
@@ -74,7 +74,7 @@ impl CatalogueWrite for PgStore {
         let credits = resolve_credits(&self.pool, &metadata).await?;
 
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
-        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits, false, &[]).await?;
+        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits, None).await?;
         set_source_file_facts_in(&mut tx, &source, facts).await?;
         tx.commit().await.map_err(repository_error)?;
 
@@ -282,7 +282,16 @@ impl CatalogueWrite for PgStore {
             INSERT INTO album_tracks
                 (album_id, track_id, disc_number, track_number, position, disc_total, track_total)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (album_id, track_id) DO NOTHING
+            ON CONFLICT (album_id, track_id) DO UPDATE
+            SET disc_number = EXCLUDED.disc_number,
+                track_number = EXCLUDED.track_number,
+                position = EXCLUDED.position
+            WHERE album_tracks.disc_number IS NULL
+              AND album_tracks.track_number IS NULL
+              AND album_tracks.position = 0
+              AND (EXCLUDED.disc_number IS NOT NULL
+                   OR EXCLUDED.track_number IS NOT NULL
+                   OR EXCLUDED.position <> 0)
             "#,
         )
         .bind(album_id.as_uuid())
@@ -849,8 +858,7 @@ async fn get_or_create_in(
     source: &SourceIdentity,
     metadata: &TrackMetadata,
     credits: &[ResolvedCredit],
-    match_provider_track: bool,
-    library_provider_ids: &[String],
+    provider_scope: Option<(&[String], Option<&AlbumId>)>,
 ) -> Result<TrackId, TrackRepositoryError> {
     let track_id = match resolve_identified_track(connection, metadata).await? {
         Some(identified) => {
@@ -867,18 +875,15 @@ async fn get_or_create_in(
         }
         None => match find_track_id_by_source_for_update(connection, source).await? {
             Some(current) => current,
-            None => match if match_provider_track {
-                find_provider_track_match(
-                    connection,
-                    source,
-                    metadata,
-                    credits,
-                    library_provider_ids,
-                )
-                .await?
-            } else {
-                None
-            } {
+            None => match find_scoped_provider_track_match(
+                connection,
+                source,
+                metadata,
+                credits,
+                provider_scope,
+            )
+            .await?
+            {
                 Some(track_id) => {
                     attach_source(connection, &track_id, source).await?;
                     track_id
@@ -893,6 +898,30 @@ async fn get_or_create_in(
     replace_track_genres(connection, &track_id, metadata.genres()).await?;
 
     Ok(track_id)
+}
+
+async fn find_scoped_provider_track_match(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+    metadata: &TrackMetadata,
+    credits: &[ResolvedCredit],
+    scope: Option<(&[String], Option<&AlbumId>)>,
+) -> Result<Option<TrackId>, TrackRepositoryError> {
+    let Some((library_provider_ids, album_id)) = scope else {
+        return Ok(None);
+    };
+    if let Some(track) =
+        find_provider_track_match(connection, source, metadata, credits, library_provider_ids)
+            .await?
+    {
+        return Ok(Some(track));
+    }
+    match album_id {
+        Some(album_id) => {
+            find_album_track_match(connection, source, metadata, credits, album_id).await
+        }
+        None => Ok(None),
+    }
 }
 
 pub(super) async fn find_provider_track_match(
@@ -912,13 +941,78 @@ pub(super) async fn find_provider_track_match(
         return Ok(None);
     };
 
-    let candidate_ids = dedup_candidate_ids(
-        connection,
-        &[metadata.title().to_owned()],
-        crate::features::music_library::catalogue::CANDIDATE_LIMIT + 1,
-        library_provider_ids,
+    let candidate_ids =
+        library_track_candidates(connection, metadata.title(), library_provider_ids).await?;
+    match_track_candidates(connection, metadata, &credit.artist_id, &candidate_ids).await
+}
+
+async fn library_track_candidates(
+    connection: &mut PgConnection,
+    title: &str,
+    library_provider_ids: &[String],
+) -> Result<Vec<Uuid>, TrackRepositoryError> {
+    let title = ParsedTitle::parse(title, &[]);
+    let mut rows = sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT track.id, track.title
+        FROM tracks AS track
+        WHERE EXISTS (
+            SELECT 1 FROM track_sources AS source
+            WHERE source.track_id = track.id
+              AND source.provider_id = ANY($1::TEXT[])
+        )
+        ORDER BY track.id
+        "#,
     )
-    .await?;
+    .bind(library_provider_ids)
+    .fetch(connection);
+    let mut candidates = Vec::new();
+    while let Some(row) = rows.next().await {
+        let (id, candidate_title) = row.map_err(repository_error)?;
+        if ParsedTitle::parse(&candidate_title, &[]).core() == title.core() {
+            candidates.push(id);
+            if candidates.len()
+                > crate::features::music_library::catalogue::CANDIDATE_LIMIT as usize
+            {
+                break;
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+pub(super) async fn find_album_track_match(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+    metadata: &TrackMetadata,
+    credits: &[ResolvedCredit],
+    album_id: &AlbumId,
+) -> Result<Option<TrackId>, TrackRepositoryError> {
+    if SourceKind::of(source.provider_id()).is_library()
+        || metadata.musicbrainz_recording_id().is_some()
+        || metadata.isrc().is_some()
+    {
+        return Ok(None);
+    }
+    let Some(credit) = credits.first() else {
+        return Ok(None);
+    };
+    let candidate_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT track_id FROM album_tracks WHERE album_id = $1 ORDER BY track_id",
+    )
+    .bind(album_id.as_uuid())
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+    match_track_candidates(connection, metadata, &credit.artist_id, &candidate_ids).await
+}
+
+pub(super) async fn match_track_candidates(
+    connection: &mut PgConnection,
+    metadata: &TrackMetadata,
+    artist_id: &ArtistId,
+    candidate_ids: &[Uuid],
+) -> Result<Option<TrackId>, TrackRepositoryError> {
     if candidate_ids.len() > crate::features::music_library::catalogue::CANDIDATE_LIMIT as usize
         || candidate_ids.is_empty()
     {
@@ -935,7 +1029,7 @@ pub(super) async fn find_provider_track_match(
             Option<String>,
             Vec<String>,
         ),
-    >(&format!(
+    >(
         r#"
         SELECT t.id, t.title, t.duration_ms,
                t.musicbrainz_recording_id, t.isrc,
@@ -948,21 +1042,18 @@ pub(super) async fn find_provider_track_match(
                )
         FROM tracks AS t
         WHERE t.id = ANY($1)
-          AND t.title_normalized = {title_key}
           AND EXISTS (
               SELECT 1 FROM track_artist_credits AS primary_credit
               WHERE primary_credit.track_id = t.id
                 AND primary_credit.position = 0
                 AND primary_credit.role IS NULL
-                AND primary_credit.artist_id = $3
+                AND primary_credit.artist_id = $2
           )
         ORDER BY t.id
         "#,
-        title_key = folded("$2"),
-    ))
+    )
     .bind(candidate_ids)
-    .bind(metadata.title())
-    .bind(credit.artist_id.as_uuid())
+    .bind(artist_id.as_uuid())
     .fetch_all(&mut *connection)
     .await
     .map_err(repository_error)?;
@@ -998,19 +1089,13 @@ pub(super) async fn find_provider_track_match(
             )
         })
         .collect();
-    let decision = RecordingIndex::new(candidates).match_record(&remote, 0);
-    if !matches!(
-        decision.status(),
-        MatchStatus::Verified | MatchStatus::MetadataCandidate
-    ) {
-        return Ok(None);
-    }
-
-    Ok(decision.target().and_then(|target| {
-        rows.iter()
-            .find(|(id, ..)| id.to_string() == target)
-            .map(|(id, ..)| TrackId::from_uuid(*id))
-    }))
+    Ok(
+        strict_recording_match(&remote, candidates).and_then(|target| {
+            rows.iter()
+                .find(|(id, ..)| id.to_string() == target)
+                .map(|(id, ..)| TrackId::from_uuid(*id))
+        }),
+    )
 }
 
 async fn resolve_identified_track(

@@ -35,6 +35,25 @@ pub enum CliError {
 
     #[error(transparent)]
     Maintenance(#[from] MaintenanceError),
+
+    #[error(transparent)]
+    Acquisition(#[from] crate::features::acquisition::service::AcquisitionError),
+
+    #[error(transparent)]
+    Provider(#[from] crate::features::playback::providers::ProviderError),
+}
+
+impl From<crate::platform::config::ConfigError> for CliError {
+    fn from(error: crate::platform::config::ConfigError) -> Self {
+        use crate::platform::config::ConfigError;
+        match error {
+            ConfigError::Missing { name } => Self::MissingConfig(name),
+            ConfigError::Invalid { name, reason, .. }
+            | ConfigError::InvalidDatabaseUrl { name, reason } => {
+                Self::Usage(format!("invalid {name}: {reason}"))
+            }
+        }
+    }
 }
 
 pub async fn run() -> Result<(), CliError> {
@@ -188,15 +207,38 @@ pub async fn run() -> Result<(), CliError> {
             .await?
         }
         Operation::PruneProviderDuplicates { apply } => {
+            let mut vars: crate::platform::config::Vars = dotenv.into_iter().collect();
+            vars.extend(env::vars());
+            vars.insert("WHIO_DATABASE_URL".to_owned(), database_url);
+            if let Some(key) = credential_key_flag {
+                vars.insert("WHIO_CREDENTIAL_KEY".to_owned(), key);
+            }
+            let protected = prune_protected_origins(&vars, database.pool()).await?;
             music_cli::prune_provider_duplicates(
                 &crate::features::music_library::maintenance(database.pool()),
                 apply,
+                &protected,
             )
             .await?
         }
     }
 
     Ok(())
+}
+
+async fn prune_protected_origins(
+    vars: &crate::platform::config::Vars,
+    pool: sqlx::PgPool,
+) -> Result<Vec<crate::features::music_library::domain::TrackId>, CliError> {
+    if !crate::features::acquisition::config::AcquisitionConfig::enabled_from_vars(vars)? {
+        return Ok(Vec::new());
+    }
+    let config = crate::app::config::Config::from_map(vars)?;
+    let state = crate::app::startup::worker_state(&config, pool)?;
+    let acquisition = state.acquisition.ok_or_else(|| {
+        CliError::Usage("enabled acquisition could not be constructed".to_owned())
+    })?;
+    Ok(acquisition.live_track_origins().await?)
 }
 
 enum Operation {

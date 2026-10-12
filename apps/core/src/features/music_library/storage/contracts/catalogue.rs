@@ -25,6 +25,7 @@ pub trait CatalogueWrite: Send + Sync {
         &self,
         source: SourceIdentity,
         metadata: TrackMetadata,
+        album_id: Option<&AlbumId>,
     ) -> Result<Track, TrackRepositoryError>;
 
     async fn set_source_file_facts(

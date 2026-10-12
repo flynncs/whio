@@ -26,6 +26,20 @@ pub struct CatalogueCandidate {
         skip_serializing_if = "Option::is_none"
     )]
     pub duration_ms: Option<Option<i32>>,
+    #[serde(
+        rename = "track_number",
+        default,
+        with = "::serde_with::rust::double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub track_number: Option<Option<i32>>,
+    #[serde(
+        rename = "disc_number",
+        default,
+        with = "::serde_with::rust::double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disc_number: Option<Option<i32>>,
     #[serde(rename = "album", skip_serializing_if = "Option::is_none")]
     pub album: Option<Box<models::CatalogueAlbum>>,
     /// Public artwork URL that the core fetches and proxies to clients.
@@ -49,6 +63,8 @@ impl CatalogueCandidate {
             title,
             artists,
             duration_ms: None,
+            track_number: None,
+            disc_number: None,
             album: None,
             artwork_url: None,
         }

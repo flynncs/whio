@@ -203,6 +203,207 @@ async fn partial_album(repository: &Arc<PostgresTrackRepository>) -> AlbumId {
 }
 
 #[sqlx::test]
+async fn completion_stores_response_order_and_search_preserves_it(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album_id = partial_album(&repository).await;
+    let songs = vec![
+        candidate("vid-1", "brutal")
+            .with_track_numbers(Some(1), Some(1))
+            .unwrap(),
+        candidate("vid-2", "z song")
+            .with_track_numbers(Some(1), Some(2))
+            .unwrap(),
+        candidate("vid-3", "a song")
+            .with_track_numbers(Some(2), Some(1))
+            .unwrap(),
+    ];
+    let provider = Arc::new(StubAlbumProvider {
+        result: Mutex::new(Ok(FetchedAlbum::new(songs, Some(3)))),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let (completion, sources) = service(&repository, provider).await;
+    let detail = completion
+        .album_detail(&album_id, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        detail
+            .entries
+            .iter()
+            .map(|entry| entry.track().title())
+            .collect::<Vec<_>>(),
+        ["brutal", "z song", "a song"]
+    );
+    let rows: Vec<(Option<i16>, Option<i16>, i32)> = sqlx::query_as(
+        "SELECT disc_number, track_number, position FROM album_tracks WHERE album_id = $1 ORDER BY position",
+    ).bind(album_id.as_uuid()).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        rows,
+        [
+            (Some(1), Some(1), 0),
+            (Some(1), Some(2), 1),
+            (Some(2), Some(1), 2)
+        ]
+    );
+    let catalogue = Arc::clone(&repository) as Arc<dyn CatalogueWrite>;
+    super::super::materialize::materialize(
+        &catalogue,
+        &sources,
+        vec![
+            candidate("vid-2", "z song"),
+            candidate("vid-1", "brutal").with_album(None),
+        ],
+    )
+    .await
+    .unwrap();
+    let after: Vec<(Option<i16>, Option<i16>, i32)> = sqlx::query_as(
+        "SELECT disc_number, track_number, position FROM album_tracks WHERE album_id = $1 ORDER BY position",
+    ).bind(album_id.as_uuid()).fetch_all(&pool).await.unwrap();
+    assert_eq!(after, rows);
+}
+
+#[sqlx::test]
+async fn completed_recording_and_isrc_placements_survive_search_without_album(pool: sqlx::PgPool) {
+    for (kind, numbers) in [
+        ("recording", None),
+        ("isrc", None),
+        ("recording", Some((1, 3))),
+        ("isrc", Some((1, 3))),
+    ] {
+        let case = format!(
+            "{kind}-{}",
+            if numbers.is_some() {
+                "numbered"
+            } else {
+                "numberless"
+            }
+        );
+        let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+        let mut metadata = TrackMetadata::from_names(
+            format!("Strong {case}"),
+            vec!["Olivia Rodrigo".to_owned()],
+            Some(200_000),
+        )
+        .unwrap();
+        metadata = if kind == "recording" {
+            metadata
+                .with_recording_id(Some(uuid::Uuid::now_v7().to_string()))
+                .unwrap()
+        } else {
+            metadata
+                .with_isrc(Some(
+                    if numbers.is_some() {
+                        "USABC2600001"
+                    } else {
+                        "USABC2600002"
+                    }
+                    .to_owned(),
+                ))
+                .unwrap()
+        };
+        let album_metadata = AlbumMetadata::new(format!("Album {case}"))
+            .unwrap()
+            .with_album_artist(ArtistCredit::new("Olivia Rodrigo".to_owned(), None).unwrap())
+            .with_provider(Some(provider_source(&format!("MPREb_{case}"))));
+        let album = repository
+            .resolve_or_create_album(&album_metadata)
+            .await
+            .unwrap();
+        repository
+            .set_album_source(album.id(), album_metadata.provider().unwrap())
+            .await
+            .unwrap();
+        let candidate =
+            CatalogueCandidate::new(provider_source(&format!("video-{case}")), metadata.clone())
+                .with_album(Some(album_metadata))
+                .with_track_numbers(
+                    numbers.map(|(disc, _)| disc),
+                    numbers.map(|(_, track)| track),
+                )
+                .unwrap();
+        let provider = Arc::new(StubAlbumProvider {
+            result: Mutex::new(Ok(FetchedAlbum::new(vec![candidate], Some(1)))),
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let (completion, sources) = service(&repository, provider).await;
+        let detail = completion
+            .album_detail(album.id(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.entries.len(), 1);
+        let completed = detail.entries[0].membership();
+        assert_eq!(completed.position(), 0);
+        assert_eq!(completed.disc_number(), numbers.map(|(disc, _)| disc));
+        assert_eq!(completed.track_number(), numbers.map(|(_, track)| track));
+        assert_eq!(completed.disc_total(), None);
+        assert_eq!(completed.track_total(), None);
+        let track_id = detail.entries[0].track().id();
+        let alias = repository
+            .resolve_or_create_album(&AlbumMetadata::new(format!("Alias {case}")).unwrap())
+            .await
+            .unwrap();
+        repository
+            .add_album_track(
+                alias.id(),
+                track_id,
+                &AlbumTrack::new(None, None, 2).unwrap(),
+            )
+            .await
+            .unwrap();
+        let unplaced = repository
+            .resolve_or_create_album(&AlbumMetadata::new(format!("Unplaced {case}")).unwrap())
+            .await
+            .unwrap();
+        repository
+            .add_album_track(unplaced.id(), track_id, &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+        let catalogue = Arc::clone(&repository) as Arc<dyn CatalogueWrite>;
+        let hits = super::super::materialize::materialize(
+            &catalogue,
+            &sources,
+            vec![CatalogueCandidate::new(
+                provider_source(&format!("search-{case}")),
+                metadata,
+            )],
+        )
+        .await
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].track().id(), track_id);
+        assert!(hits[0].album().is_none());
+        type MembershipRow = (
+            uuid::Uuid,
+            Option<i16>,
+            Option<i16>,
+            i32,
+            Option<i16>,
+            Option<i16>,
+        );
+        let rows: Vec<MembershipRow> = sqlx::query_as(
+            "SELECT album_id, disc_number, track_number, position, disc_total, track_total FROM album_tracks WHERE track_id = $1 ORDER BY album_id",
+        ).bind(track_id.as_uuid()).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            rows,
+            [
+                (
+                    *album.id().as_uuid(),
+                    numbers.map(|(disc, _)| i16::try_from(disc).unwrap()),
+                    numbers.map(|(_, track)| i16::try_from(track).unwrap()),
+                    0,
+                    None,
+                    None
+                ),
+                (*alias.id().as_uuid(), None, None, 2, None, None),
+                (*unplaced.id().as_uuid(), None, None, 0, None, None),
+            ]
+        );
+    }
+}
+
+#[sqlx::test]
 async fn artist_detail_completes_each_provider_discography_once(pool: sqlx::PgPool) {
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let artist_source = provider_source("UC-artist");

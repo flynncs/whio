@@ -705,6 +705,16 @@ components:
             - integer
             - "null"
           minimum: 0
+        track_number:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        disc_number:
+          type:
+            - integer
+            - "null"
+          minimum: 1
         album:
           $ref: "#/components/schemas/CatalogueAlbum"
         artwork_url:

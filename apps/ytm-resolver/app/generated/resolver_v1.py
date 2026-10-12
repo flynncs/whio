@@ -315,6 +315,8 @@ class CatalogueCandidate(BaseModel):
     title: str = Field(..., max_length=500, min_length=1)
     artists: list[CatalogueArtist] = Field(..., min_length=1)
     duration_ms: int | None = Field(None, ge=0)
+    track_number: int | None = Field(None, ge=1)
+    disc_number: int | None = Field(None, ge=1)
     album: CatalogueAlbum | None = None
     artwork_url: AnyUrl | None = Field(
         None,

@@ -15,6 +15,7 @@ from app.generated.resolver_v1 import (
     MatchBasis,
     SourceIdentity,
 )
+from app.youtube.artwork import full_size_artwork_url
 from app.metadata.document import (
     BIOGRAPHY_CONTENT_LIMIT_BYTES,
     FIELD_TOO_LARGE_MESSAGE,
@@ -295,7 +296,7 @@ def parse_largest_thumbnail(thumbnails: Any) -> ImageDescriptor | None:
             continue
         return ImageDescriptor(
             role=WIDE_IMAGE_ROLE,
-            reference=url,
+            reference=full_size_artwork_url(url),
             width=parse_dimension(thumbnail.get("width")),
             height=parse_dimension(thumbnail.get("height")),
         )

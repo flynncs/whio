@@ -9,10 +9,16 @@ from app.generated.resolver_v1 import SourceIdentity
 from app.youtube.catalogue import (
     YouTubeMusicCatalogue,
     parse_duration_ms,
+    parse_positive_number,
 )
 
 
 class YouTubeMusicCatalogueTest(unittest.TestCase):
+    def test_track_numbers_reject_zero_negative_and_non_integer_values(self) -> None:
+        for value in [None, 0, -1, True, "1", 1.5]:
+            self.assertIsNone(parse_positive_number(value))
+        self.assertEqual(parse_positive_number(1), 1)
+
     def test_search_translates_provider_failures(self) -> None:
         for failure in [
             YTMusicServerError("private provider details"),
@@ -40,6 +46,8 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
                 {
                     "videoId": "v1",
                     "title": "brutal",
+                    "trackNumber": 1,
+                    "discNumber": 2,
                     "duration_seconds": 144,
                     "artists": [{"name": "Olivia Rodrigo", "id": "artist-1"}],
                 },
@@ -68,6 +76,10 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
         self.assertEqual(
             response.results[0].artists[0].source.external_id, "artist-1"
         )
+        self.assertEqual(response.results[0].track_number, 1)
+        self.assertEqual(response.results[0].disc_number, 2)
+        self.assertIsNone(response.results[1].track_number)
+        self.assertIsNone(response.results[1].disc_number)
         self.assertEqual(response.results[0].duration_ms, 144000)
         self.assertEqual(response.results[1].duration_ms, 229000)
         self.assertEqual(

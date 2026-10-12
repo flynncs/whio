@@ -367,16 +367,17 @@ impl Harness {
         hook: Option<crate::features::acquisition::service::ConflictHook>,
         before: Option<crate::features::acquisition::service::ConflictHook>,
     ) -> Self {
-        Self::build_with_width(pool, staging, clock, hook, before, 1).await
+        Self::build_with_options(pool, staging, clock, hook, before, 1, None).await
     }
 
-    async fn build_with_width(
+    async fn build_with_options(
         pool: PgPool,
         staging: PathBuf,
         clock: Clock,
         hook: Option<crate::features::acquisition::service::ConflictHook>,
         before: Option<crate::features::acquisition::service::ConflictHook>,
         race_width: usize,
+        provider: Option<Arc<dyn crate::features::music_library::catalogue::CatalogueProvider>>,
     ) -> Self {
         awa::migrations::run(&pool).await.expect("the awa schema");
 
@@ -413,10 +414,23 @@ impl Harness {
             Arc::clone(&repository)
                 as Arc<dyn crate::features::music_library::test_support::StateStore>,
         ));
-        let completion = Arc::new(CompletionService::disabled(
-            Arc::clone(&library),
-            search_service,
-        ));
+        let completion = Arc::new(match provider {
+            Some(provider) => CompletionService::new(
+                Arc::clone(&library),
+                Arc::clone(&repository)
+                    as Arc<dyn crate::features::music_library::test_support::CatalogueWrite>,
+                Arc::clone(&repository)
+                    as Arc<dyn crate::features::music_library::test_support::SourceLookup>,
+                vec![provider],
+                search_service,
+            )
+            .with_registry(
+                crate::features::music_library::availability::ProviderRegistry::with_enabled([
+                    "youtube_music",
+                ]),
+            ),
+            None => CompletionService::disabled(Arc::clone(&library), search_service),
+        });
         let ports = AcquisitionPorts::new(
             Arc::clone(&search) as Arc<dyn CandidateSearch>,
             Arc::clone(&transfer) as Arc<dyn RemoteTransfer>,
@@ -1966,6 +1980,880 @@ fn only_unavailable_provider_errors_are_retryable() {
         map_ownership(OwnershipError::Unavailable),
         AcquisitionError::Unavailable
     ));
+}
+
+struct AlbumFixtureProvider {
+    fetched: crate::features::music_library::catalogue::FetchedAlbum,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl crate::features::music_library::catalogue::CatalogueProvider for AlbumFixtureProvider {
+    async fn search_tracks(
+        &self,
+        _search: &crate::features::music_library::catalogue::CatalogueSearch,
+        _context: &crate::platform::request::RequestContext,
+    ) -> Result<
+        Vec<crate::features::music_library::catalogue::CatalogueCandidate>,
+        crate::features::music_library::catalogue::ProviderError,
+    > {
+        Err(crate::features::music_library::catalogue::ProviderError::UnsupportedProvider)
+    }
+
+    async fn fetch_album(
+        &self,
+        _source: &crate::features::music_library::domain::SourceIdentity,
+        _context: &crate::platform::request::RequestContext,
+    ) -> Result<
+        crate::features::music_library::catalogue::FetchedAlbum,
+        crate::features::music_library::catalogue::ProviderError,
+    > {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.fetched.clone())
+    }
+}
+
+fn album_fixture_source(video: &str) -> crate::features::music_library::domain::SourceIdentity {
+    use crate::features::music_library::domain::{ProviderId, SourceIdentity, SourceScope};
+    SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        video.to_owned(),
+    )
+    .unwrap()
+}
+
+fn pylon_candidates() -> Vec<crate::features::music_library::catalogue::CatalogueCandidate> {
+    use crate::features::music_library::catalogue::CatalogueCandidate;
+    use crate::features::music_library::domain::{AlbumMetadata, ArtistCredit, TrackMetadata};
+    let album = AlbumMetadata::new("Pylon".to_owned())
+        .unwrap()
+        .with_album_artist(ArtistCredit::new("An Artist".to_owned(), None).unwrap())
+        .with_provider(Some(album_fixture_source("MPREb_pylon")));
+    (0..14)
+        .map(|index| {
+            let title = match index {
+                0 => "Spark".to_owned(),
+                1 => "Satellite".to_owned(),
+                6 => "Switchblade".to_owned(),
+                _ => format!("Song {index}"),
+            };
+            CatalogueCandidate::new(
+                album_fixture_source(&format!("video-{index}")),
+                TrackMetadata::from_names(
+                    title,
+                    vec!["An Artist".to_owned()],
+                    Some(200_000 + index * 10_000),
+                )
+                .unwrap(),
+            )
+            .with_album(Some(album.clone()))
+            .with_track_numbers(None, Some(u16::try_from(index + 1).unwrap()))
+            .unwrap()
+        })
+        .collect()
+}
+
+async fn seed_legacy_pylon(pool: &PgPool) -> crate::features::music_library::domain::AlbumId {
+    use crate::features::music_library::domain::AlbumTrack;
+    use crate::features::music_library::test_support::CatalogueWrite;
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let songs = pylon_candidates();
+    let album = repository
+        .resolve_or_create_album(songs[0].album().unwrap())
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &album_fixture_source("MPREb_pylon"))
+        .await
+        .unwrap();
+    for (index, song) in songs.iter().enumerate().filter(|(index, _)| *index != 6) {
+        let track = repository
+            .get_or_create(song.source().clone(), song.metadata().clone())
+            .await
+            .unwrap();
+        repository
+            .add_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+        if index < 2 {
+            let duplicate = repository
+                .get_or_create(
+                    album_fixture_source(&format!("search-{index}")),
+                    song.metadata().clone(),
+                )
+                .await
+                .unwrap();
+            repository
+                .add_album_track(album.id(), duplicate.id(), &AlbumTrack::unplaced())
+                .await
+                .unwrap();
+        }
+    }
+    repository
+        .set_provider_entity_state(
+            &album_fixture_source("MPREb_pylon"),
+            &crate::features::music_library::domain::ProviderEntityState::new(
+                Utc::now(),
+                Some(14),
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    album.id().clone()
+}
+
+fn pylon_release() -> MbRelease {
+    MbRelease {
+        id: release_id(),
+        artist: "An Artist".to_owned(),
+        title: "Pylon".to_owned(),
+        tracks: pylon_candidates()
+            .iter()
+            .enumerate()
+            .map(|(index, song)| ExpectedTrack {
+                disc: 1,
+                position: u16::try_from(index + 1).unwrap(),
+                title: song.title().to_owned(),
+                length_ms: song
+                    .duration_ms()
+                    .and_then(|length| u32::try_from(length).ok()),
+            })
+            .collect(),
+    }
+}
+
+#[sqlx::test]
+async fn a_pending_track_origin_is_protected_during_repair_then_pins_normally(pool: PgPool) {
+    use crate::features::music_library::domain::{
+        AlbumMetadata, AlbumTrack, SkipReason, TrackMetadata,
+    };
+    use crate::features::music_library::test_support::{CatalogueWrite, LibraryRead, SourceLookup};
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let metadata = TrackMetadata::from_names(
+        "One".to_owned(),
+        vec!["An Artist".to_owned()],
+        Some(200_000),
+    )
+    .unwrap();
+    let kept = repository
+        .get_or_create(album_fixture_source("kept"), metadata.clone())
+        .await
+        .unwrap();
+    let removed = repository
+        .get_or_create(album_fixture_source("removed"), metadata)
+        .await
+        .unwrap();
+    let album = repository
+        .resolve_or_create_album(&AlbumMetadata::new("Album".to_owned()).unwrap())
+        .await
+        .unwrap();
+    for track in [&kept, &removed] {
+        repository
+            .add_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+    }
+    let harness = Harness::new(
+        pool.clone(),
+        std::env::temp_dir().join(Uuid::now_v7().to_string()),
+        Clock::system(),
+    )
+    .await;
+    let request = harness
+        .service
+        .request(AcquisitionOrigin::Track(removed.id().clone()))
+        .await
+        .unwrap();
+    let protected = harness.service.live_track_origins().await.unwrap();
+    assert_eq!(protected, [removed.id().clone()]);
+    let maintenance = crate::features::music_library::maintenance(pool.clone());
+    let request_before = harness
+        .store
+        .find_request(request.request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let preview = maintenance.provider_duplicates(&protected).await.unwrap();
+    assert!(preview.track_merges.is_empty());
+    assert_eq!(preview.skipped.len(), 1);
+    assert_eq!(preview.skipped[0].id, *removed.id().as_uuid());
+    assert_eq!(preview.skipped[0].reason, SkipReason::AcquisitionOrigin);
+    assert_eq!(
+        repository
+            .find_album_entries(album.id(), None)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        maintenance
+            .delete_provider_duplicates(&protected)
+            .await
+            .unwrap(),
+        preview
+    );
+    assert_eq!(
+        repository
+            .find_album_entries(album.id(), None)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        repository.find_sources(removed.id()).await.unwrap().len(),
+        1
+    );
+    let still_pending = harness
+        .store
+        .find_request(request.request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_pending.id, request_before.id);
+    assert_eq!(still_pending.origin, request_before.origin);
+    assert_eq!(still_pending.state, RequestState::Pending);
+    assert!(still_pending.target.is_none());
+    harness
+        .lookup
+        .recordings
+        .lock()
+        .unwrap()
+        .push_back(Ok(vec![MbRecording {
+            id: recording_id(),
+            artist: "An Artist".to_owned(),
+            title: "One".to_owned(),
+            length_ms: Some(200_000),
+        }]));
+    *harness.ownership.owned.lock().unwrap() = true;
+    assert_eq!(
+        harness.service.advance(request.request.id).await.unwrap(),
+        Step::Done
+    );
+    let pinned = harness
+        .store
+        .find_request(request.request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pinned.id, request_before.id);
+    assert_eq!(pinned.origin, request_before.origin);
+    assert_eq!(pinned.state, RequestState::AlreadyOwned);
+    assert_eq!(
+        pinned.target,
+        Some(AcquisitionTarget::Recording(recording_id()))
+    );
+    let unprotected = harness.service.live_track_origins().await.unwrap();
+    assert!(unprotected.is_empty());
+    assert_eq!(
+        maintenance
+            .delete_provider_duplicates(&unprotected)
+            .await
+            .unwrap()
+            .track_merges
+            .len(),
+        1
+    );
+}
+
+#[sqlx::test]
+async fn pylon_feature_credits_and_versions_agree_for_library_album_repair_and_pin(pool: PgPool) {
+    use crate::features::music_library::domain::{
+        AlbumMetadata, AlbumTrack, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+    };
+    use crate::features::music_library::test_support::{
+        CatalogueWrite, LibraryRead, Retention, SourceLookup,
+    };
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let metadata = |title: &str, artists: &[&str], duration| {
+        TrackMetadata::from_names(
+            title.to_owned(),
+            artists.iter().map(|artist| (*artist).to_owned()).collect(),
+            Some(duration),
+        )
+        .unwrap()
+    };
+    let cases = [
+        (
+            "Nothing to Prove",
+            "Nothing To Prove",
+            "Hayley Williams",
+            144_316,
+            145_000,
+        ),
+        (
+            "Powerlines",
+            "Powerlines",
+            "Brendan Yates",
+            178_391,
+            179_000,
+        ),
+    ];
+    let mut albums = Vec::new();
+    for (title, provider_title, guest, local_ms, provider_ms) in cases {
+        let tagged = format!("{title} feat. {guest}");
+        let album = repository
+            .resolve_or_create_album(&AlbumMetadata::new(format!("{title} Album")).unwrap())
+            .await
+            .unwrap();
+        let kept = repository
+            .get_or_create(
+                album_fixture_source(&format!("{title}-kept")),
+                metadata(&tagged, &["beabadoobee"], local_ms),
+            )
+            .await
+            .unwrap();
+        repository
+            .add_album_track(album.id(), kept.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+        let attached = repository
+            .get_or_create_provider(
+                album_fixture_source(&format!("{title}-attached")),
+                metadata(provider_title, &["beabadoobee", guest], provider_ms),
+                Some(album.id()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(attached.id(), kept.id());
+        let mut versions = Vec::new();
+        for version in ["Remix", "Live"] {
+            let track = repository
+                .get_or_create_provider(
+                    album_fixture_source(&format!("{title}-{version}")),
+                    metadata(
+                        &format!("{provider_title} ({version})"),
+                        &["beabadoobee", guest],
+                        provider_ms,
+                    ),
+                    Some(album.id()),
+                )
+                .await
+                .unwrap();
+            assert_ne!(track.id(), kept.id());
+            repository
+                .add_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+                .await
+                .unwrap();
+            versions.push(track);
+        }
+        let legacy = repository
+            .get_or_create(
+                album_fixture_source(&format!("{title}-legacy")),
+                metadata(provider_title, &["beabadoobee", guest], provider_ms),
+            )
+            .await
+            .unwrap();
+        repository
+            .add_album_track(album.id(), legacy.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+        let entries = repository
+            .find_album_entries(album.id(), None)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 4);
+        let collapsed = super::pin::collapse_album_entries(&entries);
+        assert_eq!(
+            collapsed
+                .iter()
+                .map(|entry| entry.track().id())
+                .collect::<Vec<_>>(),
+            [&kept, &versions[0], &versions[1]].map(|track| track.id())
+        );
+        albums.push((album, kept, legacy, versions));
+    }
+    let preview = repository.provider_duplicates(&[]).await.unwrap();
+    assert_eq!(preview.track_merges.len(), 2);
+    for (album, kept, legacy, _) in &albums {
+        assert!(
+            preview
+                .track_merges
+                .iter()
+                .any(|merge| merge.id == *legacy.id().as_uuid()
+                    && merge.into == *kept.id().as_uuid())
+        );
+        assert_eq!(
+            repository
+                .find_album_entries(album.id(), None)
+                .await
+                .unwrap()
+                .len(),
+            4
+        );
+        assert_eq!(repository.find_sources(kept.id()).await.unwrap().len(), 2);
+    }
+    assert_eq!(
+        repository.delete_provider_duplicates(&[]).await.unwrap(),
+        preview
+    );
+    for (album, kept, _, versions) in &albums {
+        let entries = repository
+            .find_album_entries(album.id(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.track().id())
+                .collect::<Vec<_>>(),
+            [kept, &versions[0], &versions[1]].map(|track| track.id())
+        );
+        assert_eq!(repository.find_sources(kept.id()).await.unwrap().len(), 3);
+    }
+    for (title, provider_title, guest, local_ms, provider_ms) in cases {
+        let local_source = SourceIdentity::new(
+            ProviderId::new("local".to_owned()).unwrap(),
+            SourceScope::Named("/music".to_owned()),
+            format!("{title}.flac"),
+        )
+        .unwrap();
+        let local = repository
+            .get_or_create(
+                local_source,
+                metadata(
+                    &format!("{title} feat. {guest}"),
+                    &["beabadoobee"],
+                    local_ms,
+                ),
+            )
+            .await
+            .unwrap();
+        let attached = repository
+            .get_or_create_provider(
+                album_fixture_source(&format!("{title}-library")),
+                metadata(provider_title, &["beabadoobee", guest], provider_ms),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(attached.id(), local.id());
+        for version in ["Remix", "Live"] {
+            let distinct = repository
+                .get_or_create_provider(
+                    album_fixture_source(&format!("{title}-library-{version}")),
+                    metadata(
+                        &format!("{provider_title} ({version})"),
+                        &["beabadoobee", guest],
+                        provider_ms,
+                    ),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_ne!(distinct.id(), local.id());
+        }
+        assert_eq!(repository.find_sources(local.id()).await.unwrap().len(), 2);
+    }
+}
+
+#[sqlx::test]
+async fn feature_title_selection_agrees_for_library_album_repair_and_pin(pool: PgPool) {
+    use crate::features::music_library::domain::{
+        AlbumMetadata, AlbumTrack, ProviderId, SourceIdentity, SourceScope, TrackMetadata,
+    };
+    use crate::features::music_library::test_support::{
+        CatalogueWrite, LibraryRead, Retention, SourceLookup,
+    };
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let metadata = |title: &str, artist: &str| {
+        TrackMetadata::from_names(title.to_owned(), vec![artist.to_owned()], Some(200_000)).unwrap()
+    };
+    let local_source = |name: &str| {
+        SourceIdentity::new(
+            ProviderId::new("local".to_owned()).unwrap(),
+            SourceScope::Named("/music".to_owned()),
+            name.to_owned(),
+        )
+        .unwrap()
+    };
+    repository
+        .get_or_create(local_source("song.flac"), metadata("Song", "Artist"))
+        .await
+        .unwrap();
+    let library_feature = repository
+        .get_or_create(
+            local_source("feature.flac"),
+            metadata("Song (feat. Guest)", "Artist"),
+        )
+        .await
+        .unwrap();
+    let library_matched = repository
+        .get_or_create_provider(
+            album_fixture_source("library-feature"),
+            metadata("Song (feat. Guest)", "Artist"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_ne!(library_matched.id(), library_feature.id());
+
+    let album = repository
+        .resolve_or_create_album(&AlbumMetadata::new("Provider Album".to_owned()).unwrap())
+        .await
+        .unwrap();
+    let plain = repository
+        .get_or_create(
+            album_fixture_source("plain"),
+            metadata("Song", "Provider Artist"),
+        )
+        .await
+        .unwrap();
+    let feature = repository
+        .get_or_create(
+            album_fixture_source("feature"),
+            metadata("Song (feat. Guest)", "Provider Artist"),
+        )
+        .await
+        .unwrap();
+    for track in [&plain, &feature] {
+        repository
+            .add_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+    }
+    let album_matched = repository
+        .get_or_create_provider(
+            album_fixture_source("feature-match"),
+            metadata("Song (feat. Guest)", "Provider Artist"),
+            Some(album.id()),
+        )
+        .await
+        .unwrap();
+    assert_ne!(album_matched.id(), feature.id());
+    let legacy = album_matched;
+    repository
+        .add_album_track(album.id(), legacy.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    let entries = repository
+        .find_album_entries(album.id(), None)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 3);
+    let collapsed = super::pin::collapse_album_entries(&entries);
+    assert_eq!(collapsed.len(), 3);
+    assert_eq!(collapsed[0].track().id(), plain.id());
+    assert_eq!(collapsed[1].track().id(), feature.id());
+    assert_eq!(collapsed[2].track().id(), legacy.id());
+    let preview = repository.provider_duplicates(&[]).await.unwrap();
+    assert!(preview.track_merges.is_empty());
+    assert!(preview.duplicates.is_empty());
+    assert_eq!(
+        repository.delete_provider_duplicates(&[]).await.unwrap(),
+        preview
+    );
+    assert_eq!(
+        repository
+            .find_album_entries(album.id(), None)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        repository.find_sources(feature.id()).await.unwrap().len(),
+        1
+    );
+}
+
+#[sqlx::test]
+async fn pylon_repair_refetch_orders_fourteen_tracks_and_pins_the_release(pool: PgPool) {
+    use crate::features::music_library::domain::{ProviderId, SourceIdentity, SourceScope};
+    use crate::features::music_library::test_support::{
+        CatalogueWrite, LibraryRead, Retention, SourceLookup,
+    };
+    let album_id = seed_legacy_pylon(&pool).await;
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let library_source = SourceIdentity::new(
+        ProviderId::new("local".to_owned()).unwrap(),
+        SourceScope::Named("/music".to_owned()),
+        "switchblade.flac".to_owned(),
+    )
+    .unwrap();
+    let switchblade = repository
+        .get_or_create(
+            library_source,
+            pylon_candidates()[6]
+                .metadata()
+                .clone()
+                .with_recording_id(Some("library-switchblade".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .find_album_entries(&album_id, None)
+            .await
+            .unwrap()
+            .len(),
+        15
+    );
+    let preview = repository.provider_duplicates(&[]).await.unwrap();
+    assert_eq!(preview.track_merges.len(), 2);
+    assert_eq!(preview.refetch.len(), 1);
+    assert_eq!(
+        repository
+            .find_album_entries(&album_id, None)
+            .await
+            .unwrap()
+            .len(),
+        15
+    );
+    assert_eq!(
+        preview,
+        repository.delete_provider_duplicates(&[]).await.unwrap()
+    );
+    assert_eq!(
+        repository
+            .find_album_entries(&album_id, None)
+            .await
+            .unwrap()
+            .len(),
+        13
+    );
+    assert!(
+        repository
+            .find_provider_entity_state(&album_fixture_source("MPREb_pylon"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let staging = std::env::temp_dir().join(Uuid::now_v7().to_string());
+    let harness = Harness::build_with_options(
+        pool.clone(),
+        staging,
+        Clock::system(),
+        None,
+        None,
+        1,
+        Some(Arc::new(AlbumFixtureProvider {
+            fetched: crate::features::music_library::catalogue::FetchedAlbum::new(
+                pylon_candidates(),
+                Some(14),
+            ),
+            calls: Arc::clone(&calls),
+        })),
+    )
+    .await;
+    harness
+        .lookup
+        .candidates
+        .lock()
+        .unwrap()
+        .push_back(Ok(vec![pylon_release()]));
+    *harness.ownership.owned.lock().unwrap() = true;
+    let request = harness
+        .service
+        .request(AcquisitionOrigin::Album(album_id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        harness.service.advance(request.request.id).await.unwrap(),
+        Step::Done
+    );
+    let stored = harness
+        .store
+        .find_request(request.request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.target,
+        Some(AcquisitionTarget::Release(release_id()))
+    );
+    assert_eq!(stored.state, RequestState::AlreadyOwned);
+    assert_eq!(stored.expected_tracks.len(), 14);
+    let entries = repository
+        .find_album_entries(&album_id, None)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 14);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.track().title())
+            .collect::<Vec<_>>(),
+        pylon_release()
+            .tracks
+            .iter()
+            .map(|track| track.title.as_str())
+            .collect::<Vec<_>>()
+    );
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry.membership().track_number(),
+            Some(u16::try_from(index + 1).unwrap())
+        );
+        assert_eq!(entry.membership().position(), u32::try_from(index).unwrap());
+    }
+    assert_eq!(entries[6].track().id(), switchblade.id());
+    assert_eq!(
+        repository
+            .find_sources(switchblade.id())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[derive(Clone)]
+struct PinLogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for PinLogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for PinLogWriter {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+async fn pin_failure_events(harness: &Harness, id: Uuid) -> Vec<serde_json::Value> {
+    use tracing::instrument::WithSubscriber;
+    let writer = PinLogWriter(Arc::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(writer.clone())
+        .finish();
+    harness
+        .service
+        .advance(id)
+        .with_subscriber(subscriber)
+        .await
+        .unwrap();
+    let bytes = writer.0.lock().unwrap().clone();
+    std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|event: &serde_json::Value| event["fields"]["message"] == "acquisition pin failed")
+        .collect()
+}
+
+#[sqlx::test]
+async fn album_pin_failures_store_and_log_the_collapsed_count_once(pool: PgPool) {
+    let album_id = seed_legacy_pylon(&pool).await;
+    let staging = std::env::temp_dir().join(Uuid::now_v7().to_string());
+    let harness = Harness::new(pool.clone(), staging, Clock::system()).await;
+    let candidates = vec![pylon_release(), pylon_release(), pylon_release()];
+    harness
+        .lookup
+        .candidates
+        .lock()
+        .unwrap()
+        .push_back(Ok(candidates));
+    let request = harness
+        .service
+        .request(AcquisitionOrigin::Album(album_id.clone()))
+        .await
+        .unwrap();
+    let events = pin_failure_events(&harness, request.request.id).await;
+    let stored = harness
+        .store
+        .find_request(request.request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, RequestState::ReleaseNotFound);
+    assert_eq!(
+        stored.reason.as_deref(),
+        Some("release_not_found: origin 13 tracks; candidates 14,14,14")
+    );
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["level"], "INFO");
+    assert_eq!(events[0]["fields"]["origin_entries"], 13);
+    assert_eq!(events[0]["fields"]["candidate_releases"], 3);
+    assert_eq!(
+        events[0]["fields"]["candidate_track_counts"],
+        "[14, 14, 14]"
+    );
+    assert_eq!(events[0]["span"]["name"], "advance");
+}
+
+#[sqlx::test]
+async fn an_ambiguous_album_pin_stores_the_candidate_counts(pool: PgPool) {
+    use crate::features::music_library::domain::AlbumTrack;
+    use crate::features::music_library::test_support::CatalogueWrite;
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let song = &pylon_candidates()[0];
+    let album = repository
+        .resolve_or_create_album(song.album().unwrap())
+        .await
+        .unwrap();
+    let first = repository
+        .get_or_create(song.source().clone(), song.metadata().clone())
+        .await
+        .unwrap();
+    let second = repository
+        .get_or_create(album_fixture_source("duplicate"), song.metadata().clone())
+        .await
+        .unwrap();
+    for track in [&first, &second] {
+        repository
+            .add_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+    }
+    let harness = Harness::new(
+        pool,
+        std::env::temp_dir().join(Uuid::now_v7().to_string()),
+        Clock::system(),
+    )
+    .await;
+    let mut release = pylon_release();
+    release.tracks.truncate(1);
+    let mut another = release.clone();
+    another.id = recording_id();
+    another.tracks[0].title = "Different".to_owned();
+    harness
+        .lookup
+        .candidates
+        .lock()
+        .unwrap()
+        .push_back(Ok(vec![release, another]));
+    let request = harness
+        .service
+        .request(AcquisitionOrigin::Album(album.id().clone()))
+        .await
+        .unwrap();
+    let events = pin_failure_events(&harness, request.request.id).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["level"], "INFO");
+    assert_eq!(events[0]["fields"]["origin_entries"], 1);
+    assert_eq!(events[0]["fields"]["candidate_releases"], 2);
+    assert_eq!(events[0]["fields"]["candidate_track_counts"], "[1, 1]");
+    assert_eq!(events[0]["span"]["name"], "advance");
+    let stored = harness
+        .store
+        .find_request(request.request.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, RequestState::ReleaseAmbiguous);
+    assert_eq!(
+        stored.reason.as_deref(),
+        Some("release_ambiguous: origin 1 tracks; candidates 1,1")
+    );
 }
 
 struct HeldProvider {

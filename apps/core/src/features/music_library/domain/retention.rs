@@ -20,6 +20,8 @@ pub struct ProviderDuplicate {
 pub enum SkipReason {
     PlaylistEntry,
     QueueEntry,
+    OverlappingListens,
+    AcquisitionOrigin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +42,24 @@ pub struct ArtistMerge {
     pub albums_merged: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackMerge {
+    pub id: Uuid,
+    pub name: String,
+    pub into: Uuid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumRefetch {
+    pub id: Uuid,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderDuplicateReport {
     pub merges: Vec<ArtistMerge>,
+    pub track_merges: Vec<TrackMerge>,
+    pub refetch: Vec<AlbumRefetch>,
     pub duplicates: Vec<ProviderDuplicate>,
     pub skipped: Vec<SkippedDuplicate>,
 }

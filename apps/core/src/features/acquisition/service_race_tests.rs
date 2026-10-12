@@ -7,7 +7,7 @@ async fn race(pool: PgPool, width: usize) -> (Harness, Arc<Mutex<chrono::DateTim
         Clock::from_fn(move || *now.lock().unwrap())
     };
     let staging = std::env::temp_dir().join(format!("whio-aq-race-{}", Uuid::now_v7()));
-    let harness = Harness::build_with_width(pool, staging, clock, None, None, width).await;
+    let harness = Harness::build_with_options(pool, staging, clock, None, None, width, None).await;
     (harness, now)
 }
 

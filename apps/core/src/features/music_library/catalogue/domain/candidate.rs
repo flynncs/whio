@@ -1,5 +1,6 @@
 use crate::features::music_library::domain::{
-    AlbumMetadata, ArtistCredit, ArtworkRef, SourceIdentity, TrackMetadata,
+    AlbumMetadata, AlbumTrack, ArtistCredit, ArtworkRef, SourceIdentity, TrackMetadata,
+    ValidationError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -8,6 +9,8 @@ pub struct CatalogueCandidate {
     metadata: TrackMetadata,
     album: Option<AlbumMetadata>,
     artwork: Option<ArtworkRef>,
+    track_number: Option<u16>,
+    disc_number: Option<u16>,
 }
 
 impl CatalogueCandidate {
@@ -17,6 +20,8 @@ impl CatalogueCandidate {
             metadata,
             album: None,
             artwork: None,
+            track_number: None,
+            disc_number: None,
         }
     }
 
@@ -28,6 +33,22 @@ impl CatalogueCandidate {
     pub fn with_artwork(mut self, artwork: Option<ArtworkRef>) -> Self {
         self.artwork = artwork;
         self
+    }
+
+    pub fn with_track_numbers(
+        mut self,
+        disc_number: Option<u16>,
+        track_number: Option<u16>,
+    ) -> Result<Self, ValidationError> {
+        AlbumTrack::new(disc_number, track_number, 0)?;
+        self.disc_number = disc_number;
+        self.track_number = track_number;
+        Ok(self)
+    }
+
+    pub fn album_track(&self, position: u32) -> AlbumTrack {
+        AlbumTrack::new(self.disc_number, self.track_number, position)
+            .expect("candidate numbers are validated")
     }
 
     pub fn source(&self) -> &SourceIdentity {

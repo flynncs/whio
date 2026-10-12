@@ -1532,10 +1532,34 @@ async fn a_provider_source_attaches_to_one_matching_library_track(pool: PgPool) 
         .get_or_create_provider(
             source("glue-song-video"),
             metadata("Glue Song", &["beabadoobee"], Some(181_000)),
+            None,
         )
         .await
         .unwrap();
 
+    assert_eq!(provider.id(), local.id());
+    assert_eq!(repository.find_sources(local.id()).await.unwrap().len(), 2);
+}
+
+#[sqlx::test]
+async fn provider_base_title_matching_does_not_depend_on_full_title_similarity(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let guest = "A Guest With A Very Long Credited Name";
+    let local = repository
+        .get_or_create(
+            local_source("short-base.flac"),
+            metadata(&format!("A (feat. {guest})"), &["Artist"], Some(200_000)),
+        )
+        .await
+        .unwrap();
+    let provider = repository
+        .get_or_create_provider(
+            source("short-base"),
+            metadata("A", &["Artist", guest], Some(200_500)),
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(provider.id(), local.id());
     assert_eq!(repository.find_sources(local.id()).await.unwrap().len(), 2);
 }
@@ -1559,6 +1583,7 @@ async fn provider_matching_rejects_mismatched_secondary_artists(pool: PgPool) {
                 &["Primary", "Different Guest"],
                 Some(180_000),
             ),
+            None,
         )
         .await
         .unwrap();
@@ -1581,6 +1606,7 @@ async fn provider_feature_superset_uses_the_stricter_duration_tolerance(pool: Pg
         .get_or_create_provider(
             source("feature-superset-video"),
             metadata("Shared Song", &["Primary", "Guest"], Some(181_500)),
+            None,
         )
         .await
         .unwrap();
@@ -1603,6 +1629,7 @@ async fn a_provider_source_outside_duration_tolerance_stays_separate(pool: PgPoo
         .get_or_create_provider(
             source("glue-song-video"),
             metadata("Glue Song", &["beabadoobee"], Some(182_001)),
+            None,
         )
         .await
         .unwrap();
@@ -1632,6 +1659,7 @@ async fn one_matching_track_is_selected_among_similar_library_tracks(pool: PgPoo
         .get_or_create_provider(
             source("unique-match-video"),
             metadata("Shared Song", &["Matching Artist"], Some(180_000)),
+            None,
         )
         .await
         .unwrap();
@@ -1656,6 +1684,7 @@ async fn several_library_matches_do_not_attach_a_provider_source(pool: PgPool) {
         .get_or_create_provider(
             source("glue-song-video"),
             metadata("Glue Song", &["beabadoobee"], Some(180_000)),
+            None,
         )
         .await
         .unwrap();
@@ -2241,12 +2270,13 @@ async fn provider_matching_rejects_candidate_overflow_for_attach_and_prune(pool:
         .get_or_create_provider(
             source("overflow-provider"),
             metadata("Overflow Song", &["Overflow Target"], Some(180_000)),
+            None,
         )
         .await
         .unwrap();
 
     assert_ne!(provider.id().as_uuid(), &track_ids[0]);
-    let report = repository.provider_duplicates().await.unwrap();
+    let report = repository.provider_duplicates(&[]).await.unwrap();
     assert!(
         !report
             .duplicates

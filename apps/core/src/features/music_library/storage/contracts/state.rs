@@ -78,9 +78,13 @@ pub trait Retention: Send + Sync {
         Ok(EvictionReport::default())
     }
 
-    async fn provider_duplicates(&self) -> Result<ProviderDuplicateReport, TrackRepositoryError>;
+    async fn provider_duplicates(
+        &self,
+        protected: &[TrackId],
+    ) -> Result<ProviderDuplicateReport, TrackRepositoryError>;
 
     async fn delete_provider_duplicates(
         &self,
+        protected: &[TrackId],
     ) -> Result<ProviderDuplicateReport, TrackRepositoryError>;
 }

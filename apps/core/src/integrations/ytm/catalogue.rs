@@ -339,6 +339,23 @@ mod mapping {
             .with_artwork(artwork))
     }
 
+    fn track_number(
+        value: Option<i32>,
+        field: &'static str,
+    ) -> Result<Option<u16>, ValidationError> {
+        value
+            .map(|value| {
+                u16::try_from(value).ok().filter(|value| *value > 0).ok_or(
+                    ValidationError::OutOfRange {
+                        field,
+                        min: 1,
+                        max: i64::from(u16::MAX),
+                    },
+                )
+            })
+            .transpose()
+    }
+
     impl TryFrom<CatalogueCandidateDto> for CatalogueCandidate {
         type Error = ValidationError;
 
@@ -380,9 +397,13 @@ mod mapping {
                 .flatten()
                 .and_then(|url| ArtworkRef::url(url).ok());
 
-            Ok(CatalogueCandidate::new(source, metadata)
+            CatalogueCandidate::new(source, metadata)
                 .with_album(album)
-                .with_artwork(artwork))
+                .with_artwork(artwork)
+                .with_track_numbers(
+                    track_number(candidate.disc_number.flatten(), "disc_number")?,
+                    track_number(candidate.track_number.flatten(), "track_number")?,
+                )
         }
     }
 
@@ -405,6 +426,8 @@ mod mapping {
                     ))),
                 }],
                 duration_ms: Some(Some(337_000)),
+                track_number: None,
+                disc_number: None,
                 album: None,
                 artwork_url: None,
             }
@@ -468,6 +491,29 @@ mod mapping {
                 candidate.artwork(),
                 Some(&ArtworkRef::url("https://art.test/ram.jpg".to_owned()).unwrap())
             );
+        }
+
+        #[test]
+        fn dto_track_numbers_are_validated_and_reach_membership() {
+            let mut dto = candidate();
+            dto.track_number = Some(Some(4));
+            dto.disc_number = Some(Some(2));
+            let mapped = CatalogueCandidate::try_from(dto).unwrap();
+            let membership = mapped.album_track(3);
+            assert_eq!(membership.track_number(), Some(4));
+            assert_eq!(membership.disc_number(), Some(2));
+            assert_eq!(membership.position(), 3);
+            for value in [0, -1, 65_536] {
+                let mut dto = candidate();
+                dto.track_number = Some(Some(value));
+                assert!(CatalogueCandidate::try_from(dto).is_err());
+            }
+            let mut dto = candidate();
+            dto.track_number = Some(None);
+            dto.disc_number = Some(None);
+            let membership = CatalogueCandidate::try_from(dto).unwrap().album_track(0);
+            assert_eq!(membership.track_number(), None);
+            assert_eq!(membership.disc_number(), None);
         }
 
         #[test]

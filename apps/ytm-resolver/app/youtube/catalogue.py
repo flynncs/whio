@@ -6,6 +6,7 @@ from ytmusicapi import YTMusic
 from ytmusicapi.exceptions import YTMusicServerError, YTMusicUserError
 
 from app.errors import ProviderUnavailableError, SourceNotFoundError
+from app.youtube.artwork import full_size_artwork_url
 from app.generated.resolver_v1 import (
     CatalogueAlbum,
     CatalogueAlbumCandidate,
@@ -247,6 +248,8 @@ def normalize_album_track(
         duration_ms=parse_duration_seconds(track.get("duration_seconds")),
         album=album,
         artwork_url=artwork_url,
+        track_number=parse_positive_number(track.get("trackNumber")),
+        disc_number=parse_positive_number(track.get("discNumber")),
     )
 
 
@@ -302,6 +305,12 @@ def parse_duration_seconds(value: Any) -> int | None:
     return None
 
 
+def parse_positive_number(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    return None
+
+
 def parse_count(value: Any) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value
@@ -309,7 +318,6 @@ def parse_count(value: Any) -> int | None:
 
 
 def parse_artwork_url(thumbnails: Any) -> str | None:
-    """the largest thumbnail is the last entry in ytmusicapi's ordering."""
     if not isinstance(thumbnails, list):
         return None
 
@@ -317,7 +325,7 @@ def parse_artwork_url(thumbnails: Any) -> str | None:
         if isinstance(thumbnail, Mapping):
             url = thumbnail.get("url")
             if isinstance(url, str) and url:
-                return url
+                return full_size_artwork_url(url)
     return None
 
 
