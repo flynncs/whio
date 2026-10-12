@@ -7,7 +7,7 @@ import:
   resume: no
   incremental: no
 match:
-  strong_rec_thresh: 0.15
+  strong_rec_thresh: 0.3
 ftintitle:
   auto: yes
   format: "feat. {}"
