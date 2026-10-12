@@ -35,18 +35,18 @@ pub enum StorageError {
 
 pub struct PostgresAcquisitionStore {
     pool: PgPool,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "postgres-integration"))]
     claim_hook: Option<ClaimHook>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres-integration"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClaimBoundary {
     BeforeInsert,
     AfterInsert,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres-integration"))]
 pub(crate) type ClaimHook = std::sync::Arc<
     dyn Fn(Uuid, ClaimBoundary) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
@@ -57,12 +57,12 @@ impl PostgresAcquisitionStore {
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "postgres-integration"))]
             claim_hook: None,
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "postgres-integration"))]
     pub(crate) fn with_claim_hook(mut self, hook: ClaimHook) -> Self {
         self.claim_hook = Some(hook);
         self
@@ -372,7 +372,7 @@ impl PostgresAcquisitionStore {
         .map_err(StorageError::Database)?;
 
         for path in paths {
-            #[cfg(test)]
+            #[cfg(all(test, feature = "postgres-integration"))]
             if let Some(hook) = &self.claim_hook {
                 hook(id, ClaimBoundary::BeforeInsert).await;
             }
@@ -387,7 +387,7 @@ impl PostgresAcquisitionStore {
             .await
             .map_err(StorageError::Database)?;
 
-            #[cfg(test)]
+            #[cfg(all(test, feature = "postgres-integration"))]
             if let Some(hook) = &self.claim_hook {
                 hook(id, ClaimBoundary::AfterInsert).await;
             }

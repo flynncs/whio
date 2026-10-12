@@ -103,29 +103,29 @@ pub struct AcquisitionService {
     library: Arc<LibraryService>,
     config: AcquisitionConfig,
     clock: Clock,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "postgres-integration"))]
     conflict_hook: Option<ConflictHook>,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "postgres-integration"))]
     before_insert_hook: Option<ConflictHook>,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "postgres-integration"))]
     finish_hook: Option<FinishHook>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres-integration"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FinishBoundary {
     BeforeIntent,
     BeforeCommit,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres-integration"))]
 pub(crate) type FinishHook = Arc<
     dyn Fn(FinishBoundary) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
         + Sync,
 >;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres-integration"))]
 pub(crate) type ConflictHook =
     Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
@@ -143,28 +143,28 @@ impl AcquisitionService {
             library,
             config,
             clock,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "postgres-integration"))]
             conflict_hook: None,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "postgres-integration"))]
             before_insert_hook: None,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "postgres-integration"))]
             finish_hook: None,
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "postgres-integration"))]
     pub(crate) fn with_conflict_hook(mut self, hook: ConflictHook) -> Self {
         self.conflict_hook = Some(hook);
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "postgres-integration"))]
     pub(crate) fn with_before_insert_hook(mut self, hook: ConflictHook) -> Self {
         self.before_insert_hook = Some(hook);
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "postgres-integration"))]
     pub(crate) fn set_finish_hook(&mut self, hook: FinishHook) {
         self.finish_hook = Some(hook);
     }
@@ -184,7 +184,7 @@ impl AcquisitionService {
         }
 
         loop {
-            #[cfg(test)]
+            #[cfg(all(test, feature = "postgres-integration"))]
             if let Some(hook) = &self.before_insert_hook {
                 hook().await;
             }
@@ -198,7 +198,7 @@ impl AcquisitionService {
                 });
             }
 
-            #[cfg(test)]
+            #[cfg(all(test, feature = "postgres-integration"))]
             if let Some(hook) = &self.conflict_hook {
                 hook().await;
             }
@@ -964,7 +964,7 @@ impl AcquisitionService {
             request_reason,
             cancel: attempt.state == AttemptState::Transferring,
         };
-        #[cfg(test)]
+        #[cfg(all(test, feature = "postgres-integration"))]
         if let Some(hook) = &self.finish_hook {
             hook(FinishBoundary::BeforeIntent).await;
         }
@@ -988,7 +988,7 @@ impl AcquisitionService {
             self.cancel_all(&intent.update.handles).await?;
         }
         self.cleanup_claimed_files(request.id, number).await?;
-        #[cfg(test)]
+        #[cfg(all(test, feature = "postgres-integration"))]
         if let Some(hook) = &self.finish_hook {
             hook(FinishBoundary::BeforeCommit).await;
         }
