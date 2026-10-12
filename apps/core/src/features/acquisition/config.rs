@@ -12,9 +12,12 @@ const CANDIDATE_BUDGET: &str = "WHIO_ACQUISITION_CANDIDATE_BUDGET";
 const TRANSFER_TIMEOUT: &str = "WHIO_ACQUISITION_TRANSFER_TIMEOUT_SECONDS";
 const POLL: &str = "WHIO_ACQUISITION_POLL_SECONDS";
 
-const DEFAULT_CANDIDATE_BUDGET: usize = 3;
+const RACE_WIDTH: &str = "WHIO_ACQUISITION_RACE_WIDTH";
+const START_TIMEOUT: &str = "WHIO_ACQUISITION_START_TIMEOUT_SECONDS";
+
+const DEFAULT_CANDIDATE_BUDGET: usize = 6;
 const MIN_CANDIDATE_BUDGET: usize = 1;
-const MAX_CANDIDATE_BUDGET: usize = 10;
+const MAX_CANDIDATE_BUDGET: usize = 20;
 const DEFAULT_TRANSFER_TIMEOUT_SECONDS: u64 = 1800;
 const MIN_TRANSFER_TIMEOUT_SECONDS: u64 = 60;
 const MAX_TRANSFER_TIMEOUT_SECONDS: u64 = 86_400;
@@ -28,6 +31,8 @@ pub struct AcquisitionConfig {
     pub staging_dir: Option<PathBuf>,
     pub library_dir: Option<PathBuf>,
     pub candidate_budget: usize,
+    pub race_width: usize,
+    pub start_timeout: Duration,
     pub transfer_timeout: Duration,
     pub poll: Duration,
 }
@@ -55,6 +60,8 @@ impl AcquisitionConfig {
             MIN_CANDIDATE_BUDGET,
             MAX_CANDIDATE_BUDGET,
         )?;
+        let race_width = bounded_number(vars, RACE_WIDTH, 3, 1, 5)?;
+        let start_timeout = bounded_seconds(vars, START_TIMEOUT, 600, 30, 7200)?;
         let transfer_timeout = bounded_seconds(
             vars,
             TRANSFER_TIMEOUT,
@@ -76,6 +83,8 @@ impl AcquisitionConfig {
                 staging_dir: None,
                 library_dir: None,
                 candidate_budget,
+                race_width,
+                start_timeout,
                 transfer_timeout,
                 poll,
             });
@@ -123,6 +132,8 @@ impl AcquisitionConfig {
             staging_dir: Some(staging_dir),
             library_dir: Some(library_dir),
             candidate_budget,
+            race_width,
+            start_timeout,
             transfer_timeout,
             poll,
         })
@@ -266,7 +277,9 @@ mod tests {
         let config = AcquisitionConfig::from_vars(&Vars::new(), false, false, &[]).unwrap();
 
         assert!(!config.enabled);
-        assert_eq!(config.candidate_budget, 3);
+        assert_eq!(config.candidate_budget, 6);
+        assert_eq!(config.race_width, 3);
+        assert_eq!(config.start_timeout, Duration::from_secs(600));
         assert_eq!(config.transfer_timeout, Duration::from_secs(1800));
         assert_eq!(config.poll, Duration::from_secs(10));
 
@@ -343,8 +356,24 @@ mod tests {
         };
         assert!(budget("0").is_err());
         assert!(budget("1").is_ok());
-        assert!(budget("10").is_ok());
-        assert!(budget("11").is_err());
+        assert!(budget("20").is_ok());
+        assert!(budget("21").is_err());
+
+        for (name, valid, invalid) in [
+            (RACE_WIDTH, ["1", "5"], ["0", "6"]),
+            (START_TIMEOUT, ["30", "7200"], ["29", "7201"]),
+        ] {
+            for value in valid {
+                let mut vars = enabled();
+                vars.insert(name.to_owned(), value.to_owned());
+                assert!(AcquisitionConfig::from_vars(&vars, true, true, &media()).is_ok());
+            }
+            for value in invalid {
+                let mut vars = enabled();
+                vars.insert(name.to_owned(), value.to_owned());
+                assert!(AcquisitionConfig::from_vars(&vars, true, true, &media()).is_err());
+            }
+        }
 
         let timeout = |value: &str| {
             let mut vars = enabled();

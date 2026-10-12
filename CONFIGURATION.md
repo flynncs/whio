@@ -167,8 +167,10 @@ both.
 | `WHIO_ACQUISITION_ENABLED` | `false` | enable the acquisition API and worker queue |
 | `WHIO_ACQUISITION_STAGING_DIR` | required when enabled | absolute path where this process sees slskd's download directory; must not overlap a media root |
 | `WHIO_ACQUISITION_LIBRARY_DIR` | required when enabled | absolute import destination; must equal one of `WHIO_MEDIA_ROOTS` |
-| `WHIO_ACQUISITION_CANDIDATE_BUDGET` | `3` | ranked candidates tried per request, 1..=10 |
-| `WHIO_ACQUISITION_TRANSFER_TIMEOUT_SECONDS` | `1800` | per-attempt transfer budget, 60..=86400 |
+| `WHIO_ACQUISITION_CANDIDATE_BUDGET` | `6` | ranked users tried per request, one copy per user, 1..=20 |
+| `WHIO_ACQUISITION_RACE_WIDTH` | `3` | users queued together until the first bytes select a winner, 1..=5 |
+| `WHIO_ACQUISITION_START_TIMEOUT_SECONDS` | `600` | round budget before any user starts downloading, 30..=7200 |
+| `WHIO_ACQUISITION_TRANSFER_TIMEOUT_SECONDS` | `1800` | winner transfer budget measured from its win, 60..=86400 |
 | `WHIO_ACQUISITION_POLL_SECONDS` | `10` | job snooze while a transfer runs, 1..=300 |
 | `WHIO_BEETS_COMMAND` | `beet` | beets executable |
 | `WHIO_BEETS_CONFIG` | `/etc/whio/beets.yaml` | beets config read when acquisition is enabled |

@@ -480,7 +480,7 @@ fn parse_phase(state: &str) -> TransferPhase {
     {
         return TransferPhase::Failed;
     }
-    if has("InProgress") || has("Initializing") {
+    if has("InProgress") {
         return TransferPhase::Active;
     }
 

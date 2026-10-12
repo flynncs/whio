@@ -145,6 +145,8 @@ async fn fixture(pool: PgPool, enabled: bool) -> Fixture {
                 staging_dir: Some(PathBuf::from("/staging")),
                 library_dir: Some(PathBuf::from("/staging")),
                 candidate_budget: 3,
+                race_width: 1,
+                start_timeout: Duration::from_secs(600),
                 transfer_timeout: Duration::from_secs(1800),
                 poll: Duration::from_secs(10),
             },

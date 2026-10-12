@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Serialize, de::DeserializeOwned};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
 use crate::jobs::acquisition::{
@@ -11,12 +11,12 @@ use crate::platform::jobs::{PendingJob, enqueue};
 
 use super::domain::{
     AcquisitionOrigin, Attempt, AttemptFile, AttemptState, AttemptUpdate, FinishIntent, OriginKind,
-    Request, RequestState,
+    Request, RequestState, Round,
 };
 use super::ports::{AcquisitionTarget, ExpectedTrack, MbId, ReleaseCandidate};
 
 const REQUEST_COLUMNS: &str = "id, origin_kind, origin_id, target_kind, target_id, artist, title, \
-     expected_tracks, candidates, state, reason, attempts, created_at, updated_at";
+     expected_tracks, candidates, state, reason, attempts, round, created_at, updated_at";
 
 const TERMINAL_STATES: &str = "'completed', 'already_owned', 'release_not_found', \
      'release_ambiguous', 'no_candidate', 'exhausted', 'import_mismatch'";
@@ -180,69 +180,107 @@ impl PostgresAcquisitionStore {
         self.find_request(id).await
     }
 
-    pub async fn insert_attempt_and_dispatch(
+    pub(crate) async fn dispatch_round(
         &self,
         id: Uuid,
-        number: u16,
-        files: &[AttemptFile],
+        round: &Round,
+        attempts: &[(u16, Vec<AttemptFile>)],
     ) -> Result<(), StorageError> {
-        self.dispatch(id, number, files, None).await
-    }
-
-    pub async fn set_candidates_and_dispatch(
-        &self,
-        id: Uuid,
-        candidates: &[ReleaseCandidate],
-        number: u16,
-        files: &[AttemptFile],
-    ) -> Result<(), StorageError> {
-        self.dispatch(id, number, files, Some(candidates)).await
-    }
-
-    async fn dispatch(
-        &self,
-        id: Uuid,
-        number: u16,
-        files: &[AttemptFile],
-        candidates: Option<&[ReleaseCandidate]>,
-    ) -> Result<(), StorageError> {
-        let attempt = i16::try_from(number).unwrap_or(i16::MAX);
         let mut transaction = self.pool.begin().await.map_err(StorageError::Database)?;
-
-        if let Some(candidates) = candidates {
+        for (number, files) in attempts {
             sqlx::query(
-                "UPDATE acquisition_requests SET candidates = $2, updated_at = CURRENT_TIMESTAMP \
-                 WHERE id = $1",
+                "INSERT INTO acquisition_attempts (request_id, attempt, state, files) \
+                 VALUES ($1, $2, 'transferring', $3) ON CONFLICT (request_id, attempt) DO NOTHING",
             )
             .bind(id)
-            .bind(json(&candidates)?)
+            .bind(i16::try_from(*number).map_err(|_| StorageError::Inconsistent)?)
+            .bind(json(files)?)
             .execute(&mut *transaction)
             .await
             .map_err(StorageError::Database)?;
         }
-
+        let last = round.attempts.last().ok_or(StorageError::Inconsistent)?;
         sqlx::query(
-            "INSERT INTO acquisition_attempts (request_id, attempt, state, files) \
-             VALUES ($1, $2, 'transferring', $3) ON CONFLICT (request_id, attempt) DO NOTHING",
+            "UPDATE acquisition_requests SET round = $2, state = 'transferring', reason = NULL, \
+             attempts = GREATEST(attempts, $3), updated_at = CURRENT_TIMESTAMP WHERE id = $1",
         )
         .bind(id)
-        .bind(attempt)
-        .bind(json(&files)?)
+        .bind(json(round)?)
+        .bind(i32::from(*last))
         .execute(&mut *transaction)
         .await
         .map_err(StorageError::Database)?;
-
-        sqlx::query(
-            "UPDATE acquisition_requests SET state = 'transferring', reason = NULL, \
-             attempts = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
-        )
-        .bind(id)
-        .bind(attempt)
-        .execute(&mut *transaction)
-        .await
-        .map_err(StorageError::Database)?;
-
         transaction.commit().await.map_err(StorageError::Database)
+    }
+
+    pub(crate) async fn record_round_outcome(
+        &self,
+        id: Uuid,
+        round: &Round,
+        finishes: &[(u16, FinishIntent)],
+        winner_paths: &[String],
+    ) -> Result<bool, StorageError> {
+        let mut transaction = self.pool.begin().await.map_err(StorageError::Database)?;
+        for path in winner_paths {
+            let winner = round.winner.ok_or(StorageError::Inconsistent)?;
+            if !self.claim_path(&mut transaction, id, winner, path).await? {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(StorageError::Database)?;
+                return Ok(false);
+            }
+        }
+        sqlx::query("UPDATE acquisition_requests SET round = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1")
+            .bind(id)
+            .bind(json(round)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StorageError::Database)?;
+        for (number, intent) in finishes {
+            sqlx::query(
+                "UPDATE acquisition_attempts SET finish_intent = COALESCE(finish_intent, $3), \
+                 updated_at = CURRENT_TIMESTAMP WHERE request_id = $1 AND attempt = $2",
+            )
+            .bind(id)
+            .bind(i16::try_from(*number).map_err(|_| StorageError::Inconsistent)?)
+            .bind(json(intent)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StorageError::Database)?;
+        }
+        transaction.commit().await.map_err(StorageError::Database)?;
+        Ok(true)
+    }
+
+    async fn claim_path(
+        &self,
+        connection: &mut PgConnection,
+        id: Uuid,
+        number: u16,
+        path: &str,
+    ) -> Result<bool, StorageError> {
+        #[cfg(all(test, feature = "postgres-integration"))]
+        if let Some(hook) = &self.claim_hook {
+            hook(id, ClaimBoundary::BeforeInsert).await;
+        }
+        let inserted = sqlx::query(
+            "INSERT INTO acquisition_claims (path, request_id, attempt) \
+             VALUES ($1, $2, $3) ON CONFLICT (path) DO UPDATE SET path = EXCLUDED.path \
+             WHERE acquisition_claims.request_id = EXCLUDED.request_id \
+             AND acquisition_claims.attempt = EXCLUDED.attempt",
+        )
+        .bind(path)
+        .bind(id)
+        .bind(i16::try_from(number).map_err(|_| StorageError::Inconsistent)?)
+        .execute(connection)
+        .await
+        .map_err(StorageError::Database)?;
+        #[cfg(all(test, feature = "postgres-integration"))]
+        if let Some(hook) = &self.claim_hook {
+            hook(id, ClaimBoundary::AfterInsert).await;
+        }
+        Ok(inserted.rows_affected() == 1)
     }
 
     pub async fn record_attempt(
@@ -258,6 +296,7 @@ impl PostgresAcquisitionStore {
             request_state,
             request_reason: request_reason.map(str::to_owned),
             cancel: false,
+            recover_start: false,
         };
         self.record(id, number, &outcome, false).await
     }
@@ -280,6 +319,29 @@ impl PostgresAcquisitionStore {
         .await
         .map_err(StorageError::Database)?;
 
+        parse(&stored)
+    }
+
+    pub(crate) async fn persist_recovered_finish(
+        &self,
+        id: Uuid,
+        number: u16,
+        previous: &FinishIntent,
+        recovered: &FinishIntent,
+    ) -> Result<FinishIntent, StorageError> {
+        let stored: String = sqlx::query_scalar(
+            "UPDATE acquisition_attempts SET handles = $3, finish_intent = $4, \
+             updated_at = CURRENT_TIMESTAMP WHERE request_id = $1 AND attempt = $2 \
+             AND finish_intent = $5 RETURNING finish_intent",
+        )
+        .bind(id)
+        .bind(i16::try_from(number).map_err(|_| StorageError::Inconsistent)?)
+        .bind(json(&recovered.update.handles)?)
+        .bind(json(recovered)?)
+        .bind(json(previous)?)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StorageError::Database)?;
         parse(&stored)
     }
 
@@ -322,7 +384,7 @@ impl PostgresAcquisitionStore {
         .map_err(StorageError::Database)?;
 
         sqlx::query(
-            "UPDATE acquisition_requests SET state = $3, reason = $4, attempts = $2, \
+            "UPDATE acquisition_requests SET state = $3, reason = $4, attempts = GREATEST(attempts, $2), \
              updated_at = CURRENT_TIMESTAMP WHERE id = $1",
         )
         .bind(id)
@@ -372,26 +434,7 @@ impl PostgresAcquisitionStore {
         .map_err(StorageError::Database)?;
 
         for path in paths {
-            #[cfg(all(test, feature = "postgres-integration"))]
-            if let Some(hook) = &self.claim_hook {
-                hook(id, ClaimBoundary::BeforeInsert).await;
-            }
-            let inserted = sqlx::query(
-                "INSERT INTO acquisition_claims (path, request_id, attempt) \
-                 VALUES ($1, $2, $3) ON CONFLICT (path) DO NOTHING",
-            )
-            .bind(path)
-            .bind(id)
-            .bind(attempt)
-            .execute(&mut *transaction)
-            .await
-            .map_err(StorageError::Database)?;
-
-            #[cfg(all(test, feature = "postgres-integration"))]
-            if let Some(hook) = &self.claim_hook {
-                hook(id, ClaimBoundary::AfterInsert).await;
-            }
-            if inserted.rows_affected() == 0 {
+            if !self.claim_path(&mut transaction, id, number, path).await? {
                 transaction
                     .rollback()
                     .await
@@ -402,7 +445,7 @@ impl PostgresAcquisitionStore {
         }
 
         sqlx::query(
-            "UPDATE acquisition_requests SET state = $3, reason = $4, attempts = $2, \
+            "UPDATE acquisition_requests SET state = $3, reason = $4, attempts = GREATEST(attempts, $2), \
              updated_at = CURRENT_TIMESTAMP WHERE id = $1",
         )
         .bind(id)
@@ -610,6 +653,18 @@ impl PostgresAcquisitionStore {
         row.as_ref().map(attempt_from_row).transpose()
     }
 
+    pub(crate) async fn load_attempts(&self, id: Uuid) -> Result<Vec<Attempt>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT request_id, attempt, state, reason, files, handles, delivered, imported, \
+             finish_intent, created_at FROM acquisition_attempts WHERE request_id = $1 ORDER BY attempt",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::Database)?;
+        rows.iter().map(attempt_from_row).collect()
+    }
+
     pub async fn load_current_attempt(&self, id: Uuid) -> Result<Option<Attempt>, StorageError> {
         let row = sqlx::query(
             "SELECT request_id, attempt, state, reason, files, handles, delivered, imported, \
@@ -694,6 +749,12 @@ fn request_from_row(row: &PgRow) -> Result<Request, StorageError> {
                 .map_err(StorageError::Database)?,
         )
         .map_err(|_| StorageError::Inconsistent)?,
+        round: row
+            .try_get::<Option<String>, _>("round")
+            .map_err(StorageError::Database)?
+            .as_deref()
+            .map(parse)
+            .transpose()?,
         created_at: row.try_get("created_at").map_err(StorageError::Database)?,
         updated_at: row.try_get("updated_at").map_err(StorageError::Database)?,
     })

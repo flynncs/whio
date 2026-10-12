@@ -181,8 +181,17 @@ pub struct Request {
     pub state: RequestState,
     pub reason: Option<String>,
     pub attempts: u16,
+    pub(crate) round: Option<Round>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Round {
+    pub attempts: Vec<u16>,
+    pub started_at: DateTime<Utc>,
+    pub winner: Option<u16>,
+    pub won_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +248,8 @@ pub(crate) struct FinishIntent {
     pub request_state: RequestState,
     pub request_reason: Option<String>,
     pub cancel: bool,
+    #[serde(default)]
+    pub recover_start: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

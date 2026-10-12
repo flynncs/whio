@@ -338,6 +338,8 @@ async fn files_group_by_peer_and_directory() {
 
     assert_eq!(candidates.len(), 2);
     assert_eq!(candidates[0].source, r"peer-a:Music\Album");
+    assert_eq!(candidates[0].user(), Some("peer-a"));
+    assert_eq!(candidates[1].user(), Some("peer-b"));
     assert_eq!(candidates[0].files.len(), 2);
     assert_eq!(candidates[0].files[0].name, "One.flac");
     assert_eq!(candidates[0].peer.queue_length, Some(2));
@@ -555,7 +557,7 @@ async fn every_phase_rule_maps_and_a_missing_batch_is_missing() {
         ("Rejected", TransferPhase::Failed),
         ("Aborted", TransferPhase::Failed),
         ("InProgress", TransferPhase::Active),
-        ("Initializing", TransferPhase::Active),
+        ("Initializing", TransferPhase::Queued),
         ("Requested", TransferPhase::Queued),
         ("Queued, Remotely", TransferPhase::Queued),
         ("None", TransferPhase::Queued),

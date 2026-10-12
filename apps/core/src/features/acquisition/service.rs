@@ -14,13 +14,13 @@ use crate::platform::clock::Clock;
 use super::config::AcquisitionConfig;
 use super::domain::{
     AcquisitionOrigin, Attempt, AttemptFile, AttemptState, AttemptUpdate, FinishIntent, Request,
-    RequestState,
+    RequestState, Round,
 };
 use super::ports::{
     AcquisitionTarget, CandidateLimit, CandidateSearch, ExpectedTrack, ImportError, ImportJob,
     ImportedItem, Importer, LibraryOwnership, LookupError, MbId, MbRecording, MbRelease,
     MusicBrainzLookup, OwnershipError, RemoteTransfer, Slot, TransferError, TransferHandle,
-    TransferPhase, TransferRequest,
+    TransferPhase, TransferProgress, TransferRequest,
 };
 use super::selection;
 use super::storage::{PostgresAcquisitionStore, StorageError};
@@ -51,6 +51,7 @@ pub enum AcquisitionError {
     Repository(#[from] StorageError),
 }
 
+#[derive(Clone)]
 pub struct AcquisitionPorts {
     pub search: Arc<dyn CandidateSearch>,
     pub transfer: Arc<dyn RemoteTransfer>,
@@ -115,6 +116,7 @@ pub struct AcquisitionService {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FinishBoundary {
     BeforeIntent,
+    IntentDurable,
     BeforeCommit,
 }
 
@@ -223,7 +225,7 @@ impl AcquisitionService {
         Ok(self.store.list_latest_by_origins(origin_ids).await?)
     }
 
-    #[tracing::instrument(skip_all, fields(request_id = %id, state = tracing::field::Empty, attempt = tracing::field::Empty))]
+    #[tracing::instrument(skip_all, fields(request_id = %id, state = tracing::field::Empty, attempt = tracing::field::Empty, round = tracing::field::Empty, winner = tracing::field::Empty))]
     pub async fn advance(&self, id: Uuid) -> Result<Step, AcquisitionError> {
         loop {
             let request = self
@@ -233,12 +235,16 @@ impl AcquisitionService {
                 .ok_or(AcquisitionError::NotFound)?;
             tracing::Span::current().record("state", request.state.as_str());
             tracing::Span::current().record("attempt", request.attempts);
+            if let Some(round) = &request.round {
+                tracing::Span::current().record("round", round.attempts.first().copied());
+                tracing::Span::current().record("winner", round.winner);
+            }
 
             let phase = match request.state {
                 RequestState::Pending => self.pin(&request).await?,
                 RequestState::Searching => self.search(&request).await?,
                 RequestState::Transferring | RequestState::Importing => {
-                    self.run_attempt(&request).await?
+                    self.run_round(&request).await?
                 }
                 _ => {
                     self.resume_cleanup(&request).await?;
@@ -469,7 +475,7 @@ impl AcquisitionService {
 
     async fn search(&self, request: &Request) -> Result<Phase, AcquisitionError> {
         if !request.candidates.is_empty() {
-            return self.begin_attempt(request.id, &request.candidates, 1).await;
+            return self.begin_round(request).await;
         }
 
         let Some(target) = request.target else {
@@ -511,12 +517,10 @@ impl AcquisitionService {
             };
 
             if !accepted.is_empty() {
-                let files = attempt_files(&accepted[0]);
-                self.store
-                    .set_candidates_and_dispatch(request.id, &accepted, 1, &files)
-                    .await?;
-
-                return self.start_attempt(request.id, 1).await;
+                self.store.set_candidates(request.id, &accepted).await?;
+                let mut selected = request.clone();
+                selected.candidates = accepted;
+                return self.begin_round(&selected).await;
             }
         }
 
@@ -527,96 +531,321 @@ impl AcquisitionService {
         Ok(Phase::Done)
     }
 
-    async fn run_attempt(&self, request: &Request) -> Result<Phase, AcquisitionError> {
-        let Some(attempt) = self.store.load_current_attempt(request.id).await? else {
+    async fn begin_round(&self, request: &Request) -> Result<Phase, AcquisitionError> {
+        let previous = self.store.load_attempts(request.id).await?;
+        let mut users = previous
+            .iter()
+            .flat_map(|attempt| &attempt.files)
+            .map(|file| file.input().user().to_owned())
+            .collect::<HashSet<_>>();
+        let mut attempts = Vec::new();
+        for (index, candidate) in request.candidates.iter().enumerate() {
+            let number = u16::try_from(index + 1).map_err(|_| AcquisitionError::Failed)?;
+            if previous.iter().any(|attempt| attempt.number == number) {
+                continue;
+            }
+            if candidate.files.is_empty() {
+                self.store
+                    .set_terminal(request.id, RequestState::NoCandidate, Some("no_candidate"))
+                    .await?;
+                return Ok(Phase::Done);
+            }
+            let user = candidate.user().ok_or(AcquisitionError::Failed)?;
+            if !users.insert(user.to_owned()) {
+                continue;
+            }
+            attempts.push((number, attempt_files(candidate)));
+            if attempts.len() == self.config.race_width {
+                break;
+            }
+        }
+        if attempts.is_empty() {
             self.store
                 .set_terminal(request.id, RequestState::Exhausted, Some("exhausted"))
                 .await?;
-
             return Ok(Phase::Done);
+        }
+        let round = Round {
+            attempts: attempts.iter().map(|(number, _)| *number).collect(),
+            started_at: self.clock.now(),
+            winner: None,
+            won_at: None,
         };
+        self.store
+            .dispatch_round(request.id, &round, &attempts)
+            .await?;
+        Ok(Phase::Again)
+    }
 
-        if let Some(intent) = &attempt.finish_intent {
-            return self.resume_finish(request, attempt.number, intent).await;
+    async fn run_round(&self, request: &Request) -> Result<Phase, AcquisitionError> {
+        let Some(round) = &request.round else {
+            return self.resume_single_attempt(request).await;
+        };
+        let mut attempts = Vec::new();
+        for number in &round.attempts {
+            let attempt = self
+                .store
+                .load_attempt(request.id, *number)
+                .await?
+                .ok_or(AcquisitionError::Failed)?;
+            if let Some(intent) = &attempt.finish_intent {
+                self.resume_finish(request, *number, intent).await?;
+                return Ok(Phase::Again);
+            }
+            attempts.push(attempt);
         }
 
-        match attempt.state {
-            AttemptState::Imported => {
-                self.finish_attempt(
-                    request,
-                    &attempt,
-                    Finish::Imported(attempt.imported.clone()),
-                    &attempt.handles,
-                    attempt.delivered(),
-                )
-                .await
+        if let Some(number) = round.winner {
+            let winner = attempts
+                .iter()
+                .find(|attempt| attempt.number == number)
+                .ok_or(AcquisitionError::Failed)?;
+            return match winner.state {
+                AttemptState::Failed => self.begin_round(request).await,
+                AttemptState::Imported => {
+                    self.finish_attempt(
+                        request,
+                        winner,
+                        Finish::Imported(winner.imported.clone()),
+                        &winner.handles,
+                        winner.delivered(),
+                    )
+                    .await
+                }
+                AttemptState::Importing => self.import_phase(request, winner).await,
+                AttemptState::Transferring => self.transfer_phase(request, winner).await,
+            };
+        }
+
+        let live = attempts
+            .iter()
+            .filter(|attempt| attempt.state == AttemptState::Transferring)
+            .collect::<Vec<_>>();
+        if live.is_empty() {
+            return self.begin_round(request).await;
+        }
+        if self.start_expired(round, self.clock.now()) {
+            return self.timeout_round(request, round, &live).await;
+        }
+        let mut started = false;
+        for attempt in &live {
+            if attempt.handles.is_empty() || attempt.handles.iter().any(Option::is_none) {
+                self.start_attempt(request.id, attempt.number).await?;
+                started = true;
             }
-            AttemptState::Failed => {
-                self.finish_attempt(
-                    request,
+        }
+        if started {
+            return Ok(Phase::Again);
+        }
+        self.poll_round(request, round, &live).await
+    }
+
+    async fn resume_single_attempt(&self, request: &Request) -> Result<Phase, AcquisitionError> {
+        let Some(attempt) = self.store.load_current_attempt(request.id).await? else {
+            return self.begin_round(request).await;
+        };
+        let round = Round {
+            attempts: vec![attempt.number],
+            started_at: attempt.created_at,
+            winner: Some(attempt.number),
+            won_at: Some(attempt.created_at),
+        };
+        let finishes = if attempt.state == AttemptState::Failed && attempt.finish_intent.is_none() {
+            vec![(
+                attempt.number,
+                finish_intent(
                     &attempt,
                     Finish::Failed(attempt.reason.clone().ok_or(AcquisitionError::Failed)?),
                     &attempt.handles,
                     attempt.delivered(),
-                )
-                .await
-            }
-            AttemptState::Transferring => self.transfer_phase(request, &attempt).await,
-            AttemptState::Importing => self.import_phase(request, &attempt).await,
-        }
-    }
-
-    async fn begin_attempt(
-        &self,
-        id: Uuid,
-        candidates: &[super::ports::ReleaseCandidate],
-        number: u16,
-    ) -> Result<Phase, AcquisitionError> {
-        let Some(candidate) = candidates.get(usize::from(number) - 1) else {
-            self.store
-                .set_terminal(id, RequestState::Exhausted, Some("exhausted"))
-                .await?;
-
-            return Ok(Phase::Done);
+                ),
+            )]
+        } else {
+            Vec::new()
         };
-        if candidate.files.is_empty() {
-            self.store
-                .set_terminal(id, RequestState::NoCandidate, Some("no_candidate"))
-                .await?;
-
-            return Ok(Phase::Done);
-        }
-        let files = candidate
-            .files
-            .iter()
-            .map(|file| AttemptFile::new(Uuid::now_v7(), file.clone()))
-            .collect::<Vec<_>>();
-
         self.store
-            .insert_attempt_and_dispatch(id, number, &files)
+            .record_round_outcome(request.id, &round, &finishes, &[])
             .await?;
-
-        self.start_attempt(id, number).await
+        Ok(Phase::Again)
     }
 
-    async fn next_attempt(
+    async fn poll_round(
         &self,
         request: &Request,
-        number: u16,
+        round: &Round,
+        attempts: &[&Attempt],
     ) -> Result<Phase, AcquisitionError> {
-        let next = number + 1;
-
-        if usize::from(next) <= request.candidates.len() {
-            let candidates = request.candidates.clone();
-
-            return Box::pin(self.begin_attempt(request.id, &candidates, next)).await;
+        let mut observed = Vec::new();
+        for attempt in attempts {
+            observed.push(self.observe_transfer(attempt).await?);
         }
+        let now = self.clock.now();
+        let expired = self.start_expired(round, now);
+        let winner = if expired {
+            None
+        } else {
+            observed.iter().position(|slots| {
+                !transfer_failed(slots) && slots.iter().any(|slot| matches!(
+                    slot,
+                    Slot::Accepted(progress) if progress.bytes_done.unwrap_or_default() > 0
+                        || matches!(progress.phase, TransferPhase::Active | TransferPhase::ReportedComplete)
+                ))
+            })
+        };
+        let mut decided = round.clone();
+        if let Some(index) = winner {
+            decided.winner = Some(attempts[index].number);
+            decided.won_at = Some(now);
+        }
+        let mut finishes = attempts
+            .iter()
+            .zip(&observed)
+            .enumerate()
+            .filter_map(|(index, (attempt, slots))| {
+                let reason = if winner.is_some() && winner != Some(index) {
+                    "lost_race"
+                } else if winner.is_none() && expired {
+                    "start_timeout"
+                } else if transfer_failed(slots) {
+                    "transfer_failed"
+                } else {
+                    return None;
+                };
+                Some((
+                    attempt.number,
+                    finish_intent(
+                        attempt,
+                        Finish::Failed(reason.to_owned()),
+                        &attempt.handles,
+                        &delivered_of(slots),
+                    ),
+                ))
+            })
+            .collect::<Vec<_>>();
+        if winner.is_some() || !finishes.is_empty() {
+            let winner_paths = winner
+                .map(|index| delivered_of(&observed[index]))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|path| matches!(self.staged_input(path), StagedInput::Ready(_)))
+                .collect::<Vec<_>>();
+            let protected = self
+                .store
+                .record_round_outcome(
+                    request.id,
+                    &decided,
+                    &finishes,
+                    &delivered_strings(&winner_paths),
+                )
+                .await?;
+            if !protected {
+                let index = winner.ok_or(AcquisitionError::Failed)?;
+                let attempt = attempts[index];
+                finishes.push((
+                    attempt.number,
+                    finish_intent(
+                        attempt,
+                        Finish::Failed("staging_conflict".to_owned()),
+                        &attempt.handles,
+                        &delivered_of(&observed[index]),
+                    ),
+                ));
+                self.store
+                    .record_round_outcome(request.id, &decided, &finishes, &[])
+                    .await?;
+            }
+            for (number, intent) in &finishes {
+                self.resume_finish(request, *number, intent).await?;
+            }
+            if let Some(index) = winner.filter(|_| protected) {
+                let mut request = request.clone();
+                request.round = Some(decided);
+                return self
+                    .transfer_observed(&request, attempts[index], &observed[index])
+                    .await;
+            }
+            return Ok(Phase::Again);
+        }
+        Ok(Phase::Wait(self.config.poll))
+    }
 
+    fn start_expired(&self, round: &Round, now: chrono::DateTime<chrono::Utc>) -> bool {
+        now >= round.started_at
+            + chrono::Duration::from_std(self.config.start_timeout).unwrap_or_default()
+    }
+
+    async fn timeout_round(
+        &self,
+        request: &Request,
+        round: &Round,
+        attempts: &[&Attempt],
+    ) -> Result<Phase, AcquisitionError> {
+        let mut finishes = Vec::new();
+        for attempt in attempts {
+            let recover_start =
+                attempt.handles.is_empty() || attempt.handles.iter().any(Option::is_none);
+            let delivered = if recover_start {
+                attempt.delivered.clone()
+            } else {
+                delivered_of(&self.observe_transfer(attempt).await?)
+            };
+            let mut intent = finish_intent(
+                attempt,
+                Finish::Failed("start_timeout".to_owned()),
+                &attempt.handles,
+                &delivered,
+            );
+            intent.recover_start = recover_start;
+            finishes.push((attempt.number, intent));
+        }
         self.store
-            .set_terminal(request.id, RequestState::Exhausted, Some("exhausted"))
+            .record_round_outcome(request.id, round, &finishes, &[])
             .await?;
+        for (number, intent) in &finishes {
+            self.resume_finish(request, *number, intent).await?;
+        }
+        Ok(Phase::Again)
+    }
 
-        Ok(Phase::Done)
+    async fn observe_transfer(
+        &self,
+        attempt: &Attempt,
+    ) -> Result<Vec<Slot<TransferProgress>>, AcquisitionError> {
+        let handles = attempt
+            .handles
+            .iter()
+            .flatten()
+            .map(|handle| TransferHandle::new(handle.clone()))
+            .collect::<Vec<_>>();
+        let slots = self
+            .ports
+            .transfer
+            .status(&handles)
+            .await
+            .map_err(map_transfer)?;
+        if slots.len() != handles.len() {
+            return Err(AcquisitionError::Failed);
+        }
+        Ok(slots)
+    }
+
+    async fn start_transfer(
+        &self,
+        attempt: &Attempt,
+    ) -> Result<Vec<Slot<TransferHandle>>, AcquisitionError> {
+        let requests = attempt
+            .files
+            .iter()
+            .map(|file| TransferRequest {
+                key: file.key(),
+                input: file.input().clone(),
+            })
+            .collect::<Vec<_>>();
+        self.ports
+            .transfer
+            .start(&requests)
+            .await
+            .map_err(map_transfer)
     }
 
     async fn start_attempt(&self, id: Uuid, number: u16) -> Result<Phase, AcquisitionError> {
@@ -638,30 +867,12 @@ impl AcquisitionService {
 
             return Ok(Phase::Done);
         }
-        let requests = attempt
-            .files
-            .iter()
-            .map(|file| TransferRequest {
-                key: file.key(),
-                input: file.input().clone(),
-            })
-            .collect::<Vec<_>>();
-        let slots = match self.ports.transfer.start(&requests).await {
-            Ok(slots) => slots,
-            Err(TransferError::Unavailable) => return Err(AcquisitionError::Unavailable),
-            Err(error) => return Err(map_transfer(error)),
-        };
-        let accepted = slots.len() == requests.len()
+        let slots = self.start_transfer(&attempt).await?;
+        let accepted = slots.len() == attempt.files.len()
             && slots.iter().all(|slot| matches!(slot, Slot::Accepted(_)));
 
         if !accepted {
-            let handles = slots
-                .iter()
-                .map(|slot| match slot {
-                    Slot::Accepted(handle) => Some(handle.as_str().to_owned()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
+            let handles = transfer_handles(&slots);
 
             let request = self
                 .store
@@ -680,13 +891,7 @@ impl AcquisitionService {
                 .await;
         }
 
-        let handles = slots
-            .iter()
-            .map(|slot| match slot {
-                Slot::Accepted(handle) => Some(handle.as_str().to_owned()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let handles = transfer_handles(&slots);
         let update = AttemptUpdate {
             state: AttemptState::Transferring,
             reason: None,
@@ -710,19 +915,17 @@ impl AcquisitionService {
             return self.start_attempt(request.id, attempt.number).await;
         }
 
-        let handles = attempt
-            .handles
-            .iter()
-            .flatten()
-            .map(|handle| TransferHandle::new(handle.clone()))
-            .collect::<Vec<_>>();
-        let slots = self
-            .ports
-            .transfer
-            .status(&handles)
-            .await
-            .map_err(map_transfer)?;
-        let delivered = delivered_of(&slots);
+        let slots = self.observe_transfer(attempt).await?;
+        self.transfer_observed(request, attempt, &slots).await
+    }
+
+    async fn transfer_observed(
+        &self,
+        request: &Request,
+        attempt: &Attempt,
+        slots: &[Slot<TransferProgress>],
+    ) -> Result<Phase, AcquisitionError> {
+        let delivered = delivered_of(slots);
         let complete = !slots.is_empty()
             && slots.iter().all(|slot| {
                 matches!(
@@ -734,7 +937,11 @@ impl AcquisitionService {
             });
 
         let expired = self.clock.now()
-            >= attempt.created_at
+            >= request
+                .round
+                .as_ref()
+                .and_then(|round| round.won_at)
+                .ok_or(AcquisitionError::Failed)?
                 + chrono::Duration::from_std(self.config.transfer_timeout).unwrap_or_default();
 
         if complete {
@@ -795,13 +1002,7 @@ impl AcquisitionService {
             }
         }
 
-        let failed = slots.iter().any(|slot| match slot {
-            Slot::Missing | Slot::Rejected(_) => true,
-            Slot::Accepted(progress) => matches!(
-                progress.phase,
-                TransferPhase::Failed | TransferPhase::Cancelled
-            ),
-        });
+        let failed = transfer_failed(slots);
 
         if failed || expired {
             let reason = if failed {
@@ -917,53 +1118,7 @@ impl AcquisitionService {
         handles: &[Option<String>],
         delivered: &[PathBuf],
     ) -> Result<Phase, AcquisitionError> {
-        let (update, request_state, request_reason) = match finish {
-            Finish::Completed => (
-                AttemptUpdate {
-                    state: AttemptState::Imported,
-                    reason: None,
-                    handles: handles.to_vec(),
-                    delivered: delivered.to_vec(),
-                    imported: attempt.imported.clone(),
-                },
-                RequestState::Completed,
-                None,
-            ),
-            Finish::Failed(reason) => (
-                failed_update(&reason, handles, delivered.to_vec()),
-                RequestState::Transferring,
-                None,
-            ),
-            Finish::Imported(items) => (
-                AttemptUpdate {
-                    state: AttemptState::Imported,
-                    reason: None,
-                    handles: handles.to_vec(),
-                    delivered: delivered.to_vec(),
-                    imported: items,
-                },
-                RequestState::Completed,
-                None,
-            ),
-            Finish::Mismatch(reason, items) => (
-                AttemptUpdate {
-                    state: AttemptState::Failed,
-                    reason: Some("import_mismatch".to_owned()),
-                    handles: handles.to_vec(),
-                    delivered: delivered.to_vec(),
-                    imported: items,
-                },
-                RequestState::ImportMismatch,
-                Some(reason),
-            ),
-        };
-
-        let intent = FinishIntent {
-            update,
-            request_state,
-            request_reason,
-            cancel: attempt.state == AttemptState::Transferring,
-        };
+        let intent = finish_intent(attempt, finish, handles, delivered);
         #[cfg(all(test, feature = "postgres-integration"))]
         if let Some(hook) = &self.finish_hook {
             hook(FinishBoundary::BeforeIntent).await;
@@ -982,6 +1137,13 @@ impl AcquisitionService {
         number: u16,
         intent: &FinishIntent,
     ) -> Result<Phase, AcquisitionError> {
+        #[cfg(all(test, feature = "postgres-integration"))]
+        if let Some(hook) = &self.finish_hook {
+            hook(FinishBoundary::IntentDurable).await;
+        }
+        let intent = self
+            .recover_finish_start(request.id, number, intent)
+            .await?;
         if intent.cancel {
             self.claim_subset(request.id, number, &intent.update.delivered)
                 .await?;
@@ -993,14 +1155,50 @@ impl AcquisitionService {
             hook(FinishBoundary::BeforeCommit).await;
         }
         self.store
-            .complete_finish(request.id, number, intent)
+            .complete_finish(request.id, number, &intent)
             .await?;
 
         if intent.request_state.is_terminal() {
             Ok(Phase::Done)
         } else {
-            self.next_attempt(request, number).await
+            Ok(Phase::Again)
         }
+    }
+
+    async fn recover_finish_start(
+        &self,
+        id: Uuid,
+        number: u16,
+        intent: &FinishIntent,
+    ) -> Result<FinishIntent, AcquisitionError> {
+        if !intent.recover_start {
+            return Ok(intent.clone());
+        }
+        let mut attempt = self
+            .store
+            .load_attempt(id, number)
+            .await?
+            .ok_or(AcquisitionError::Failed)?;
+        if attempt.files.is_empty() {
+            return Err(AcquisitionError::Failed);
+        }
+        let slots = self.start_transfer(&attempt).await?;
+        attempt.handles = transfer_handles(&slots);
+        let mut recovered = intent.clone();
+        recovered.update.handles = attempt.handles.clone();
+        if attempt.handles.iter().any(Option::is_some) {
+            let delivered = delivered_of(&self.observe_transfer(&attempt).await?);
+            for path in delivered {
+                if !recovered.update.delivered.contains(&path) {
+                    recovered.update.delivered.push(path);
+                }
+            }
+        }
+        recovered.recover_start = false;
+        Ok(self
+            .store
+            .persist_recovered_finish(id, number, intent, &recovered)
+            .await?)
     }
 
     async fn claim_subset(
@@ -1060,6 +1258,7 @@ impl AcquisitionService {
                         request_state: request.state,
                         request_reason: request.reason.clone(),
                         cancel: false,
+                        recover_start: false,
                     };
                     self.store
                         .persist_finish(request.id, attempt.number, &intent)
@@ -1171,6 +1370,82 @@ impl AcquisitionService {
                 tracing::debug!(%error, "a staged directory could not be removed");
             }
         }
+    }
+}
+
+fn transfer_handles(slots: &[Slot<TransferHandle>]) -> Vec<Option<String>> {
+    slots
+        .iter()
+        .map(|slot| match slot {
+            Slot::Accepted(handle) => Some(handle.as_str().to_owned()),
+            Slot::Rejected(_) | Slot::Missing => None,
+        })
+        .collect()
+}
+
+fn transfer_failed(slots: &[Slot<TransferProgress>]) -> bool {
+    slots.iter().any(|slot| match slot {
+        Slot::Missing | Slot::Rejected(_) => true,
+        Slot::Accepted(progress) => matches!(
+            progress.phase,
+            TransferPhase::Failed | TransferPhase::Cancelled
+        ),
+    })
+}
+
+fn finish_intent(
+    attempt: &Attempt,
+    finish: Finish,
+    handles: &[Option<String>],
+    delivered: &[PathBuf],
+) -> FinishIntent {
+    let (update, request_state, request_reason) = match finish {
+        Finish::Completed => (
+            AttemptUpdate {
+                state: AttemptState::Imported,
+                reason: None,
+                handles: handles.to_vec(),
+                delivered: delivered.to_vec(),
+                imported: attempt.imported.clone(),
+            },
+            RequestState::Completed,
+            None,
+        ),
+        Finish::Failed(reason) => (
+            failed_update(&reason, handles, delivered.to_vec()),
+            RequestState::Transferring,
+            None,
+        ),
+        Finish::Imported(items) => (
+            AttemptUpdate {
+                state: AttemptState::Imported,
+                reason: None,
+                handles: handles.to_vec(),
+                delivered: delivered.to_vec(),
+                imported: items,
+            },
+            RequestState::Completed,
+            None,
+        ),
+        Finish::Mismatch(reason, items) => (
+            AttemptUpdate {
+                state: AttemptState::Failed,
+                reason: Some("import_mismatch".to_owned()),
+                handles: handles.to_vec(),
+                delivered: delivered.to_vec(),
+                imported: items,
+            },
+            RequestState::ImportMismatch,
+            Some(reason),
+        ),
+    };
+
+    FinishIntent {
+        update,
+        request_state,
+        request_reason,
+        cancel: attempt.state == AttemptState::Transferring,
+        recover_start: false,
     }
 }
 

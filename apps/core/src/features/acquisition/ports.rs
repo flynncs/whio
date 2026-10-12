@@ -58,6 +58,20 @@ pub struct ReleaseCandidate {
     pub files: Vec<CandidateFile>,
 }
 
+impl ReleaseCandidate {
+    pub fn user(&self) -> Option<&str> {
+        self.files.first().map(|file| file.input.user())
+    }
+}
+
+impl TransferInput {
+    pub fn user(&self) -> &str {
+        match self {
+            Self::SoulseekFile { peer, .. } => peer,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PeerFacts {
     pub queue_length: Option<u32>,

@@ -115,6 +115,8 @@ struct FakeTransfer {
     status_calls: std::sync::atomic::AtomicUsize,
     observe_removed: std::sync::atomic::AtomicBool,
     on_status: Mutex<Option<(PathBuf, Vec<u8>)>>,
+    status_hold: Mutex<Option<Arc<Hold>>>,
+    start_hold: Mutex<Option<Arc<Hold>>>,
 }
 
 impl FakeTransfer {
@@ -131,6 +133,10 @@ impl RemoteTransfer for FakeTransfer {
         &self,
         requests: &[TransferRequest],
     ) -> Result<Vec<Slot<TransferHandle>>, TransferError> {
+        let hold = self.start_hold.lock().unwrap().take();
+        if let Some(hold) = hold {
+            hold.wait().await;
+        }
         self.started_keys
             .lock()
             .unwrap()
@@ -146,6 +152,10 @@ impl RemoteTransfer for FakeTransfer {
         &self,
         handles: &[TransferHandle],
     ) -> Result<Vec<Slot<TransferProgress>>, TransferError> {
+        let hold = self.status_hold.lock().unwrap().take();
+        if let Some(hold) = hold {
+            hold.wait().await;
+        }
         if let Some((path, bytes)) = self.on_status.lock().unwrap().take() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, bytes).unwrap();
@@ -320,9 +330,23 @@ struct Harness {
     importer: Arc<FakeImporter>,
     ownership: Arc<FakeOwnership>,
     staging: PathBuf,
+    ports: AcquisitionPorts,
+    library: Arc<LibraryService>,
+    config: AcquisitionConfig,
+    clock: Clock,
 }
 
 impl Harness {
+    fn restart(&mut self) {
+        self.service = Arc::new(AcquisitionService::new(
+            Arc::clone(&self.store),
+            self.ports.clone(),
+            Arc::clone(&self.library),
+            self.config.clone(),
+            self.clock.clone(),
+        ));
+    }
+
     async fn new(pool: PgPool, staging: PathBuf, clock: Clock) -> Self {
         Self::build(pool, staging, clock, None).await
     }
@@ -342,6 +366,17 @@ impl Harness {
         clock: Clock,
         hook: Option<crate::features::acquisition::service::ConflictHook>,
         before: Option<crate::features::acquisition::service::ConflictHook>,
+    ) -> Self {
+        Self::build_with_width(pool, staging, clock, hook, before, 1).await
+    }
+
+    async fn build_with_width(
+        pool: PgPool,
+        staging: PathBuf,
+        clock: Clock,
+        hook: Option<crate::features::acquisition::service::ConflictHook>,
+        before: Option<crate::features::acquisition::service::ConflictHook>,
+        race_width: usize,
     ) -> Self {
         awa::migrations::run(&pool).await.expect("the awa schema");
 
@@ -391,19 +426,22 @@ impl Harness {
             completion,
         );
 
+        let config = AcquisitionConfig {
+            enabled: true,
+            staging_dir: Some(staging.clone()),
+            library_dir: Some(staging.clone()),
+            candidate_budget: 6,
+            race_width,
+            start_timeout: Duration::from_secs(600),
+            transfer_timeout: Duration::from_secs(1800),
+            poll: Duration::from_secs(10),
+        };
         let service = AcquisitionService::new(
             Arc::clone(&store),
-            ports,
-            library,
-            AcquisitionConfig {
-                enabled: true,
-                staging_dir: Some(staging.clone()),
-                library_dir: Some(staging.clone()),
-                candidate_budget: 3,
-                transfer_timeout: Duration::from_secs(1800),
-                poll: Duration::from_secs(10),
-            },
-            clock,
+            ports.clone(),
+            Arc::clone(&library),
+            config.clone(),
+            clock.clone(),
         );
         let service = match hook {
             Some(hook) => service.with_conflict_hook(hook),
@@ -424,6 +462,10 @@ impl Harness {
             importer,
             ownership,
             staging,
+            ports,
+            library,
+            config,
+            clock,
         }
     }
 }
@@ -449,19 +491,27 @@ fn candidate_file(name: &str) -> CandidateFile {
 }
 
 fn candidate(name: &str) -> ReleaseCandidate {
+    candidate_from(name, &[name])
+}
+
+fn candidate_from(user: &str, names: &[&str]) -> ReleaseCandidate {
     ReleaseCandidate {
-        source: "peer-a:dir".to_owned(),
+        source: format!("{user}:dir"),
         peer: PeerFacts::default(),
-        files: vec![candidate_file(name)],
+        files: names
+            .iter()
+            .map(|name| {
+                let mut file = candidate_file(name);
+                let TransferInput::SoulseekFile { peer, .. } = &mut file.input;
+                *peer = user.to_owned();
+                file
+            })
+            .collect(),
     }
 }
 
 fn candidate_with(names: &[&str]) -> ReleaseCandidate {
-    ReleaseCandidate {
-        source: "peer-a:dir".to_owned(),
-        peer: PeerFacts::default(),
-        files: names.iter().map(|name| candidate_file(name)).collect(),
-    }
+    candidate_from(names.first().copied().unwrap_or("empty"), names)
 }
 
 fn expected_track() -> Vec<ExpectedTrack> {
@@ -2078,6 +2128,8 @@ async fn an_album_pin_waits_for_completion(pool: PgPool) {
             staging_dir: Some(PathBuf::from("/staging")),
             library_dir: Some(PathBuf::from("/staging")),
             candidate_budget: 3,
+            race_width: 1,
+            start_timeout: Duration::from_secs(600),
             transfer_timeout: Duration::from_secs(1800),
             poll: Duration::from_secs(10),
         },
@@ -3129,3 +3181,6 @@ async fn a_terminal_request_resumes_its_unfinished_cleanup(pool: PgPool) {
 
 #[path = "service_finish_tests.rs"]
 mod finish_tests;
+
+#[path = "service_race_tests.rs"]
+mod race_tests;

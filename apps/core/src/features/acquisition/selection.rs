@@ -1,4 +1,4 @@
-use std::cmp::Reverse;
+use std::{cmp::Reverse, collections::HashSet};
 
 use unicode_normalization::UnicodeNormalization;
 
@@ -269,10 +269,17 @@ fn speed_key(candidate: &ReleaseCandidate) -> (u8, Reverse<u64>) {
     }
 }
 
-fn truncate(mut candidates: Vec<ReleaseCandidate>, budget: usize) -> Vec<ReleaseCandidate> {
-    candidates.truncate(budget);
-
+fn truncate(candidates: Vec<ReleaseCandidate>, budget: usize) -> Vec<ReleaseCandidate> {
+    let mut users = HashSet::new();
     candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate
+                .user()
+                .is_some_and(|user| users.insert(user.to_owned()))
+        })
+        .take(budget)
+        .collect()
 }
 
 #[cfg(test)]
@@ -295,7 +302,11 @@ mod tests {
         }
     }
 
-    fn candidate(source: &str, files: Vec<CandidateFile>) -> ReleaseCandidate {
+    fn candidate(source: &str, mut files: Vec<CandidateFile>) -> ReleaseCandidate {
+        for file in &mut files {
+            let TransferInput::SoulseekFile { peer, .. } = &mut file.input;
+            *peer = source.split(':').next().unwrap().to_owned();
+        }
         ReleaseCandidate {
             source: source.to_owned(),
             peer: PeerFacts::default(),
@@ -407,6 +418,42 @@ mod tests {
 
         assert_eq!(ranked[0].source, "first");
         assert_eq!(ranked[1].source, "second");
+    }
+
+    #[test]
+    fn one_candidate_per_user() {
+        let candidates = vec![
+            candidate("a:lossy", vec![file("One.mp3", None)]),
+            candidate("a:best", vec![file("One.flac", None)]),
+            candidate("a:other", vec![file("One.flac", None)]),
+            candidate("b:copy", vec![file("One.flac", None)]),
+        ];
+        let accepted = accepted_for_release(candidates, 1, &[None], 6);
+        assert_eq!(
+            accepted
+                .iter()
+                .map(|candidate| candidate.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a:best", "b:copy"]
+        );
+    }
+
+    #[test]
+    fn budget_counts_users() {
+        let candidates = vec![
+            candidate("a:first", vec![file("One.flac", None)]),
+            candidate("a:second", vec![file("One.flac", None)]),
+            candidate("b:first", vec![file("One.flac", None)]),
+            candidate("c:first", vec![file("One.flac", None)]),
+        ];
+        let accepted = accepted_for_recording(candidates, "One", None, 2);
+        assert_eq!(
+            accepted
+                .iter()
+                .map(|candidate| candidate.user().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[test]
