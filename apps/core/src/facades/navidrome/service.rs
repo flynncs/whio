@@ -24,7 +24,7 @@ use crate::{
 };
 
 use super::{
-    dto::{Album, Artist, Genre, Playlist, PlaylistSong, Queue, QueueSaveBody, Song},
+    dto::{Album, AlbumTags, Artist, Genre, Playlist, PlaylistSong, Queue, QueueSaveBody, Song},
     session,
 };
 
@@ -118,6 +118,9 @@ fn album_from_summary(summary: &AlbumSummary) -> Album {
         duration: summary.duration_ms() as f32 / 1000.0,
         cover_art: Some(CoverArtTarget::album(album.id()).encode()),
         year: album.year(),
+        tags: album.release_type().map(|release_type| AlbumTags {
+            releasetype: Some(vec![release_type.to_owned()]),
+        }),
         created_at: summary.created_at().to_rfc3339(),
         starred: state.is_starred(),
         starred_at: state.starred_at().map(|at| at.to_rfc3339()),

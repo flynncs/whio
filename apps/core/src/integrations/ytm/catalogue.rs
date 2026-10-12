@@ -299,14 +299,18 @@ mod mapping {
             ProviderError::InvalidCatalogueData(ValidationError::Empty { field: "artist" })
         })?;
         let artist = artist_credit(artist).map_err(ProviderError::InvalidCatalogueData)?;
+        let artwork = candidate
+            .artwork_url
+            .flatten()
+            .and_then(|url| ArtworkRef::url(url).ok());
         AlbumMetadata::new(candidate.title)
             .map_err(ProviderError::InvalidCatalogueData)?
             .with_provider(Some(source))
             .with_year(candidate.year.flatten())
             .map_err(ProviderError::InvalidCatalogueData)?
             .with_release_type(candidate.release_type.flatten())
-            .map(|album| album.with_album_artist(artist))
             .map_err(ProviderError::InvalidCatalogueData)
+            .map(|album| album.with_artwork(artwork).with_album_artist(artist))
     }
 
     pub(super) fn artist_candidate(
@@ -324,10 +328,15 @@ mod mapping {
     }
 
     fn album_metadata(album: CatalogueAlbumDto) -> Result<AlbumMetadata, ValidationError> {
-        AlbumMetadata::new(album.title)?
+        let artwork = album
+            .artwork_url
+            .flatten()
+            .and_then(|url| ArtworkRef::url(url).ok());
+        Ok(AlbumMetadata::new(album.title)?
             .with_provider(provider_source(album.source)?)
             .with_year(album.year.flatten())?
-            .with_release_type(album.release_type.flatten())
+            .with_release_type(album.release_type.flatten())?
+            .with_artwork(artwork))
     }
 
     impl TryFrom<CatalogueCandidateDto> for CatalogueCandidate {
@@ -430,6 +439,7 @@ mod mapping {
                 ))),
                 year: Some(Some(2013)),
                 release_type: Some(Some("Album".to_owned())),
+                artwork_url: Some(Some("https://art.test/ram-album.jpg".to_owned())),
             }));
             dto.artwork_url = Some(Some("https://art.test/ram.jpg".to_owned()));
 
@@ -439,7 +449,11 @@ mod mapping {
             assert_eq!(album.title(), "Random Access Memories");
             assert_eq!(album.album_artist().unwrap().name(), "Daft Punk");
             assert_eq!(album.year(), Some(2013));
-            assert_eq!(album.release_type(), Some("Album"));
+            assert_eq!(album.release_type(), Some("album"));
+            assert_eq!(
+                album.artwork(),
+                Some(&ArtworkRef::url("https://art.test/ram-album.jpg".to_owned()).unwrap())
+            );
             assert_eq!(
                 album.provider().map(|provider| provider.external_id()),
                 Some("album-1")

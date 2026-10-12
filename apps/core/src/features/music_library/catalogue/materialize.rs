@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use crate::features::music_library::{
-    domain::{Album, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, SourceKind, TrackHit},
+    domain::{
+        Album, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtworkRef, SourceIdentity,
+        SourceKind, TrackHit,
+    },
     storage::contracts::{CatalogueWrite, SourceLookup},
 };
 
@@ -46,6 +49,7 @@ pub(crate) async fn materialize_album(
             .await
             .map_err(CatalogueError::Repository)?
     {
+        store_album_artwork(sources, source, metadata.artwork()).await;
         return Ok(album);
     }
 
@@ -61,8 +65,22 @@ pub(crate) async fn materialize_album(
             .set_album_source(album.id(), source)
             .await
             .map_err(CatalogueError::Repository)?;
+        store_album_artwork(sources, source, metadata.artwork()).await;
     }
     Ok(album)
+}
+
+async fn store_album_artwork(
+    sources: &Arc<dyn SourceLookup>,
+    source: &SourceIdentity,
+    artwork: Option<&ArtworkRef>,
+) {
+    let Some(artwork) = artwork else {
+        return;
+    };
+    if let Err(error) = sources.set_album_source_artwork(source, artwork).await {
+        tracing::warn!(%error, "album artwork could not be stored");
+    }
 }
 
 pub(crate) async fn materialize(
@@ -138,3 +156,7 @@ pub(crate) async fn materialize(
 
     Ok(hits)
 }
+
+#[cfg(all(test, feature = "postgres-integration"))]
+#[path = "materialize_tests.rs"]
+mod tests;

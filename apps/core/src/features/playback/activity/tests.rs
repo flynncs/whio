@@ -8,9 +8,9 @@ use uuid::Uuid;
 use crate::features::music_library::{
     catalogue::LibraryService,
     domain::{
-        ListenCount, ListenCoverage, ListenOrigin, ListenOutcome, ListenPage, ListenQuery,
-        ListenSubmission, ListenWindow, SourceIdentity, Track, TrackId, TrackListFilter,
-        TrackMetadata, TrackOrder, TrackPage, TrackView,
+        AlbumId, ArtworkRef, ListenCount, ListenCoverage, ListenOrigin, ListenOutcome, ListenPage,
+        ListenQuery, ListenSubmission, ListenWindow, SourceIdentity, Track, TrackId,
+        TrackListFilter, TrackMetadata, TrackOrder, TrackPage, TrackView,
     },
     history::ListenService,
     test_support::{LibraryRead, ListenStore, SourceLookup, StateStore, TrackRepositoryError},
@@ -79,6 +79,21 @@ impl SourceLookup for NoSources {
         _track_id: &TrackId,
     ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
         Ok(Vec::new())
+    }
+
+    async fn set_album_source_artwork(
+        &self,
+        _source: &SourceIdentity,
+        _artwork: &ArtworkRef,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn find_album_artwork(
+        &self,
+        _album_id: &AlbumId,
+    ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+        Ok(None)
     }
 }
 

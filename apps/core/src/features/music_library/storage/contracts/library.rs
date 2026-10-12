@@ -267,6 +267,23 @@ pub trait SourceLookup: Send + Sync {
         Ok(None)
     }
 
+    async fn set_album_source_artwork(
+        &self,
+        source: &SourceIdentity,
+        artwork: &crate::features::music_library::domain::ArtworkRef,
+    ) -> Result<(), TrackRepositoryError>;
+
+    async fn find_album_artwork(
+        &self,
+        album_id: &AlbumId,
+    ) -> Result<
+        Option<(
+            SourceIdentity,
+            crate::features::music_library::domain::ArtworkRef,
+        )>,
+        TrackRepositoryError,
+    >;
+
     async fn find_source_file_facts(
         &self,
         _source: &SourceIdentity,

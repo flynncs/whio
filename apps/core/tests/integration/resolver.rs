@@ -61,6 +61,7 @@ fn candidate_dto() -> CatalogueCandidateDto {
             ))),
             year: Some(Some(2013)),
             release_type: Some(Some("Album".to_owned())),
+            artwork_url: None,
         })),
         artwork_url: None,
     }
@@ -208,7 +209,8 @@ async fn resolver_server(
                         "source": {"provider_id": "youtube_music", "external_id": "UC-artist"}
                     }],
                     "year": 2021,
-                    "release_type": "Album"
+                    "release_type": "Album",
+                    "artwork_url": "https://art.test/sour.jpg"
                 }],
                 "next_offset": 25
             }))
@@ -300,6 +302,10 @@ async fn advertised_album_search_converts_candidates_and_cursor() {
     assert_eq!(
         page.items()[0].album_artist().unwrap().name(),
         "Olivia Rodrigo"
+    );
+    assert_eq!(
+        page.items()[0].artwork().map(|artwork| artwork.reference()),
+        Some("https://art.test/sour.jpg")
     );
     assert_eq!(page.next_offset().unwrap().get(), 25);
     assert_eq!(calls.load(Ordering::SeqCst), 1);

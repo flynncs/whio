@@ -644,6 +644,12 @@ components:
             - "null"
           minLength: 1
           maxLength: 100
+        artwork_url:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: Public artwork URL that the core fetches and proxies to clients.
 
     CatalogueArtistCandidate:
       type: object
@@ -746,6 +752,12 @@ components:
             - "null"
           minLength: 1
           maxLength: 100
+        artwork_url:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: Public artwork URL that the core fetches and proxies to clients.
 
     CatalogueEntityRequest:
       type: object

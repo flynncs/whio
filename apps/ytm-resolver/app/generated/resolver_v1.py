@@ -98,6 +98,10 @@ class CatalogueAlbum(BaseModel):
     )
     year: int | None = Field(None, ge=0)
     release_type: str | None = Field(None, max_length=100, min_length=1)
+    artwork_url: AnyUrl | None = Field(
+        None,
+        description='Public artwork URL that the core fetches and proxies to clients.',
+    )
 
 
 class CatalogueEntityRequest(BaseModel):
@@ -297,6 +301,10 @@ class CatalogueAlbumCandidate(BaseModel):
     artists: list[CatalogueArtist] = Field(..., min_length=1)
     year: int | None = Field(None, ge=0)
     release_type: str | None = Field(None, max_length=100, min_length=1)
+    artwork_url: AnyUrl | None = Field(
+        None,
+        description='Public artwork URL that the core fetches and proxies to clients.',
+    )
 
 
 class CatalogueCandidate(BaseModel):

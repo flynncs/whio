@@ -181,7 +181,7 @@ mod tests {
 
     use super::*;
     use crate::features::music_library::{
-        domain::{AlbumId, AlbumTrack, SourceIdentity, Track, TrackId, TrackMetadata},
+        domain::{AlbumId, AlbumTrack, ArtworkRef, SourceIdentity, Track, TrackId, TrackMetadata},
         storage::contracts::{CatalogueWrite, SourceLookup, TrackRepositoryError},
     };
 
@@ -222,6 +222,21 @@ mod tests {
             _track: &TrackId,
         ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
             panic!("status checks must not read sources")
+        }
+
+        async fn set_album_source_artwork(
+            &self,
+            _source: &SourceIdentity,
+            _artwork: &ArtworkRef,
+        ) -> Result<(), TrackRepositoryError> {
+            panic!("status checks must not write artwork")
+        }
+
+        async fn find_album_artwork(
+            &self,
+            _album_id: &AlbumId,
+        ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+            panic!("status checks must not read artwork")
         }
     }
 

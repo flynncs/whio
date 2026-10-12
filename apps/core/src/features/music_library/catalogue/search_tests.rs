@@ -24,8 +24,8 @@ use crate::{
     },
     features::music_library::{
         domain::{
-            Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, ProviderId,
-            SourceIdentity, SourceScope, Track, TrackMetadata,
+            Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, ArtworkRef,
+            ProviderId, SourceIdentity, SourceScope, Track, TrackMetadata,
         },
         storage::contracts::TrackRepositoryError,
         storage::postgres::PostgresTrackRepository,
@@ -111,6 +111,21 @@ impl SourceLookup for FailingTrackRepository {
         &self,
         _track_id: &crate::features::music_library::domain::TrackId,
     ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    async fn set_album_source_artwork(
+        &self,
+        _source: &SourceIdentity,
+        _artwork: &ArtworkRef,
+    ) -> Result<(), TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
+    async fn find_album_artwork(
+        &self,
+        _album_id: &AlbumId,
+    ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
         Err(TrackRepositoryError::Unavailable)
     }
 }
@@ -1907,6 +1922,7 @@ struct MemoryStore {
     hits: Mutex<Vec<SearchHit>>,
     albums: Mutex<Vec<Album>>,
     artists: Mutex<Vec<Artist>>,
+    artwork: Mutex<Vec<(SourceIdentity, ArtworkRef)>>,
     materialized: mpsc::UnboundedSender<Materialised>,
     fail_tracks: AtomicBool,
     fail_albums: AtomicBool,
@@ -1918,6 +1934,7 @@ impl MemoryStore {
             hits: Mutex::new(Vec::new()),
             albums: Mutex::new(Vec::new()),
             artists: Mutex::new(Vec::new()),
+            artwork: Mutex::new(Vec::new()),
             materialized,
             fail_tracks: AtomicBool::new(false),
             fail_albums: AtomicBool::new(false),
@@ -1951,6 +1968,10 @@ impl MemoryStore {
             .iter()
             .map(|artist| artist.name().to_owned())
             .collect()
+    }
+
+    fn artwork_writes(&self) -> Vec<(SourceIdentity, ArtworkRef)> {
+        self.artwork.lock().clone()
     }
 
     fn fail_tracks(&self) {
@@ -2116,6 +2137,22 @@ impl SourceLookup for MemoryStore {
             .map(|hit| hit.sources().to_vec())
             .unwrap_or_default())
     }
+
+    async fn set_album_source_artwork(
+        &self,
+        source: &SourceIdentity,
+        artwork: &ArtworkRef,
+    ) -> Result<(), TrackRepositoryError> {
+        self.artwork.lock().push((source.clone(), artwork.clone()));
+        Ok(())
+    }
+
+    async fn find_album_artwork(
+        &self,
+        _album_id: &AlbumId,
+    ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+        Ok(self.artwork.lock().first().cloned())
+    }
 }
 
 #[async_trait]
@@ -2136,6 +2173,9 @@ fn album_metadata() -> AlbumMetadata {
     AlbumMetadata::new("Beatopia".to_owned())
         .unwrap()
         .with_provider(Some(provider_source_for_test("album-1")))
+        .with_artwork(Some(
+            ArtworkRef::url("https://art.test/beatopia.jpg".to_owned()).unwrap(),
+        ))
 }
 
 fn artist_credit() -> ArtistCredit {
@@ -2758,6 +2798,13 @@ async fn a_held_album_provider_materialises_after_the_response() {
         Materialised::Album
     ));
     assert_eq!(store.album_titles(), vec!["Beatopia".to_owned()]);
+    assert_eq!(
+        store.artwork_writes(),
+        vec![(
+            provider_source_for_test("album-1"),
+            ArtworkRef::url("https://art.test/beatopia.jpg".to_owned()).unwrap()
+        )]
+    );
 }
 
 #[tokio::test(start_paused = true)]

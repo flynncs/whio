@@ -333,6 +333,25 @@ async fn add_album(
     album.id().clone()
 }
 
+async fn add_release_type_album(
+    fixture: &Fixture,
+    title: &str,
+    release_type: Option<&str>,
+) -> AlbumId {
+    let metadata = AlbumMetadata::new(title.to_owned())
+        .expect("valid album")
+        .with_release_type(release_type.map(str::to_owned))
+        .expect("valid release type");
+
+    fixture
+        .store
+        .resolve_or_create_album(&metadata)
+        .await
+        .expect("a stored album")
+        .id()
+        .clone()
+}
+
 async fn place(fixture: &Fixture, album: &AlbumId, track: &TrackId, position: u16) {
     fixture
         .store
@@ -1475,6 +1494,25 @@ async fn navidrome_album_without_an_album_artist(pool: PgPool) {
         body[0]["albumArtistId"],
         json!(credited.daft_punk.to_string())
     );
+}
+
+#[sqlx::test]
+async fn navidrome_album_tags_carry_the_canonical_release_type(pool: PgPool) {
+    let fixture = fixture(pool).await;
+    let single = add_release_type_album(&fixture, "Single", Some("Single")).await;
+    let album = add_release_type_album(&fixture, "Album", None).await;
+    for (album_id, external_id) in [(&single, "single.flac"), (&album, "album.flac")] {
+        let track = add_track(&fixture, MUSIC_ROOT, external_id, "Track", "Artist", &[]).await;
+        place(&fixture, album_id, &track, 1).await;
+    }
+
+    let (status, _, body) = get(&fixture, &format!("/album/{single}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["tags"], json!({"releasetype": ["single"]}));
+
+    let (status, _, body) = get(&fixture, &format!("/album/{album}")).await;
+    assert_eq!(status, StatusCode::OK);
+    absent(&body, "tags");
 }
 
 #[sqlx::test]

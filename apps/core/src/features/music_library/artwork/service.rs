@@ -367,7 +367,11 @@ impl ArtworkService {
             return Ok(Some(local));
         }
 
-        self.stored_for_entries(library, sources, &entries).await
+        if let Some(stored) = self.stored_for_entries(library, sources, &entries).await? {
+            return Ok(Some(stored));
+        }
+
+        self.stored_for_album(library, sources, album_id).await
     }
 
     async fn artist_artwork(
@@ -518,6 +522,23 @@ impl ArtworkService {
     ) -> Result<Option<Resolved>, ArtworkError> {
         let Some((_, artwork)) = sources
             .find_artwork(track_id)
+            .await
+            .map_err(ArtworkError::Repository)?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(Resolved::Remote(artwork.reference().to_owned())))
+    }
+
+    async fn stored_for_album(
+        &self,
+        _library: &Arc<dyn LibraryRead>,
+        sources: &Arc<dyn SourceLookup>,
+        album_id: &AlbumId,
+    ) -> Result<Option<Resolved>, ArtworkError> {
+        let Some((_, artwork)) = sources
+            .find_album_artwork(album_id)
             .await
             .map_err(ArtworkError::Repository)?
         else {

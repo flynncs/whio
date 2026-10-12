@@ -88,6 +88,8 @@ pub(crate) struct Album {
     pub(crate) cover_art: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) year: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tags: Option<AlbumTags>,
     pub(crate) created_at: String,
     #[serde(skip_serializing_if = "is_false")]
     pub(crate) starred: bool,
@@ -99,6 +101,12 @@ pub(crate) struct Album {
     pub(crate) play_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) play_date: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AlbumTags {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) releasetype: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]

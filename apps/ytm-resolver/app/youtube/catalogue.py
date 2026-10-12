@@ -138,13 +138,14 @@ class YouTubeMusicCatalogue:
             raise ProviderUnavailableError(
                 "The provider is temporarily unavailable"
             ) from error
+        artwork_url = parse_artwork_url(album.get("thumbnails"))
         album_identity = CatalogueAlbum(
             title=album["title"],
             source=source,
             year=parse_year(album.get("year")),
             release_type=parse_release_type(album.get("type")),
+            artwork_url=artwork_url,
         )
-        artwork_url = parse_artwork_url(album.get("thumbnails"))
         album_artists = album.get("artists")
 
         return CatalogueCandidatesResponse(
@@ -190,6 +191,7 @@ def normalize_album_result(
         artists=named_artists,
         year=nonnegative_year(result.get("year")),
         release_type=bounded_release_type(result.get("type")),
+        artwork_url=parse_artwork_url(result.get("thumbnails")),
     )
 
 

@@ -21,10 +21,10 @@ use crate::features::music_library::discovery::{
 };
 use crate::features::music_library::domain::normalize_for_matching;
 use crate::features::music_library::domain::{
-    Album, AlbumId, AlbumSummary, Artist, ArtistCredit, ArtistId, EnrichmentSubject, LibraryState,
-    ListenQuery, ListenRecord, ListenWindow, PageLimit, ProviderId, SourceIdentity, SourceScope,
-    Track, TrackHit, TrackId, TrackListFilter, TrackListScope, TrackMetadata, TrackOrder,
-    TrackPage, TrackView,
+    Album, AlbumId, AlbumSummary, Artist, ArtistCredit, ArtistId, ArtworkRef, EnrichmentSubject,
+    LibraryState, ListenQuery, ListenRecord, ListenWindow, PageLimit, ProviderId, SourceIdentity,
+    SourceScope, Track, TrackHit, TrackId, TrackListFilter, TrackListScope, TrackMetadata,
+    TrackOrder, TrackPage, TrackView,
 };
 use crate::features::music_library::test_support::{
     LibraryRead, ListenStore, SourceLookup, StateStore, TrackRepositoryError,
@@ -311,6 +311,21 @@ impl SourceLookup for FakeSources {
         Ok(artist_id.map(|id| {
             Artist::new(id, "Found Artist".to_owned(), None, None).expect("a found artist")
         }))
+    }
+
+    async fn set_album_source_artwork(
+        &self,
+        _source: &SourceIdentity,
+        _artwork: &ArtworkRef,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn find_album_artwork(
+        &self,
+        _album_id: &AlbumId,
+    ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+        Ok(None)
     }
 }
 

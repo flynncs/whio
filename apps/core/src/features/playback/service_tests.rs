@@ -9,7 +9,9 @@ use parking_lot::Mutex;
 
 use super::*;
 use crate::{
-    features::music_library::domain::{ProviderId, SourceIdentity, SourceScope},
+    features::music_library::domain::{
+        AlbumId, ArtworkRef, ProviderId, SourceIdentity, SourceScope,
+    },
     features::playback::media::MediaFetchError,
     features::playback::{MediaMetadata, PlayableMedia, PlaybackUrl, SourceKey},
     platform::request::RequestId,
@@ -142,6 +144,21 @@ impl SourceLookup for ScriptedSources {
             .lock()
             .pop_front()
             .expect("unexpected source query")
+    }
+
+    async fn set_album_source_artwork(
+        &self,
+        _source: &SourceIdentity,
+        _artwork: &ArtworkRef,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn find_album_artwork(
+        &self,
+        _album_id: &AlbumId,
+    ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+        Ok(None)
     }
 }
 

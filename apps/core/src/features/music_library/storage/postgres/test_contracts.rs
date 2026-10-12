@@ -280,6 +280,55 @@ async fn artwork_resolves_from_the_source_that_stored_it(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test]
+async fn album_source_artwork_is_stored_and_replaced(pool: sqlx::PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let source = source("youtube_music", "MPREb_album");
+    let album = repository
+        .resolve_or_create_album(&album_metadata("Album"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &source)
+        .await
+        .unwrap();
+
+    repository
+        .set_album_source_artwork(
+            &source,
+            &ArtworkRef::url("https://art.test/first.jpg".to_owned()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let (owner, artwork) = repository
+        .find_album_artwork(album.id())
+        .await
+        .unwrap()
+        .expect("album artwork is stored");
+    assert_eq!(owner.provider_id().as_str(), "youtube_music");
+    assert_eq!(
+        artwork,
+        ArtworkRef::url("https://art.test/first.jpg".to_owned()).unwrap()
+    );
+
+    repository
+        .set_album_source_artwork(
+            &source,
+            &ArtworkRef::url("https://art.test/second.jpg".to_owned()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let (_, artwork) = repository
+        .find_album_artwork(album.id())
+        .await
+        .unwrap()
+        .expect("album artwork is replaced");
+    assert_eq!(
+        artwork,
+        ArtworkRef::url("https://art.test/second.jpg".to_owned()).unwrap()
+    );
+}
+
+#[sqlx::test]
 async fn artist_ladder_prefers_identifiers_then_normalised_names(pool: sqlx::PgPool) {
     let repository = PostgresTrackRepository::new(pool.clone());
 

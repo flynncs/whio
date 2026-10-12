@@ -298,6 +298,21 @@ impl SourceLookup for Walk {
     ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
         Ok(None)
     }
+
+    async fn set_album_source_artwork(
+        &self,
+        _source: &SourceIdentity,
+        _artwork: &ArtworkRef,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn find_album_artwork(
+        &self,
+        _album_id: &AlbumId,
+    ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+        Ok(None)
+    }
 }
 
 impl StateStore for Walk {}

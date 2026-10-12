@@ -64,6 +64,7 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
         self.assertEqual(album.source.external_id, "MPREb_album")
         self.assertEqual(album.year, 2021)
         self.assertEqual(album.release_type, "Album")
+        self.assertEqual(str(album.artwork_url), "https://art.test/sour.jpg")
         self.assertEqual(
             response.results[0].artists[0].source.external_id, "artist-1"
         )
@@ -77,6 +78,40 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
         self.assertEqual(
             str(response.results[0].artwork_url), "https://art.test/sour.jpg"
         )
+
+    def test_album_search_keeps_the_largest_thumbnail(self) -> None:
+        client = Mock()
+        client.search.return_value = [
+            {
+                "browseId": "MPREb_album",
+                "title": "SOUR",
+                "artists": [{"name": "Olivia Rodrigo"}],
+                "thumbnails": [
+                    {"url": "https://art.test/small.jpg", "width": 60, "height": 60},
+                    {"url": "https://art.test/large.jpg", "width": 544, "height": 544},
+                ],
+            }
+        ]
+
+        page = YouTubeMusicCatalogue(client).search_albums("SOUR", 5)
+
+        self.assertEqual(
+            str(page.results[0].artwork_url), "https://art.test/large.jpg"
+        )
+
+    def test_album_search_without_thumbnails_has_no_artwork(self) -> None:
+        client = Mock()
+        client.search.return_value = [
+            {
+                "browseId": "MPREb_album",
+                "title": "SOUR",
+                "artists": [{"name": "Olivia Rodrigo"}],
+            }
+        ]
+
+        page = YouTubeMusicCatalogue(client).search_albums("SOUR", 5)
+
+        self.assertIsNone(page.results[0].artwork_url)
 
     def test_album_search_slices_raw_rows_before_dropping_invalid_rows(self) -> None:
         client = Mock()

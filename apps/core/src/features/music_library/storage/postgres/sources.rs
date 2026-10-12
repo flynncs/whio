@@ -172,22 +172,48 @@ impl SourceLookup for PgStore {
         .await
         .map_err(repository_error)?;
 
-        let mut best: Option<(SourceIdentity, ArtworkRef)> = None;
-        for (provider_id, source_scope, external_id, reference) in rows {
-            let source = decode_source(provider_id, source_scope, external_id)?;
-            let artwork = ArtworkRef::from_stored(reference)
-                .map_err(|_| TrackRepositoryError::InvalidData)?;
+        select_artwork(rows)
+    }
 
-            let outranks = best.as_ref().is_none_or(|(current, _)| {
-                source.provider_id().precedence() < current.provider_id().precedence()
-            });
+    async fn set_album_source_artwork(
+        &self,
+        source: &SourceIdentity,
+        artwork: &ArtworkRef,
+    ) -> Result<(), TrackRepositoryError> {
+        sqlx::query(
+            r#"UPDATE album_sources
+            SET artwork_ref = $1
+            WHERE provider_id = $2 AND source_scope = $3 AND external_id = $4
+            "#,
+        )
+        .bind(artwork.reference())
+        .bind(source.provider_id().as_str())
+        .bind(encode_source_scope(source.source_scope()))
+        .bind(source.external_id())
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(repository_error)
+    }
 
-            if outranks {
-                best = Some((source, artwork));
-            }
-        }
+    async fn find_album_artwork(
+        &self,
+        album_id: &AlbumId,
+    ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            r#"SELECT provider_id, source_scope, external_id, artwork_ref
+            FROM album_sources
+            WHERE album_id = $1
+              AND artwork_ref IS NOT NULL
+            ORDER BY created_at, id
+            "#,
+        )
+        .bind(album_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
 
-        Ok(best)
+        select_artwork(rows)
     }
 
     async fn find_source_file_facts(
@@ -234,4 +260,25 @@ impl SourceLookup for PgStore {
 
         rows.into_iter().map(decode_scanned_path).collect()
     }
+}
+
+fn select_artwork(
+    rows: Vec<(String, String, String, String)>,
+) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+    let mut best: Option<(SourceIdentity, ArtworkRef)> = None;
+    for (provider_id, source_scope, external_id, reference) in rows {
+        let source = decode_source(provider_id, source_scope, external_id)?;
+        let artwork =
+            ArtworkRef::from_stored(reference).map_err(|_| TrackRepositoryError::InvalidData)?;
+
+        let outranks = best.as_ref().is_none_or(|(current, _)| {
+            source.provider_id().precedence() < current.provider_id().precedence()
+        });
+
+        if outranks {
+            best = Some((source, artwork));
+        }
+    }
+
+    Ok(best)
 }

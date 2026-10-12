@@ -56,9 +56,9 @@ use crate::features::music_library::discovery::{
     DiscoveryBasis, DiscoverySeed, DiscoveryService, RelatedRequest, TopRequest,
 };
 use crate::features::music_library::domain::{
-    Artist, ArtistId, EnrichmentSubject, ListenCount, ListenCoverage, ListenOutcome, ListenPage,
-    ListenQuery, ListenSubmission, ListenWindow, PageLimit, ProviderId, RefreshDemand,
-    SourceIdentity, SourceScope, Track, TrackId, TrackView,
+    AlbumId, Artist, ArtistId, ArtworkRef, EnrichmentSubject, ListenCount, ListenCoverage,
+    ListenOutcome, ListenPage, ListenQuery, ListenSubmission, ListenWindow, PageLimit, ProviderId,
+    RefreshDemand, SourceIdentity, SourceScope, Track, TrackId, TrackView,
 };
 use crate::features::music_library::storage::contracts::ArtworkStore;
 use crate::features::music_library::test_support::{
@@ -335,6 +335,21 @@ impl SourceLookup for FakeSources {
         _artist_id: &ArtistId,
     ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
         Ok(self.identities.clone())
+    }
+
+    async fn set_album_source_artwork(
+        &self,
+        _source: &SourceIdentity,
+        _artwork: &ArtworkRef,
+    ) -> Result<(), TrackRepositoryError> {
+        Ok(())
+    }
+
+    async fn find_album_artwork(
+        &self,
+        _album_id: &AlbumId,
+    ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+        Ok(None)
     }
 }
 

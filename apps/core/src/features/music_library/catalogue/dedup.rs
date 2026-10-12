@@ -466,6 +466,28 @@ mod tests {
         > {
             Ok(vec![])
         }
+
+        async fn set_album_source_artwork(
+            &self,
+            _: &crate::features::music_library::domain::SourceIdentity,
+            _: &crate::features::music_library::domain::ArtworkRef,
+        ) -> Result<(), crate::features::music_library::storage::contracts::TrackRepositoryError>
+        {
+            Ok(())
+        }
+
+        async fn find_album_artwork(
+            &self,
+            _: &crate::features::music_library::domain::AlbumId,
+        ) -> Result<
+            Option<(
+                crate::features::music_library::domain::SourceIdentity,
+                crate::features::music_library::domain::ArtworkRef,
+            )>,
+            crate::features::music_library::storage::contracts::TrackRepositoryError,
+        > {
+            Ok(None)
+        }
     }
     impl crate::features::music_library::storage::contracts::StateStore for UnusableCandidates {}
     impl crate::features::music_library::storage::contracts::DuplicateReport for UnusableCandidates {}

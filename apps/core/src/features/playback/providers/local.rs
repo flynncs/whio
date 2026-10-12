@@ -116,7 +116,9 @@ fn repository_error(error: SourceQueryError) -> ProviderError {
 mod tests {
     use super::*;
     use crate::{
-        features::music_library::domain::{ProviderId, SourceIdentity, TrackId},
+        features::music_library::domain::{
+            AlbumId, ArtworkRef, ProviderId, SourceIdentity, TrackId,
+        },
         features::music_library::test_support::{
             SourceFileFacts, SourceLookup, TrackRepositoryError,
         },
@@ -144,6 +146,21 @@ mod tests {
         ) -> Result<Option<SourceFileFacts>, TrackRepositoryError> {
             assert_eq!(source, &self.source);
             Ok(self.facts.clone())
+        }
+
+        async fn set_album_source_artwork(
+            &self,
+            _source: &SourceIdentity,
+            _artwork: &ArtworkRef,
+        ) -> Result<(), TrackRepositoryError> {
+            Ok(())
+        }
+
+        async fn find_album_artwork(
+            &self,
+            _album_id: &AlbumId,
+        ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+            Ok(None)
         }
     }
 

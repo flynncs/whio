@@ -140,6 +140,28 @@ async fn album_with(
     album.id().clone()
 }
 
+async fn album_with_source_artwork(
+    repository: &Arc<PostgresTrackRepository>,
+    external_id: &str,
+    reference: &str,
+) -> AlbumId {
+    let source = remote_source(external_id);
+    let album = repository
+        .resolve_or_create_album(&AlbumMetadata::new("Album".to_owned()).unwrap())
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &source)
+        .await
+        .unwrap();
+    repository
+        .set_album_source_artwork(&source, &ArtworkRef::url(reference.to_owned()).unwrap())
+        .await
+        .unwrap();
+
+    album.id().clone()
+}
+
 fn service(repository: Arc<PostgresTrackRepository>) -> ArtworkService {
     ArtworkService::new(
         Arc::clone(&repository) as Arc<dyn LibraryRead>,
@@ -248,6 +270,47 @@ async fn album_art_walks_members_and_falls_back_to_stored_artwork(pool: sqlx::Pg
     ));
 
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[sqlx::test]
+async fn a_memberless_provider_album_serves_its_source_artwork(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album =
+        album_with_source_artwork(&repository, "MPREb_album", "https://art.test/album.jpg").await;
+
+    let resolved = service(repository)
+        .resolve(CoverArtTarget::Album(album))
+        .await
+        .unwrap()
+        .expect("album source art");
+
+    assert!(matches!(
+        resolved,
+        Resolved::Remote(reference) if reference == "https://art.test/album.jpg"
+    ));
+}
+
+#[sqlx::test]
+async fn member_art_wins_over_album_source_art(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album =
+        album_with_source_artwork(&repository, "MPREb_album", "https://art.test/album.jpg").await;
+    let member = add_stored_remote_track(&repository, "vid-1").await;
+    repository
+        .set_album_track(&album, &member, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let resolved = service(repository)
+        .resolve(CoverArtTarget::Album(album))
+        .await
+        .unwrap()
+        .expect("member art");
+
+    assert!(matches!(
+        resolved,
+        Resolved::Remote(reference) if reference == "https://art.test/remote.jpg"
+    ));
 }
 
 #[sqlx::test]

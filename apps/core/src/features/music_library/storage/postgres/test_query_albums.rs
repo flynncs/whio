@@ -14,7 +14,9 @@ use crate::features::music_library::{
     },
     library::LibraryId,
     library_state::test_support::seed_play,
-    storage::contracts::{CatalogueWrite, LibraryRead, StateStore, TrackRepositoryError},
+    storage::contracts::{
+        CatalogueWrite, LibraryRead, SourceLookup, StateStore, TrackRepositoryError,
+    },
 };
 
 const LOCAL_ROOT: &str = "/music";
@@ -2290,4 +2292,90 @@ async fn full_text_album_filters_match_all_terms_and_text_fields(pool: PgPool) {
         [glue.id().clone()]
     );
     assert_eq!(total(&repository, &combined, None).await, 1);
+}
+
+#[sqlx::test]
+async fn release_types_are_canonical_on_write(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let source = source("youtube_music", "MPREb_single");
+    let album = repository
+        .resolve_or_create_album(
+            &album("Single")
+                .with_release_type(Some("  SINGLE  ".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &source)
+        .await
+        .unwrap();
+
+    let stored = repository
+        .find_album_by_source(&source)
+        .await
+        .unwrap()
+        .expect("the album is stored");
+
+    assert_eq!(stored.release_type(), Some("single"));
+}
+
+#[sqlx::test]
+async fn mixed_case_release_types_read_lowercase_after_migrating(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let kept = repository
+        .resolve_or_create_album(&album("Single"))
+        .await
+        .unwrap();
+    let blank = repository
+        .resolve_or_create_album(&album("Blank"))
+        .await
+        .unwrap();
+
+    sqlx::query("UPDATE albums SET release_type = 'Single' WHERE id = $1")
+        .bind(kept.id().as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE albums SET release_type = '  ' WHERE id = $1")
+        .bind(blank.id().as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query("ALTER TABLE album_sources DROP COLUMN artwork_ref")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 35")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::migrate!().run(&pool).await.unwrap();
+
+    let release_type: Option<String> =
+        sqlx::query_scalar("SELECT release_type FROM albums WHERE id = $1")
+            .bind(kept.id().as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(release_type.as_deref(), Some("single"));
+
+    let blank_release_type: Option<String> =
+        sqlx::query_scalar("SELECT release_type FROM albums WHERE id = $1")
+            .bind(blank.id().as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(blank_release_type, None);
+
+    let artwork_column: Option<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_name = 'album_sources' AND column_name = 'artwork_ref'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert_eq!(artwork_column.as_deref(), Some("artwork_ref"));
 }

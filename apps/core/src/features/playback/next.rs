@@ -180,9 +180,9 @@ pub(crate) mod fixtures {
     use crate::features::music_library::{
         catalogue::{LibraryService, TrackListFilter, TrackOrder},
         domain::{
-            Album, AlbumId, LibraryState, ProviderId, RestoreQueueEntry, RestoreQueueEntryId,
-            RestoreQueueSnapshot, RestoreQueueWrite, RestoreQueueWriteOutcome, SourceIdentity,
-            SourceScope, Track, TrackId, TrackMetadata, TrackPage, TrackView,
+            Album, AlbumId, ArtworkRef, LibraryState, ProviderId, RestoreQueueEntry,
+            RestoreQueueEntryId, RestoreQueueSnapshot, RestoreQueueWrite, RestoreQueueWriteOutcome,
+            SourceIdentity, SourceScope, Track, TrackId, TrackMetadata, TrackPage, TrackView,
         },
         queue::RestoreQueueService,
         test_support::{
@@ -228,6 +228,21 @@ pub(crate) mod fixtures {
             track_id: &TrackId,
         ) -> Result<Vec<SourceIdentity>, TrackRepositoryError> {
             Ok(self.sources.get(track_id).cloned().unwrap_or_default())
+        }
+
+        async fn set_album_source_artwork(
+            &self,
+            _source: &SourceIdentity,
+            _artwork: &ArtworkRef,
+        ) -> Result<(), TrackRepositoryError> {
+            Ok(())
+        }
+
+        async fn find_album_artwork(
+            &self,
+            _album_id: &AlbumId,
+        ) -> Result<Option<(SourceIdentity, ArtworkRef)>, TrackRepositoryError> {
+            Ok(None)
         }
     }
 

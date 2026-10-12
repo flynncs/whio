@@ -6,8 +6,8 @@ use std::{
 use uuid::Uuid;
 
 use super::{
-    Artist, ArtistCredit, ArtistId, FullTextSelector, IdSet, LibraryState, MatchQuality,
-    RandomSeed, Range, RoleSet, SelectorText, SortDirection, SourceIdentity,
+    Artist, ArtistCredit, ArtistId, ArtworkRef, FullTextSelector, IdSet, LibraryState,
+    MatchQuality, RandomSeed, Range, RoleSet, SelectorText, SortDirection, SourceIdentity,
     SourceRepresentationFacts, Track, TrackView, ValidationError,
     text::{optional, required},
 };
@@ -86,7 +86,7 @@ impl Album {
             title: required("title", title, MAX_TITLE)?,
             album_artist_id,
             year: checked_year(year)?,
-            release_type: optional("release_type", release_type, MAX_IDENTIFIER)?,
+            release_type: canonical_release_type(release_type)?,
             label: optional("label", label, MAX_TEXT)?,
             musicbrainz_release_group_id: optional(
                 "musicbrainz_release_group_id",
@@ -256,6 +256,7 @@ pub struct AlbumMetadata {
     release_country: Option<String>,
     compilation: Option<bool>,
     provider: Option<SourceIdentity>,
+    artwork: Option<ArtworkRef>,
 }
 
 impl AlbumMetadata {
@@ -272,6 +273,7 @@ impl AlbumMetadata {
             release_country: None,
             compilation: None,
             provider: None,
+            artwork: None,
         })
     }
 
@@ -282,6 +284,15 @@ impl AlbumMetadata {
 
     pub fn provider(&self) -> Option<&SourceIdentity> {
         self.provider.as_ref()
+    }
+
+    pub fn with_artwork(mut self, artwork: Option<ArtworkRef>) -> Self {
+        self.artwork = artwork;
+        self
+    }
+
+    pub fn artwork(&self) -> Option<&ArtworkRef> {
+        self.artwork.as_ref()
     }
 
     pub fn with_album_artist(mut self, album_artist: ArtistCredit) -> Self {
@@ -298,7 +309,7 @@ impl AlbumMetadata {
         mut self,
         release_type: Option<String>,
     ) -> Result<Self, ValidationError> {
-        self.release_type = optional("release_type", release_type, MAX_IDENTIFIER)?;
+        self.release_type = canonical_release_type(release_type)?;
         Ok(self)
     }
 
@@ -922,6 +933,11 @@ impl AlbumEntry {
     }
 }
 
+fn canonical_release_type(value: Option<String>) -> Result<Option<String>, ValidationError> {
+    Ok(optional("release_type", value, MAX_IDENTIFIER)?
+        .map(|release_type| release_type.to_lowercase()))
+}
+
 fn checked_year(year: Option<i32>) -> Result<Option<i32>, ValidationError> {
     if let Some(year) = year
         && !(MIN_YEAR..=MAX_YEAR).contains(&i64::from(year))
@@ -967,6 +983,28 @@ mod tests {
         assert_eq!(metadata.release_type(), Some("album"));
         assert_eq!(metadata.label(), None);
         assert_eq!(metadata.musicbrainz_release_group_id(), Some("rg-1"));
+    }
+
+    #[test]
+    fn release_types_are_canonical_lowercase_on_both_album_types() {
+        let metadata = AlbumMetadata::new("Single".to_owned())
+            .unwrap()
+            .with_release_type(Some("  SINGLE ".to_owned()))
+            .unwrap();
+        assert_eq!(metadata.release_type(), Some("single"));
+
+        let album = Album::new(
+            AlbumId::new(),
+            "Single".to_owned(),
+            None,
+            None,
+            Some("EP".to_owned()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(album.release_type(), Some("ep"));
     }
 
     #[test]
