@@ -257,6 +257,15 @@ impl ArtworkService {
                     return Ok(Some(resolved));
                 }
 
+                if let Some(album) = library
+                    .find_album_for_track(&track_id)
+                    .await
+                    .map_err(ArtworkError::Repository)?
+                    && let Some(resolved) = self.album_artwork(library, sources, album.id()).await?
+                {
+                    return Ok(Some(resolved));
+                }
+
                 let uuid = *track_id.as_uuid();
                 if let Some(resolved) = self
                     .album_artwork(library, sources, &AlbumId::from_uuid(uuid))

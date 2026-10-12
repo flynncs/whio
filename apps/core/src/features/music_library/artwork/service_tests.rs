@@ -314,6 +314,216 @@ async fn member_art_wins_over_album_source_art(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test]
+async fn a_track_without_own_art_borrows_album_source_art(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let album =
+        album_with_source_artwork(&repository, "album-cover", "https://art.test/album.jpg").await;
+    let track = repository
+        .get_or_create(remote_source("bare-track"), track_metadata("Bare"))
+        .await
+        .unwrap();
+    repository
+        .set_album_track(&album, track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let resolved = service(repository)
+        .resolve(CoverArtTarget::Track(track.id().clone()))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        resolved,
+        Some(Resolved::Remote(reference)) if reference == "https://art.test/album.jpg"
+    ));
+}
+
+#[sqlx::test]
+async fn a_track_borrows_local_art_from_an_album_member(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let root = pictured_root("borrow-member");
+    let pictured = add_local_track(&repository, &root, "pictured-member").await;
+    let bare = repository
+        .get_or_create(remote_source("bare-member"), track_metadata("Bare"))
+        .await
+        .unwrap();
+    let album = album_with(&repository, None, &[bare.id().clone(), pictured]).await;
+    let service = service(repository);
+
+    let ArtworkOutcome::Found(cover) = service
+        .load(CoverArtTarget::Album(album), None, Some(300))
+        .await
+        .unwrap()
+    else {
+        panic!("expected album artwork");
+    };
+    let expected = cover.into_parts();
+    let ArtworkOutcome::Found(cover) = service
+        .load(CoverArtTarget::Track(bare.id().clone()), None, Some(300))
+        .await
+        .unwrap()
+    else {
+        panic!("expected borrowed artwork");
+    };
+    assert_eq!(cover.into_parts(), expected);
+    assert!(matches!(
+        service
+            .load(CoverArtTarget::Track(bare.id().clone()), Some(&expected.2), Some(300))
+            .await
+            .unwrap(),
+        ArtworkOutcome::NotModified(etag) if etag == expected.2
+    ));
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[sqlx::test]
+async fn a_tracks_stored_art_beats_its_albums_local_art(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let own = add_stored_remote_track(&repository, "own-cover").await;
+    let root = pictured_root("own-stored");
+    let member = add_local_track(&repository, &root, "album-member").await;
+    album_with(&repository, None, &[own.clone(), member]).await;
+
+    let resolved = service(repository)
+        .resolve(CoverArtTarget::Track(own))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        resolved,
+        Some(Resolved::Remote(reference)) if reference == "https://art.test/remote.jpg"
+    ));
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[sqlx::test]
+async fn a_tracks_local_art_beats_its_albums_stored_art(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let album =
+        album_with_source_artwork(&repository, "album-cover", "https://art.test/album.jpg").await;
+    let root = pictured_root("own-local");
+    let own = add_local_track(&repository, &root, "own-cover").await;
+    repository
+        .set_album_track(&album, &own, &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    let resolved = service(repository)
+        .resolve(CoverArtTarget::Track(own))
+        .await
+        .unwrap();
+
+    assert!(matches!(resolved, Some(Resolved::Local { path, .. }) if path == root.join("a.flac")));
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[sqlx::test]
+async fn track_art_uses_primary_album_library_then_library_member_then_id(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let track = repository
+        .get_or_create(remote_source("bare-track"), track_metadata("Bare"))
+        .await
+        .unwrap();
+    let mut albums = Vec::new();
+    for title in ["First", "Second", "Third"] {
+        let album = repository
+            .resolve_or_create_album(&AlbumMetadata::new(title.to_owned()).unwrap())
+            .await
+            .unwrap();
+        repository
+            .add_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+        albums.push(album.id().clone());
+    }
+    albums.sort_by_key(|album| *album.as_uuid());
+    for (index, album) in albums.iter().enumerate() {
+        let source = remote_source(&format!("album-{index}"));
+        repository.set_album_source(album, &source).await.unwrap();
+        repository
+            .set_album_source_artwork(
+                &source,
+                &ArtworkRef::url(format!("https://art.test/album-{index}.jpg")).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let service = service(Arc::clone(&repository));
+    let target = CoverArtTarget::Track(track.id().clone());
+    assert!(matches!(
+        service.resolve(target.clone()).await.unwrap(),
+        Some(Resolved::Remote(reference)) if reference == "https://art.test/album-0.jpg"
+    ));
+
+    let local = repository
+        .get_or_create(
+            local_source(Path::new("/unused"), "library-member"),
+            track_metadata("Local member"),
+        )
+        .await
+        .unwrap();
+    repository
+        .add_album_track(&albums[1], local.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.resolve(target.clone()).await.unwrap(),
+        Some(Resolved::Remote(reference)) if reference == "https://art.test/album-1.jpg"
+    ));
+
+    repository
+        .set_album_source(
+            &albums[2],
+            &local_source(Path::new("/unused"), "library-album"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.resolve(target).await.unwrap(),
+        Some(Resolved::Remote(reference)) if reference == "https://art.test/album-2.jpg"
+    ));
+}
+
+#[sqlx::test]
+async fn a_track_does_not_borrow_art_from_a_non_primary_album(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let covered =
+        album_with_source_artwork(&repository, "covered-album", "https://art.test/album.jpg").await;
+    let bare = repository
+        .get_or_create(remote_source("bare-track"), track_metadata("Bare"))
+        .await
+        .unwrap();
+    let primary = repository
+        .resolve_or_create_album(&AlbumMetadata::new("Primary".to_owned()).unwrap())
+        .await
+        .unwrap();
+    repository
+        .set_album_source(
+            primary.id(),
+            &local_source(Path::new("/unused"), "primary-album"),
+        )
+        .await
+        .unwrap();
+    for album in [&covered, primary.id()] {
+        repository
+            .add_album_track(album, bare.id(), &AlbumTrack::unplaced())
+            .await
+            .unwrap();
+    }
+
+    assert!(matches!(
+        service(repository)
+            .load(CoverArtTarget::Track(bare.id().clone()), None, None)
+            .await
+            .unwrap(),
+        ArtworkOutcome::Missing
+    ));
+}
+
+#[sqlx::test]
 async fn a_bare_album_id_resolves_album_art(pool: sqlx::PgPool) {
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let root = plain_root("bare");

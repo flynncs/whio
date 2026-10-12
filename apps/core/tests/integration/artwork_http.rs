@@ -235,6 +235,100 @@ async fn pictured_app(pool: PgPool) -> (axum::Router, String, String, String) {
     )
 }
 
+async fn album_borrowing_app(
+    pool: PgPool,
+    with_picture: bool,
+) -> (axum::Router, String, String, PathBuf) {
+    use whio_core::features::music_library::domain::{AlbumId, AlbumTrack, TrackId};
+    use whio_core::features::music_library::test_support::{CatalogueWrite, SourceLookup};
+
+    let (app, album_id, _, pictured_id) = pictured_app(pool.clone()).await;
+    let repository = PostgresTrackRepository::new(pool);
+    let sources = repository
+        .find_sources(&pictured_id.parse::<TrackId>().unwrap())
+        .await
+        .unwrap();
+    let SourceScope::Named(root) = sources[0].source_scope() else {
+        panic!("expected a local album member");
+    };
+    let root = PathBuf::from(root);
+    if !with_picture {
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tagged.flac"),
+            root.join("a.flac"),
+        )
+        .unwrap();
+    }
+    let source = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Global,
+        "bare-track".to_owned(),
+    )
+    .unwrap();
+    let track = repository.get_or_create(source, metadata()).await.unwrap();
+    repository
+        .set_album_track(
+            &album_id
+                .strip_prefix("al-")
+                .unwrap()
+                .parse::<AlbumId>()
+                .unwrap(),
+            track.id(),
+            &AlbumTrack::unplaced(),
+        )
+        .await
+        .unwrap();
+
+    (app, track.id().to_string(), album_id, root)
+}
+
+#[sqlx::test]
+async fn a_track_borrows_album_art_through_native_and_subsonic(pool: PgPool) {
+    let (app, track_id, album_id, root) = album_borrowing_app(pool, true).await;
+    let album = app
+        .clone()
+        .oneshot(subsonic_cover_art_request(&album_id))
+        .await
+        .unwrap();
+    assert_eq!(album.status(), StatusCode::OK);
+    let expected_type = album.headers()[header::CONTENT_TYPE].clone();
+    let expected_etag = album.headers()[header::ETAG].clone();
+    let expected_bytes = axum::body::to_bytes(album.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    for request in [
+        artwork_request(&track_id),
+        subsonic_cover_art_request(&track_id),
+    ] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], expected_type);
+        assert_eq!(response.headers()[header::ETAG], expected_etag);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(bytes, expected_bytes);
+    }
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[sqlx::test]
+async fn a_track_without_own_or_album_art_is_404_through_native_and_subsonic(pool: PgPool) {
+    let (app, track_id, _, root) = album_borrowing_app(pool, false).await;
+
+    for request in [
+        artwork_request(&track_id),
+        subsonic_cover_art_request(&track_id),
+    ] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn subsonic_cover_art_request(id: &str) -> Request<Body> {
     Request::builder()
         .method("GET")
