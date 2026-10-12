@@ -7,6 +7,7 @@ use whio_subsonic_api::models;
 pub(crate) const SUBSONIC_API_VERSION: &str = "1.16.1";
 pub(crate) const INDEX_BASED_QUEUE_EXTENSION: &str = "indexBasedQueue";
 pub(crate) const PLAYBACK_REPORT_EXTENSION: &str = "playbackReport";
+pub(crate) const SONG_LYRICS_EXTENSION: &str = "songLyrics";
 const SERVER_TYPE: &str = "whio";
 
 #[derive(Clone, Copy, Debug)]
@@ -80,6 +81,10 @@ pub(crate) fn extensions_envelope() -> models::GetOpenSubsonicExtensionsResponse
                             },
                             models::OpenSubsonicExtension {
                                 name: PLAYBACK_REPORT_EXTENSION.to_owned(),
+                                versions: vec![1],
+                            },
+                            models::OpenSubsonicExtension {
+                                name: SONG_LYRICS_EXTENSION.to_owned(),
                                 versions: vec![1],
                             },
                         ],
@@ -594,6 +599,149 @@ pub(crate) fn play_queue_by_index_envelope(
                     open_subsonic: true,
                     status: models::get_play_queue_by_index_success_response::Status::Ok,
                     play_queue_by_index: Box::new(play_queue),
+                }),
+            ),
+        )),
+    }
+}
+
+pub(crate) fn music_folders_envelope(
+    folders: Vec<models::MusicFolder>,
+) -> models::GetMusicFoldersResponse {
+    models::GetMusicFoldersResponse {
+        subsonic_response: Some(Box::new(
+            models::GetMusicFoldersResponseSubsonicResponse::GetMusicFoldersSuccessResponse(
+                Box::new(models::GetMusicFoldersSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_music_folders_success_response::Status::Ok,
+                    music_folders: Box::new(models::MusicFolders {
+                        music_folder: Some(folders),
+                    }),
+                }),
+            ),
+        )),
+    }
+}
+
+pub(crate) fn license_envelope() -> models::GetLicenseResponse {
+    models::GetLicenseResponse {
+        subsonic_response: Some(Box::new(
+            models::GetLicenseResponseSubsonicResponse::GetLicenseSuccessResponse(Box::new(
+                models::GetLicenseSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_license_success_response::Status::Ok,
+                    license: Box::new(models::License::new(true)),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn bookmarks_envelope() -> models::GetBookmarksResponse {
+    models::GetBookmarksResponse {
+        subsonic_response: Some(Box::new(
+            models::GetBookmarksResponseSubsonicResponse::GetBookmarksSuccessResponse(Box::new(
+                models::GetBookmarksSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_bookmarks_success_response::Status::Ok,
+                    bookmarks: Box::new(models::Bookmarks::new()),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn shares_envelope() -> models::GetSharesResponse {
+    models::GetSharesResponse {
+        subsonic_response: Some(Box::new(
+            models::GetSharesResponseSubsonicResponse::GetSharesSuccessResponse(Box::new(
+                models::GetSharesSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_shares_success_response::Status::Ok,
+                    shares: Box::new(models::Shares::new()),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn internet_radio_stations_envelope() -> models::GetInternetRadioStationsResponse {
+    models::GetInternetRadioStationsResponse {
+        subsonic_response: Some(Box::new(
+            models::GetInternetRadioStationsResponseSubsonicResponse::
+                GetInternetRadioStationsSuccessResponse(Box::new(
+                    models::GetInternetRadioStationsSuccessResponse {
+                        version: SUBSONIC_API_VERSION.to_owned(),
+                        r#type: SERVER_TYPE.to_owned(),
+                        server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                        open_subsonic: true,
+                        status: models::get_internet_radio_stations_success_response::Status::Ok,
+                        internet_radio_stations: Box::new(models::InternetRadioStations::new()),
+                    },
+                )),
+        )),
+    }
+}
+
+pub(crate) fn podcasts_envelope() -> models::GetPodcastsResponse {
+    models::GetPodcastsResponse {
+        subsonic_response: Some(Box::new(
+            models::GetPodcastsResponseSubsonicResponse::GetPodcastsSuccessResponse(Box::new(
+                models::GetPodcastsSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_podcasts_success_response::Status::Ok,
+                    podcasts: Box::new(models::Podcasts::new()),
+                },
+            )),
+        )),
+    }
+}
+
+pub(crate) fn newest_podcasts_envelope() -> models::GetNewestPodcastsResponse {
+    models::GetNewestPodcastsResponse {
+        subsonic_response: Some(Box::new(
+            models::GetNewestPodcastsResponseSubsonicResponse::GetNewestPodcastsSuccessResponse(
+                Box::new(models::GetNewestPodcastsSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_newest_podcasts_success_response::Status::Ok,
+                    newest_podcasts: Box::new(models::NewestPodcasts::new()),
+                }),
+            ),
+        )),
+    }
+}
+
+pub(crate) fn lyrics_by_song_id_envelope() -> models::GetLyricsBySongIdResponse {
+    models::GetLyricsBySongIdResponse {
+        subsonic_response: Some(Box::new(
+            models::GetLyricsBySongIdResponseSubsonicResponse::GetLyricsBySongIdSuccessResponse(
+                Box::new(models::GetLyricsBySongIdSuccessResponse {
+                    version: SUBSONIC_API_VERSION.to_owned(),
+                    r#type: SERVER_TYPE.to_owned(),
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    open_subsonic: true,
+                    status: models::get_lyrics_by_song_id_success_response::Status::Ok,
+                    lyrics_list: Box::new(models::LyricsList {
+                        structured_lyrics: Some(Vec::new()),
+                    }),
                 }),
             ),
         )),

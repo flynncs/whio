@@ -396,6 +396,16 @@ pub(crate) async fn music_folder_scope(
     }
 }
 
+pub(crate) async fn music_folders(
+    libraries: &LibraryRegistry,
+) -> Result<Vec<models::MusicFolder>, BrowseError> {
+    match libraries.libraries().await {
+        Ok(libraries) => Ok(libraries.iter().map(mapping::music_folder).collect()),
+        Err(LibraryRegistrationError::Disabled) => Ok(Vec::new()),
+        Err(error) => Err(BrowseError::Registry(error)),
+    }
+}
+
 pub(crate) async fn genres(library: &LibraryService) -> Result<Vec<models::Genre>, BrowseError> {
     library
         .genres()

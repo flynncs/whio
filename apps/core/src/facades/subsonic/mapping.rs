@@ -9,6 +9,7 @@ use crate::{
         AlbumEntry, AlbumSummary, AlbumTrack, Artist, ArtistInformation, ArtistSummary,
         GenreSummary, LibraryState, Playlist, TrackView,
     },
+    features::music_library::library::Library,
     features::music_library::playlists::{PlaylistDetail, PlaylistEntry},
     features::playback::{ActivitySession, PlaybackState},
 };
@@ -387,6 +388,13 @@ pub(crate) fn genre_from_summary(summary: &GenreSummary) -> models::Genre {
         value: summary.genre().to_owned(),
         song_count: summary.song_count() as i32,
         album_count: summary.album_count() as i32,
+    }
+}
+
+pub(crate) fn music_folder(library: &Library) -> models::MusicFolder {
+    models::MusicFolder {
+        id: library.numeric_id(),
+        name: Some(library.label().to_owned()),
     }
 }
 

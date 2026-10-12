@@ -243,6 +243,10 @@ async fn open_subsonic_extensions_lists_the_advertised_extensions(pool: PgPool) 
                     {
                         "name": "playbackReport",
                         "versions": [1]
+                    },
+                    {
+                        "name": "songLyrics",
+                        "versions": [1]
                     }
                 ]
             }
@@ -256,7 +260,7 @@ async fn unknown_rest_endpoints_answer_with_a_subsonic_envelope_not_product_json
     // must speak subsonic even there
     let response = get(
         app(pool.clone(), support::credential_service()),
-        "/rest/getPodcasts.view?u=flynn&v=1.16.1&c=test-client&apiKey=whio_whatever",
+        "/rest/getChatMessages.view?u=flynn&v=1.16.1&c=test-client&apiKey=whio_whatever",
     )
     .await;
 
@@ -303,6 +307,8 @@ struct FolderFixture {
     auth: String,
     music: i32,
     elsewhere: i32,
+    album: AlbumId,
+    track: TrackId,
 }
 
 struct FailingLibraryStore;
@@ -464,6 +470,8 @@ async fn folder_fixture(pool: PgPool) -> FolderFixture {
         auth: format!("u=flynn&v=1.16.1&c=test-client&p={secret}"),
         music: numeric("music"),
         elsewhere: numeric("elsewhere"),
+        album: alpha_album.clone(),
+        track: alpha.clone(),
     }
 }
 
@@ -755,4 +763,253 @@ async fn subsonic_music_folder_leaves_other_parameters_alone(pool: PgPool) {
         set(&[]),
         "the year range and the folder both apply"
     );
+}
+
+#[sqlx::test]
+async fn subsonic_music_folders_lists_the_registered_libraries(pool: PgPool) {
+    let fixture = folder_fixture(pool).await;
+
+    let body = rest_ok(&fixture.app, &fixture.auth, "/getMusicFolders.view", "").await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    let mut listed: Vec<(i64, String)> = section(&body, "musicFolders")["musicFolder"]
+        .as_array()
+        .expect("a musicFolder list")
+        .iter()
+        .map(|folder| {
+            (
+                folder["id"].as_i64().expect("a numeric folder id"),
+                folder["name"].as_str().expect("a folder name").to_owned(),
+            )
+        })
+        .collect();
+    listed.sort();
+    let mut expected = vec![
+        (i64::from(fixture.music), "music".to_owned()),
+        (i64::from(fixture.elsewhere), "elsewhere".to_owned()),
+    ];
+    expected.sort();
+
+    assert_eq!(listed, expected);
+}
+
+#[sqlx::test]
+async fn subsonic_every_listed_music_folder_id_is_accepted(pool: PgPool) {
+    let fixture = folder_fixture(pool).await;
+
+    let body = rest_ok(&fixture.app, &fixture.auth, "/getMusicFolders.view", "").await;
+    let ids: Vec<i64> = section(&body, "musicFolders")["musicFolder"]
+        .as_array()
+        .expect("a musicFolder list")
+        .iter()
+        .map(|folder| folder["id"].as_i64().expect("a numeric folder id"))
+        .collect();
+    assert_eq!(ids.len(), 2, "both registered libraries are listed");
+
+    for id in ids {
+        for (path, query) in [
+            (
+                "/getAlbumList2.view",
+                format!("type=alphabeticalByName&musicFolderId={id}"),
+            ),
+            (
+                "/getRandomSongs.view",
+                format!("size=10&musicFolderId={id}"),
+            ),
+        ] {
+            let body = rest_ok(&fixture.app, &fixture.auth, path, &query).await;
+            assert_eq!(
+                body["subsonic-response"]["status"],
+                json!("ok"),
+                "{path}?{query} accepts a listed folder id"
+            );
+        }
+    }
+}
+
+#[sqlx::test]
+async fn subsonic_reads_for_absent_features_answer_empty(pool: PgPool) {
+    let fixture = folder_fixture(pool).await;
+
+    for (path, query, wrapper, entries) in [
+        ("/getBookmarks.view", "", "bookmarks", "bookmark"),
+        ("/getShares.view", "", "shares", "share"),
+        (
+            "/getInternetRadioStations.view",
+            "",
+            "internetRadioStations",
+            "internetRadioStation",
+        ),
+        ("/getPodcasts.view", "", "podcasts", "channel"),
+        (
+            "/getPodcasts.view",
+            "id=1&includeEpisodes=false",
+            "podcasts",
+            "channel",
+        ),
+        ("/getNewestPodcasts.view", "", "newestPodcasts", "episode"),
+    ] {
+        let body = rest_ok(&fixture.app, &fixture.auth, path, query).await;
+        assert_eq!(
+            body["subsonic-response"]["status"],
+            json!("ok"),
+            "{path}?{query}: {body}"
+        );
+        let wrapper = section(&body, wrapper);
+        assert!(
+            wrapper.is_object(),
+            "{path} keeps its wrapper element: {body}"
+        );
+        assert!(
+            wrapper.get(entries).is_none(),
+            "{path} has no entries: {body}"
+        );
+    }
+
+    let body = rest_ok(&fixture.app, &fixture.auth, "/getLicense.view", "").await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    assert_eq!(section(&body, "license")["valid"], json!(true));
+}
+
+#[sqlx::test]
+async fn subsonic_lyrics_for_a_song_without_lyrics_is_an_empty_list(pool: PgPool) {
+    let fixture = folder_fixture(pool).await;
+
+    let body = rest_ok(
+        &fixture.app,
+        &fixture.auth,
+        "/getLyricsBySongId.view",
+        &format!("id={}", fixture.track),
+    )
+    .await;
+    assert_eq!(body["subsonic-response"]["status"], json!("ok"));
+    assert_eq!(section(&body, "lyricsList")["structuredLyrics"], json!([]));
+
+    let (status, body) = rest(
+        &fixture.app,
+        &format!(
+            "/rest/getLyricsBySongId.view?{}&id=00000000-0000-0000-0000-000000000000",
+            fixture.auth
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["subsonic-response"]["error"]["code"], json!(70));
+    assert_eq!(
+        body["subsonic-response"]["error"]["message"],
+        json!("Not found.")
+    );
+}
+
+#[sqlx::test]
+async fn subsonic_absent_feature_mutations_stay_unsupported(pool: PgPool) {
+    let fixture = folder_fixture(pool).await;
+
+    for path in [
+        "/createBookmark.view",
+        "/deleteBookmark.view",
+        "/createShare.view",
+        "/updateShare.view",
+        "/deleteShare.view",
+        "/createInternetRadioStation.view",
+        "/updateInternetRadioStation.view",
+        "/deleteInternetRadioStation.view",
+        "/createPodcastChannel.view",
+        "/deletePodcastChannel.view",
+        "/deletePodcastEpisode.view",
+        "/refreshPodcasts.view",
+    ] {
+        let (status, body) = rest(&fixture.app, &format!("/rest{path}?{}", fixture.auth)).await;
+
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(
+            body["subsonic-response"]["status"],
+            json!("failed"),
+            "{path}: {body}"
+        );
+        assert_eq!(
+            body["subsonic-response"]["error"]["code"],
+            json!(0),
+            "{path}"
+        );
+        assert_eq!(
+            body["subsonic-response"]["error"]["message"],
+            json!("Unsupported operation."),
+            "{path}"
+        );
+    }
+}
+
+#[sqlx::test]
+async fn subsonic_unknown_endpoints_log_a_validated_name(pool: PgPool) {
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let fixture = folder_fixture(pool).await;
+    support::keep_callsites_interested();
+    let capture = support::Capture::default();
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(capture.clone())
+                .with_ansi(false),
+        )
+        .with(tracing_subscriber::EnvFilter::new("info"));
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let over_long = format!("/rest/{}.view", "a".repeat(65));
+
+    async {
+        rest(&fixture.app, &format!("/rest/getFoo.view?{}", fixture.auth)).await;
+        rest(
+            &fixture.app,
+            &format!("/rest/nested/getBar.view?{}", fixture.auth),
+        )
+        .await;
+        rest(&fixture.app, "/rest/../x").await;
+        rest(&fixture.app, &over_long).await;
+    }
+    .with_subscriber(dispatch)
+    .await;
+
+    let logs = String::from_utf8_lossy(&capture.0.lock().unwrap()).into_owned();
+    assert!(logs.contains("endpoint=\"getFoo\""), "{logs}");
+    assert!(logs.contains("endpoint=\"getBar\""), "{logs}");
+    assert!(!logs.contains("nested"), "{logs}");
+    assert_eq!(
+        logs.matches("endpoint=\"invalid\"").count(),
+        2,
+        "traversal and over-long names are not echoed: {logs}"
+    );
+    assert!(!logs.contains("/rest/../x"), "{logs}");
+    assert!(!logs.contains(&"a".repeat(65)), "{logs}");
+}
+
+#[sqlx::test]
+async fn subsonic_arpeggi_initial_sync_sequence_is_served(pool: PgPool) {
+    let fixture = folder_fixture(pool).await;
+    let music = fixture.music;
+
+    for (path, query) in [
+        ("/ping.view".to_owned(), String::new()),
+        ("/getUser.view".to_owned(), "username=flynn".to_owned()),
+        ("/getOpenSubsonicExtensions.view".to_owned(), String::new()),
+        ("/getMusicFolders.view".to_owned(), String::new()),
+        (
+            "/getRandomSongs.view".to_owned(),
+            format!("size=100&musicFolderId={music}"),
+        ),
+        (
+            "/getAlbumList2.view".to_owned(),
+            format!("type=newest&size=100&musicFolderId={music}"),
+        ),
+        ("/getStarred2.view".to_owned(), String::new()),
+        ("/getAlbum.view".to_owned(), format!("id={}", fixture.album)),
+        ("/getScanStatus.view".to_owned(), String::new()),
+    ] {
+        let body = rest_ok(&fixture.app, &fixture.auth, &path, &query).await;
+        assert_eq!(
+            body["subsonic-response"]["status"],
+            json!("ok"),
+            "{path}?{query}: {body}"
+        );
+    }
 }

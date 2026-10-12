@@ -8,8 +8,8 @@ pub(crate) mod state;
 use axum::{
     Extension, Json, Router,
     body::Bytes,
-    extract::{FromRef, OriginalUri, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_RANGE},
+    extract::{FromRef, State},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header::CONTENT_RANGE},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -31,12 +31,15 @@ use auth::SubsonicError;
 pub(crate) use envelope::{SubsonicFailure, failed_response};
 use envelope::{
     album_envelope, album_list2_envelope, artist_envelope, artist_info_envelope,
-    artist_info2_envelope, artists_envelope, create_playlist_envelope, directory_envelope,
-    extensions_envelope, genres_envelope, indexes_envelope, now_playing_envelope, ok_envelope,
+    artist_info2_envelope, artists_envelope, bookmarks_envelope, create_playlist_envelope,
+    directory_envelope, extensions_envelope, genres_envelope, indexes_envelope,
+    internet_radio_stations_envelope, license_envelope, lyrics_by_song_id_envelope,
+    music_folders_envelope, newest_podcasts_envelope, now_playing_envelope, ok_envelope,
     play_queue_by_index_envelope, play_queue_envelope, playlist_envelope, playlists_envelope,
-    random_songs_envelope, scan_status_envelope, search3_envelope, similar_songs_envelope,
-    similar_songs2_envelope, song_envelope, songs_by_genre_envelope, starred2_envelope,
-    start_scan_envelope, top_songs_envelope, user_envelope,
+    podcasts_envelope, random_songs_envelope, scan_status_envelope, search3_envelope,
+    shares_envelope, similar_songs_envelope, similar_songs2_envelope, song_envelope,
+    songs_by_genre_envelope, starred2_envelope, start_scan_envelope, top_songs_envelope,
+    user_envelope,
 };
 use state::SubsonicState;
 
@@ -111,6 +114,26 @@ where
         ),
         ("/stream", get(stream)),
         ("/getCoverArt", get(get_cover_art)),
+        (
+            "/getMusicFolders",
+            get(get_music_folders).post(get_music_folders),
+        ),
+        ("/getLicense", get(get_license).post(get_license)),
+        ("/getBookmarks", get(get_bookmarks).post(get_bookmarks)),
+        ("/getShares", get(get_shares).post(get_shares)),
+        (
+            "/getInternetRadioStations",
+            get(get_internet_radio_stations).post(get_internet_radio_stations),
+        ),
+        ("/getPodcasts", get(get_podcasts).post(get_podcasts)),
+        (
+            "/getNewestPodcasts",
+            get(get_newest_podcasts).post(get_newest_podcasts),
+        ),
+        (
+            "/getLyricsBySongId",
+            get(get_lyrics_by_song_id).post(get_lyrics_by_song_id),
+        ),
         (
             "/getOpenSubsonicExtensions",
             get(get_open_subsonic_extensions).post(get_open_subsonic_extensions),
@@ -929,6 +952,106 @@ pub(crate) async fn get_open_subsonic_extensions(
     }
 }
 
+pub(crate) async fn get_music_folders(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    if let Err(response) = authenticate(&state, &context, auth).await {
+        return response;
+    }
+
+    match service::music_folders(state.libraries()).await {
+        Ok(folders) => Json(music_folders_envelope(folders)).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+pub(crate) async fn get_license(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    authenticated_read(&state, &context, auth, license_envelope).await
+}
+
+pub(crate) async fn get_bookmarks(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    authenticated_read(&state, &context, auth, bookmarks_envelope).await
+}
+
+pub(crate) async fn get_shares(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    authenticated_read(&state, &context, auth, shares_envelope).await
+}
+
+pub(crate) async fn get_internet_radio_stations(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    authenticated_read(&state, &context, auth, internet_radio_stations_envelope).await
+}
+
+pub(crate) async fn get_podcasts(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    authenticated_read(&state, &context, auth, podcasts_envelope).await
+}
+
+pub(crate) async fn get_newest_podcasts(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+) -> Response {
+    authenticated_read(&state, &context, auth, newest_podcasts_envelope).await
+}
+
+pub(crate) async fn get_lyrics_by_song_id(
+    State(state): State<SubsonicState>,
+    Extension(context): Extension<RequestContext>,
+    auth: SubsonicAuth,
+    query: RawQuery,
+) -> Response {
+    let principal = match authenticate(&state, &context, auth).await {
+        Ok(principal) => principal,
+        Err(response) => return response,
+    };
+    let Some(id) = query.get("id") else {
+        return SubsonicError::MissingParameter.into_response();
+    };
+    let user = principal.user_id.as_uuid();
+
+    match service::song_detail(state.library(), id, Some(&user), state.source_tags()).await {
+        Ok(_) => Json(lyrics_by_song_id_envelope()).into_response(),
+        Err(error) => browse_failure_response(&context, error),
+    }
+}
+
+async fn authenticated_read<M, F>(
+    state: &SubsonicState,
+    context: &RequestContext,
+    auth: SubsonicAuth,
+    envelope: F,
+) -> Response
+where
+    M: serde::Serialize,
+    F: FnOnce() -> M,
+{
+    match authenticate(state, context, auth).await {
+        Ok(_) => Json(envelope()).into_response(),
+        Err(response) => response,
+    }
+}
+
 async fn authenticate(
     state: &SubsonicState,
     context: &RequestContext,
@@ -1669,12 +1792,56 @@ fn invalid_parameter_response() -> Response {
     response
 }
 
-async fn unsupported(Extension(context): Extension<RequestContext>, uri: OriginalUri) -> Response {
-    tracing::debug!(
-        path = %uri.0.path(),
+const MAX_UNSUPPORTED_ENDPOINT_LENGTH: usize = 64;
+
+async fn unsupported(Extension(context): Extension<RequestContext>, uri: Uri) -> Response {
+    tracing::info!(
+        endpoint = unsupported_endpoint(uri.path()),
         request_id = context.request_id().as_str(),
         "unsupported subsonic operation"
     );
 
     failed_response(models::error::Code::Variant0, "Unsupported operation.").into_response()
+}
+
+fn unsupported_endpoint(path: &str) -> &str {
+    if path.split('/').any(|segment| segment == "..") {
+        return "invalid";
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let name = name.strip_suffix(".view").unwrap_or(name);
+
+    if !name.is_empty()
+        && name.len() <= MAX_UNSUPPORTED_ENDPOINT_LENGTH
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        name
+    } else {
+        "invalid"
+    }
+}
+
+#[cfg(test)]
+mod unsupported_endpoint_tests {
+    use super::unsupported_endpoint;
+
+    #[test]
+    fn endpoint_names_are_the_last_alphanumeric_segment_of_bounded_length() {
+        assert_eq!(unsupported_endpoint("/getFoo.view"), "getFoo");
+        assert_eq!(unsupported_endpoint("/getFoo"), "getFoo");
+        assert_eq!(unsupported_endpoint("/../x"), "invalid");
+        assert_eq!(unsupported_endpoint("/nested/getFoo.view"), "getFoo");
+        assert_eq!(unsupported_endpoint("/nested/../getFoo.view"), "invalid");
+        assert_eq!(unsupported_endpoint("/get Foo.view"), "invalid");
+        assert_eq!(unsupported_endpoint("/get-foo.view"), "invalid");
+        assert_eq!(unsupported_endpoint("/getFoo.view.view"), "invalid");
+        assert_eq!(unsupported_endpoint("/"), "invalid");
+
+        let boundary = "a".repeat(64);
+        let path = format!("/{boundary}");
+        assert_eq!(unsupported_endpoint(&path), boundary.as_str());
+
+        let over_long = format!("/{}.view", "a".repeat(65));
+        assert_eq!(unsupported_endpoint(&over_long), "invalid");
+    }
 }

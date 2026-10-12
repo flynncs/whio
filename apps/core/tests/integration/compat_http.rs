@@ -4122,7 +4122,7 @@ async fn subsonic_advertises_only_the_extensions_it_serves(pool: PgPool) {
         .map(|extension| extension["name"].as_str().unwrap())
         .collect();
 
-    assert_eq!(names, ["indexBasedQueue", "playbackReport"]);
+    assert_eq!(names, ["indexBasedQueue", "playbackReport", "songLyrics"]);
     assert_eq!(
         extensions
             .iter()
