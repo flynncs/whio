@@ -144,7 +144,8 @@ mod tests {
         },
         features::playback::{
             CatalogueNextTracks, DeliveryError, DeliveryResult, LocalMedia, MediaMetadata,
-            PlayableMedia, PlaybackProvider, PlaybackSource, PlaybackUrl, StreamingService,
+            PlayableMedia, PlaybackProvider, PlaybackSource, PlaybackUrl, StreamRequest,
+            StreamingService,
             next::fixtures::{FakeQueue, FakeSources, library, local, queue, track, youtube},
             providers::ProviderError,
         },
@@ -286,6 +287,8 @@ mod tests {
             &self,
             _key: &SourceKey,
             _resolved: &ResolvedPlayback,
+            _request: &StreamRequest,
+            _track: &TrackId,
             _client_range: Option<String>,
         ) -> Result<DeliveryResult, DeliveryError> {
             *self.delivered.lock() += 1;
@@ -299,6 +302,7 @@ mod tests {
         async fn cached(
             &self,
             key: &SourceKey,
+            _request: &StreamRequest,
             _client_range: Option<String>,
         ) -> Option<Result<DeliveryResult, DeliveryError>> {
             self.is_cached(key).then(|| {
@@ -499,7 +503,15 @@ mod tests {
         )
         .with_prefetch(Arc::new(StubNextTracks::new(vec![second.clone()])), 1);
 
-        let result = service.stream(&first, Some(&user), &context(), None).await;
+        let result = service
+            .stream(
+                &first,
+                Some(&user),
+                &context(),
+                StreamRequest::default(),
+                None,
+            )
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(*delivery.delivered.lock(), 1);
@@ -608,7 +620,15 @@ mod tests {
         )
         .with_prefetch(Arc::new(StubNextTracks::new(vec![second.clone()])), 1);
 
-        let result = service.stream(&first, Some(&user), &context(), None).await;
+        let result = service
+            .stream(
+                &first,
+                Some(&user),
+                &context(),
+                StreamRequest::default(),
+                None,
+            )
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(*delivery.delivered.lock(), 0);
@@ -645,7 +665,12 @@ mod tests {
 
         let (sender, mut receiver) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            let _ = sender.send(service.stream(&first, None, &context(), None).await.is_ok());
+            let _ = sender.send(
+                service
+                    .stream(&first, None, &context(), StreamRequest::default(), None)
+                    .await
+                    .is_ok(),
+            );
         });
 
         let streamed = tokio::time::timeout(Duration::from_secs(5), receiver.recv())

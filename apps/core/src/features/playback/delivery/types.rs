@@ -4,6 +4,7 @@ use axum::{
 };
 
 use super::range::RangeError;
+use crate::features::playback::TrackDurationError;
 use crate::features::playback::media::MediaFetchError;
 
 /// one resolved representation, delivered to the client.
@@ -32,16 +33,33 @@ pub enum DeliveryError {
         error: RangeError,
     },
 
+    #[error("media duration is unknown")]
+    MissingDuration,
+
+    #[error("audio conversion is not available")]
+    ConversionUnavailable,
+
+    #[error("audio conversion failed")]
+    Conversion,
+
+    #[error("track duration lookup failed")]
+    Duration(#[source] TrackDurationError),
+
     #[error("playback resource limit reached")]
     Overloaded,
 }
 
 impl DeliveryError {
-    /// a failed attempt may try the next eligible source. matches the previous
-    /// behaviour: direct, media and local failures fall back; spool, range and
-    /// overload end the request.
     pub fn allows_fallback(&self) -> bool {
-        !matches!(self, Self::Spool | Self::Range { .. } | Self::Overloaded)
+        !matches!(
+            self,
+            Self::Spool
+                | Self::Range { .. }
+                | Self::Overloaded
+                | Self::ConversionUnavailable
+                | Self::Conversion
+                | Self::Duration(_)
+        )
     }
 
     /// the same source may be retried on the same request.

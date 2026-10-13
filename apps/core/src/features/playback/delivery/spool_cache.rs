@@ -5,9 +5,31 @@ use parking_lot::Mutex;
 use tokio::sync::OnceCell;
 
 use crate::{
-    features::playback::{SourceKey, delivery::ActiveSpool, media::MediaInfo},
+    features::playback::{Representation, SourceKey, delivery::ActiveSpool, media::MediaInfo},
     platform::clock::Clock,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct SpoolKey {
+    source: SourceKey,
+    representation: Representation,
+}
+
+impl SpoolKey {
+    pub(super) fn original(source: &SourceKey) -> Self {
+        Self {
+            source: source.clone(),
+            representation: Representation::Original,
+        }
+    }
+
+    pub(super) fn new(source: &SourceKey, representation: Representation) -> Self {
+        Self {
+            source: source.clone(),
+            representation,
+        }
+    }
+}
 
 pub(super) struct Entry {
     spool: Arc<ActiveSpool>,
@@ -38,7 +60,7 @@ impl Cached {
 }
 
 pub(super) struct SpoolCache {
-    cells: Mutex<HashMap<SourceKey, Arc<OnceCell<Entry>>>>,
+    cells: Mutex<HashMap<SpoolKey, Arc<OnceCell<Entry>>>>,
     clock: Clock,
     idle: chrono::Duration,
 }
@@ -48,8 +70,8 @@ fn idle_duration(idle: Duration) -> chrono::Duration {
 }
 
 fn remove_if_current(
-    cells: &mut HashMap<SourceKey, Arc<OnceCell<Entry>>>,
-    key: &SourceKey,
+    cells: &mut HashMap<SpoolKey, Arc<OnceCell<Entry>>>,
+    key: &SpoolKey,
     cell: &Arc<OnceCell<Entry>>,
 ) {
     if cells
@@ -87,7 +109,7 @@ impl SpoolCache {
         }
     }
 
-    pub(super) fn cell(&self, key: &SourceKey) -> Arc<OnceCell<Entry>> {
+    pub(super) fn cell(&self, key: &SpoolKey) -> Arc<OnceCell<Entry>> {
         let mut cells = self.cells.lock();
         let failed = cells
             .get(key)
@@ -105,7 +127,7 @@ impl SpoolCache {
 
     pub(super) async fn get_or_init<E, F, Fut>(
         &self,
-        key: &SourceKey,
+        key: &SpoolKey,
         create: F,
     ) -> Result<Cached, E>
     where
@@ -119,7 +141,7 @@ impl SpoolCache {
         Ok(Cached { cell, spool, info })
     }
 
-    pub(super) fn get(&self, key: &SourceKey) -> Option<Cached> {
+    pub(super) fn get(&self, key: &SpoolKey) -> Option<Cached> {
         let now = self.clock.now();
         let mut cells = self.cells.lock();
         let cell = Arc::clone(cells.get(key)?);
@@ -134,7 +156,7 @@ impl SpoolCache {
         Some(Cached { cell, spool, info })
     }
 
-    pub(super) fn is_cached(&self, key: &SourceKey) -> bool {
+    pub(super) fn is_cached(&self, key: &SpoolKey) -> bool {
         self.cells
             .lock()
             .get(key)
@@ -142,7 +164,7 @@ impl SpoolCache {
             .is_some_and(|entry| !entry.spool.failed())
     }
 
-    pub(super) fn invalidate(&self, key: &SourceKey, cached: &Cached) {
+    pub(super) fn invalidate(&self, key: &SpoolKey, cached: &Cached) {
         remove_if_current(&mut self.cells.lock(), key, &cached.cell);
     }
 
@@ -193,7 +215,7 @@ mod tests {
         platform::clock::Clock,
     };
 
-    fn key(external_id: &str) -> SourceKey {
+    fn source(external_id: &str) -> SourceKey {
         SourceKey::new(
             &PlaybackSource::from_identity(
                 SourceIdentity::new(
@@ -205,6 +227,10 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    fn key(external_id: &str) -> SpoolKey {
+        SpoolKey::original(&source(external_id))
     }
 
     fn info() -> MediaInfo {
@@ -251,7 +277,7 @@ mod tests {
         spool
     }
 
-    async fn insert(cache: &SpoolCache, key: &SourceKey, spool: Arc<ActiveSpool>) {
+    async fn insert(cache: &SpoolCache, key: &SpoolKey, spool: Arc<ActiveSpool>) {
         cache
             .get_or_init(key, || async { Ok::<_, ()>(cache.entry(spool, info())) })
             .await
@@ -389,5 +415,25 @@ mod tests {
         assert!(!cache.evict_one_idle());
         drop(cached);
         assert!(cache.evict_one_idle());
+    }
+
+    #[tokio::test]
+    async fn representations_of_one_source_have_distinct_cells() {
+        let (clock, _) = manual_clock();
+        let cache = SpoolCache::new(clock, Duration::from_secs(60));
+        let original = SpoolKey::original(&source("one"));
+        let converted = SpoolKey::new(
+            &source("one"),
+            Representation::Aac(crate::features::playback::AacMode::Copy),
+        );
+
+        insert(&cache, &original, spool().await).await;
+        insert(&cache, &converted, spool().await).await;
+        assert!(cache.is_cached(&original));
+        assert!(cache.is_cached(&converted));
+        assert!(!Arc::ptr_eq(
+            &cache.cell(&original),
+            &cache.cell(&converted)
+        ));
     }
 }

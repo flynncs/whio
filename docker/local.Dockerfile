@@ -1,5 +1,5 @@
 FROM rust:1.97.1-bookworm AS compiler
-RUN apt-get update && apt-get install --no-install-recommends --yes btrfs-progs && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install --no-install-recommends --yes btrfs-progs ffmpeg && rm -rf /var/lib/apt/lists/*
 RUN rustup component add clippy rustfmt
 WORKDIR /workspace
 

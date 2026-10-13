@@ -5,7 +5,8 @@ use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::{
-    features::playback::DeliveryError, features::playback::delivery::spool_status::SpoolStatus,
+    features::playback::DeliveryError,
+    features::playback::delivery::{spool_status::SpoolFailure, spool_status::SpoolStatus},
 };
 
 pub struct SpoolReader {
@@ -42,11 +43,13 @@ impl SpoolReader {
         loop {
             let status = self.updates.borrow_and_update().clone();
 
-            let (available, complete, failed) = match status {
-                SpoolStatus::Downloading { available } => (available, false, false),
-                SpoolStatus::Complete { length } => (length, true, false),
-                SpoolStatus::Failed { available } => (available, false, true),
+            let (available, complete, failure) = match status {
+                SpoolStatus::Downloading { available } => (available, false, None),
+                SpoolStatus::Complete { length } => (length, true, None),
+                SpoolStatus::Failed { available, failure } => (available, false, Some(failure)),
             };
+            let failed = failure.is_some();
+            let conversion = failure == Some(SpoolFailure::Conversion);
 
             if self.remaining == 0 {
                 return Ok(None);
@@ -65,16 +68,30 @@ impl SpoolReader {
 
                 if count == 0 {
                     if complete || failed {
-                        tracing::error!(
-                            offset = self.offset,
-                            remaining = self.remaining,
-                            available,
-                            complete,
-                            failed,
-                            "playback spool reached EOF before the requested bytes were available"
-                        );
+                        if conversion {
+                            tracing::debug!(
+                                offset = self.offset,
+                                remaining = self.remaining,
+                                available,
+                                complete,
+                                "playback conversion ended before the requested range was available"
+                            );
+                        } else {
+                            tracing::error!(
+                                offset = self.offset,
+                                remaining = self.remaining,
+                                available,
+                                complete,
+                                failed,
+                                "playback spool reached EOF before the requested bytes were available"
+                            );
+                        }
 
-                        return Err(DeliveryError::Spool);
+                        return Err(if conversion {
+                            DeliveryError::Conversion
+                        } else {
+                            DeliveryError::Spool
+                        });
                     }
 
                     self.wait_for_update().await?;
@@ -101,13 +118,26 @@ impl SpoolReader {
             }
 
             if failed {
-                tracing::error!(
-                    offset = self.offset,
-                    remaining = self.remaining,
-                    available,
-                    "playback spool failed before the requested range was available"
-                );
-                return Err(DeliveryError::Spool);
+                if conversion {
+                    tracing::debug!(
+                        offset = self.offset,
+                        remaining = self.remaining,
+                        available,
+                        "playback conversion failed before the requested range was available"
+                    );
+                } else {
+                    tracing::error!(
+                        offset = self.offset,
+                        remaining = self.remaining,
+                        available,
+                        "playback spool failed before the requested range was available"
+                    );
+                }
+                return Err(if conversion {
+                    DeliveryError::Conversion
+                } else {
+                    DeliveryError::Spool
+                });
             }
 
             self.wait_for_update().await?;
@@ -121,9 +151,17 @@ impl SpoolReader {
 
         match self.updates.borrow().clone() {
             SpoolStatus::Complete { .. } => Ok(()),
-            SpoolStatus::Failed { available } => {
-                tracing::error!(available, "playback spool failed while reader was waiting");
-                Err(DeliveryError::Spool)
+            SpoolStatus::Failed { available, failure } => {
+                if failure == SpoolFailure::Conversion {
+                    tracing::debug!(
+                        available,
+                        "playback conversion failed while reader was waiting"
+                    );
+                    Err(DeliveryError::Conversion)
+                } else {
+                    tracing::error!(available, "playback spool failed while reader was waiting");
+                    Err(DeliveryError::Spool)
+                }
             }
             SpoolStatus::Downloading { available } => {
                 tracing::error!(

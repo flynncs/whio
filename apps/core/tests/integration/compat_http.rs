@@ -35,7 +35,7 @@ use whio_core::{
     features::music_library::queue::{RestoreQueueSave, RestoreQueueService},
     features::playback::providers::ProviderError,
     features::playback::{
-        PlaybackActivityService, PlaybackProvider, PlaybackSource, ResolvedPlayback,
+        ClientFormats, PlaybackActivityService, PlaybackProvider, PlaybackSource, ResolvedPlayback,
         StreamingService,
     },
     integrations::ytm::playback::YtmPlayback,
@@ -4226,7 +4226,7 @@ struct PayloadFixture {
     album: String,
 }
 
-async fn payload_fixture(pool: PgPool) -> PayloadFixture {
+async fn payload_fixture(pool: PgPool, formats: ClientFormats) -> PayloadFixture {
     let (service, secret) = support::credentials::database_credential_service(pool.clone()).await;
     let ports = StorePorts::new(pool.clone());
     let album = ports
@@ -4288,7 +4288,8 @@ async fn payload_fixture(pool: PgPool) -> PayloadFixture {
             .with_playlists(playlists)
             .with_queue(queue)
             .with_playback_activity(activity)
-            .with_library_state(library_state),
+            .with_library_state(library_state)
+            .with_client_formats(formats),
     );
 
     PayloadFixture {
@@ -4301,7 +4302,7 @@ async fn payload_fixture(pool: PgPool) -> PayloadFixture {
 
 #[sqlx::test]
 async fn subsonic_song_surfaces_share_representation_facts(pool: PgPool) {
-    let fixture = payload_fixture(pool).await;
+    let fixture = payload_fixture(pool, ClientFormats::default()).await;
     let auth = &fixture.auth;
     let track = fixture.track.to_string();
 
@@ -4435,8 +4436,135 @@ async fn subsonic_song_surfaces_share_representation_facts(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn an_aac_client_rule_marks_the_transcoded_song_fields(pool: PgPool) {
+    let fixture = payload_fixture(pool, ClientFormats::parse("Arpeggi=aac").unwrap()).await;
+    let track = fixture.track.to_string();
+    let arpeggi = fixture.auth.replace("c=test-client", "c=Arpeggi");
+
+    let body = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "createPlaylist",
+            &arpeggi,
+            &format!("name=Converted&songId={track}"),
+        ),
+    )
+    .await;
+    let playlist_id = playlist_id_of(&body);
+    let _ = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "savePlayQueue",
+            &arpeggi,
+            &format!("id={track}&current={track}"),
+        ),
+    )
+    .await;
+    let _ = get(
+        fixture.app.clone(),
+        &playlist_route(
+            "scrobble",
+            &arpeggi,
+            &format!("id={track}&submission=false"),
+        ),
+    )
+    .await;
+
+    let surfaces = [
+        (
+            "search",
+            get(fixture.app.clone(), &subsonic_search3("query=", &arpeggi)).await,
+        ),
+        (
+            "getSong",
+            get(
+                fixture.app.clone(),
+                &format!("/compat/subsonic/rest/getSong.view?{arpeggi}&id={track}"),
+            )
+            .await,
+        ),
+        (
+            "album",
+            get(
+                fixture.app.clone(),
+                &format!(
+                    "/compat/subsonic/rest/getAlbum.view?{arpeggi}&id={}",
+                    fixture.album
+                ),
+            )
+            .await,
+        ),
+        (
+            "directory",
+            get(
+                fixture.app.clone(),
+                &format!(
+                    "/compat/subsonic/rest/getMusicDirectory.view?{arpeggi}&id={}",
+                    fixture.album
+                ),
+            )
+            .await,
+        ),
+        (
+            "playlist",
+            get(
+                fixture.app.clone(),
+                &playlist_route("getPlaylist", &arpeggi, &format!("id={playlist_id}")),
+            )
+            .await,
+        ),
+        (
+            "starred",
+            get(
+                fixture.app.clone(),
+                &format!("/compat/subsonic/rest/getStarred2.view?{arpeggi}"),
+            )
+            .await,
+        ),
+        (
+            "queue",
+            get(
+                fixture.app.clone(),
+                &format!("/compat/subsonic/rest/getPlayQueue.view?{arpeggi}"),
+            )
+            .await,
+        ),
+        (
+            "nowPlaying",
+            get(
+                fixture.app.clone(),
+                &format!("/compat/subsonic/rest/getNowPlaying.view?{arpeggi}"),
+            )
+            .await,
+        ),
+    ];
+
+    for (surface, body) in &surfaces {
+        let song = representation_song(body, surface, &track);
+        assert_eq!(song["transcodedSuffix"], json!("aac"), "{surface}");
+        assert_eq!(
+            song["transcodedContentType"],
+            json!("audio/aac"),
+            "{surface}"
+        );
+    }
+
+    let plain = get(
+        fixture.app,
+        &format!(
+            "/compat/subsonic/rest/getSong.view?{}&id={track}",
+            fixture.auth
+        ),
+    )
+    .await;
+    let song = representation_song(&plain, "getSong", &track);
+    assert!(song.get("transcodedSuffix").is_none());
+    assert!(song.get("transcodedContentType").is_none());
+}
+
+#[sqlx::test]
 async fn subsonic_get_song_errors_follow_entity_shapes(pool: PgPool) {
-    let fixture = payload_fixture(pool).await;
+    let fixture = payload_fixture(pool, ClientFormats::default()).await;
     let path = "/compat/subsonic/rest/getSong.view";
 
     let (status, body) = get_status(fixture.app.clone(), &format!("{path}?{}", fixture.auth)).await;

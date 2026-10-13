@@ -14,4 +14,6 @@ pub enum FetchError {
     DisallowedDestination,
     #[error("media response was too large")]
     ResponseTooLarge,
+    #[error("media conversion failed")]
+    Conversion,
 }

@@ -191,7 +191,7 @@ async fn search_maps_tracks_and_short_circuits_empty(pool: sqlx::PgPool) {
         None,
         "song",
         &windows(Some("10"), None),
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("search succeeds");
@@ -257,7 +257,7 @@ async fn paging_caps_slices_and_rejects(pool: sqlx::PgPool) {
             None,
             "song",
             &windows(Some(count), Some(offset)),
-            SourceTags::Off,
+            PayloadContext::default(),
         )
         .await
         .expect("page succeeds")
@@ -283,7 +283,7 @@ async fn paging_caps_slices_and_rejects(pool: sqlx::PgPool) {
         None,
         "song",
         &windows(Some("100"), None),
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("search succeeds")
@@ -631,9 +631,14 @@ async fn album_detail_lists_its_tracks_in_order(pool: sqlx::PgPool) {
         .unwrap();
     let catalogue = disabled_completion(&repository);
 
-    let detail = album_detail(&catalogue, &album.id().to_string(), None, SourceTags::Off)
-        .await
-        .expect("the album is found");
+    let detail = album_detail(
+        &catalogue,
+        &album.id().to_string(),
+        None,
+        PayloadContext::default(),
+    )
+    .await
+    .expect("the album is found");
 
     assert_eq!(detail.song_count, 2);
     assert_eq!(detail.duration, 3);
@@ -647,7 +652,7 @@ async fn album_detail_lists_its_tracks_in_order(pool: sqlx::PgPool) {
     assert_eq!(detail.song[0].disc_number, Some(1));
 
     assert!(matches!(
-        album_detail(&catalogue, "not-a-uuid", None, SourceTags::Off).await,
+        album_detail(&catalogue, "not-a-uuid", None, PayloadContext::default()).await,
         Err(BrowseError::AlbumNotFound)
     ));
     assert!(matches!(
@@ -655,7 +660,7 @@ async fn album_detail_lists_its_tracks_in_order(pool: sqlx::PgPool) {
             &catalogue,
             &Uuid::now_v7().to_string(),
             None,
-            SourceTags::Off
+            PayloadContext::default()
         )
         .await,
         Err(BrowseError::AlbumNotFound)
@@ -781,7 +786,7 @@ async fn enumerate_pages_each_kind_independently(pool: sqlx::PgPool) {
         artists: EnumerationWindow::new(1, 0).expect("valid window"),
     };
 
-    let result = enumerate(&library, None, &request, SourceTags::Off)
+    let result = enumerate(&library, None, &request, PayloadContext::default())
         .await
         .expect("the enumeration succeeds");
 
@@ -812,7 +817,7 @@ async fn enumerate_fills_a_count_above_the_page_limit_from_several_pages(pool: s
         artists: EnumerationWindow::new(0, 0).expect("valid window"),
     };
 
-    let result = enumerate(&library, None, &request, SourceTags::Off)
+    let result = enumerate(&library, None, &request, PayloadContext::default())
         .await
         .expect("the enumeration succeeds");
 
@@ -838,7 +843,7 @@ async fn enumerate_zero_count_performs_no_work_for_that_kind(pool: sqlx::PgPool)
         artists: EnumerationWindow::new(0, 0).expect("valid window"),
     };
 
-    let result = enumerate(&library, None, &zeroed, SourceTags::Off)
+    let result = enumerate(&library, None, &zeroed, PayloadContext::default())
         .await
         .expect("the enumeration succeeds");
 
@@ -857,7 +862,7 @@ async fn enumerate_zero_count_performs_no_work_for_that_kind(pool: sqlx::PgPool)
         artists: EnumerationWindow::new(1, 0).expect("valid window"),
     };
 
-    let result = enumerate(&library, None, &served, SourceTags::Off)
+    let result = enumerate(&library, None, &served, PayloadContext::default())
         .await
         .expect("the enumeration succeeds");
 
@@ -880,7 +885,7 @@ async fn enumerate_skips_kinds_with_a_zero_count(pool: sqlx::PgPool) {
         artists: EnumerationWindow::new(0, 0).expect("valid window"),
     };
 
-    let result = enumerate(&library, None, &request, SourceTags::Off)
+    let result = enumerate(&library, None, &request, PayloadContext::default())
         .await
         .expect("the enumeration succeeds");
 
@@ -1223,7 +1228,7 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
         &library,
         None,
         &stored(Some("Rock"), Some("2"), Some("0")),
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the stored genre finds the songs");
@@ -1238,7 +1243,7 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
         &library,
         None,
         &stored(Some("Rock"), Some("2"), Some("2")),
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the offset pages the same membership");
@@ -1248,7 +1253,7 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
         &library,
         None,
         &stored(Some("Jazz"), None, None),
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("an unknown genre is an empty page");
@@ -1256,15 +1261,20 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
 
     let before = calls.tracks();
 
-    let missing = songs_by_genre(&library, None, &stored(None, None, None), SourceTags::Off)
-        .await
-        .expect("an absent genre is the reference's empty page, not an error");
+    let missing = songs_by_genre(
+        &library,
+        None,
+        &stored(None, None, None),
+        PayloadContext::default(),
+    )
+    .await
+    .expect("an absent genre is the reference's empty page, not an error");
     assert!(missing.is_empty());
     let blank = songs_by_genre(
         &library,
         None,
         &stored(Some("   "), None, None),
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("a blank genre is the same empty page");
@@ -1283,7 +1293,7 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
         library_id: None,
     };
     assert!(matches!(
-        songs_by_genre(&library, None, &over_long, SourceTags::Off).await,
+        songs_by_genre(&library, None, &over_long, PayloadContext::default()).await,
         Err(BrowseError::InvalidRequest)
     ));
     assert!(matches!(
@@ -1291,7 +1301,7 @@ async fn subsonic_songs_by_genre_uses_the_stored_set(pool: sqlx::PgPool) {
             &library,
             None,
             &stored(Some("Rock"), Some("many"), None),
-            SourceTags::Off
+            PayloadContext::default()
         )
         .await,
         Err(BrowseError::InvalidRequest)
@@ -1330,21 +1340,39 @@ async fn subsonic_random_songs_is_one_permutation(pool: sqlx::PgPool) {
         library_id: None,
     };
 
-    let whole = random_songs(&library, Some(&user), &request("40"), seed, SourceTags::Off)
-        .await
-        .expect("the random page succeeds");
-    let again = random_songs(&library, Some(&user), &request("40"), seed, SourceTags::Off)
-        .await
-        .expect("the random page succeeds");
-    let head = random_songs(&library, Some(&user), &request("10"), seed, SourceTags::Off)
-        .await
-        .expect("the random page succeeds");
+    let whole = random_songs(
+        &library,
+        Some(&user),
+        &request("40"),
+        seed,
+        PayloadContext::default(),
+    )
+    .await
+    .expect("the random page succeeds");
+    let again = random_songs(
+        &library,
+        Some(&user),
+        &request("40"),
+        seed,
+        PayloadContext::default(),
+    )
+    .await
+    .expect("the random page succeeds");
+    let head = random_songs(
+        &library,
+        Some(&user),
+        &request("10"),
+        seed,
+        PayloadContext::default(),
+    )
+    .await
+    .expect("the random page succeeds");
     let elsewhere = random_songs(
         &library,
         Some(&user),
         &request("40"),
         other,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the random page succeeds");
@@ -1498,7 +1526,7 @@ async fn subsonic_music_directory_walks_entities(pool: sqlx::PgPool) {
         .remove(0);
     let artist_id = artist.id.clone();
 
-    let directory = music_directory(&library, &artist_id, None, SourceTags::Off)
+    let directory = music_directory(&library, &artist_id, None, PayloadContext::default())
         .await
         .expect("the artist directory resolves");
     assert_eq!(directory.id, artist_id);
@@ -1516,7 +1544,7 @@ async fn subsonic_music_directory_walks_entities(pool: sqlx::PgPool) {
     );
 
     let album_id = children[0].id.clone();
-    let directory = music_directory(&library, &album_id, None, SourceTags::Off)
+    let directory = music_directory(&library, &album_id, None, PayloadContext::default())
         .await
         .expect("the album directory resolves");
     assert_eq!(directory.id, album_id);
@@ -1573,7 +1601,7 @@ async fn subsonic_music_directory_walks_entities(pool: sqlx::PgPool) {
         &library,
         &provider_album.id().to_string(),
         None,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the provider album resolves");
@@ -1603,11 +1631,17 @@ async fn subsonic_music_directory_walks_entities(pool: sqlx::PgPool) {
     );
 
     assert!(matches!(
-        music_directory(&library, &Uuid::now_v7().to_string(), None, SourceTags::Off).await,
+        music_directory(
+            &library,
+            &Uuid::now_v7().to_string(),
+            None,
+            PayloadContext::default()
+        )
+        .await,
         Err(BrowseError::AlbumNotFound)
     ));
     assert!(matches!(
-        music_directory(&library, "not-a-uuid", None, SourceTags::Off).await,
+        music_directory(&library, "not-a-uuid", None, PayloadContext::default()).await,
         Err(BrowseError::ArtistNotFound)
     ));
 }
@@ -1621,7 +1655,7 @@ async fn subsonic_search3_windows_are_per_type(pool: sqlx::PgPool) {
         "songCount=2&songOffset=1&albumCount=1&albumOffset=1&artistCount=1&artistOffset=2",
     ))
     .expect("the windows parse");
-    let result = enumerate(&library, None, &request, SourceTags::Off)
+    let result = enumerate(&library, None, &request, PayloadContext::default())
         .await
         .expect("the enumeration succeeds");
 
@@ -1645,7 +1679,7 @@ async fn subsonic_search3_windows_are_per_type(pool: sqlx::PgPool) {
 
     let only_songs =
         enumeration_request(&RawQuery::parse("songCount=1")).expect("the window parses");
-    let result = enumerate(&library, None, &only_songs, SourceTags::Off)
+    let result = enumerate(&library, None, &only_songs, PayloadContext::default())
         .await
         .expect("the enumeration succeeds");
 
@@ -1774,7 +1808,7 @@ async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx:
         &completion,
         &summary.album().id().to_string(),
         None,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the album detail succeeds");
@@ -1808,7 +1842,7 @@ async fn subsonic_album_and_artist_details_use_the_shared_operations(pool: sqlx:
             &completion,
             &Uuid::now_v7().to_string(),
             None,
-            SourceTags::Off
+            PayloadContext::default()
         )
         .await,
         Err(BrowseError::AlbumNotFound)
@@ -2010,7 +2044,7 @@ async fn a_now_playing_notification_records_nothing_and_shows_the_session(pool: 
         &fixture.library,
         &fixture.credential,
         &fixture.principal,
-        SourceTags::Off,
+        PayloadContext::default(),
         at(0),
     )
     .await
@@ -2658,7 +2692,7 @@ async fn top_songs_resolves_an_exact_name_and_serves_the_local_tracks_capped_at_
         "Seed Artist",
         None,
         50,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the local top songs");
@@ -2679,7 +2713,7 @@ async fn top_songs_resolves_an_exact_name_and_serves_the_local_tracks_capped_at_
         "Seed Artist",
         None,
         1,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the capped local top songs");
@@ -2718,7 +2752,7 @@ async fn top_songs_reports_not_found_for_zero_and_for_several_exact_matches(pool
             "Nobody",
             None,
             50,
-            SourceTags::Off
+            PayloadContext::default()
         )
         .await,
         Err(BrowseError::ArtistNotFound)
@@ -2730,7 +2764,7 @@ async fn top_songs_reports_not_found_for_zero_and_for_several_exact_matches(pool
             "Twin Artist",
             None,
             50,
-            SourceTags::Off
+            PayloadContext::default()
         )
         .await,
         Err(BrowseError::ArtistNotFound)
@@ -2750,7 +2784,7 @@ async fn similar_songs_exclude_the_seed_and_honour_count(pool: sqlx::PgPool) {
         &data.seed_track.to_string(),
         None,
         50,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the similar songs");
@@ -2791,7 +2825,7 @@ async fn similar_songs2_serves_the_related_artists_tracks_in_rank_order(pool: sq
         &data.seed.to_string(),
         None,
         50,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the similar songs");
@@ -2812,7 +2846,7 @@ async fn similar_songs2_serves_the_related_artists_tracks_in_rank_order(pool: sq
         &data.seed.to_string(),
         None,
         1,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the capped similar songs");
@@ -2836,7 +2870,7 @@ async fn similar_songs_by_album_id_seed_the_album_artist(pool: sqlx::PgPool) {
         &data.seed_album.to_string(),
         None,
         50,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("album radio");
@@ -2867,7 +2901,7 @@ async fn similar_songs_and_top_songs_declare_an_empty_list_when_nothing_is_avail
         &data.quiet_track.to_string(),
         None,
         50,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the declared absence");
@@ -2880,7 +2914,7 @@ async fn similar_songs_and_top_songs_declare_an_empty_list_when_nothing_is_avail
         &data.quiet.to_string(),
         None,
         50,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the declared absence");
@@ -2893,7 +2927,7 @@ async fn similar_songs_and_top_songs_declare_an_empty_list_when_nothing_is_avail
         "Empty Artist",
         None,
         50,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the declared absence");
@@ -2955,7 +2989,7 @@ async fn similar_artists_and_top_songs_report_not_found_for_an_unmatched_name_or
             "Nobody",
             None,
             50,
-            SourceTags::Off
+            PayloadContext::default()
         )
         .await,
         Err(BrowseError::ArtistNotFound)
@@ -2967,7 +3001,7 @@ async fn similar_artists_and_top_songs_report_not_found_for_an_unmatched_name_or
             "Twin Artist",
             None,
             50,
-            SourceTags::Off
+            PayloadContext::default()
         )
         .await,
         Err(BrowseError::ArtistNotFound)
@@ -2979,7 +3013,7 @@ async fn similar_artists_and_top_songs_report_not_found_for_an_unmatched_name_or
             &ArtistId::new().to_string(),
             None,
             50,
-            SourceTags::Off
+            PayloadContext::default()
         )
         .await,
         Err(BrowseError::ArtistNotFound)
@@ -2991,7 +3025,7 @@ async fn similar_artists_and_top_songs_report_not_found_for_an_unmatched_name_or
             "not-a-uuid",
             None,
             50,
-            SourceTags::Off
+            PayloadContext::default()
         )
         .await,
         Err(BrowseError::ArtistNotFound)
@@ -3147,7 +3181,7 @@ async fn a_provider_only_ranking_is_not_served_through_the_subsonic_discovery_li
         &artist.to_string(),
         None,
         50,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the declared absence");
@@ -3170,7 +3204,7 @@ async fn a_provider_only_ranking_is_not_served_through_the_subsonic_discovery_li
             "Provider Only",
             None,
             50,
-            SourceTags::Off
+            PayloadContext::default()
         )
         .await
         .expect("the declared absence")
@@ -3277,7 +3311,7 @@ async fn the_native_route_and_the_subsonic_facade_observe_the_same_composed_resu
         "Seed Artist",
         Some(&user),
         50,
-        SourceTags::Off,
+        PayloadContext::default(),
     )
     .await
     .expect("the facade top songs");

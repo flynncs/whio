@@ -46,10 +46,15 @@ const METADATA_SOURCE_ORDER: &str = "WHIO_METADATA_SOURCE_ORDER";
 const ARTWORK_CACHE_DIR: &str = "WHIO_ARTWORK_CACHE_DIR";
 const ARTWORK_CACHE_BYTES: &str = "WHIO_ARTWORK_CACHE_BYTES";
 const PLAYBACK_MAX_SESSIONS: &str = "WHIO_PLAYBACK_MAX_SESSIONS";
+const PLAYBACK_MAX_CONVERSIONS: &str = "WHIO_PLAYBACK_MAX_CONVERSIONS";
+const PLAYBACK_CLIENT_FORMATS: &str = "WHIO_PLAYBACK_CLIENT_FORMATS";
+const FFMPEG_BINARY: &str = "WHIO_FFMPEG";
 const PLAYBACK_PREFETCH_TRACKS: &str = "WHIO_PLAYBACK_PREFETCH_TRACKS";
 const PLAYBACK_SPOOL_IDLE_SECONDS: &str = "WHIO_PLAYBACK_SPOOL_IDLE_SECONDS";
 const SPOOL_DIR: &str = "WHIO_SPOOL_DIR";
 const DEFAULT_MAX_PLAYBACK_SESSIONS: usize = 16;
+const DEFAULT_MAX_PLAYBACK_CONVERSIONS: usize =
+    crate::features::playback::media::DEFAULT_FFMPEG_MAX_CONVERSIONS;
 const DEFAULT_PLAYBACK_PREFETCH_TRACKS: usize = 1;
 const MAX_PLAYBACK_PREFETCH_TRACKS: usize = 3;
 const DEFAULT_PLAYBACK_SPOOL_IDLE_SECONDS: u64 =
@@ -106,6 +111,9 @@ pub(crate) struct Config {
     pub(crate) artwork_cache_bytes: u64,
     pub(crate) spool_dir: std::path::PathBuf,
     pub(crate) max_playback_sessions: usize,
+    pub(crate) max_playback_conversions: usize,
+    pub(crate) ffmpeg_binary: std::path::PathBuf,
+    pub(crate) client_formats: crate::features::playback::ClientFormats,
     pub(crate) playback_prefetch_tracks: usize,
     pub(crate) playback_spool_idle_seconds: u64,
     pub(crate) max_spool_bytes: u64,
@@ -301,6 +309,40 @@ impl Config {
                 "must be a positive session count",
             ));
         }
+
+        let max_playback_conversions = match vars.get(PLAYBACK_MAX_CONVERSIONS) {
+            None => DEFAULT_MAX_PLAYBACK_CONVERSIONS,
+            Some(raw) => raw.parse().map_err(|_| {
+                invalid(
+                    PLAYBACK_MAX_CONVERSIONS,
+                    raw,
+                    "must be a positive conversion count",
+                )
+            })?,
+        };
+        if max_playback_conversions == 0 {
+            return Err(invalid(
+                PLAYBACK_MAX_CONVERSIONS,
+                "0",
+                "must be a positive conversion count",
+            ));
+        }
+
+        let ffmpeg_binary = vars
+            .get(FFMPEG_BINARY)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+
+        let client_formats = match vars.get(PLAYBACK_CLIENT_FORMATS) {
+            None => crate::features::playback::ClientFormats::default(),
+            Some(raw) => crate::features::playback::ClientFormats::parse(raw).ok_or_else(|| {
+                invalid(
+                    PLAYBACK_CLIENT_FORMATS,
+                    raw,
+                    "must be a comma-separated list of name=aac|raw",
+                )
+            })?,
+        };
 
         let playback_prefetch_tracks = match vars.get(PLAYBACK_PREFETCH_TRACKS) {
             None => DEFAULT_PLAYBACK_PREFETCH_TRACKS,
@@ -536,6 +578,9 @@ impl Config {
             artwork_cache_bytes,
             spool_dir,
             max_playback_sessions,
+            max_playback_conversions,
+            ffmpeg_binary,
+            client_formats,
             playback_prefetch_tracks,
             playback_spool_idle_seconds,
             max_spool_bytes,
@@ -1543,6 +1588,59 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn playback_conversion_config_parses_and_rejects_invalid_values() {
+        use crate::features::playback::ClientFormat;
+
+        let config = parse_config(&[
+            (PLAYBACK_MAX_CONVERSIONS, "2"),
+            (FFMPEG_BINARY, "/usr/bin/ffmpeg"),
+            (PLAYBACK_CLIENT_FORMATS, "Arpeggi=aac,Feishin=raw"),
+        ])
+        .unwrap();
+        assert_eq!(config.max_playback_conversions, 2);
+        assert_eq!(
+            config.ffmpeg_binary,
+            std::path::PathBuf::from("/usr/bin/ffmpeg")
+        );
+        assert_eq!(
+            config.client_formats.format_for("Arpeggi"),
+            Some(ClientFormat::Aac)
+        );
+        assert_eq!(
+            config.client_formats.format_for("Feishin"),
+            Some(ClientFormat::Raw)
+        );
+
+        let default = parse_config(&[]).unwrap();
+        assert_eq!(
+            default.max_playback_conversions,
+            DEFAULT_MAX_PLAYBACK_CONVERSIONS
+        );
+        assert_eq!(default.ffmpeg_binary, std::path::PathBuf::from("ffmpeg"));
+        assert!(default.client_formats.is_empty());
+
+        for value in ["0", "many"] {
+            assert!(matches!(
+                parse_config(&[(PLAYBACK_MAX_CONVERSIONS, value)]),
+                Err(ConfigError::Invalid {
+                    name: PLAYBACK_MAX_CONVERSIONS,
+                    ..
+                })
+            ));
+        }
+
+        for value in ["Arpeggi", "Arpeggi=mp3", "=aac"] {
+            assert!(matches!(
+                parse_config(&[(PLAYBACK_CLIENT_FORMATS, value)]),
+                Err(ConfigError::Invalid {
+                    name: PLAYBACK_CLIENT_FORMATS,
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

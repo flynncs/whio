@@ -9,11 +9,16 @@ use axum::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use super::PlaybackByteStream;
 use super::range::{RangeRequest, parse_range_header};
-use super::spool_cache::{Cached, SpoolCache};
-use super::{ActiveSpool, PlaybackByteStream};
+use super::spool_cache::{Cached, SpoolCache, SpoolKey};
+use super::spool_file::ActiveSpool;
+use super::spool_status::SpoolFailure;
 use crate::{
-    features::playback::media::{ByteRange, MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
+    features::playback::media::{
+        ByteRange, ConversionInput, ConversionTarget, Converter, MediaBody, MediaFetchError,
+        MediaFetcher, MediaInfo, fit_to_length,
+    },
     features::playback::{DeliveryError, DeliveryResult, PlayableMedia, SourceKey},
     platform::clock::Clock,
 };
@@ -64,7 +69,7 @@ impl SpoolStrategy {
         self
     }
 
-    pub fn lookup(&self, key: &SourceKey) -> Option<Cached> {
+    pub fn lookup(&self, key: &SpoolKey) -> Option<Cached> {
         self.cache.evict_idle();
         self.cache.get(key)
     }
@@ -75,8 +80,9 @@ impl SpoolStrategy {
         media: &PlayableMedia,
         client_range: Option<&str>,
     ) -> Result<DeliveryResult, DeliveryError> {
-        if let Some(cached) = self.lookup(key) {
-            match self.serve(key, &cached, client_range).await {
+        let key = SpoolKey::original(key);
+        if let Some(cached) = self.lookup(&key) {
+            match self.serve(&key, &cached, client_range).await {
                 Ok(delivery) => return Ok(delivery),
                 Err(DeliveryError::Spool) if cached.failed() => {}
                 Err(error) => return Err(error),
@@ -84,13 +90,29 @@ impl SpoolStrategy {
         }
         let info = self.fetcher.probe(media).await?;
         SpoolResponse::validate(&info, client_range)?;
-        let cached = self.create_once(key, media, &info).await?;
-        self.serve(key, &cached, client_range).await
+        let cached = self.create_source(&key, media, &info).await?;
+        self.serve(&key, &cached, client_range).await
+    }
+
+    pub async fn source(
+        &self,
+        key: &SourceKey,
+        media: &PlayableMedia,
+    ) -> Result<Cached, DeliveryError> {
+        let key = SpoolKey::original(key);
+        if let Some(cached) = self.lookup(&key) {
+            return Ok(cached);
+        }
+        let info = self.fetcher.probe(media).await?;
+        if info.content_length == 0 {
+            return Err(MediaFetchError::InvalidContentRange.into());
+        }
+        self.create_source(&key, media, &info).await
     }
 
     pub async fn serve(
         &self,
-        key: &SourceKey,
+        key: &SpoolKey,
         cached: &Cached,
         client_range: Option<&str>,
     ) -> Result<DeliveryResult, DeliveryError> {
@@ -98,27 +120,58 @@ impl SpoolStrategy {
             Ok(delivery) => Ok(delivery),
             Err(DeliveryError::Spool) if cached.failed() => {
                 self.cache.invalidate(key, cached);
-                Err(DeliveryError::Spool)
+                Err(failure_error(cached.spool.failure()))
             }
             Err(error) => Err(error),
         }
     }
 
     pub fn is_cached(&self, key: &SourceKey) -> bool {
-        self.cache.is_cached(key)
+        self.cache.is_cached(&SpoolKey::original(key))
     }
 
     pub async fn warm(&self, key: &SourceKey, media: &PlayableMedia) -> Result<(), DeliveryError> {
-        if self.lookup(key).is_some() {
+        let key = SpoolKey::original(key);
+        if self.lookup(&key).is_some() {
             return Ok(());
         }
         let info = self.fetcher.probe(media).await?;
-        self.create_once(key, media, &info).await.map(|_| ())
+        self.create_source(&key, media, &info).await.map(|_| ())
     }
 
-    async fn create_once(
+    pub fn validate(info: &MediaInfo, client_range: Option<&str>) -> Result<(), DeliveryError> {
+        SpoolResponse::validate(info, client_range)
+    }
+
+    pub async fn converted<F, Fut>(
         &self,
-        key: &SourceKey,
+        key: &SpoolKey,
+        info: MediaInfo,
+        converter: &dyn Converter,
+        target: ConversionTarget,
+        open_input: F,
+    ) -> Result<Cached, DeliveryError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<ConversionInput, DeliveryError>>,
+    {
+        let length = info.content_length;
+        self.cache
+            .get_or_init(key, || async {
+                let reservation = self.reserve(length)?;
+                let input = open_input().await?;
+                let body = converter.start(input, target).await?;
+                let spool =
+                    ActiveSpool::start(&self.directory, fit_to_length(body, length), reservation)
+                        .await?;
+                Ok(self.cache.entry(spool, info.clone()))
+            })
+            .await
+    }
+
+    async fn create_source(
+        &self,
+        key: &SpoolKey,
         media: &PlayableMedia,
         info: &MediaInfo,
     ) -> Result<Cached, DeliveryError> {
@@ -162,6 +215,13 @@ impl SpoolStrategy {
     }
 }
 
+fn failure_error(failure: Option<SpoolFailure>) -> DeliveryError {
+    match failure {
+        Some(SpoolFailure::Conversion) => DeliveryError::Conversion,
+        _ => DeliveryError::Spool,
+    }
+}
+
 async fn respond(
     spool: &Arc<ActiveSpool>,
     info: &MediaInfo,
@@ -171,7 +231,7 @@ async fn respond(
     let range = response.range();
     let reader = spool.reader(range.start(), range.len()).await?;
     if spool.failed() {
-        return Err(DeliveryError::Spool);
+        return Err(failure_error(spool.failure()));
     }
     let stream = PlaybackByteStream::start(reader, spool.id(), range);
     Ok(response.into_delivery(Body::from_stream(stream)))
@@ -366,7 +426,9 @@ mod tests {
         key: &SourceKey,
         release: &Arc<Notify>,
     ) -> Cached {
-        let cached = strategy.lookup(key).expect("a live cached spool");
+        let cached = strategy
+            .lookup(&SpoolKey::original(key))
+            .expect("a live cached spool");
         release.notify_one();
         let mut reader = cached.spool.reader(0, 1).await.unwrap();
         assert!(reader.next_chunk().await.is_err());
@@ -393,7 +455,7 @@ mod tests {
 
         let cached = failed_cached(&strategy, &source, &release).await;
         let error = strategy
-            .serve(&source, &cached, None)
+            .serve(&SpoolKey::original(&source), &cached, None)
             .await
             .err()
             .expect("a failed spool must not be admitted");
@@ -418,7 +480,7 @@ mod tests {
 
         let cached = failed_cached(&strategy, &source, &release).await;
         let error = strategy
-            .serve(&source, &cached, Some("bytes=99-100"))
+            .serve(&SpoolKey::original(&source), &cached, Some("bytes=99-100"))
             .await
             .err()
             .expect("an invalid range must fail");

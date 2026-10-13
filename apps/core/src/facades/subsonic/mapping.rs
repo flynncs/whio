@@ -1,7 +1,6 @@
 use whio_subsonic_api::models;
 
 use crate::{
-    facades::SourceTags,
     features::metadata::domain::{Attribution, FieldEntry, FieldId, FieldValue, Presence},
     features::music_library::artwork::CoverArtTarget,
     features::music_library::catalogue::{AlbumDetail, ArtistDetail},
@@ -14,15 +13,19 @@ use crate::{
     features::playback::{ActivitySession, PlaybackState},
 };
 
+use super::payload::PayloadContext;
 use super::service::PlayQueueView;
 
 const UNKNOWN_CONTENT_TYPE: &str = "application/octet-stream";
 
-pub(crate) fn child_from_playlist_entry(entry: &PlaylistEntry, tags: SourceTags) -> models::Child {
+pub(crate) fn child_from_playlist_entry(
+    entry: &PlaylistEntry,
+    tags: PayloadContext,
+) -> models::Child {
     child_from_view(entry.track(), tags)
 }
 
-pub(crate) fn child_from_view(view: &TrackView, tags: SourceTags) -> models::Child {
+pub(crate) fn child_from_view(view: &TrackView, tags: PayloadContext) -> models::Child {
     let track = view.track();
     let representation = view.representation();
 
@@ -31,7 +34,8 @@ pub(crate) fn child_from_view(view: &TrackView, tags: SourceTags) -> models::Chi
         is_dir: false,
         title: track.title().to_owned(),
         album: view.album().map(|album| album.title().to_owned()),
-        artist: (!track.artists().is_empty()).then(|| tags.artist(track.artists(), view.sources())),
+        artist: (!track.artists().is_empty())
+            .then(|| tags.tags().artist(track.artists(), view.sources())),
         track: view
             .membership()
             .and_then(AlbumTrack::track_number)
@@ -59,6 +63,8 @@ pub(crate) fn child_from_view(view: &TrackView, tags: SourceTags) -> models::Chi
         sampling_rate: wire_integer(representation.and_then(|facts| facts.sample_rate_hz)),
         bit_depth: wire_integer(representation.and_then(|facts| facts.bit_depth)),
         channel_count: wire_integer(representation.and_then(|facts| facts.channels)),
+        transcoded_suffix: tags.transcoded_suffix().map(str::to_owned),
+        transcoded_content_type: tags.transcoded_content_type().map(str::to_owned),
         media_type: Some(models::MediaType::Song),
         r#type: Some(models::GenericMediaType::Music),
         ..Default::default()
@@ -68,7 +74,7 @@ pub(crate) fn child_from_view(view: &TrackView, tags: SourceTags) -> models::Chi
 pub(crate) fn child_from_entry(
     entry: &AlbumEntry,
     album: &AlbumSummary,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> models::Child {
     child_from_view(&entry.track_view(album), tags)
 }
@@ -81,7 +87,7 @@ pub(crate) fn now_playing_entry(
     view: &TrackView,
     session: &ActivitySession,
     username: &str,
-    tags: SourceTags,
+    tags: PayloadContext,
     at: chrono::DateTime<chrono::Utc>,
 ) -> models::NowPlayingEntry {
     let child = child_from_view(view, tags);
@@ -307,7 +313,7 @@ fn last_fm_url(entry: &FieldEntry) -> Option<String> {
 
 pub(crate) fn album_detail_with_songs(
     detail: &AlbumDetail,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> models::AlbumId3WithSongs {
     let songs = detail
         .entries
@@ -342,7 +348,7 @@ pub(crate) fn playlist_from_domain(playlist: &Playlist) -> models::Playlist {
 
 pub(crate) fn playlist_with_songs(
     detail: &PlaylistDetail,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> models::PlaylistWithSongs {
     let playlist = playlist_from_domain(&detail.playlist);
 
@@ -575,7 +581,10 @@ pub(crate) enum DirectoryTarget<'a> {
     Album(&'a AlbumDetail),
 }
 
-pub(crate) fn music_directory(target: DirectoryTarget<'_>, tags: SourceTags) -> models::Directory {
+pub(crate) fn music_directory(
+    target: DirectoryTarget<'_>,
+    tags: PayloadContext,
+) -> models::Directory {
     match target {
         DirectoryTarget::Artist(detail) => {
             let artist = detail.artist.artist();
@@ -799,7 +808,7 @@ mod tests {
         let id = track.id().to_string();
         let view = track_view(track, Some(album()), vec![source()]);
 
-        let child = child_from_view(&view, SourceTags::Off);
+        let child = child_from_view(&view, PayloadContext::default());
 
         assert_eq!(child.album.as_deref(), Some("album"));
         assert_eq!(child.cover_art.as_deref(), Some(id.as_str()));
@@ -815,13 +824,18 @@ mod tests {
         );
 
         assert_eq!(
-            child_from_view(&view, SourceTags::Off).artist.as_deref(),
+            child_from_view(&view, PayloadContext::default())
+                .artist
+                .as_deref(),
             Some("artist, featured")
         );
         assert_eq!(
-            child_from_view(&view, SourceTags::ArtistPrefix)
-                .artist
-                .as_deref(),
+            child_from_view(
+                &view,
+                PayloadContext::from(crate::facades::SourceTags::ArtistPrefix)
+            )
+            .artist
+            .as_deref(),
             Some("[YTM] artist, featured")
         );
     }
@@ -835,7 +849,7 @@ mod tests {
         );
         let summary = AlbumSummary::new(album.clone(), None, 1, 200_000, chrono::Utc::now());
 
-        let child = child_from_entry(&entry, &summary, SourceTags::Off);
+        let child = child_from_entry(&entry, &summary, PayloadContext::default());
 
         assert_eq!(child.album.as_deref(), Some("album"));
         assert_eq!(
@@ -851,7 +865,7 @@ mod tests {
         let view = track_view(track(&["artist"]), Some(album()), vec![source()])
             .with_representation(Some(representation()));
 
-        let child = child_from_view(&view, SourceTags::Off);
+        let child = child_from_view(&view, PayloadContext::default());
 
         assert_eq!(child.content_type.as_deref(), Some("audio/flac"));
         assert_eq!(child.suffix.as_deref(), Some("flac"));
@@ -866,7 +880,7 @@ mod tests {
     fn provider_only_track_uses_an_unknown_representation_until_delivery() {
         let view = track_view(track(&["artist"]), Some(album()), vec![source()]);
 
-        let child = child_from_view(&view, SourceTags::Off);
+        let child = child_from_view(&view, PayloadContext::default());
 
         assert_eq!(
             child.content_type.as_deref(),
@@ -883,7 +897,7 @@ mod tests {
         unrecorded.content_type = None;
         let selected = view.with_representation(Some(unrecorded));
 
-        let child = child_from_view(&selected, SourceTags::Off);
+        let child = child_from_view(&selected, PayloadContext::default());
 
         assert_eq!(
             child.content_type.as_deref(),
@@ -900,7 +914,7 @@ mod tests {
         let view = track_view(track(&["artist"]), Some(album()), vec![source()])
             .with_representation(Some(zero));
 
-        let child = child_from_view(&view, SourceTags::Off);
+        let child = child_from_view(&view, PayloadContext::default());
 
         assert_eq!(child.size, Some(0));
         assert_eq!(child.bit_rate, Some(0));
@@ -911,7 +925,7 @@ mod tests {
         let view = track_view(track(&["artist"]), Some(album()), vec![source()])
             .with_representation(Some(overflow));
 
-        let child = child_from_view(&view, SourceTags::Off);
+        let child = child_from_view(&view, PayloadContext::default());
 
         assert_eq!(child.size, None);
         assert_eq!(child.bit_rate, None);
@@ -929,7 +943,7 @@ mod tests {
         );
         let entry = PlaylistEntry::new(PlaylistEntryId::new(), 0, view);
 
-        let child = child_from_playlist_entry(&entry, SourceTags::Off);
+        let child = child_from_playlist_entry(&entry, PayloadContext::default());
 
         assert_eq!(child.track, Some(4));
         assert_eq!(child.disc_number, Some(2));

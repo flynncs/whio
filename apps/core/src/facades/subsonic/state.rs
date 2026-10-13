@@ -13,7 +13,7 @@ use crate::{
             playlists::PlaylistService,
             queue::RestoreQueueService,
         },
-        playback::{PlaybackActivityService, StreamingService},
+        playback::{ClientFormats, PlaybackActivityService, StreamingService},
     },
 };
 
@@ -34,6 +34,7 @@ pub struct SubsonicState {
     pub(crate) streaming: Arc<StreamingService>,
     pub(crate) discovery: Option<Arc<DiscoveryService>>,
     pub(crate) source_tags: SourceTags,
+    pub(crate) client_formats: ClientFormats,
 }
 
 impl SubsonicState {
@@ -75,6 +76,9 @@ impl SubsonicState {
     }
     pub(crate) fn source_tags(&self) -> SourceTags {
         self.source_tags
+    }
+    pub(crate) fn client_formats(&self) -> &ClientFormats {
+        &self.client_formats
     }
     pub fn discovery(&self) -> Option<&Arc<DiscoveryService>> {
         self.discovery.as_ref()

@@ -57,7 +57,11 @@ async fn send(
             }
             Ok(None) => break "completed",
             Err(error) => {
-                tracing::error!(error = %error, "playback response stream failed");
+                if matches!(error, DeliveryError::Conversion) {
+                    tracing::debug!(error = %error, "playback conversion stream failed");
+                } else {
+                    tracing::error!(error = %error, "playback response stream failed");
+                }
                 let _ = sender.send(Err(error)).await;
                 break "failed";
             }

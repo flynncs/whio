@@ -54,6 +54,7 @@ pub struct AppState {
     metadata_profile: crate::features::metadata::MetadataProfile,
     metadata_language: String,
     source_tags: SourceTags,
+    client_formats: crate::features::playback::ClientFormats,
     acquisition: Option<Arc<crate::features::acquisition::service::AcquisitionService>>,
     pub(crate) client_ip_policy: Arc<ClientIpPolicy>,
 }
@@ -130,6 +131,14 @@ impl AppState {
 
     pub fn with_delivery(mut self, delivery: Arc<DeliveryService>) -> Self {
         self.delivery = Some(delivery);
+        self
+    }
+
+    pub fn with_client_formats(
+        mut self,
+        formats: crate::features::playback::ClientFormats,
+    ) -> Self {
+        self.client_formats = formats;
         self
     }
 
@@ -247,6 +256,7 @@ impl AppState {
             metadata_profile: crate::features::metadata::MetadataProfile::artist_display(),
             metadata_language: "en".to_owned(),
             source_tags: SourceTags::Off,
+            client_formats: crate::features::playback::ClientFormats::default(),
             acquisition: None,
             client_ip_policy: Arc::new(ClientIpPolicy {
                 trusted_proxies: Vec::new(),
@@ -334,6 +344,7 @@ impl FromRef<AppState> for crate::facades::subsonic::state::SubsonicState {
             streaming: Arc::clone(&state.streaming),
             discovery: state.discovery.clone(),
             source_tags: state.source_tags,
+            client_formats: state.client_formats.clone(),
         }
     }
 }

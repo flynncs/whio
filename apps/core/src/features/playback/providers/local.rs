@@ -85,7 +85,8 @@ impl PlaybackProvider for LocalPlaybackProvider {
             });
 
         let media = LocalMedia::new(absolute, length, content_type)
-            .map_err(ProviderError::InvalidPlaybackData)?;
+            .map_err(ProviderError::InvalidPlaybackData)?
+            .with_audio(facts.codec.clone(), facts.bitrate_kbps.map(f64::from));
         Ok(Some(ResolvedPlayback::Local(media)))
     }
 }

@@ -1,5 +1,6 @@
 use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use tokio::net::TcpListener;
 
 use super::config::Config;
@@ -10,14 +11,17 @@ use crate::{
     features::metadata::{METADATA_ADAPTER_VERSION, storage::PostgresMetadataStore},
     features::music_library::{
         self, ArtworkStore, DeliveryStore, EnrichmentGuard, PostgresTrackRepository,
-        catalogue::CatalogueProvider, domain::YOUTUBE_MUSIC_PROVIDER_ID,
+        catalogue::{CatalogueProvider, LibraryService},
+        domain::{TrackId, YOUTUBE_MUSIC_PROVIDER_ID},
         library::LibraryRegistrationError,
     },
     features::playback::activity::PlaybackActivityService,
     features::playback::delivery::StreamDelivery,
     features::playback::media::{self, HttpMediaFetcher},
     features::playback::providers::{LocalPlaybackProvider, ProviderError},
-    features::playback::{CatalogueNextTracks, PlaybackProvider, StreamingService},
+    features::playback::{
+        CatalogueNextTracks, PlaybackProvider, StreamingService, TrackDurationError, TrackDurations,
+    },
     integrations::{
         listenbrainz::ListenBrainzAdapter,
         musicbrainz::client::MusicBrainzClient,
@@ -59,7 +63,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let database = Arc::new(Database::connect(&config.database_url).await?);
     let _spool_directory =
         crate::features::playback::delivery::SpoolDirectory::open(&config.spool_dir).await?;
-    let state = build_state(&config, database.clone())?;
+    let state = build_state(&config, database.clone()).await?;
     let listener = TcpListener::bind(config.bind_address).await?;
 
     tracing::info!(address = %config.bind_address, "listening");
@@ -94,7 +98,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, ProviderError> {
+async fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, ProviderError> {
     let transport = ytm_transport(config)?;
     let ytm_playback = Arc::new(YtmPlayback::new(transport.clone()));
     let ytm_catalogue = Arc::new(YtmCatalogue::new(transport.clone()));
@@ -154,6 +158,13 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
         )),
         youtube_media_suffixes,
     ));
+    let converter = Arc::new(
+        crate::features::playback::media::FfmpegConverter::probe(
+            config.ffmpeg_binary.clone(),
+            config.max_playback_conversions,
+        )
+        .await,
+    );
     let delivery = Arc::new(
         StreamDelivery::new(
             fetcher,
@@ -161,7 +172,10 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             config.max_playback_sessions,
         )
         .with_spool_limits(config.max_spool_bytes, config.spool_budget_bytes)
-        .with_spool_idle(Duration::from_secs(config.playback_spool_idle_seconds)),
+        .with_spool_idle(Duration::from_secs(config.playback_spool_idle_seconds))
+        .with_converter(converter)
+        .with_client_formats(config.client_formats.clone())
+        .with_track_durations(Arc::new(LibraryTrackDurations(Arc::clone(&music.library)))),
     );
     let local = Arc::new(LocalPlaybackProvider::new(Arc::clone(&music.sources)));
     let streaming = Arc::new(
@@ -211,6 +225,7 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
             )
             .with_destinations(destinations)
             .with_source_tags(config.source_tags)
+            .with_client_formats(config.client_formats.clone())
             .with_acquisition(acquisition)
             .with_client_ip_policy(crate::platform::client_ip::ClientIpPolicy {
                 trusted_proxies: config.trusted_proxies.clone(),
@@ -224,6 +239,19 @@ fn build_state(config: &Config, database: Arc<Database>) -> Result<AppState, Pro
     }
 
     Ok(state)
+}
+
+struct LibraryTrackDurations(Arc<LibraryService>);
+
+#[async_trait]
+impl TrackDurations for LibraryTrackDurations {
+    async fn duration_ms(&self, track: &TrackId) -> Result<Option<u64>, TrackDurationError> {
+        self.0
+            .track(track)
+            .await
+            .map(|track| track.and_then(|track| track.duration_ms()))
+            .map_err(|_| TrackDurationError::Library)
+    }
 }
 
 pub(crate) struct WorkerState {

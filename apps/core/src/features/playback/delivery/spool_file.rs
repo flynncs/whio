@@ -11,7 +11,7 @@ use crate::{
     features::playback::delivery::{
         TransferStats,
         spool_read::SpoolReader,
-        spool_status::{SpoolStatus, download_to_file},
+        spool_status::{SpoolFailure, SpoolStatus, download_to_file},
     },
     features::playback::media::MediaBody,
 };
@@ -66,6 +66,13 @@ impl ActiveSpool {
 
     pub fn failed(&self) -> bool {
         matches!(*self.updates.borrow(), SpoolStatus::Failed { .. })
+    }
+
+    pub fn failure(&self) -> Option<SpoolFailure> {
+        match *self.updates.borrow() {
+            SpoolStatus::Failed { failure, .. } => Some(failure),
+            _ => None,
+        }
     }
 
     pub async fn reader(
@@ -172,9 +179,9 @@ async fn download(
 }
 
 fn log_download_finished(spool_id: Uuid, status: SpoolStatus, started_at: Instant) {
-    let (bytes, failed) = match status {
-        SpoolStatus::Complete { length } => (length, false),
-        SpoolStatus::Failed { available } => (available, true),
+    let (bytes, failure) = match status {
+        SpoolStatus::Complete { length } => (length, None),
+        SpoolStatus::Failed { available, failure } => (available, Some(failure)),
         SpoolStatus::Downloading { available } => {
             tracing::warn!(
                 spool_id = %spool_id,
@@ -189,22 +196,28 @@ fn log_download_finished(spool_id: Uuid, status: SpoolStatus, started_at: Instan
     let elapsed_ms = stats.elapsed_ms();
     let average_mbps = stats.average_mbps();
 
-    if failed {
-        tracing::warn!(
-            spool_id = %spool_id,
-            bytes,
-            elapsed_ms,
-            average_mbps = %format_args!("{average_mbps:.2}"),
-            "playback spool failed"
-        );
-    } else {
-        tracing::info!(
+    match failure {
+        None => tracing::info!(
             spool_id = %spool_id,
             bytes,
             elapsed_ms,
             average_mbps = %format_args!("{average_mbps:.2}"),
             "playback spool completed"
-        );
+        ),
+        Some(SpoolFailure::Conversion) => tracing::info!(
+            spool_id = %spool_id,
+            bytes,
+            elapsed_ms,
+            average_mbps = %format_args!("{average_mbps:.2}"),
+            "playback conversion spool stopped"
+        ),
+        Some(_) => tracing::warn!(
+            spool_id = %spool_id,
+            bytes,
+            elapsed_ms,
+            average_mbps = %format_args!("{average_mbps:.2}"),
+            "playback spool failed"
+        ),
     }
 }
 

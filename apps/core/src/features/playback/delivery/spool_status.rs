@@ -1,13 +1,29 @@
 use tokio::{fs::File, io::AsyncWriteExt};
 use tokio_stream::StreamExt;
 
-use crate::features::playback::media::MediaBody;
+use crate::features::playback::media::{MediaBody, MediaFetchError};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpoolFailure {
+    Upstream,
+    Write,
+    Flush,
+    Length,
+    Conversion,
+}
 
 #[derive(Clone, Debug)]
 pub enum SpoolStatus {
-    Downloading { available: u64 },
-    Complete { length: u64 },
-    Failed { available: u64 },
+    Downloading {
+        available: u64,
+    },
+    Complete {
+        length: u64,
+    },
+    Failed {
+        available: u64,
+        failure: SpoolFailure,
+    },
 }
 
 pub async fn download_to_file(
@@ -28,7 +44,7 @@ pub async fn download_to_file(
                     .is_none_or(|maximum| available.saturating_add(bytes.len() as u64) > maximum)
                 {
                     tracing::error!(available, "playback spool exceeded its reserved length");
-                    updates.send_replace(SpoolStatus::Failed { available });
+                    fail(&updates, available, SpoolFailure::Length);
                     return;
                 }
                 if let Err(error) = file.write_all(&bytes).await {
@@ -38,7 +54,7 @@ pub async fn download_to_file(
                         "playback spool write failed"
                     );
 
-                    updates.send_replace(SpoolStatus::Failed { available });
+                    fail(&updates, available, SpoolFailure::Write);
 
                     return;
                 }
@@ -47,6 +63,10 @@ pub async fn download_to_file(
 
                 updates.send_replace(SpoolStatus::Downloading { available });
             }
+            Err(MediaFetchError::Conversion) => {
+                fail(&updates, available, SpoolFailure::Conversion);
+                return;
+            }
             Err(error) => {
                 tracing::error!(
                     error = %error,
@@ -54,7 +74,7 @@ pub async fn download_to_file(
                     "playback spool upstream failed"
                 );
 
-                updates.send_replace(SpoolStatus::Failed { available });
+                fail(&updates, available, SpoolFailure::Upstream);
 
                 return;
             }
@@ -68,7 +88,7 @@ pub async fn download_to_file(
             "playback spool flush failed"
         );
 
-        updates.send_replace(SpoolStatus::Failed { available });
+        fail(&updates, available, SpoolFailure::Flush);
 
         return;
     }
@@ -82,12 +102,16 @@ pub async fn download_to_file(
             "playback spool ended before the advertised content length"
         );
 
-        updates.send_replace(SpoolStatus::Failed { available });
+        fail(&updates, available, SpoolFailure::Length);
 
         return;
     }
 
     updates.send_replace(SpoolStatus::Complete { length: available });
+}
+
+fn fail(updates: &tokio::sync::watch::Sender<SpoolStatus>, available: u64, failure: SpoolFailure) {
+    updates.send_replace(SpoolStatus::Failed { available, failure });
 }
 
 #[cfg(test)]

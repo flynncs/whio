@@ -1,6 +1,7 @@
 mod auth;
 mod envelope;
 mod mapping;
+mod payload;
 mod query_auth;
 mod service;
 pub(crate) mod state;
@@ -21,7 +22,7 @@ use crate::{
     features::music_library::domain::{RandomSeed, Resource},
     features::music_library::library::{ScanMode, ScanRequestError},
     features::music_library::playlists::PlaylistError,
-    features::playback::{DeliveryError, PlaybackError},
+    features::playback::{DeliveryError, PlaybackError, StreamRequest},
     platform::http::FetchError,
     platform::raw_query::RawQuery,
     platform::request::RequestContext,
@@ -41,7 +42,12 @@ use envelope::{
     songs_by_genre_envelope, starred2_envelope, start_scan_envelope, top_songs_envelope,
     user_envelope,
 };
+use payload::PayloadContext;
 use state::SubsonicState;
+
+fn payload_context(state: &SubsonicState, query: &RawQuery) -> PayloadContext {
+    PayloadContext::new(state.source_tags(), query.get("c"), state.client_formats())
+}
 
 pub(crate) fn router<S>() -> Router<S>
 where
@@ -216,7 +222,7 @@ pub(crate) async fn search3(
                     state.library(),
                     Some(&user_uuid),
                     &request,
-                    state.source_tags(),
+                    payload_context(&state, &query),
                 )
                 .await
             }
@@ -232,7 +238,7 @@ pub(crate) async fn search3(
                     Some(&user_uuid),
                     q,
                     &windows,
-                    state.source_tags(),
+                    payload_context(&state, &query),
                 )
                 .await
             }
@@ -380,7 +386,14 @@ pub(crate) async fn get_album(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::album_detail(state.completion(), id, Some(&user), state.source_tags()).await {
+    match service::album_detail(
+        state.completion(),
+        id,
+        Some(&user),
+        payload_context(&state, &query),
+    )
+    .await
+    {
         Ok(album) => Json(album_envelope(album)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
@@ -401,7 +414,14 @@ pub(crate) async fn get_song(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::song_detail(state.library(), id, Some(&user), state.source_tags()).await {
+    match service::song_detail(
+        state.library(),
+        id,
+        Some(&user),
+        payload_context(&state, &query),
+    )
+    .await
+    {
         Ok(song) => Json(song_envelope(song)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
@@ -533,7 +553,7 @@ pub(crate) async fn get_top_songs(
         artist,
         Some(&user),
         count,
-        state.source_tags(),
+        payload_context(&state, &query),
     )
     .await
     {
@@ -567,7 +587,7 @@ pub(crate) async fn get_similar_songs(
         id,
         Some(&user),
         count,
-        state.source_tags(),
+        payload_context(&state, &query),
     )
     .await
     {
@@ -601,7 +621,7 @@ pub(crate) async fn get_similar_songs2(
         id,
         Some(&user),
         count,
-        state.source_tags(),
+        payload_context(&state, &query),
     )
     .await
     {
@@ -633,7 +653,13 @@ pub(crate) async fn get_songs_by_genre(
         library_id,
     };
 
-    match service::songs_by_genre(state.library(), Some(&user), &request, state.source_tags()).await
+    match service::songs_by_genre(
+        state.library(),
+        Some(&user),
+        &request,
+        payload_context(&state, &query),
+    )
+    .await
     {
         Ok(songs) => Json(songs_by_genre_envelope(songs)).into_response(),
         Err(error) => browse_failure_response(&context, error),
@@ -671,7 +697,7 @@ pub(crate) async fn get_random_songs(
         Some(&user),
         &request,
         seed,
-        state.source_tags(),
+        payload_context(&state, &query),
     )
     .await
     {
@@ -712,7 +738,14 @@ pub(crate) async fn get_music_directory(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::music_directory(state.library(), id, Some(&user), state.source_tags()).await {
+    match service::music_directory(
+        state.library(),
+        id,
+        Some(&user),
+        payload_context(&state, &query),
+    )
+    .await
+    {
         Ok(directory) => Json(directory_envelope(directory)).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
@@ -803,10 +836,21 @@ pub(crate) async fn stream(
         .get(axum::http::header::RANGE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let format = query.get("format").map(str::to_owned);
+    let max_bitrate_kbps = query
+        .get("maxBitRate")
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .filter(|kbps| *kbps > 0);
+    let client = query.get("c").map(str::to_owned);
+    let request = StreamRequest {
+        format,
+        max_bitrate_kbps,
+        client,
+    };
 
     match state
         .streaming()
-        .stream(&track_id, Some(&user_uuid), &context, client_range)
+        .stream(&track_id, Some(&user_uuid), &context, request, client_range)
         .await
     {
         Ok(delivery) => into_response(delivery),
@@ -888,10 +932,21 @@ fn stream_failure_response(context: &RequestContext, error: PlaybackError) -> Re
         ),
         PlaybackError::Library(_)
         | PlaybackError::Internal(_)
-        | PlaybackError::Delivery(DeliveryError::Spool | DeliveryError::Local(_)) => (
+        | PlaybackError::Delivery(
+            DeliveryError::Spool
+            | DeliveryError::Local(_)
+            | DeliveryError::MissingDuration
+            | DeliveryError::Conversion
+            | DeliveryError::Duration(_),
+        ) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             models::error::Code::Variant0,
             "Internal error.",
+        ),
+        PlaybackError::Delivery(DeliveryError::ConversionUnavailable) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            models::error::Code::Variant0,
+            "Audio conversion is unavailable.",
         ),
         PlaybackError::Provider(_) => (
             StatusCode::BAD_GATEWAY,
@@ -930,6 +985,7 @@ fn stream_failure_response(context: &RequestContext, error: PlaybackError) -> Re
     };
     match status {
         StatusCode::NOT_FOUND => tracing::debug!(error = %error, "playback track was not found"),
+        _ if matches!(error, PlaybackError::Delivery(DeliveryError::Conversion)) => {}
         _ => tracing::error!(
             error = %error,
             request_id = context.request_id().as_str(),
@@ -1030,7 +1086,14 @@ pub(crate) async fn get_lyrics_by_song_id(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::song_detail(state.library(), id, Some(&user), state.source_tags()).await {
+    match service::song_detail(
+        state.library(),
+        id,
+        Some(&user),
+        payload_context(&state, &query),
+    )
+    .await
+    {
         Ok(_) => Json(lyrics_by_song_id_envelope()).into_response(),
         Err(error) => browse_failure_response(&context, error),
     }
@@ -1084,6 +1147,7 @@ pub(crate) async fn get_starred2(
     State(state): State<SubsonicState>,
     Extension(context): Extension<RequestContext>,
     auth: SubsonicAuth,
+    query: RawQuery,
 ) -> Response {
     let principal = match authenticate(&state, &context, auth).await {
         Ok(principal) => principal,
@@ -1095,7 +1159,7 @@ pub(crate) async fn get_starred2(
         state.library_state(),
         state.library(),
         user,
-        state.source_tags(),
+        payload_context(&state, &query),
     )
     .await
     {
@@ -1214,7 +1278,7 @@ pub(crate) async fn get_playlist(
     match state.playlists().detail(user, &playlist_id).await {
         Ok(Some(detail)) => Json(playlist_envelope(mapping::playlist_with_songs(
             &detail,
-            state.source_tags(),
+            payload_context(&state, &query),
         )))
         .into_response(),
         Ok(None) => playlist_not_found(),
@@ -1241,7 +1305,7 @@ pub(crate) async fn create_playlist(
 
     match service::create_playlist(state.playlists(), user, request).await {
         Ok(service::PlaylistCreated::Created(detail)) => Json(create_playlist_envelope(
-            mapping::playlist_with_songs(&detail, state.source_tags()),
+            mapping::playlist_with_songs(&detail, payload_context(&state, &query)),
         ))
         .into_response(),
         Ok(service::PlaylistCreated::Forbidden) => playlist_forbidden(),
@@ -1482,6 +1546,7 @@ pub(crate) async fn get_now_playing(
     State(state): State<SubsonicState>,
     Extension(context): Extension<RequestContext>,
     auth: SubsonicAuth,
+    query: RawQuery,
 ) -> Response {
     let principal = match authenticate(&state, &context, auth).await {
         Ok(principal) => principal,
@@ -1493,7 +1558,7 @@ pub(crate) async fn get_now_playing(
         state.library(),
         state.credential(),
         &principal,
-        state.source_tags(),
+        payload_context(&state, &query),
         state.activity().now(),
     )
     .await
@@ -1536,6 +1601,7 @@ pub(crate) async fn get_play_queue(
     State(state): State<SubsonicState>,
     Extension(context): Extension<RequestContext>,
     auth: SubsonicAuth,
+    query: RawQuery,
 ) -> Response {
     let principal = match authenticate(&state, &context, auth).await {
         Ok(principal) => principal,
@@ -1543,7 +1609,13 @@ pub(crate) async fn get_play_queue(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::read_play_queue(state.queue(), state.library(), user, state.source_tags()).await
+    match service::read_play_queue(
+        state.queue(),
+        state.library(),
+        user,
+        payload_context(&state, &query),
+    )
+    .await
     {
         Ok(Some(view)) => Json(play_queue_envelope(mapping::play_queue(view))).into_response(),
         Ok(None) => match service::queue_owner_name(state.credential(), &principal).await {
@@ -1561,6 +1633,7 @@ pub(crate) async fn get_play_queue_by_index(
     State(state): State<SubsonicState>,
     Extension(context): Extension<RequestContext>,
     auth: SubsonicAuth,
+    query: RawQuery,
 ) -> Response {
     let principal = match authenticate(&state, &context, auth).await {
         Ok(principal) => principal,
@@ -1568,7 +1641,13 @@ pub(crate) async fn get_play_queue_by_index(
     };
     let user = principal.user_id.as_uuid();
 
-    match service::read_play_queue(state.queue(), state.library(), user, state.source_tags()).await
+    match service::read_play_queue(
+        state.queue(),
+        state.library(),
+        user,
+        payload_context(&state, &query),
+    )
+    .await
     {
         Ok(Some(view)) => Json(play_queue_by_index_envelope(mapping::play_queue_by_index(
             view,

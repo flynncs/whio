@@ -78,6 +78,7 @@ fn playback_error_response(error: PlaybackError, context: RequestContext) -> Res
             request_id = context.request_id().as_str(),
             "playback track was not found"
         ),
+        PlaybackError::Delivery(DeliveryError::Conversion) => {}
         _ => tracing::error!(
             error = %error,
             request_id = context.request_id().as_str(),
@@ -97,14 +98,22 @@ fn playback_error_details(error: &PlaybackError) -> (StatusCode, &'static str, &
         ),
         PlaybackError::CredentialsStale
         | PlaybackError::Unavailable
-        | PlaybackError::Delivery(DeliveryError::Overloaded) => (
+        | PlaybackError::Delivery(
+            DeliveryError::Overloaded | DeliveryError::ConversionUnavailable,
+        ) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "playback_unavailable",
             "Playback is temporarily unavailable",
         ),
         PlaybackError::Library(_)
         | PlaybackError::Internal(_)
-        | PlaybackError::Delivery(DeliveryError::Spool | DeliveryError::Local(_)) => (
+        | PlaybackError::Delivery(
+            DeliveryError::Spool
+            | DeliveryError::Local(_)
+            | DeliveryError::MissingDuration
+            | DeliveryError::Conversion
+            | DeliveryError::Duration(_),
+        ) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
             "An unexpected error occurred",
@@ -138,6 +147,7 @@ fn media_error_details(
         | crate::features::playback::media::MediaFetchError::MissingContentLength
         | crate::features::playback::media::MediaFetchError::InvalidContentRange
         | crate::features::playback::media::MediaFetchError::ResponseTooLarge
+        | crate::features::playback::media::MediaFetchError::Conversion
         | crate::features::playback::media::MediaFetchError::RangesUnsupported => (
             StatusCode::BAD_GATEWAY,
             "stream_failure",
@@ -152,7 +162,10 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::{features::music_library::sources::SourceQueryError, platform::request::RequestId};
+    use crate::{
+        features::music_library::sources::SourceQueryError, features::playback::TrackDurationError,
+        platform::request::RequestId,
+    };
 
     fn context() -> RequestContext {
         RequestContext::new(RequestId::new("request-123".to_owned()).unwrap())
@@ -242,5 +255,61 @@ mod tests {
             }),
         )
         .await;
+    }
+
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_duration_lookup_is_logged_once_and_stays_a_named_failure() {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let response = ApiError::PlaybackStream {
+            context: context(),
+            error: PlaybackError::Delivery(DeliveryError::Duration(TrackDurationError::Library)),
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({
+                "code": "internal_error",
+                "message": "An unexpected error occurred",
+                "request_id": "request-123"
+            })
+        );
+        drop(_guard);
+
+        let text = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            text.matches("playback resolution failed").count(),
+            1,
+            "{text}"
+        );
     }
 }

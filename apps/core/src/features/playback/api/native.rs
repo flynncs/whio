@@ -42,7 +42,13 @@ pub(crate) async fn stream_response(
 
     state
         .0
-        .stream(&track_id, Some(&user_uuid), context, client_range)
+        .stream(
+            &track_id,
+            Some(&user_uuid),
+            context,
+            crate::features::playback::StreamRequest::default(),
+            client_range,
+        )
         .await
         .map(into_response)
         .map_err(StreamFailure::Stream)

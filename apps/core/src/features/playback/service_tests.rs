@@ -13,7 +13,7 @@ use crate::{
         AlbumId, ArtworkRef, ProviderId, SourceIdentity, SourceScope,
     },
     features::playback::media::MediaFetchError,
-    features::playback::{MediaMetadata, PlayableMedia, PlaybackUrl, SourceKey},
+    features::playback::{MediaMetadata, PlayableMedia, PlaybackUrl, SourceKey, StreamRequest},
     platform::request::RequestId,
 };
 
@@ -74,6 +74,8 @@ impl PlaybackDelivery for FakeDelivery {
         &self,
         _key: &SourceKey,
         _resolved: &ResolvedPlayback,
+        _request: &StreamRequest,
+        _track: &TrackId,
         _client_range: Option<String>,
     ) -> Result<DeliveryResult, DeliveryError> {
         *self.attempts.lock() += 1;
@@ -95,6 +97,7 @@ impl PlaybackDelivery for FakeDelivery {
     async fn cached(
         &self,
         _key: &SourceKey,
+        _request: &StreamRequest,
         _client_range: Option<String>,
     ) -> Option<Result<DeliveryResult, DeliveryError>> {
         *self.cached_attempts.lock() += 1;
@@ -319,7 +322,13 @@ async fn stream_falls_back_to_the_next_source() {
     );
 
     let result = service
-        .stream(&TrackId::new(), None, &context(), None)
+        .stream(
+            &TrackId::new(),
+            None,
+            &context(),
+            StreamRequest::default(),
+            None,
+        )
         .await;
 
     assert!(result.is_ok());
@@ -343,7 +352,9 @@ async fn stream_retries_a_retryable_delivery_error() {
         Arc::clone(&delivery) as Arc<dyn PlaybackDelivery>,
     );
 
-    let result = service.stream(&track_id, None, &context(), None).await;
+    let result = service
+        .stream(&track_id, None, &context(), StreamRequest::default(), None)
+        .await;
 
     assert!(result.is_ok());
     assert_eq!(*delivery.attempts.lock(), 2);
@@ -361,7 +372,9 @@ async fn stream_stops_on_a_non_retryable_delivery_error() {
         Arc::clone(&delivery) as Arc<dyn PlaybackDelivery>,
     );
 
-    let result = service.stream(&track_id, None, &context(), None).await;
+    let result = service
+        .stream(&track_id, None, &context(), StreamRequest::default(), None)
+        .await;
 
     assert!(matches!(
         result,
@@ -380,7 +393,13 @@ async fn provider_access_failure_is_internal_and_does_not_try_another_source() {
     );
 
     let result = service
-        .stream(&TrackId::new(), None, &context(), None)
+        .stream(
+            &TrackId::new(),
+            None,
+            &context(),
+            StreamRequest::default(),
+            None,
+        )
         .await;
 
     assert!(matches!(
@@ -401,7 +420,13 @@ async fn a_cached_hit_does_not_resolve() {
     );
 
     let result = service
-        .stream(&TrackId::new(), None, &context(), None)
+        .stream(
+            &TrackId::new(),
+            None,
+            &context(),
+            StreamRequest::default(),
+            None,
+        )
         .await;
 
     assert!(result.is_ok());
@@ -420,7 +445,13 @@ async fn stream_reports_track_not_found_without_delivering() {
     );
 
     let result = service
-        .stream(&TrackId::new(), None, &context(), None)
+        .stream(
+            &TrackId::new(),
+            None,
+            &context(),
+            StreamRequest::default(),
+            None,
+        )
         .await;
 
     assert!(matches!(result, Err(PlaybackError::TrackNotFound)));

@@ -69,6 +69,10 @@ impl PlayableMedia {
     pub fn headers(&self) -> &HashMap<String, String> {
         &self.headers
     }
+
+    pub fn metadata(&self) -> &MediaMetadata {
+        &self.metadata
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +80,8 @@ pub struct LocalMedia {
     path: std::path::PathBuf,
     content_length: u64,
     content_type: Option<String>,
+    codec: Option<String>,
+    bitrate_kbps: Option<f64>,
 }
 
 impl LocalMedia {
@@ -98,7 +104,15 @@ impl LocalMedia {
             path,
             content_length,
             content_type,
+            codec: None,
+            bitrate_kbps: None,
         })
+    }
+
+    pub fn with_audio(mut self, codec: Option<String>, bitrate_kbps: Option<f64>) -> Self {
+        self.codec = codec.filter(|codec| !codec.is_empty());
+        self.bitrate_kbps = bitrate_kbps.filter(|kbps| kbps.is_finite() && *kbps > 0.0);
+        self
     }
 
     pub fn path(&self) -> &std::path::Path {
@@ -111,6 +125,14 @@ impl LocalMedia {
 
     pub fn content_type(&self) -> Option<&str> {
         self.content_type.as_deref()
+    }
+
+    pub fn codec(&self) -> Option<&str> {
+        self.codec.as_deref()
+    }
+
+    pub fn bitrate_kbps(&self) -> Option<f64> {
+        self.bitrate_kbps
     }
 }
 

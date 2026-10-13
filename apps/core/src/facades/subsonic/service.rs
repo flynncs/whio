@@ -4,10 +4,11 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 use whio_subsonic_api::models;
 
+use super::payload::PayloadContext;
+
 use uuid::Uuid;
 
 use crate::{
-    facades::SourceTags,
     features::identity::{domain::Principal, service::CredentialService},
     features::metadata::MetadataProfile,
     features::music_library::catalogue::{
@@ -65,7 +66,7 @@ pub(crate) async fn search(
     user: Option<&uuid::Uuid>,
     query: &str,
     windows: &SearchWindows,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<SearchResult, SearchError> {
     let request = SearchRequest::new(
         SearchQuery::new(query.to_owned()).map_err(|_| SearchError::InvalidSearch)?,
@@ -161,7 +162,7 @@ pub(crate) async fn enumerate(
     library: &LibraryService,
     user: Option<&Uuid>,
     request: &EnumerationRequest,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<SearchResult, SearchError> {
     let songs = request
         .songs
@@ -437,7 +438,7 @@ pub(crate) async fn starred(
     state: &LibraryStateService,
     library: &LibraryService,
     user: Uuid,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<StarredResult, StateError> {
     let starred = state.starred(user).await.map_err(StateError::State)?;
     let views = views_for_hits(library, starred.tracks(), Some(&user))
@@ -780,7 +781,7 @@ pub(crate) async fn now_playing(
     library: &LibraryService,
     credential: &CredentialService,
     principal: &Principal,
-    tags: SourceTags,
+    tags: PayloadContext,
     at: DateTime<Utc>,
 ) -> Result<Vec<models::NowPlayingEntry>, ReportingError> {
     let username = reporting_username(credential, principal).await?;
@@ -830,7 +831,7 @@ pub(crate) async fn album_detail(
     completion: &CompletionService,
     raw_id: &str,
     user: Option<&Uuid>,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<models::AlbumId3WithSongs, BrowseError> {
     let album_id: AlbumId = raw_id.parse().map_err(|_| BrowseError::AlbumNotFound)?;
     let detail = completion
@@ -869,7 +870,7 @@ pub(crate) async fn song_detail(
     library: &LibraryService,
     raw_id: &str,
     user: Option<&Uuid>,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<models::Child, BrowseError> {
     let track_id: TrackId = raw_id.parse().map_err(|_| BrowseError::SongNotFound)?;
     let mut views = library
@@ -998,7 +999,7 @@ async fn songs_from_top(
     library: &LibraryService,
     items: &[TopItem],
     user: Option<&Uuid>,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<Vec<models::Child>, BrowseError> {
     let track_ids = items
         .iter()
@@ -1067,7 +1068,7 @@ pub(crate) async fn top_songs(
     artist: &str,
     user: Option<&Uuid>,
     count: u32,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<models::TopSongs, BrowseError> {
     let Some(artist_id) = library
         .artist_by_exact_name(artist)
@@ -1127,7 +1128,7 @@ async fn similar_songs_for(
     seed: DiscoverySeed,
     user: Option<&Uuid>,
     count: u32,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<Vec<models::Child>, BrowseError> {
     let result = discovery
         .similar_tracks(SimilarTracksRequest {
@@ -1149,7 +1150,7 @@ pub(crate) async fn similar_songs(
     raw_id: &str,
     user: Option<&Uuid>,
     count: u32,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<models::SimilarSongs, BrowseError> {
     let seed = similar_seed(library, raw_id, user).await?;
     let discovery = require_discovery(discovery)?;
@@ -1164,7 +1165,7 @@ pub(crate) async fn similar_songs2(
     raw_id: &str,
     user: Option<&Uuid>,
     count: u32,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<models::SimilarSongs2, BrowseError> {
     let artist_id: ArtistId = raw_id.parse().map_err(|_| BrowseError::ArtistNotFound)?;
     let discovery = require_discovery(discovery)?;
@@ -1213,7 +1214,7 @@ pub(crate) async fn songs_by_genre(
     library: &LibraryService,
     user: Option<&Uuid>,
     request: &SongsByGenreRequest<'_>,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<Vec<models::Child>, BrowseError> {
     let genre = match request.genre {
         None => return Ok(Vec::new()),
@@ -1258,7 +1259,7 @@ pub(crate) async fn random_songs(
     user: Option<&Uuid>,
     request: &RandomSongsRequest<'_>,
     seed: RandomSeed,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<Vec<models::Child>, BrowseError> {
     let size = browse_size(request.size, DEFAULT_RANDOM_SIZE)?;
     let mut filter = TrackListFilter::new().with_random_seed(Some(seed));
@@ -1353,7 +1354,7 @@ pub(crate) async fn music_directory(
     library: &LibraryService,
     raw_id: &str,
     user: Option<&Uuid>,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<models::Directory, BrowseError> {
     let artist_id: ArtistId = raw_id.parse().map_err(|_| BrowseError::ArtistNotFound)?;
 
@@ -1682,7 +1683,7 @@ pub(crate) async fn read_play_queue(
     queue: &RestoreQueueService,
     library: &LibraryService,
     user: Uuid,
-    tags: SourceTags,
+    tags: PayloadContext,
 ) -> Result<Option<PlayQueueView>, PlayQueueError> {
     let Some(snapshot) = queue.read(user).await.map_err(PlayQueueError::from_queue)? else {
         return Ok(None);

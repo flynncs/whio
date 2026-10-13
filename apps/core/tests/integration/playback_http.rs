@@ -25,11 +25,13 @@ use whio_core::{
     features::music_library::domain::{
         ProviderId, ProviderKind, SourceIdentity, SourceScope, TrackId, TrackMetadata,
     },
-    features::playback::delivery::StreamDelivery,
-    features::playback::media::{MediaBody, MediaFetchError, MediaFetcher, MediaInfo},
+    features::playback::delivery::{DEFAULT_MAX_SESSIONS, StreamDelivery},
+    features::playback::media::{
+        FfmpegConverter, MediaBody, MediaFetchError, MediaFetcher, MediaInfo,
+    },
     features::playback::providers::ProviderError,
     features::playback::{
-        MediaMetadata, PlayableMedia, PlaybackProvider, PlaybackSource, PlaybackUrl,
+        ClientFormats, MediaMetadata, PlayableMedia, PlaybackProvider, PlaybackSource, PlaybackUrl,
         ResolvedPlayback, StreamingService,
     },
     platform::request::RequestContext,
@@ -137,6 +139,52 @@ fn playable_media() -> PlayableMedia {
 
 fn app(pool: PgPool) -> (Router, Arc<StubProvider>) {
     app_with_media_bytes(pool, b"0123456789".to_vec())
+}
+
+fn conversion_media() -> PlayableMedia {
+    PlayableMedia::new(
+        PlaybackUrl::new("https://media.example.test/audio".to_owned()).unwrap(),
+        HashMap::from([("User-Agent".to_owned(), "whio-test".to_owned())]),
+        None,
+        MediaMetadata::new(
+            Some("audio/flac".to_owned()),
+            Some(23_710),
+            Some("flac".to_owned()),
+            Some(900.0),
+            Some(1_000),
+        )
+        .unwrap(),
+    )
+}
+
+async fn app_with_conversion(pool: PgPool, bytes: Vec<u8>, formats: &str) -> Router {
+    let source = source();
+    let provider = Arc::new(StubProvider {
+        candidate: candidate(source),
+        playback: Mutex::new(Some(conversion_media())),
+        resolved_source: Mutex::new(None),
+    });
+    let ports = StorePorts::new(pool.clone());
+    let (search, library) =
+        ports.catalogue_service(vec![provider.clone() as Arc<dyn CatalogueProvider>]);
+    let converter = Arc::new(FfmpegConverter::probe(std::path::PathBuf::from("ffmpeg"), 2).await);
+    let delivery = StreamDelivery::new(
+        Arc::new(StubMediaFetcher {
+            bytes,
+            content_type: "audio/flac",
+        }),
+        std::env::temp_dir(),
+        DEFAULT_MAX_SESSIONS,
+    )
+    .with_converter(converter)
+    .with_client_formats(ClientFormats::parse(formats).unwrap());
+    let playback = Arc::new(StreamingService::new(
+        ports.source_queries(),
+        vec![provider as Arc<dyn PlaybackProvider>],
+        Arc::new(delivery),
+    ));
+
+    router(credential_service(), search, library, playback)
 }
 
 fn app_with_media_bytes(pool: PgPool, bytes: Vec<u8>) -> (Router, Arc<StubProvider>) {
@@ -494,4 +542,57 @@ async fn provider_song_sentinel_does_not_replace_delivered_media_type(pool: PgPo
             "application/octet-stream"
         );
     }
+}
+
+fn subsonic_stream_request(track_id: &str, client: &str, parameters: &str) -> Request<Body> {
+    Request::builder()
+            .uri(format!(
+                "/compat/subsonic/rest/stream.view?u=test-user&v=1.16.1&c={client}&p=whio-test-password&id={track_id}{parameters}"
+            ))
+            .header("x-request-id", support::TEST_REQUEST_ID)
+            .body(Body::empty())
+            .unwrap()
+}
+
+#[sqlx::test]
+async fn client_format_rules_decide_the_streamed_representation(pool: PgPool) {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lossless.flac"),
+    )
+    .unwrap();
+    let app = app_with_conversion(pool.clone(), bytes.clone(), "Arpeggi=aac").await;
+    let track_id = searched_track_id(&app).await;
+
+    let converted = app
+        .clone()
+        .oneshot(subsonic_stream_request(&track_id, "Arpeggi", ""))
+        .await
+        .unwrap();
+    assert_eq!(converted.status(), StatusCode::OK);
+    assert_eq!(converted.headers()[header::CONTENT_TYPE], "audio/aac");
+    let converted = to_bytes(converted.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(converted[0], 0xFF);
+    assert_eq!(converted[1] & 0xF0, 0xF0);
+
+    let original = app
+        .clone()
+        .oneshot(subsonic_stream_request(&track_id, "Feishin", ""))
+        .await
+        .unwrap();
+    assert_eq!(original.status(), StatusCode::OK);
+    assert_eq!(original.headers()[header::CONTENT_TYPE], "audio/flac");
+    assert_eq!(
+        to_bytes(original.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .len(),
+        bytes.len()
+    );
+
+    let raw = app
+        .oneshot(subsonic_stream_request(&track_id, "Arpeggi", "&format=raw"))
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), StatusCode::OK);
+    assert_eq!(raw.headers()[header::CONTENT_TYPE], "audio/flac");
 }

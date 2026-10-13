@@ -32,6 +32,9 @@ jobs:
       - name: Lint core
         run: cargo clippy --locked --manifest-path apps/core/Cargo.toml --all-targets -- -D warnings
 
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg
+
       - name: Test core
         run: cargo test --locked --manifest-path apps/core/Cargo.toml
 
@@ -89,6 +92,9 @@ jobs:
         env:
           OPENAPI_GENERATOR_JAR: /tmp/openapi-generator-cli.jar
         run: ./tools/generate-subsonic-types.sh --check
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg
 
       - name: Test PostgreSQL integration suites
         env:

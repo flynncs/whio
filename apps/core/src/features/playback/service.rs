@@ -10,7 +10,7 @@ use crate::{
     features::playback::providers::ProviderError,
     features::playback::{
         DeliveryError, DeliveryResult, LocalMedia, PlayableMedia, PlaybackDelivery, PlaybackSource,
-        SourceKey,
+        SourceKey, StreamRequest,
     },
     platform::request::RequestContext,
 };
@@ -180,12 +180,13 @@ impl StreamingService {
         track_id: &TrackId,
         user: Option<&Uuid>,
         context: &RequestContext,
+        request: StreamRequest,
         range: Option<String>,
     ) -> Result<DeliveryResult, PlaybackError> {
         let mut failure = PlaybackError::TrackNotFound;
         for source in self.candidates(track_id).await? {
             match self
-                .try_source(track_id, &source, user, context, range.clone())
+                .try_source(track_id, &source, user, context, &request, range.clone())
                 .await
             {
                 Ok(Some(delivery)) => return Ok(delivery),
@@ -203,10 +204,11 @@ impl StreamingService {
         source: &PlaybackSource,
         user: Option<&Uuid>,
         context: &RequestContext,
+        request: &StreamRequest,
         range: Option<String>,
     ) -> Result<Option<DeliveryResult>, PlaybackError> {
         let key = SourceKey::new(source);
-        if let Some(delivery) = self.delivery.cached(&key, range.clone()).await {
+        if let Some(delivery) = self.delivery.cached(&key, request, range.clone()).await {
             let delivery = delivery.map_err(playback_delivery_error)?;
             self.prefetch_next(track_id, user, context);
             return Ok(Some(delivery));
@@ -222,7 +224,11 @@ impl StreamingService {
             let Some(resolved) = resolved else {
                 return Ok(None);
             };
-            match self.delivery.deliver(&key, &resolved, range.clone()).await {
+            match self
+                .delivery
+                .deliver(&key, &resolved, request, track_id, range.clone())
+                .await
+            {
                 Ok(delivery) => {
                     if matches!(resolved, ResolvedPlayback::Remote(_)) {
                         self.prefetch_next(track_id, user, context);
