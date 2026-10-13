@@ -666,6 +666,184 @@ async fn two_identifiers_are_two_albums_even_when_the_text_agrees(pool: PgPool) 
     assert_ne!(original.id(), remaster.id());
 }
 
+fn ego_death_album(external_id: &str, release_type: &str) -> AlbumMetadata {
+    album("Ego Death At A Bachelorette Party")
+        .with_album_artist(credit("Hayley Williams", None))
+        .with_provider(Some(source(external_id)))
+        .with_release_type(Some(release_type.to_owned()))
+        .unwrap()
+}
+
+#[sqlx::test]
+
+async fn each_provider_album_id_is_its_own_album_row(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album = repository
+        .resolve_or_create_album(&ego_death_album("MPREb_NZ6ZYsnWffp", "album"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &source("MPREb_NZ6ZYsnWffp"))
+        .await
+        .unwrap();
+    let single = repository
+        .resolve_or_create_album(&ego_death_album("MPREb_9DTZIOTqaov", "single"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(single.id(), &source("MPREb_9DTZIOTqaov"))
+        .await
+        .unwrap();
+
+    assert_ne!(album.id(), single.id());
+    assert_eq!(album.release_type(), Some("album"));
+    assert_eq!(single.release_type(), Some("single"));
+    assert_eq!(
+        repository.find_album_sources(album.id()).await.unwrap(),
+        vec![source("MPREb_NZ6ZYsnWffp")]
+    );
+    assert_eq!(
+        repository.find_album_sources(single.id()).await.unwrap(),
+        vec![source("MPREb_9DTZIOTqaov")]
+    );
+}
+
+#[sqlx::test]
+
+async fn a_provider_single_first_still_keeps_the_album_apart(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let single = repository
+        .resolve_or_create_album(&ego_death_album("MPREb_9DTZIOTqaov", "single"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(single.id(), &source("MPREb_9DTZIOTqaov"))
+        .await
+        .unwrap();
+    let album = repository
+        .resolve_or_create_album(&ego_death_album("MPREb_NZ6ZYsnWffp", "album"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &source("MPREb_NZ6ZYsnWffp"))
+        .await
+        .unwrap();
+
+    assert_ne!(album.id(), single.id());
+    assert_eq!(album.release_type(), Some("album"));
+    assert_eq!(single.release_type(), Some("single"));
+}
+
+#[sqlx::test]
+
+async fn a_provider_album_still_joins_its_unique_library_album(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let library = repository
+        .resolve_or_create_album(
+            &album("Ego Death At A Bachelorette Party")
+                .with_album_artist(credit("Hayley Williams", None)),
+        )
+        .await
+        .unwrap();
+
+    let provider = repository
+        .resolve_or_create_album(&ego_death_album("MPREb_NZ6ZYsnWffp", "album"))
+        .await
+        .unwrap();
+
+    assert_eq!(library.id(), provider.id());
+}
+
+#[sqlx::test]
+
+async fn a_matching_release_group_keeps_several_provider_identities(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let artist = credit("Hayley Williams", None);
+    let first = repository
+        .resolve_or_create_album(
+            &album("Ego Death At A Bachelorette Party")
+                .with_album_artist(artist.clone())
+                .with_provider(Some(source("MPREb_album")))
+                .with_release_group_id(Some("rg-ego".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let second = repository
+        .resolve_or_create_album(
+            &album("Ego Death At A Bachelorette Party")
+                .with_album_artist(artist)
+                .with_provider(Some(source("MPREb_edition")))
+                .with_release_group_id(Some("rg-ego".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first.id(), second.id());
+    assert_eq!(
+        repository
+            .find_album_sources(first.id())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        repository
+            .provider_duplicates(&[])
+            .await
+            .unwrap()
+            .splits
+            .is_empty()
+    );
+}
+
+#[sqlx::test]
+
+async fn a_matching_release_id_keeps_several_provider_identities(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let artist = credit("Hayley Williams", None);
+    let first = repository
+        .resolve_or_create_album(
+            &album("Ego Death At A Bachelorette Party")
+                .with_album_artist(artist.clone())
+                .with_provider(Some(source("MPREb_album")))
+                .with_release_id(Some("rel-ego".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let second = repository
+        .resolve_or_create_album(
+            &album("Ego Death At A Bachelorette Party")
+                .with_album_artist(artist)
+                .with_provider(Some(source("MPREb_edition")))
+                .with_release_id(Some("rel-ego".to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first.id(), second.id());
+    assert_eq!(
+        repository
+            .find_album_sources(first.id())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        repository
+            .provider_duplicates(&[])
+            .await
+            .unwrap()
+            .splits
+            .is_empty()
+    );
+}
+
 #[sqlx::test]
 
 async fn concurrent_album_resolution_creates_one_row(pool: PgPool) {
@@ -710,7 +888,7 @@ async fn concurrent_album_resolution_creates_one_row(pool: PgPool) {
 
 #[sqlx::test]
 
-async fn album_unique_indexes_refuse_a_second_row(pool: PgPool) {
+async fn album_text_index_distinguishes_provider_identities(pool: PgPool) {
     let repository = PostgresTrackRepository::new(pool.clone());
     let artist = repository
         .resolve_or_create_artist(&credit("Daft Punk", None))
@@ -728,7 +906,23 @@ async fn album_unique_indexes_refuse_a_second_row(pool: PgPool) {
             .bind(artist.id().as_uuid())
             .execute(&pool)
             .await;
-    assert!(duplicate_text.is_err(), "the text index must refuse it");
+    assert!(
+        duplicate_text.is_err(),
+        "two albums without a provider identity still collide by text"
+    );
+
+    for key in ["youtube_music:MPREb_one", "youtube_music:MPREb_two"] {
+        sqlx::query(
+            "INSERT INTO albums (id, title, album_artist_id, provider_source_key) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind("Discovery")
+        .bind(artist.id().as_uuid())
+        .bind(key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
 
     repository
         .resolve_or_create_album(

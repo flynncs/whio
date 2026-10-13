@@ -50,6 +50,9 @@ mod test_history;
 #[path = "test_libraries.rs"]
 mod test_libraries;
 #[cfg(all(test, feature = "postgres-integration"))]
+#[path = "test_migrations.rs"]
+mod test_migrations;
+#[cfg(all(test, feature = "postgres-integration"))]
 #[path = "test_playlists.rs"]
 mod test_playlists;
 #[cfg(all(test, feature = "postgres-integration"))]

@@ -136,6 +136,34 @@ impl CatalogueProvider for PerSourceAlbumProvider {
     }
 }
 
+struct TwoAlbumProvider {
+    album: FetchedAlbum,
+    single: FetchedAlbum,
+}
+
+#[async_trait]
+impl CatalogueProvider for TwoAlbumProvider {
+    async fn search_tracks(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn fetch_album(
+        &self,
+        source: &SourceIdentity,
+        _context: &RequestContext,
+    ) -> Result<FetchedAlbum, ProviderError> {
+        if source.external_id() == "MPREb_single" {
+            Ok(self.single.clone())
+        } else {
+            Ok(self.album.clone())
+        }
+    }
+}
+
 async fn service(
     repository: &Arc<PostgresTrackRepository>,
     provider: Arc<dyn CatalogueProvider>,
@@ -169,7 +197,7 @@ async fn partial_album_with_sources(
     provider_sources: &[&str],
 ) -> AlbumId {
     let album = repository
-        .resolve_or_create_album(&album_metadata())
+        .resolve_or_create_album(&album_metadata().with_provider(None))
         .await
         .unwrap();
     let track = repository
@@ -1262,4 +1290,185 @@ async fn opening_a_provider_single_whose_track_matches_the_library_lists_one_ent
         1,
         "a settled single is not fetched again"
     );
+}
+
+#[sqlx::test]
+async fn completing_a_provider_album_refreshes_its_facts(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album_id = partial_album(&repository).await;
+    sqlx::query(
+        "UPDATE albums SET title = 'SOUR (Deluxe)', release_type = 'single', year = 1999 WHERE id = $1",
+    )
+    .bind(album_id.as_uuid())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let refreshed = album_metadata()
+        .with_release_type(Some("album".to_owned()))
+        .unwrap()
+        .with_year(Some(2021))
+        .unwrap();
+    let provider = Arc::new(StubAlbumProvider {
+        result: Mutex::new(Ok(FetchedAlbum::new(
+            vec![candidate("vid-1", "brutal").with_album(Some(refreshed))],
+            Some(1),
+        ))),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let (completion, _) = service(&repository, provider).await;
+    completion
+        .album_detail(&album_id, None)
+        .await
+        .unwrap()
+        .expect("the album is completed");
+
+    let facts: (String, Option<String>, Option<i16>) =
+        sqlx::query_as("SELECT title, release_type, year FROM albums WHERE id = $1")
+            .bind(album_id.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        facts,
+        ("SOUR".to_owned(), Some("album".to_owned()), Some(2021))
+    );
+}
+
+#[sqlx::test]
+async fn completing_a_provider_album_prefers_the_incoming_year_over_a_stale_date(
+    pool: sqlx::PgPool,
+) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album_id = partial_album(&repository).await;
+    sqlx::query(
+        "UPDATE albums SET release_date = '1999-01-01', release_date_precision = 'day', year = 1999 WHERE id = $1",
+    )
+    .bind(album_id.as_uuid())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let refreshed = album_metadata().with_year(Some(2021)).unwrap();
+    let provider = Arc::new(StubAlbumProvider {
+        result: Mutex::new(Ok(FetchedAlbum::new(
+            vec![candidate("vid-1", "brutal").with_album(Some(refreshed))],
+            Some(1),
+        ))),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let (completion, _) = service(&repository, provider).await;
+    completion
+        .album_detail(&album_id, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let facts: (Option<i32>, Option<chrono::NaiveDate>, Option<String>) = sqlx::query_as(
+        "SELECT year::INTEGER, release_date, release_date_precision FROM albums WHERE id = $1",
+    )
+    .bind(album_id.as_uuid())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        facts,
+        (
+            Some(2021),
+            chrono::NaiveDate::from_ymd_opt(1999, 1, 1),
+            Some("day".to_owned())
+        )
+    );
+}
+
+#[sqlx::test]
+async fn a_provider_album_and_single_with_one_title_complete_separately(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let title = "Ego Death At A Bachelorette Party";
+    let album_metadata = |source_id: &str, release_type: &str| {
+        AlbumMetadata::new(title.to_owned())
+            .unwrap()
+            .with_album_artist(ArtistCredit::new("Hayley Williams".to_owned(), None).unwrap())
+            .with_provider(Some(provider_source(source_id)))
+            .with_release_type(Some(release_type.to_owned()))
+            .unwrap()
+    };
+    let candidate = |video: &str, track_title: &str, source_id: &str, release_type: &str| {
+        CatalogueCandidate::new(
+            provider_source(video),
+            TrackMetadata::from_names(
+                track_title.to_owned(),
+                vec!["Hayley Williams".to_owned()],
+                Some(1_000),
+            )
+            .unwrap(),
+        )
+        .with_album(Some(album_metadata(source_id, release_type)))
+    };
+
+    let album = repository
+        .resolve_or_create_album(&album_metadata("MPREb_album", "album"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &provider_source("MPREb_album"))
+        .await
+        .unwrap();
+    let single = repository
+        .resolve_or_create_album(&album_metadata("MPREb_single", "single"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(single.id(), &provider_source("MPREb_single"))
+        .await
+        .unwrap();
+    assert_ne!(album.id(), single.id());
+
+    let provider = Arc::new(TwoAlbumProvider {
+        album: FetchedAlbum::new(
+            vec![
+                candidate("vid-1", title, "MPREb_album", "album"),
+                candidate("vid-2", "Other Song", "MPREb_album", "album"),
+            ],
+            Some(2),
+        ),
+        single: FetchedAlbum::new(
+            vec![candidate("vid-3", title, "MPREb_single", "single")],
+            Some(1),
+        ),
+    });
+    let (completion, _) = service(&repository, provider).await;
+
+    completion.album_detail(album.id(), None).await.unwrap();
+    completion.album_detail(single.id(), None).await.unwrap();
+
+    let album_members: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM album_tracks WHERE album_id = $1")
+            .bind(album.id().as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let single_members: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM album_tracks WHERE album_id = $1")
+            .bind(single.id().as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(album_members, 2);
+    assert_eq!(single_members, 1);
+
+    let album_release_type: Option<String> =
+        sqlx::query_scalar("SELECT release_type FROM albums WHERE id = $1")
+            .bind(album.id().as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let single_release_type: Option<String> =
+        sqlx::query_scalar("SELECT release_type FROM albums WHERE id = $1")
+            .bind(single.id().as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(album_release_type.as_deref(), Some("album"));
+    assert_eq!(single_release_type.as_deref(), Some("single"));
 }

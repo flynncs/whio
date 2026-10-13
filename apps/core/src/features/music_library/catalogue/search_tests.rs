@@ -67,6 +67,14 @@ impl CatalogueWrite for FailingTrackRepository {
         Err(TrackRepositoryError::Unavailable)
     }
 
+    async fn refresh_album_facts(
+        &self,
+        _album_id: &AlbumId,
+        _metadata: &AlbumMetadata,
+    ) -> Result<Album, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unavailable)
+    }
+
     async fn add_album_track(
         &self,
         _album_id: &AlbumId,
@@ -2044,6 +2052,19 @@ impl CatalogueWrite for MemoryStore {
         self.albums.lock().push(album.clone());
         let _ = self.materialized.send(Materialised::Album);
         Ok(album)
+    }
+
+    async fn refresh_album_facts(
+        &self,
+        album_id: &AlbumId,
+        _metadata: &AlbumMetadata,
+    ) -> Result<Album, TrackRepositoryError> {
+        self.albums
+            .lock()
+            .iter()
+            .find(|album| album.id() == album_id)
+            .cloned()
+            .ok_or(TrackRepositoryError::Unavailable)
     }
 
     async fn resolve_or_create_artist(

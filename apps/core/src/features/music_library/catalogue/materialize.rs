@@ -49,6 +49,10 @@ pub(crate) async fn materialize_album(
             .await
             .map_err(CatalogueError::Repository)?
     {
+        let album = catalogue
+            .refresh_album_facts(album.id(), metadata)
+            .await
+            .map_err(CatalogueError::Repository)?;
         store_album_artwork(sources, source, metadata.artwork()).await;
         return Ok(album);
     }
@@ -61,10 +65,6 @@ pub(crate) async fn materialize_album(
         .await
         .map_err(CatalogueError::Repository)?;
     if let Some(source) = metadata.provider() {
-        catalogue
-            .set_album_source(album.id(), source)
-            .await
-            .map_err(CatalogueError::Repository)?;
         store_album_artwork(sources, source, metadata.artwork()).await;
     }
     Ok(album)

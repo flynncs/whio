@@ -1,12 +1,16 @@
+use std::sync::Arc;
+
 use super::PostgresTrackRepository;
 use crate::features::music_library::domain::{
-    AlbumMetadata, AlbumTrack, ProviderId, SourceIdentity, SourceScope, StateTarget, TrackMetadata,
+    AlbumMetadata, AlbumTrack, ArtistCredit, ProviderId, SourceIdentity, SourceScope, StateTarget,
+    TrackMetadata,
 };
 use crate::features::music_library::library_state::test_support::seed_play;
 use crate::features::music_library::storage::contracts::{
     CatalogueWrite, LibraryRead, Retention, StateStore,
 };
 use sqlx::PgPool;
+use tokio::sync::Barrier;
 use uuid::Uuid;
 
 fn source(external_id: &str) -> SourceIdentity {
@@ -22,6 +26,40 @@ fn local_source(external_id: &str) -> SourceIdentity {
     SourceIdentity::new(
         ProviderId::new("local".to_owned()).unwrap(),
         SourceScope::Named("/music".to_owned()),
+        external_id.to_owned(),
+    )
+    .unwrap()
+}
+
+fn spotify_source(external_id: &str) -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new("spotify".to_owned()).unwrap(),
+        SourceScope::Global,
+        external_id.to_owned(),
+    )
+    .unwrap()
+}
+
+fn album_for(title: &str) -> AlbumMetadata {
+    AlbumMetadata::new(title.to_owned())
+        .unwrap()
+        .with_album_artist(ArtistCredit::new("Hayley Williams".to_owned(), None).unwrap())
+}
+
+fn provider_album(title: &str, external_id: &str) -> AlbumMetadata {
+    album_for(title).with_provider(Some(source(external_id)))
+}
+
+fn provider_album_without_artist(title: &str, external_id: &str) -> AlbumMetadata {
+    AlbumMetadata::new(title.to_owned())
+        .unwrap()
+        .with_provider(Some(source(external_id)))
+}
+
+fn scoped_source(external_id: &str, scope: &str) -> SourceIdentity {
+    SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Named(scope.to_owned()),
         external_id.to_owned(),
     )
     .unwrap()
@@ -1050,6 +1088,47 @@ async fn row_count(pool: &PgPool, table: &str, column: &str, id: Uuid) -> i64 {
         .unwrap()
 }
 
+async fn album_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM albums")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn provider_source_key_of(pool: &PgPool, album_id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT provider_source_key FROM albums WHERE id = $1")
+        .bind(album_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn album_source_owners_of(pool: &PgPool) -> Vec<(String, Uuid)> {
+    sqlx::query_as("SELECT external_id, album_id FROM album_sources ORDER BY external_id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+async fn insert_album_keyed(
+    pool: &PgPool,
+    id: Uuid,
+    title: &str,
+    album_artist_id: Uuid,
+    key: &str,
+) {
+    sqlx::query(
+        "INSERT INTO albums (id, title, album_artist_id, provider_source_key) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(title)
+    .bind(album_artist_id)
+    .bind(key)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn artist_source_owner(pool: &PgPool, external_id: &str) -> Uuid {
     sqlx::query_scalar("SELECT artist_id FROM artist_sources WHERE external_id = $1")
         .bind(external_id)
@@ -1473,6 +1552,697 @@ async fn prune_merges_same_album_tracks_moves_state_and_clears_short_album_state
             .unwrap()
             .track_merges
             .is_empty()
+    );
+}
+
+#[sqlx::test]
+async fn prune_splits_one_provider_onto_each_of_its_albums(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album = repository
+        .resolve_or_create_album(&AlbumMetadata::new("Ego Death".to_owned()).unwrap())
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &source("MPREb_album"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &source("MPREb_single"))
+        .await
+        .unwrap();
+    let member = repository
+        .get_or_create(source("vid-1"), metadata("Title Track", "Ashe"))
+        .await
+        .unwrap();
+    repository
+        .add_album_track(album.id(), member.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    for external in ["MPREb_album", "MPREb_single"] {
+        repository
+            .set_provider_entity_state(
+                &source(external),
+                &crate::features::music_library::domain::ProviderEntityState::new(
+                    chrono::Utc::now(),
+                    Some(2),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let before = snapshot_tables(&pool).await;
+
+    let preview = repository.provider_duplicates(&[]).await.unwrap();
+    assert_eq!(snapshot_tables(&pool).await, before);
+    assert_eq!(preview.splits.len(), 1);
+    assert_eq!(preview.splits[0].id, *album.id().as_uuid());
+    assert_eq!(preview.splits[0].name, "Ego Death");
+    assert_eq!(preview.splits[0].provider, "youtube_music");
+    assert_eq!(preview.splits[0].external_id, "MPREb_single");
+
+    let applied = repository.delete_provider_duplicates(&[]).await.unwrap();
+    assert_eq!(applied.splits.len(), 1);
+    assert_eq!(applied.splits[0].provider, preview.splits[0].provider);
+    assert_eq!(applied.splits[0].external_id, preview.splits[0].external_id);
+    let split_album = applied.splits[0].into;
+
+    assert_eq!(
+        album_source_owners(&pool, *album.id().as_uuid()).await,
+        vec!["MPREb_album".to_owned()]
+    );
+    assert_eq!(
+        album_source_owners(&pool, split_album).await,
+        vec!["MPREb_single".to_owned()]
+    );
+    assert_eq!(
+        album_members(&pool, *album.id().as_uuid()).await,
+        vec![*member.id().as_uuid()]
+    );
+    assert!(album_members(&pool, split_album).await.is_empty());
+    assert_eq!(album_artist_of(&pool, split_album).await, None);
+    assert!(
+        snapshot_rows(&pool, "provider_entity_state")
+            .await
+            .is_empty()
+    );
+    assert!(
+        repository
+            .provider_duplicates(&[])
+            .await
+            .unwrap()
+            .splits
+            .is_empty()
+    );
+}
+
+#[sqlx::test]
+async fn prune_leaves_an_album_with_sources_from_two_providers_alone(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album = repository
+        .resolve_or_create_album(&AlbumMetadata::new("Ego Death".to_owned()).unwrap())
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &source("MPREb_album"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(album.id(), &spotify_source("sp-1"))
+        .await
+        .unwrap();
+
+    let report = repository.delete_provider_duplicates(&[]).await.unwrap();
+
+    assert!(report.splits.is_empty());
+    assert_eq!(
+        album_source_owners(&pool, *album.id().as_uuid()).await,
+        vec!["MPREb_album".to_owned(), "sp-1".to_owned()]
+    );
+}
+
+async fn race_two_provider_ids(repository: &Arc<PostgresTrackRepository>) -> Vec<Uuid> {
+    let barrier = Arc::new(Barrier::new(2));
+    let mut tasks = Vec::new();
+    for external_id in ["MPREb_first", "MPREb_second"] {
+        let repository = Arc::clone(repository);
+        let barrier = Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            repository
+                .resolve_or_create_album(&provider_album("Ego Death", external_id))
+                .await
+                .map(|album| *album.id().as_uuid())
+        }));
+    }
+
+    let mut resolved = Vec::new();
+    for task in tasks {
+        resolved.push(task.await.unwrap().unwrap());
+    }
+    resolved
+}
+
+async fn wait_until_blocked(pool: &PgPool, holder_pid: i32) {
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND pid <> $1 AND wait_event_type = 'Lock'",
+            )
+            .bind(holder_pid)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        observed.is_ok(),
+        "the competing resolution must block on the held claim"
+    );
+}
+
+#[sqlx::test]
+async fn two_provider_ids_racing_for_a_new_album_keep_one_row_each(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+
+    let resolved = race_two_provider_ids(&repository).await;
+
+    assert_eq!(album_count(&pool).await, 2);
+    let owners = album_source_owners_of(&pool).await;
+    assert_eq!(owners.len(), 2);
+    assert_eq!(owners[0].0, "MPREb_first");
+    assert_eq!(owners[1].0, "MPREb_second");
+    assert_ne!(owners[0].1, owners[1].1);
+    assert!(resolved.contains(&owners[0].1));
+    assert!(resolved.contains(&owners[1].1));
+    let keys: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT provider_source_key FROM albums ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(keys.contains(&Some("youtube_music:MPREb_first".to_owned())));
+    assert!(keys.contains(&Some("youtube_music:MPREb_second".to_owned())));
+}
+
+#[sqlx::test]
+async fn two_provider_ids_racing_for_one_library_album_keep_one_row_each(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let library = repository
+        .resolve_or_create_album(&album_for("Ego Death"))
+        .await
+        .unwrap();
+    let library_id = *library.id().as_uuid();
+
+    race_two_provider_ids(&repository).await;
+
+    assert_eq!(album_count(&pool).await, 2);
+    let owners = album_source_owners_of(&pool).await;
+    assert_eq!(owners.len(), 2);
+    assert_ne!(owners[0].1, owners[1].1);
+    assert!(owners.iter().any(|(_, album_id)| *album_id == library_id));
+    assert_eq!(
+        provider_source_key_of(&pool, library_id).await,
+        None,
+        "the library row keeps the text slot"
+    );
+    let keyed_id = owners
+        .iter()
+        .find(|(_, album_id)| *album_id != library_id)
+        .unwrap()
+        .1;
+    let keyed_source = owners
+        .iter()
+        .find(|(_, album_id)| *album_id == keyed_id)
+        .unwrap()
+        .0
+        .clone();
+    assert_eq!(
+        provider_source_key_of(&pool, keyed_id).await,
+        Some(format!("youtube_music:{keyed_source}"))
+    );
+}
+
+#[sqlx::test]
+async fn a_held_library_row_forces_the_competing_provider_id_onto_a_new_row(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let library = repository
+        .resolve_or_create_album(&album_for("Ego Death"))
+        .await
+        .unwrap();
+    let library_id = *library.id().as_uuid();
+
+    let mut holder = pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM albums WHERE id = $1 FOR UPDATE")
+        .bind(library_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO album_sources (id, album_id, provider_id, source_scope, external_id) VALUES ($1, $2, 'youtube_music', 'global', 'MPREb_first')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(library_id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+
+    let contender = {
+        let repository = Arc::clone(&repository);
+        tokio::spawn(async move {
+            repository
+                .resolve_or_create_album(&provider_album("Ego Death", "MPREb_second"))
+                .await
+                .map(|album| *album.id().as_uuid())
+        })
+    };
+
+    wait_until_blocked(&pool, holder_pid).await;
+    holder.commit().await.unwrap();
+
+    let contender_id = contender.await.unwrap().unwrap();
+    assert_ne!(contender_id, library_id);
+    assert_eq!(album_count(&pool).await, 2);
+    let owners = album_source_owners_of(&pool).await;
+    assert_eq!(owners.len(), 2);
+    assert_eq!(
+        owners
+            .iter()
+            .find(|(external_id, _)| external_id == "MPREb_first")
+            .unwrap()
+            .1,
+        library_id
+    );
+    assert_eq!(
+        owners
+            .iter()
+            .find(|(external_id, _)| external_id == "MPREb_second")
+            .unwrap()
+            .1,
+        contender_id
+    );
+    assert_eq!(provider_source_key_of(&pool, library_id).await, None);
+    assert_eq!(
+        provider_source_key_of(&pool, contender_id).await,
+        Some("youtube_music:MPREb_second".to_owned())
+    );
+}
+
+#[sqlx::test]
+async fn a_held_new_provider_claim_serialises_the_competing_resolution(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+
+    let mut holder = pool.begin().await.unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let album_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO albums (id, title, album_artist_id, provider_source_key) VALUES ($1, 'Ego Death', NULL, 'youtube_music:MPREb_held')",
+    )
+    .bind(album_id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO album_sources (id, album_id, provider_id, source_scope, external_id) VALUES ($1, $2, 'youtube_music', 'global', 'MPREb_held')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(album_id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+
+    let contender = {
+        let repository = Arc::clone(&repository);
+        tokio::spawn(async move {
+            repository
+                .resolve_or_create_album(&provider_album_without_artist("Ego Death", "MPREb_held"))
+                .await
+                .map(|album| *album.id().as_uuid())
+        })
+    };
+
+    wait_until_blocked(&pool, holder_pid).await;
+    holder.commit().await.unwrap();
+
+    let resolved = contender.await.unwrap().unwrap();
+    assert_eq!(resolved, album_id);
+    assert_eq!(album_count(&pool).await, 1);
+    assert_eq!(
+        provider_source_key_of(&pool, album_id).await,
+        Some("youtube_music:MPREb_held".to_owned())
+    );
+    assert_eq!(
+        album_source_owners(&pool, album_id).await,
+        vec!["MPREb_held".to_owned()]
+    );
+}
+
+#[sqlx::test]
+async fn a_different_provider_id_does_not_wait_for_an_uncommitted_claim(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+
+    let mut holder = pool.begin().await.unwrap();
+    let album_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO albums (id, title, album_artist_id, provider_source_key) VALUES ($1, 'Ego Death', NULL, 'youtube_music:MPREb_held')",
+    )
+    .bind(album_id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO album_sources (id, album_id, provider_id, source_scope, external_id) VALUES ($1, $2, 'youtube_music', 'global', 'MPREb_held')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(album_id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+
+    let resolved = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        repository
+            .resolve_or_create_album(&provider_album_without_artist("Ego Death", "MPREb_other")),
+    )
+    .await;
+    assert!(
+        resolved.is_ok(),
+        "a different provider id must not wait for an uncommitted claim"
+    );
+    let other_id = *resolved.unwrap().unwrap().id().as_uuid();
+    assert_ne!(other_id, album_id);
+
+    holder.commit().await.unwrap();
+
+    assert_eq!(album_count(&pool).await, 2);
+    let owners = album_source_owners_of(&pool).await;
+    assert_eq!(owners.len(), 2);
+    for (external_id, owner) in owners {
+        assert_eq!(
+            provider_source_key_of(&pool, owner).await,
+            Some(format!("youtube_music:{external_id}"))
+        );
+    }
+}
+
+#[sqlx::test]
+async fn scoped_associations_of_one_provider_id_stay_on_one_album(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let first = repository
+        .resolve_or_create_album(
+            &album_for("Ego Death").with_provider(Some(scoped_source("MPREb_scoped", "one"))),
+        )
+        .await
+        .unwrap();
+    let second = repository
+        .resolve_or_create_album(
+            &album_for("Ego Death").with_provider(Some(scoped_source("MPREb_scoped", "two"))),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first.id(), second.id());
+    assert_eq!(album_count(&pool).await, 1);
+    assert_eq!(
+        provider_source_key_of(&pool, *first.id().as_uuid()).await,
+        Some("youtube_music:MPREb_scoped".to_owned())
+    );
+    assert_eq!(album_source_owners_of(&pool).await.len(), 2);
+
+    let before = snapshot_tables(&pool).await;
+    let preview = repository.provider_duplicates(&[]).await.unwrap();
+    assert!(preview.splits.is_empty());
+    assert_eq!(snapshot_tables(&pool).await, before);
+    let applied = repository.delete_provider_duplicates(&[]).await.unwrap();
+    assert!(applied.splits.is_empty());
+    assert_eq!(album_count(&pool).await, 1);
+    assert_eq!(album_source_owners_of(&pool).await.len(), 2);
+}
+
+#[sqlx::test]
+async fn a_second_scope_after_a_split_returns_the_provider_first_album(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let album = repository
+        .resolve_or_create_album(&provider_album("Ego Death", "MPREb_album"))
+        .await
+        .unwrap();
+    let album_id = *album.id().as_uuid();
+    let single = repository
+        .resolve_or_create_album(&provider_album("Ego Death", "MPREb_single"))
+        .await
+        .unwrap();
+    assert_ne!(album_id, *single.id().as_uuid());
+
+    let scoped = repository
+        .resolve_or_create_album(
+            &album_for("Ego Death").with_provider(Some(scoped_source("MPREb_album", "second"))),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(*scoped.id().as_uuid(), album_id);
+    assert_eq!(album_count(&pool).await, 2);
+    let owners = album_source_owners_of(&pool).await;
+    assert_eq!(
+        owners
+            .iter()
+            .filter(|(external_id, owner)| external_id == "MPREb_album" && *owner == album_id)
+            .count(),
+        2
+    );
+    assert_eq!(
+        provider_source_key_of(&pool, album_id).await,
+        Some("youtube_music:MPREb_album".to_owned())
+    );
+    assert_eq!(
+        album_source_owners(&pool, *single.id().as_uuid()).await,
+        vec!["MPREb_single".to_owned()]
+    );
+}
+
+#[sqlx::test]
+async fn a_second_scope_after_a_split_returns_the_library_first_album(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let library = repository
+        .resolve_or_create_album(&album_for("Ego Death"))
+        .await
+        .unwrap();
+    let library_id = *library.id().as_uuid();
+    let joined = repository
+        .resolve_or_create_album(&provider_album("Ego Death", "MPREb_album"))
+        .await
+        .unwrap();
+    assert_eq!(*joined.id().as_uuid(), library_id);
+    let single = repository
+        .resolve_or_create_album(&provider_album("Ego Death", "MPREb_single"))
+        .await
+        .unwrap();
+    assert_ne!(library_id, *single.id().as_uuid());
+
+    let scoped = repository
+        .resolve_or_create_album(
+            &album_for("Ego Death").with_provider(Some(scoped_source("MPREb_album", "second"))),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(*scoped.id().as_uuid(), library_id);
+    assert_eq!(album_count(&pool).await, 2);
+    let owners = album_source_owners_of(&pool).await;
+    assert_eq!(
+        owners
+            .iter()
+            .filter(|(external_id, owner)| external_id == "MPREb_album" && *owner == library_id)
+            .count(),
+        2
+    );
+    assert_eq!(provider_source_key_of(&pool, library_id).await, None);
+    assert_eq!(
+        album_source_owners(&pool, *single.id().as_uuid()).await,
+        vec!["MPREb_single".to_owned()]
+    );
+}
+
+#[sqlx::test]
+async fn library_resolution_after_a_provider_split_finds_the_null_key_slot(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let legacy = repository
+        .resolve_or_create_album(&provider_album("Ego Death", "MPREb_album"))
+        .await
+        .unwrap();
+    repository
+        .set_album_source(legacy.id(), &source("MPREb_single"))
+        .await
+        .unwrap();
+    let report = repository.delete_provider_duplicates(&[]).await.unwrap();
+    assert_eq!(report.splits.len(), 1);
+    assert_eq!(album_count(&pool).await, 2);
+
+    let barrier = Arc::new(Barrier::new(4));
+    let mut tasks = Vec::new();
+    for _ in 0..4 {
+        let repository = Arc::clone(&repository);
+        let barrier = Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            repository
+                .resolve_or_create_album(&album_for("Ego Death"))
+                .await
+                .map(|album| *album.id().as_uuid())
+        }));
+    }
+    let mut resolved = Vec::new();
+    for task in tasks {
+        resolved.push(task.await.unwrap().unwrap());
+    }
+
+    assert!(resolved.iter().all(|id| id == &resolved[0]));
+    assert_eq!(album_count(&pool).await, 3);
+    let null_keys: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM albums WHERE provider_source_key IS NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(null_keys, 1);
+
+    let again = repository
+        .resolve_or_create_album(&album_for("Ego Death"))
+        .await
+        .unwrap();
+    assert_eq!(*again.id().as_uuid(), resolved[0]);
+    assert_eq!(album_count(&pool).await, 3);
+}
+
+#[sqlx::test]
+async fn a_library_album_resolved_first_keeps_its_text_slot(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let library = repository
+        .resolve_or_create_album(&album_for("Ego Death"))
+        .await
+        .unwrap();
+    let library_id = *library.id().as_uuid();
+
+    let first = repository
+        .resolve_or_create_album(&provider_album("Ego Death", "MPREb_album"))
+        .await
+        .unwrap();
+    assert_eq!(*first.id().as_uuid(), library_id);
+    let second = repository
+        .resolve_or_create_album(&provider_album("Ego Death", "MPREb_single"))
+        .await
+        .unwrap();
+    assert_ne!(*second.id().as_uuid(), library_id);
+
+    let again = repository
+        .resolve_or_create_album(&album_for("Ego Death"))
+        .await
+        .unwrap();
+    assert_eq!(*again.id().as_uuid(), library_id);
+    assert_eq!(provider_source_key_of(&pool, library_id).await, None);
+    assert_eq!(album_count(&pool).await, 2);
+}
+
+#[sqlx::test]
+async fn prune_keeps_the_keyed_source_when_an_artist_merge_adds_an_older_one(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let identified = Uuid::now_v7();
+    let id_less = Uuid::now_v7();
+    insert_artist(&pool, identified, "Shared Name", Some("mb-shared")).await;
+    insert_artist(&pool, id_less, "Shared Name", None).await;
+    insert_artist_source(&pool, id_less, "shared-provider").await;
+
+    let library_track = Uuid::now_v7();
+    insert_track(&pool, library_track, "Library Song", 180_000).await;
+    insert_credit(&pool, library_track, 0, "Shared Name", identified, None).await;
+    insert_credit(
+        &pool,
+        library_track,
+        1,
+        "Shared Name",
+        id_less,
+        Some("composer"),
+    )
+    .await;
+    insert_track_source(
+        &pool,
+        library_track,
+        "local",
+        "named:/music",
+        "library-song.flac",
+    )
+    .await;
+
+    let provider_track = Uuid::now_v7();
+    insert_track(&pool, provider_track, "Provider Song", 200_000).await;
+    insert_credit(&pool, provider_track, 0, "Shared Name", id_less, None).await;
+
+    let target_album = Uuid::now_v7();
+    insert_album_keyed(
+        &pool,
+        target_album,
+        "Switchblade",
+        identified,
+        "youtube_music:later",
+    )
+    .await;
+    seed_album_source(&pool, target_album, "later").await;
+    insert_album_track(&pool, target_album, library_track, 0).await;
+
+    let source_album = Uuid::now_v7();
+    insert_album_keyed(
+        &pool,
+        source_album,
+        "Switchblade",
+        id_less,
+        "youtube_music:earlier",
+    )
+    .await;
+    seed_album_source(&pool, source_album, "earlier").await;
+    for (external_id, created_at) in [
+        ("earlier", "2026-01-01T00:00:00Z"),
+        ("later", "2026-02-01T00:00:00Z"),
+    ] {
+        sqlx::query("UPDATE album_sources SET created_at = $1::TIMESTAMPTZ WHERE external_id = $2")
+            .bind(created_at)
+            .bind(external_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let before = snapshot_tables(&pool).await;
+    let preview = repository.provider_duplicates(&[]).await.unwrap();
+    assert_eq!(
+        snapshot_tables(&pool).await,
+        before,
+        "the dry run rolls back"
+    );
+    assert_eq!(preview.merges.len(), 1);
+    assert_eq!(preview.splits.len(), 1);
+    assert_eq!(preview.splits[0].id, target_album);
+    assert_eq!(preview.splits[0].external_id, "earlier");
+
+    let applied = repository.delete_provider_duplicates(&[]).await.unwrap();
+    assert_eq!(applied.splits.len(), 1);
+    assert_eq!(applied.splits[0].external_id, "earlier");
+
+    assert_eq!(row_count(&pool, "albums", "id", source_album).await, 0);
+    assert_eq!(
+        album_source_owners(&pool, target_album).await,
+        vec!["later".to_owned()]
+    );
+    assert_eq!(
+        provider_source_key_of(&pool, target_album).await,
+        Some("youtube_music:later".to_owned())
+    );
+    let split_album = applied.splits[0].into;
+    assert_eq!(
+        album_source_owners(&pool, split_album).await,
+        vec!["earlier".to_owned()]
+    );
+    assert_eq!(
+        provider_source_key_of(&pool, split_album).await,
+        Some("youtube_music:earlier".to_owned())
+    );
+    assert_eq!(
+        row_count(&pool, "album_tracks", "album_id", target_album).await,
+        1
+    );
+    assert_eq!(
+        row_count(&pool, "album_tracks", "album_id", split_album).await,
+        0
     );
 }
 
@@ -1937,7 +2707,13 @@ async fn colliding_albums_merge_into_the_identified_artists_row(pool: PgPool) {
     );
 
     let report = repository.delete_provider_duplicates(&[]).await.unwrap();
-    assert_eq!(report, preview, "apply returns the previewed report");
+    assert_eq!(report.merges, preview.merges);
+    assert_eq!(report.track_merges, preview.track_merges);
+    assert_eq!(report.refetch, preview.refetch);
+    assert_eq!(report.duplicates, preview.duplicates);
+    assert_eq!(report.skipped, preview.skipped);
+    assert_eq!(report.splits.len(), preview.splits.len());
+    assert_eq!(report.splits[0].external_id, "source-album");
 
     assert_eq!(report.merges.len(), 1);
     assert_eq!(report.merges[0].credits, 2);
@@ -1964,7 +2740,11 @@ async fn colliding_albums_merge_into_the_identified_artists_row(pool: PgPool) {
     );
     assert_eq!(
         album_source_owners(&pool, target_album).await,
-        vec!["source-album".to_owned(), "target-album".to_owned()]
+        vec!["target-album".to_owned()]
+    );
+    assert_eq!(
+        album_source_owners(&pool, report.splits[0].into).await,
+        vec!["source-album".to_owned()]
     );
 
     assert_eq!(

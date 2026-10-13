@@ -3,8 +3,8 @@ use uuid::Uuid;
 
 use crate::features::music_library::{
     domain::{
-        AlbumRefetch, ArtistCredit, ArtistId, ArtistMerge, DuplicateCandidate, DuplicateKind,
-        DuplicateSource, EvictionReport, LOCAL_PROVIDER_ID, ProviderDuplicate,
+        AlbumId, AlbumRefetch, AlbumSplit, ArtistCredit, ArtistId, ArtistMerge, DuplicateCandidate,
+        DuplicateKind, DuplicateSource, EvictionReport, LOCAL_PROVIDER_ID, ProviderDuplicate,
         ProviderDuplicateReport, RetentionReport, SkipReason, SkippedDuplicate, SplitArtist,
         SplitArtistRow, TrackId, TrackMerge, TrackMetadata,
     },
@@ -15,8 +15,8 @@ use crate::features::music_library::storage::contracts::{DuplicateReport, Retent
 
 use super::PgStore;
 use super::catalogue::{
-    find_provider_track_match, find_unique_artist_by_name, match_track_candidates,
-    resolve_cleanup_artist,
+    album_provider_source_key, find_provider_track_match, find_unique_artist_by_name,
+    match_track_candidates, resolve_cleanup_artist,
 };
 use super::decode::{decode_source, repository_error};
 use sqlx::{PgConnection, PgPool};
@@ -524,6 +524,120 @@ async fn merge_track(
     Ok(())
 }
 
+async fn split_provider_albums(
+    connection: &mut PgConnection,
+    library_ids: &[String],
+) -> Result<Vec<AlbumSplit>, TrackRepositoryError> {
+    let groups = sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT source.album_id, source.provider_id
+        FROM album_sources AS source
+        JOIN albums AS album ON album.id = source.album_id
+        WHERE source.provider_id <> ALL($1::TEXT[])
+          AND album.musicbrainz_release_group_id IS NULL
+          AND album.musicbrainz_release_id IS NULL
+        GROUP BY source.album_id, source.provider_id
+        HAVING count(DISTINCT source.external_id) > 1
+        ORDER BY source.album_id, source.provider_id
+        "#,
+    )
+    .bind(library_ids)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+
+    let mut splits = Vec::new();
+    for (album_id, provider_id) in groups {
+        let Some((title, album_artist_id, row_key)) =
+            sqlx::query_as::<_, (String, Option<Uuid>, Option<String>)>(
+                "SELECT title, album_artist_id, provider_source_key FROM albums WHERE id = $1",
+            )
+            .bind(album_id)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(repository_error)?
+        else {
+            continue;
+        };
+
+        sqlx::query(
+            r#"
+            DELETE FROM provider_entity_state AS state
+            USING album_sources AS source
+            WHERE source.album_id = $1
+              AND source.provider_id = $2
+              AND state.provider_id = source.provider_id
+              AND state.source_scope = source.source_scope
+              AND state.external_id = source.external_id
+            "#,
+        )
+        .bind(album_id)
+        .bind(&provider_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(repository_error)?;
+
+        let identities = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT external_id
+            FROM album_sources
+            WHERE album_id = $1 AND provider_id = $2
+            GROUP BY external_id
+            ORDER BY min(created_at), external_id
+            "#,
+        )
+        .bind(album_id)
+        .bind(&provider_id)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(repository_error)?;
+
+        let retained = identities
+            .iter()
+            .position(|external_id| {
+                row_key.as_deref()
+                    == Some(album_provider_source_key(&provider_id, external_id).as_str())
+            })
+            .unwrap_or(0);
+
+        for (index, external_id) in identities.into_iter().enumerate() {
+            if index == retained {
+                continue;
+            }
+            let new_album_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO albums (id, title, album_artist_id, provider_source_key) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(new_album_id)
+            .bind(&title)
+            .bind(album_artist_id)
+            .bind(album_provider_source_key(&provider_id, &external_id))
+            .execute(&mut *connection)
+            .await
+            .map_err(repository_error)?;
+            sqlx::query(
+                "UPDATE album_sources SET album_id = $1 WHERE album_id = $2 AND provider_id = $3 AND external_id = $4",
+            )
+            .bind(new_album_id)
+            .bind(album_id)
+            .bind(&provider_id)
+            .bind(&external_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(repository_error)?;
+            splits.push(AlbumSplit {
+                id: album_id,
+                name: title.clone(),
+                into: new_album_id,
+                provider: provider_id.clone(),
+                external_id,
+            });
+        }
+    }
+
+    Ok(splits)
+}
+
 async fn clear_incomplete_album_states(
     connection: &mut PgConnection,
     library_ids: &[String],
@@ -1023,6 +1137,9 @@ async fn collect_provider_album_duplicates(
         if duplicate.id().as_uuid() == &row.id {
             continue;
         }
+        if albums_share_provider_identity(connection, row.id, duplicate.id()).await? {
+            continue;
+        }
         deletable_ids.push(row.id);
         report.duplicates.push(ProviderDuplicate {
             kind: DuplicateKind::Album,
@@ -1033,6 +1150,31 @@ async fn collect_provider_album_duplicates(
         });
     }
     Ok(deletable_ids)
+}
+
+async fn albums_share_provider_identity(
+    connection: &mut PgConnection,
+    candidate_album_id: Uuid,
+    target_album_id: &AlbumId,
+) -> Result<bool, TrackRepositoryError> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM album_sources AS candidate
+            JOIN album_sources AS target
+              ON target.album_id = $2
+             AND target.provider_id = candidate.provider_id
+             AND target.external_id <> candidate.external_id
+            WHERE candidate.album_id = $1
+        )
+        "#,
+    )
+    .bind(candidate_album_id)
+    .bind(target_album_id.as_uuid())
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(repository_error)
 }
 
 async fn collect_provider_artist_duplicates(
@@ -1286,11 +1428,13 @@ async fn run_provider_duplicate_cleanup(
     let merges = merge_artist_namesakes(&mut transaction, library_ids).await?;
     let (track_merges, skipped) =
         merge_provider_album_tracks(&mut transaction, library_ids, protected).await?;
+    let splits = split_provider_albums(&mut transaction, library_ids).await?;
     let refetch = clear_incomplete_album_states(&mut transaction, library_ids).await?;
     let mut report =
         provider_duplicate_report(&mut transaction, library_ids, skipped, protected).await?;
     report.merges = merges;
     report.track_merges = track_merges;
+    report.splits = splits;
     report.refetch = refetch;
     delete_reported_duplicates(&mut transaction, &report).await?;
 

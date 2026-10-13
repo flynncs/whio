@@ -55,10 +55,20 @@ pub struct AlbumRefetch {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumSplit {
+    pub id: Uuid,
+    pub name: String,
+    pub into: Uuid,
+    pub provider: String,
+    pub external_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderDuplicateReport {
     pub merges: Vec<ArtistMerge>,
     pub track_merges: Vec<TrackMerge>,
+    pub splits: Vec<AlbumSplit>,
     pub refetch: Vec<AlbumRefetch>,
     pub duplicates: Vec<ProviderDuplicate>,
     pub skipped: Vec<SkippedDuplicate>,

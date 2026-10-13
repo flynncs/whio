@@ -80,6 +80,12 @@ pub trait CatalogueWrite: Send + Sync {
         Ok(())
     }
 
+    async fn refresh_album_facts(
+        &self,
+        album_id: &AlbumId,
+        metadata: &AlbumMetadata,
+    ) -> Result<Album, TrackRepositoryError>;
+
     async fn set_artist_source(
         &self,
         _artist_id: &ArtistId,

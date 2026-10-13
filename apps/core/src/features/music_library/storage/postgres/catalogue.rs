@@ -152,22 +152,23 @@ impl CatalogueWrite for PgStore {
         album_id: &AlbumId,
         source: &SourceIdentity,
     ) -> Result<(), TrackRepositoryError> {
-        sqlx::query(
-            r#"
-            INSERT INTO album_sources (id, album_id, provider_id, source_scope, external_id)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (provider_id, source_scope, external_id) DO NOTHING
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(album_id.as_uuid())
-        .bind(source.provider_id().as_str())
-        .bind(encode_source_scope(source.source_scope()))
-        .bind(source.external_id())
-        .execute(&self.pool)
-        .await
-        .map(|_| ())
-        .map_err(repository_error)
+        let mut connection = self.pool.acquire().await.map_err(repository_error)?;
+
+        attach_album_source(&mut connection, album_id, source)
+            .await
+            .map(|_| ())
+    }
+
+    async fn refresh_album_facts(
+        &self,
+        album_id: &AlbumId,
+        metadata: &AlbumMetadata,
+    ) -> Result<Album, TrackRepositoryError> {
+        let mut connection = self.pool.acquire().await.map_err(repository_error)?;
+
+        apply_observed_album_facts(&mut connection, album_id, metadata)
+            .await?
+            .ok_or(TrackRepositoryError::InvalidData)
     }
 
     async fn set_artist_source(
@@ -538,59 +539,249 @@ async fn resolve_album(
     };
 
     for _ in 0..2 {
-        if let Some(album) = find_or_attach_album(pool, metadata, album_artist_id.as_ref()).await? {
-            return Ok(album);
-        }
-        if let Some(album) = insert_album(pool, metadata, album_artist_id.as_ref()).await? {
-            return Ok(album);
+        let mut transaction = pool.begin().await.map_err(repository_error)?;
+        match resolve_album_once(&mut transaction, metadata, album_artist_id.as_ref()).await? {
+            Some(album) => {
+                transaction.commit().await.map_err(repository_error)?;
+                return Ok(album);
+            }
+            None => transaction.rollback().await.map_err(repository_error)?,
         }
     }
 
     Err(TrackRepositoryError::InvalidData)
 }
 
-async fn find_or_attach_album(
-    pool: &PgPool,
+async fn resolve_album_once(
+    connection: &mut PgConnection,
     metadata: &AlbumMetadata,
     album_artist_id: Option<&ArtistId>,
 ) -> Result<Option<Album>, TrackRepositoryError> {
-    if let Some(identifier) = metadata.musicbrainz_release_group_id()
-        && let Some(album) = find_album_by_release_group(pool, identifier).await?
+    match provider_album_source(metadata) {
+        Some(source) => resolve_provider_album(connection, metadata, album_artist_id, source).await,
+        None => resolve_text_album(connection, metadata, album_artist_id).await,
+    }
+}
+
+fn provider_album_source(metadata: &AlbumMetadata) -> Option<&SourceIdentity> {
+    let source = metadata.provider()?;
+    (!SourceKind::of(source.provider_id()).is_library()).then_some(source)
+}
+
+async fn resolve_provider_album(
+    connection: &mut PgConnection,
+    metadata: &AlbumMetadata,
+    album_artist_id: Option<&ArtistId>,
+    source: &SourceIdentity,
+) -> Result<Option<Album>, TrackRepositoryError> {
+    if let Some(album) = find_album_by_source_in(connection, source).await? {
+        return apply_observed_album_facts(connection, album.id(), metadata).await;
+    }
+
+    let existing = match identifier_album(connection, metadata).await? {
+        Some(album) => Some(album),
+        None => find_unique_album_by_source_identity(connection, source).await?,
+    };
+    if let Some(album) = existing {
+        if attach_album_source(connection, album.id(), source).await? == 0 {
+            return Ok(None);
+        }
+        return apply_observed_album_facts(connection, album.id(), metadata).await;
+    }
+
+    let Some(candidate) = text_candidate(connection, metadata, album_artist_id).await? else {
+        return insert_keyed_album(connection, metadata, album_artist_id, source).await;
+    };
+
+    let Some(album) = lock_album(connection, candidate.id()).await? else {
+        return Ok(None);
+    };
+    if !has_identifier(&album) && album_claim_conflict(connection, album.id(), source).await? {
+        return insert_keyed_album(connection, metadata, album_artist_id, source).await;
+    }
+    if attach_album_source(connection, album.id(), source).await? == 0 {
+        return Ok(None);
+    }
+
+    apply_observed_album_facts(connection, album.id(), metadata).await
+}
+
+async fn resolve_text_album(
+    connection: &mut PgConnection,
+    metadata: &AlbumMetadata,
+    album_artist_id: Option<&ArtistId>,
+) -> Result<Option<Album>, TrackRepositoryError> {
+    if let Some(album) = identifier_album(connection, metadata).await? {
+        return apply_observed_album_facts(connection, album.id(), metadata).await;
+    }
+
+    let existing = match find_unique_null_key_album_by_text(
+        &mut *connection,
+        metadata.title(),
+        album_artist_id,
+    )
+    .await?
     {
-        return apply_observed_album_facts(pool, album.id(), metadata).await;
+        Some(album) => Some(album),
+        None => text_match(connection, metadata, album_artist_id).await?,
+    };
+    let Some(existing) = existing else {
+        return insert_album(connection, metadata, album_artist_id, None).await;
+    };
+    if has_identifier(&existing) && incoming_has_identifier(metadata) {
+        return insert_album(connection, metadata, album_artist_id, None).await;
+    }
+
+    apply_observed_album_facts(connection, existing.id(), metadata).await
+}
+
+async fn text_candidate(
+    connection: &mut PgConnection,
+    metadata: &AlbumMetadata,
+    album_artist_id: Option<&ArtistId>,
+) -> Result<Option<Album>, TrackRepositoryError> {
+    let Some(existing) = text_match(connection, metadata, album_artist_id).await? else {
+        return Ok(None);
+    };
+    if has_identifier(&existing) && incoming_has_identifier(metadata) {
+        return Ok(None);
+    }
+
+    Ok(Some(existing))
+}
+
+async fn identifier_album(
+    connection: &mut PgConnection,
+    metadata: &AlbumMetadata,
+) -> Result<Option<Album>, TrackRepositoryError> {
+    if let Some(identifier) = metadata.musicbrainz_release_group_id()
+        && let Some(album) = find_album_by_release_group(connection, identifier).await?
+    {
+        return Ok(Some(album));
     }
 
     if let Some(identifier) = metadata.musicbrainz_release_id()
-        && let Some(album) = find_album_by_release(pool, identifier).await?
+        && let Some(album) = find_album_by_release(connection, identifier).await?
     {
-        return apply_observed_album_facts(pool, album.id(), metadata).await;
+        return Ok(Some(album));
     }
 
-    let existing = if metadata.musicbrainz_release_group_id().is_none()
+    Ok(None)
+}
+
+async fn text_match(
+    connection: &mut PgConnection,
+    metadata: &AlbumMetadata,
+    album_artist_id: Option<&ArtistId>,
+) -> Result<Option<Album>, TrackRepositoryError> {
+    if metadata.musicbrainz_release_group_id().is_none()
         && metadata.musicbrainz_release_id().is_none()
     {
-        find_unique_album_by_text(pool, metadata.title(), album_artist_id).await?
+        find_unique_album_by_text(&mut *connection, metadata.title(), album_artist_id).await
     } else {
-        find_album_by_text(pool, metadata.title(), album_artist_id).await?
-    };
-    let Some(existing) = existing else {
-        return Ok(None);
-    };
+        find_album_by_text(connection, metadata.title(), album_artist_id).await
+    }
+}
 
-    let existing_has_identifier = existing.musicbrainz_release_group_id().is_some()
-        || existing.musicbrainz_release_id().is_some();
-    let incoming_has_identifier = metadata.musicbrainz_release_group_id().is_some()
-        || metadata.musicbrainz_release_id().is_some();
+fn has_identifier(album: &Album) -> bool {
+    album.musicbrainz_release_group_id().is_some() || album.musicbrainz_release_id().is_some()
+}
 
-    if existing_has_identifier && incoming_has_identifier {
+fn incoming_has_identifier(metadata: &AlbumMetadata) -> bool {
+    metadata.musicbrainz_release_group_id().is_some() || metadata.musicbrainz_release_id().is_some()
+}
+
+async fn lock_album(
+    connection: &mut PgConnection,
+    album_id: &AlbumId,
+) -> Result<Option<Album>, TrackRepositoryError> {
+    let row = sqlx::query_as::<_, AlbumRow>(&format!(
+        "SELECT {ALBUM_COLUMNS} FROM albums WHERE id = $1 FOR UPDATE"
+    ))
+    .bind(album_id.as_uuid())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+
+    row.map(decode_album).transpose()
+}
+
+async fn album_claim_conflict(
+    connection: &mut PgConnection,
+    album_id: &AlbumId,
+    source: &SourceIdentity,
+) -> Result<bool, TrackRepositoryError> {
+    let key = album_provider_source_key(source.provider_id().as_str(), source.external_id());
+
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM album_sources
+            WHERE album_id = $1 AND provider_id = $2 AND external_id <> $3
+        ) OR EXISTS (
+            SELECT 1 FROM albums
+            WHERE id = $1
+              AND provider_source_key IS NOT NULL
+              AND provider_source_key <> $4
+              AND split_part(provider_source_key, ':', 1) = $2
+        )
+        "#,
+    )
+    .bind(album_id.as_uuid())
+    .bind(source.provider_id().as_str())
+    .bind(source.external_id())
+    .bind(key)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(repository_error)
+}
+
+async fn insert_keyed_album(
+    connection: &mut PgConnection,
+    metadata: &AlbumMetadata,
+    album_artist_id: Option<&ArtistId>,
+    source: &SourceIdentity,
+) -> Result<Option<Album>, TrackRepositoryError> {
+    let key = album_provider_source_key(source.provider_id().as_str(), source.external_id());
+    let album = insert_album(connection, metadata, album_artist_id, Some(&key)).await?;
+    if let Some(album) = &album
+        && attach_album_source(connection, album.id(), source).await? == 0
+    {
         return Ok(None);
     }
 
-    apply_observed_album_facts(pool, existing.id(), metadata).await
+    Ok(album)
+}
+
+pub(super) fn album_provider_source_key(provider_id: &str, external_id: &str) -> String {
+    format!("{provider_id}:{external_id}")
+}
+
+async fn attach_album_source(
+    connection: &mut PgConnection,
+    album_id: &AlbumId,
+    source: &SourceIdentity,
+) -> Result<u64, TrackRepositoryError> {
+    sqlx::query(
+        r#"
+        INSERT INTO album_sources (id, album_id, provider_id, source_scope, external_id)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (provider_id, source_scope, external_id) DO NOTHING
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(album_id.as_uuid())
+    .bind(source.provider_id().as_str())
+    .bind(encode_source_scope(source.source_scope()))
+    .bind(source.external_id())
+    .execute(&mut *connection)
+    .await
+    .map(|result| result.rows_affected())
+    .map_err(repository_error)
 }
 
 async fn apply_observed_album_facts(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     album_id: &AlbumId,
     metadata: &AlbumMetadata,
 ) -> Result<Option<Album>, TrackRepositoryError> {
@@ -605,11 +796,8 @@ async fn apply_observed_album_facts(
             release_date_precision = COALESCE($7, release_date_precision),
             release_country = COALESCE($8, release_country),
             compilation = COALESCE($9, compilation),
-            year = COALESCE(
-                EXTRACT(YEAR FROM COALESCE($6, release_date))::SMALLINT,
-                $3,
-                year
-            ),
+            year = COALESCE(EXTRACT(YEAR FROM $6)::SMALLINT, $3, year),
+            title = COALESCE($11, title),
             updated_at = CURRENT_TIMESTAMP
         WHERE id = $10
         RETURNING {ALBUM_COLUMNS}
@@ -625,7 +813,8 @@ async fn apply_observed_album_facts(
     .bind(metadata.release_country())
     .bind(metadata.compilation())
     .bind(album_id.as_uuid())
-    .fetch_optional(pool)
+    .bind(metadata.title())
+    .fetch_optional(&mut *connection)
     .await
     .map_err(repository_error)?;
 
@@ -639,27 +828,55 @@ pub(super) async fn find_album_by_source(
     pool: &PgPool,
     source: &SourceIdentity,
 ) -> Result<Option<Album>, TrackRepositoryError> {
+    let mut connection = pool.acquire().await.map_err(repository_error)?;
+
+    find_album_by_source_in(&mut connection, source).await
+}
+
+async fn find_album_by_source_in(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+) -> Result<Option<Album>, TrackRepositoryError> {
     let row = sqlx::query_as::<_, AlbumRow>(
         "SELECT a.id, a.title, a.album_artist_id, a.year, a.release_type, a.label, a.musicbrainz_release_group_id, a.musicbrainz_release_id FROM albums AS a JOIN album_sources AS s ON s.album_id = a.id WHERE s.provider_id = $1 AND s.source_scope = $2 AND s.external_id = $3",
     )
     .bind(source.provider_id().as_str())
     .bind(encode_source_scope(source.source_scope()))
     .bind(source.external_id())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(repository_error)?;
     row.map(decode_album).transpose()
 }
 
+async fn find_unique_album_by_source_identity(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+) -> Result<Option<Album>, TrackRepositoryError> {
+    let rows = sqlx::query_as::<_, AlbumRow>(
+        "SELECT DISTINCT a.id, a.title, a.album_artist_id, a.year, a.release_type, a.label, a.musicbrainz_release_group_id, a.musicbrainz_release_id FROM albums AS a JOIN album_sources AS s ON s.album_id = a.id WHERE s.provider_id = $1 AND s.external_id = $2 ORDER BY a.id LIMIT 2",
+    )
+    .bind(source.provider_id().as_str())
+    .bind(source.external_id())
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(repository_error)?;
+
+    match rows.as_slice() {
+        [only] => Ok(Some(decode_album(only.clone())?)),
+        _ => Ok(None),
+    }
+}
+
 async fn find_album_by_release_group(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     identifier: &str,
 ) -> Result<Option<Album>, TrackRepositoryError> {
     let row = sqlx::query_as::<_, AlbumRow>(&format!(
         "SELECT {ALBUM_COLUMNS} FROM albums WHERE musicbrainz_release_group_id = $1"
     ))
     .bind(identifier)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(repository_error)?;
 
@@ -667,14 +884,14 @@ async fn find_album_by_release_group(
 }
 
 async fn find_album_by_release(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     identifier: &str,
 ) -> Result<Option<Album>, TrackRepositoryError> {
     let row = sqlx::query_as::<_, AlbumRow>(&format!(
         "SELECT {ALBUM_COLUMNS} FROM albums WHERE musicbrainz_release_id = $1"
     ))
     .bind(identifier)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(repository_error)?;
 
@@ -695,6 +912,35 @@ where
         FROM albums
         WHERE album_artist_id IS NOT DISTINCT FROM $1
           AND title_normalized = {key}
+        ORDER BY (musicbrainz_release_group_id IS NOT NULL), id
+        LIMIT 2
+        "#,
+        key = folded("$2"),
+    ))
+    .bind(album_artist_id.map(|id| *id.as_uuid()))
+    .bind(title)
+    .fetch_all(executor)
+    .await
+    .map_err(repository_error)?;
+
+    unique_album(rows)
+}
+
+async fn find_unique_null_key_album_by_text<'e, E>(
+    executor: E,
+    title: &str,
+    album_artist_id: Option<&ArtistId>,
+) -> Result<Option<Album>, TrackRepositoryError>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let rows = sqlx::query_as::<_, AlbumRow>(&format!(
+        r#"
+        SELECT {ALBUM_COLUMNS}
+        FROM albums
+        WHERE album_artist_id IS NOT DISTINCT FROM $1
+          AND title_normalized = {key}
+          AND provider_source_key IS NULL
         ORDER BY (musicbrainz_release_group_id IS NOT NULL), id
         LIMIT 2
         "#,
@@ -752,7 +998,7 @@ fn unique_album(rows: Vec<AlbumRow>) -> Result<Option<Album>, TrackRepositoryErr
 }
 
 async fn find_album_by_text(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     title: &str,
     album_artist_id: Option<&ArtistId>,
 ) -> Result<Option<Album>, TrackRepositoryError> {
@@ -769,7 +1015,7 @@ async fn find_album_by_text(
     ))
     .bind(album_artist_id.map(|id| *id.as_uuid()))
     .bind(title)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(repository_error)?;
 
@@ -777,9 +1023,10 @@ async fn find_album_by_text(
 }
 
 async fn insert_album(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     metadata: &AlbumMetadata,
     album_artist_id: Option<&ArtistId>,
+    provider_source_key: Option<&str>,
 ) -> Result<Option<Album>, TrackRepositoryError> {
     let year = metadata
         .release_date()
@@ -790,9 +1037,10 @@ async fn insert_album(
         INSERT INTO albums (
             id, title, album_artist_id, year, release_type, label,
             musicbrainz_release_group_id, musicbrainz_release_id,
-            release_date, release_date_precision, release_country, compilation
+            release_date, release_date_precision, release_country, compilation,
+            provider_source_key
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         ON CONFLICT DO NOTHING
         RETURNING {ALBUM_COLUMNS}
         "#
@@ -809,7 +1057,8 @@ async fn insert_album(
     .bind(encode_date_precision(metadata.release_date()))
     .bind(metadata.release_country())
     .bind(metadata.compilation())
-    .fetch_optional(pool)
+    .bind(provider_source_key)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(repository_error)?;
 

@@ -141,6 +141,12 @@ fn format_provider_duplicate_report(report: &ProviderDuplicateReport, applied: b
             merge.id, merge.name, merge.into
         ));
     }
+    for split in &report.splits {
+        output.push_str(&format!(
+            "split album {} {:?} -> {} source={}:{}\n",
+            split.id, split.name, split.into, split.provider, split.external_id
+        ));
+    }
     for album in &report.refetch {
         output.push_str(&format!("refetch album {} {:?}\n", album.id, album.name));
     }
@@ -174,10 +180,11 @@ fn format_provider_duplicate_report(report: &ProviderDuplicateReport, applied: b
         }
     }
     output.push_str(&format!(
-        "{}: merges={} track_merges={} refetch={} tracks={tracks} albums={albums} artists={artists} skipped={}\n",
+        "{}: merges={} track_merges={} splits={} refetch={} tracks={tracks} albums={albums} artists={artists} skipped={}\n",
         if applied { "deleted" } else { "would delete" },
         report.merges.len(),
         report.track_merges.len(),
+        report.splits.len(),
         report.refetch.len(),
         report.skipped.len()
     ));
@@ -260,6 +267,7 @@ mod tests {
         let report = ProviderDuplicateReport {
             merges: vec![],
             track_merges: vec![],
+            splits: vec![],
             refetch: vec![],
             duplicates: vec![ProviderDuplicate {
                 kind: DuplicateKind::Track,
@@ -278,7 +286,7 @@ mod tests {
 
         assert_eq!(
             format_provider_duplicate_report(&report, false),
-            "duplicate track 00000000-0000-0000-0000-000000000000 \"Glue Song\" -> 00000000-0000-0000-0000-000000000001 listens=3\nskipped track 00000000-0000-0000-0000-000000000002 \"Queue Song\" queue_entry\nwould delete: merges=0 track_merges=0 refetch=0 tracks=1 albums=0 artists=0 skipped=1\n"
+            "duplicate track 00000000-0000-0000-0000-000000000000 \"Glue Song\" -> 00000000-0000-0000-0000-000000000001 listens=3\nskipped track 00000000-0000-0000-0000-000000000002 \"Queue Song\" queue_entry\nwould delete: merges=0 track_merges=0 splits=0 refetch=0 tracks=1 albums=0 artists=0 skipped=1\n"
         );
     }
 
@@ -303,7 +311,7 @@ mod tests {
         };
         assert_eq!(
             format_provider_duplicate_report(&report, false),
-            "skipped track 00000000-0000-0000-0000-000000000001 \"Pending\" acquisition_origin\nskipped track 00000000-0000-0000-0000-000000000002 \"Overlap\" overlapping_listens\nwould delete: merges=0 track_merges=0 refetch=0 tracks=0 albums=0 artists=0 skipped=2\n"
+            "skipped track 00000000-0000-0000-0000-000000000001 \"Pending\" acquisition_origin\nskipped track 00000000-0000-0000-0000-000000000002 \"Overlap\" overlapping_listens\nwould delete: merges=0 track_merges=0 splits=0 refetch=0 tracks=0 albums=0 artists=0 skipped=2\n"
         );
     }
 
@@ -324,7 +332,26 @@ mod tests {
         };
         assert_eq!(
             format_provider_duplicate_report(&report, false),
-            "merge track 00000000-0000-0000-0000-000000000002 \"Stop The Wedding!\" -> 00000000-0000-0000-0000-000000000001\nrefetch album 00000000-0000-0000-0000-000000000003 \"Pylon\"\nwould delete: merges=0 track_merges=1 refetch=1 tracks=0 albums=0 artists=0 skipped=0\n"
+            "merge track 00000000-0000-0000-0000-000000000002 \"Stop The Wedding!\" -> 00000000-0000-0000-0000-000000000001\nrefetch album 00000000-0000-0000-0000-000000000003 \"Pylon\"\nwould delete: merges=0 track_merges=1 splits=0 refetch=1 tracks=0 albums=0 artists=0 skipped=0\n"
+        );
+    }
+
+    #[test]
+    fn prune_prints_album_splits_before_the_counts() {
+        use crate::features::music_library::domain::AlbumSplit;
+        let report = ProviderDuplicateReport {
+            splits: vec![AlbumSplit {
+                id: Uuid::from_u128(4),
+                name: "Ego Death At A Bachelorette Party".to_owned(),
+                into: Uuid::from_u128(5),
+                provider: "youtube_music".to_owned(),
+                external_id: "MPREb_9DTZIOTqaov".to_owned(),
+            }],
+            ..ProviderDuplicateReport::default()
+        };
+        assert_eq!(
+            format_provider_duplicate_report(&report, false),
+            "split album 00000000-0000-0000-0000-000000000004 \"Ego Death At A Bachelorette Party\" -> 00000000-0000-0000-0000-000000000005 source=youtube_music:MPREb_9DTZIOTqaov\nwould delete: merges=0 track_merges=0 splits=1 refetch=0 tracks=0 albums=0 artists=0 skipped=0\n"
         );
     }
 
@@ -342,12 +369,13 @@ mod tests {
             duplicates: vec![],
             skipped: vec![],
             track_merges: vec![],
+            splits: vec![],
             refetch: vec![],
         };
 
         assert_eq!(
             format_provider_duplicate_report(&report, true),
-            "merge artist 00000000-0000-0000-0000-000000000001 \"beabadoobee\" -> 00000000-0000-0000-0000-000000000002 credits=14 albums_moved=35 albums_merged=1\ndeleted: merges=1 track_merges=0 refetch=0 tracks=0 albums=0 artists=0 skipped=0\n"
+            "merge artist 00000000-0000-0000-0000-000000000001 \"beabadoobee\" -> 00000000-0000-0000-0000-000000000002 credits=14 albums_moved=35 albums_merged=1\ndeleted: merges=1 track_merges=0 splits=0 refetch=0 tracks=0 albums=0 artists=0 skipped=0\n"
         );
     }
 }

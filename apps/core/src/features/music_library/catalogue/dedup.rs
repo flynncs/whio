@@ -446,6 +446,17 @@ mod tests {
             Err(crate::features::music_library::storage::contracts::TrackRepositoryError::Unavailable)
         }
 
+        async fn refresh_album_facts(
+            &self,
+            _: &crate::features::music_library::domain::AlbumId,
+            _: &crate::features::music_library::domain::AlbumMetadata,
+        ) -> Result<
+            crate::features::music_library::domain::Album,
+            crate::features::music_library::storage::contracts::TrackRepositoryError,
+        > {
+            Err(crate::features::music_library::storage::contracts::TrackRepositoryError::Unavailable)
+        }
+
         async fn add_album_track(
             &self,
             _: &crate::features::music_library::domain::AlbumId,

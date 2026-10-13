@@ -317,3 +317,31 @@ async fn a_failed_album_artwork_write_does_not_fail_materialisation(pool: PgPool
         1
     );
 }
+
+#[sqlx::test]
+async fn an_existing_provider_album_returns_its_refreshed_facts(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let catalogue = Arc::clone(&repository) as Arc<dyn CatalogueWrite>;
+    let sources = Arc::clone(&repository) as Arc<dyn SourceLookup>;
+
+    materialize_album(
+        &catalogue,
+        &sources,
+        &album_metadata("MPREb_album", "https://art.test/first.jpg"),
+    )
+    .await
+    .unwrap();
+    let refreshed = album_metadata("MPREb_album", "https://art.test/second.jpg")
+        .with_release_type(Some("album".to_owned()))
+        .unwrap()
+        .with_year(Some(2021))
+        .unwrap();
+
+    let album = materialize_album(&catalogue, &sources, &refreshed)
+        .await
+        .unwrap();
+
+    assert_eq!(album.title(), "Album");
+    assert_eq!(album.release_type(), Some("album"));
+    assert_eq!(album.year(), Some(2021));
+}

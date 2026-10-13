@@ -61,7 +61,7 @@ pub use queue::{
     RestoreQueueWrite, RestoreQueueWriteOutcome,
 };
 pub use retention::{
-    AlbumRefetch, ArtistMerge, DuplicateKind, EvictionReport, ProviderDuplicate,
+    AlbumRefetch, AlbumSplit, ArtistMerge, DuplicateKind, EvictionReport, ProviderDuplicate,
     ProviderDuplicateReport, RetentionReport, SkipReason, SkippedDuplicate, TrackMerge,
 };
 pub use search::{MatchQuality, SearchConfidence, SearchTerms};

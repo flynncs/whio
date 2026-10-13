@@ -181,7 +181,10 @@ mod tests {
 
     use super::*;
     use crate::features::music_library::{
-        domain::{AlbumId, AlbumTrack, ArtworkRef, SourceIdentity, Track, TrackId, TrackMetadata},
+        domain::{
+            Album, AlbumId, AlbumMetadata, AlbumTrack, ArtworkRef, SourceIdentity, Track, TrackId,
+            TrackMetadata,
+        },
         storage::contracts::{CatalogueWrite, SourceLookup, TrackRepositoryError},
     };
 
@@ -204,6 +207,14 @@ mod tests {
             _album_id: Option<&crate::features::music_library::domain::AlbumId>,
         ) -> Result<Track, TrackRepositoryError> {
             panic!("status checks must not write tracks")
+        }
+
+        async fn refresh_album_facts(
+            &self,
+            _album_id: &AlbumId,
+            _metadata: &AlbumMetadata,
+        ) -> Result<Album, TrackRepositoryError> {
+            panic!("status checks must not write albums")
         }
 
         async fn add_album_track(
