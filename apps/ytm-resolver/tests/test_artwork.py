@@ -7,7 +7,7 @@ from app.youtube.catalogue import parse_artwork_url
 
 class ArtworkSizeTest(unittest.TestCase):
     def test_supported_hosts_replace_the_trailing_size_and_flags(self) -> None:
-        for host in ["lh3.googleusercontent.com", "yt3.ggpht.com"]:
+        for host in ["lh3.googleusercontent.com", "yt3.googleusercontent.com", "yt3.ggpht.com"]:
             for directive in ["w60-h60-l90-rj", "s60", "s544-c-k-c0x00ffffff-no-rj", "w2048-h853-p-l90-rj"]:
                 with self.subTest(host=host, directive=directive):
                     self.assertEqual(
@@ -21,6 +21,7 @@ class ArtworkSizeTest(unittest.TestCase):
             "https://lh3.googleusercontent.com/image",
             "https://yt3.ggpht.com/image=unknown",
             "https://lh3.googleusercontent.com.evil.test/image=s60",
+            "https://googleusercontent.com/image=s60",
             "https://yt3.ggpht.com/image=s60/other",
         ]:
             self.assertEqual(full_size_artwork_url(url), url)
