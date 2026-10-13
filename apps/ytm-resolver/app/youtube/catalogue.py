@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -23,6 +24,10 @@ from app.generated.resolver_v1 import (
 
 
 ALBUM_BROWSE_ID_PREFIX = "MPRE"
+ATV_VIDEO_TYPE = "MUSIC_VIDEO_TYPE_ATV"
+MAX_ALBUM_BROWSE_ID_LENGTH = 128
+
+logger = logging.getLogger("uvicorn.error").getChild(__name__)
 
 
 class YouTubeMusicCatalogue:
@@ -129,7 +134,7 @@ class YouTubeMusicCatalogue:
         return CatalogueArtistAlbumsResponse(results=albums)
 
     def fetch_album(self, source: SourceIdentity) -> CatalogueCandidatesResponse:
-        if not source.external_id.startswith(ALBUM_BROWSE_ID_PREFIX):
+        if not is_album_browse_id(source.external_id):
             raise SourceNotFoundError("The source is unavailable")
         try:
             album = self._client.get_album(source.external_id)
@@ -148,14 +153,37 @@ class YouTubeMusicCatalogue:
             artwork_url=artwork_url,
         )
         album_artists = album.get("artists")
+        tracks = album.get("tracks", [])
+        audio_tracks = self._album_audio_tracks(album, source.external_id)
+        pairs = pair_album_audio_tracks(tracks, audio_tracks)
 
         return CatalogueCandidatesResponse(
             results=[
-                normalize_album_track(track, album_identity, album_artists, artwork_url)
-                for track in album.get("tracks", [])
+                normalize_album_track(
+                    track, album_identity, album_artists, artwork_url, pairs.get(position)
+                )
+                for position, track in enumerate(tracks)
             ],
             reported_count=parse_count(album.get("trackCount")),
         )
+
+    def _album_audio_tracks(
+        self, album: Mapping[str, Any], album_id: str
+    ) -> list[Any]:
+        playlist_id = album.get("audioPlaylistId")
+        if not isinstance(playlist_id, str) or not playlist_id:
+            return []
+        try:
+            playlist = self._client.get_playlist(playlist_id, limit=None)
+        except (YTMusicUserError, YTMusicServerError, RequestException) as error:
+            logger.warning(
+                "album audio playlist unavailable album_id=%s error_type=%s",
+                album_id,
+                type(error).__name__,
+            )
+            return []
+        tracks = playlist.get("tracks") if isinstance(playlist, Mapping) else None
+        return tracks if isinstance(tracks, list) else []
 
 
 def normalize_album_result(
@@ -236,21 +264,83 @@ def normalize_album_track(
     album: CatalogueAlbum,
     album_artists: Any,
     artwork_url: str | None,
+    audio: Mapping[str, Any] | None = None,
 ) -> CatalogueCandidate:
     artists = track.get("artists") or album_artists or []
+    video_id = track["videoId"]
+    source_id = video_id
+    alternate_sources: list[SourceIdentity] = []
+    duration_ms = parse_duration_seconds(track.get("duration_seconds"))
+    if audio is not None and track.get("videoType") != ATV_VIDEO_TYPE:
+        audio_id = audio.get("videoId")
+        if isinstance(audio_id, str) and audio_id and audio_id != video_id:
+            source_id = audio_id
+            alternate_sources = [
+                SourceIdentity(provider_id="youtube_music", external_id=video_id)
+            ]
+            duration_ms = parse_duration_seconds(audio.get("duration_seconds"))
 
     return CatalogueCandidate(
-        source=SourceIdentity(
-            provider_id="youtube_music", external_id=track["videoId"]
-        ),
+        source=SourceIdentity(provider_id="youtube_music", external_id=source_id),
         title=track["title"],
         artists=[parse_artist(artist) for artist in artists],
-        duration_ms=parse_duration_seconds(track.get("duration_seconds")),
+        duration_ms=duration_ms,
         album=album,
         artwork_url=artwork_url,
         track_number=parse_positive_number(track.get("trackNumber")),
         disc_number=parse_positive_number(track.get("discNumber")),
+        alternate_sources=alternate_sources,
     )
+
+
+def pair_album_audio_tracks(
+    tracks: list[Any],
+    audio_tracks: list[Any],
+) -> dict[int, Any]:
+    if not tracks or not audio_tracks:
+        return {}
+    if len(tracks) == len(audio_tracks) and all(
+        normalize_track_title(track.get("title"))
+        == normalize_track_title(audio.get("title"))
+        for track, audio in zip(tracks, audio_tracks, strict=True)
+    ):
+        return dict(enumerate(audio_tracks))
+
+    positions_by_title = _normalized_title_positions(audio_tracks)
+    album_positions = _normalized_title_positions(tracks)
+
+    pairs: dict[int, Any] = {}
+    for title, positions in album_positions.items():
+        audio_positions = positions_by_title.get(title, [])
+        if len(positions) == 1 and len(audio_positions) == 1:
+            pairs[positions[0]] = audio_tracks[audio_positions[0]]
+    return pairs
+
+
+def _normalized_title_positions(rows: list[Any]) -> dict[str, list[int]]:
+    positions: dict[str, list[int]] = {}
+    for position, row in enumerate(rows):
+        title = normalize_track_title(row.get("title"))
+        if title:
+            positions.setdefault(title, []).append(position)
+    return positions
+
+
+def is_album_browse_id(value: str) -> bool:
+    return (
+        value.startswith(ALBUM_BROWSE_ID_PREFIX)
+        and len(value) <= MAX_ALBUM_BROWSE_ID_LENGTH
+        and all(
+            character.isascii() and (character.isalnum() or character in "_-")
+            for character in value
+        )
+    )
+
+
+def normalize_track_title(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.casefold().split())
 
 
 def parse_artist(value: Mapping[str, Any]) -> CatalogueArtist:

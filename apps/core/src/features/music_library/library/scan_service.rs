@@ -205,6 +205,7 @@ mod tests {
             _source: SourceIdentity,
             _metadata: TrackMetadata,
             _album_id: Option<&crate::features::music_library::domain::AlbumId>,
+            _alternates: &[SourceIdentity],
         ) -> Result<Track, TrackRepositoryError> {
             panic!("status checks must not write tracks")
         }

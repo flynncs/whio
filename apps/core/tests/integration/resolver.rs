@@ -66,6 +66,7 @@ fn candidate_dto() -> CatalogueCandidateDto {
             artwork_url: None,
         })),
         artwork_url: None,
+        alternate_sources: None,
     }
 }
 

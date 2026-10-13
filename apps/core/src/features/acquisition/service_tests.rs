@@ -2316,6 +2316,7 @@ async fn pylon_feature_credits_and_versions_agree_for_library_album_repair_and_p
                 album_fixture_source(&format!("{title}-attached")),
                 metadata(provider_title, &["beabadoobee", guest], provider_ms),
                 Some(album.id()),
+                &[],
             )
             .await
             .unwrap();
@@ -2331,6 +2332,7 @@ async fn pylon_feature_credits_and_versions_agree_for_library_album_repair_and_p
                         provider_ms,
                     ),
                     Some(album.id()),
+                    &[],
                 )
                 .await
                 .unwrap();
@@ -2428,6 +2430,7 @@ async fn pylon_feature_credits_and_versions_agree_for_library_album_repair_and_p
                 album_fixture_source(&format!("{title}-library")),
                 metadata(provider_title, &["beabadoobee", guest], provider_ms),
                 None,
+                &[],
             )
             .await
             .unwrap();
@@ -2442,6 +2445,7 @@ async fn pylon_feature_credits_and_versions_agree_for_library_album_repair_and_p
                         provider_ms,
                     ),
                     None,
+                    &[],
                 )
                 .await
                 .unwrap();
@@ -2487,6 +2491,7 @@ async fn feature_title_selection_agrees_for_library_album_repair_and_pin(pool: P
             album_fixture_source("library-feature"),
             metadata("Song (feat. Guest)", "Artist"),
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -2521,6 +2526,7 @@ async fn feature_title_selection_agrees_for_library_album_repair_and_pin(pool: P
             album_fixture_source("feature-match"),
             metadata("Song (feat. Guest)", "Provider Artist"),
             Some(album.id()),
+            &[],
         )
         .await
         .unwrap();

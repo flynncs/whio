@@ -19,6 +19,7 @@ mod reports;
 pub(crate) mod schema;
 mod sources;
 mod state;
+mod track_merge;
 
 pub use libraries::PostgresLibraryStore;
 

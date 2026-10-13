@@ -723,6 +723,13 @@ components:
             - "null"
           format: uri
           description: Public artwork URL that the core fetches and proxies to clients.
+        alternate_sources:
+          type: array
+          maxItems: 4
+          default: []
+          items:
+            $ref: "#/components/schemas/SourceIdentity"
+          description: Other provider identities of the same recording, such as the album track's music-video id. The candidate's source is the identity to play.
 
     CatalogueArtist:
       type: object

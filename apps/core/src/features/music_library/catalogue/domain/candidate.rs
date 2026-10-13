@@ -6,6 +6,7 @@ use crate::features::music_library::domain::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CatalogueCandidate {
     source: SourceIdentity,
+    alternates: Vec<SourceIdentity>,
     metadata: TrackMetadata,
     album: Option<AlbumMetadata>,
     artwork: Option<ArtworkRef>,
@@ -17,12 +18,18 @@ impl CatalogueCandidate {
     pub fn new(source: SourceIdentity, metadata: TrackMetadata) -> Self {
         Self {
             source,
+            alternates: Vec::new(),
             metadata,
             album: None,
             artwork: None,
             track_number: None,
             disc_number: None,
         }
+    }
+
+    pub fn with_alternates(mut self, alternates: Vec<SourceIdentity>) -> Self {
+        self.alternates = alternates;
+        self
     }
 
     pub fn with_album(mut self, album: Option<AlbumMetadata>) -> Self {
@@ -53,6 +60,10 @@ impl CatalogueCandidate {
 
     pub fn source(&self) -> &SourceIdentity {
         &self.source
+    }
+
+    pub fn alternates(&self) -> &[SourceIdentity] {
+        &self.alternates
     }
 
     pub fn metadata(&self) -> &TrackMetadata {

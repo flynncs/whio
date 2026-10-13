@@ -439,6 +439,7 @@ mod tests {
             _: crate::features::music_library::domain::SourceIdentity,
             _: crate::features::music_library::domain::TrackMetadata,
             _album_id: Option<&crate::features::music_library::domain::AlbumId>,
+            _: &[crate::features::music_library::domain::SourceIdentity],
         ) -> Result<
             crate::features::music_library::domain::Track,
             crate::features::music_library::storage::contracts::TrackRepositoryError,

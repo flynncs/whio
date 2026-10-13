@@ -1,5 +1,7 @@
+import json
 import unittest
-from unittest.mock import Mock
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 from requests.exceptions import RequestException
 from ytmusicapi.exceptions import YTMusicServerError, YTMusicUserError
@@ -11,6 +13,18 @@ from app.youtube.catalogue import (
     parse_duration_ms,
     parse_positive_number,
 )
+
+
+CATALOGUE_FIXTURES = Path(__file__).parent / "fixtures" / "catalogue"
+
+
+def load_catalogue_fixture(name: str):
+    with (CATALOGUE_FIXTURES / name).open(encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def album_source() -> SourceIdentity:
+    return SourceIdentity(provider_id="youtube_music", external_id="MPREb_ego")
 
 
 class YouTubeMusicCatalogueTest(unittest.TestCase):
@@ -317,6 +331,26 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
 
         client.get_album.assert_not_called()
 
+    def test_fetch_album_rejects_album_ids_with_control_characters(self) -> None:
+        for external_id in [
+            "MPREb_ok\ninjected_log_line=yes",
+            "MPREb_ok\r\nnext",
+            "MPREb_ok\tnext",
+            "MPREb_ok next",
+            "MPRE\u274c",
+            "MPRE" + "a" * 125,
+        ]:
+            with self.subTest(external_id=external_id):
+                client = Mock()
+                source = SourceIdentity(
+                    provider_id="youtube_music", external_id=external_id
+                )
+
+                with self.assertRaises(SourceNotFoundError):
+                    YouTubeMusicCatalogue(client).fetch_album(source)
+
+                client.get_album.assert_not_called()
+
     def test_fetch_album_translates_a_rejected_browse_id(self) -> None:
         client = Mock()
         client.get_album.side_effect = YTMusicUserError(
@@ -370,6 +404,7 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
                 "title": "Instant Crush",
                 "artists": [{"name": "Daft Punk"}],
                 "duration_ms": 337000,
+                "alternate_sources": [],
             },
         )
 
@@ -456,3 +491,147 @@ class YouTubeMusicCatalogueTest(unittest.TestCase):
         for value in [None, "", "unknown"]:
             with self.subTest(value=value):
                 self.assertIsNone(parse_duration_ms(value))
+
+    def test_fetch_album_pairs_music_video_tracks_with_their_audio_ids(self) -> None:
+        client = Mock()
+        client.get_album.return_value = load_catalogue_fixture(
+            "ytm_album_ego_death.json"
+        )
+        client.get_playlist.return_value = load_catalogue_fixture(
+            "ytm_playlist_ego_death.json"
+        )
+
+        response = YouTubeMusicCatalogue(client).fetch_album(album_source())
+
+        client.get_playlist.assert_called_once_with("OLAK5uy_ego_death", limit=None)
+        self.assertEqual(
+            [candidate.source.external_id for candidate in response.results],
+            ["ATVglum0001", "ATVkillMe02", "ATVwhim0003"],
+        )
+        self.assertEqual(
+            [
+                [alternate.external_id for alternate in candidate.alternate_sources]
+                for candidate in response.results
+            ],
+            [["OMVglum0001"], ["OMVkillMe02"], ["OMVwhim0003"]],
+        )
+        self.assertEqual(
+            [candidate.duration_ms for candidate in response.results],
+            [192_000, 168_000, 216_000],
+        )
+        self.assertEqual(response.results[0].title, "Glum")
+
+    def test_fetch_album_pairing_falls_back_to_unique_titles_on_a_length_mismatch(
+        self,
+    ) -> None:
+        album = load_catalogue_fixture("ytm_album_ego_death.json")
+        playlist = load_catalogue_fixture("ytm_playlist_ego_death.json")
+        playlist["tracks"] = [
+            track for track in playlist["tracks"] if track["title"] != "Whim"
+        ]
+        client = Mock()
+        client.get_album.return_value = album
+        client.get_playlist.return_value = playlist
+
+        response = YouTubeMusicCatalogue(client).fetch_album(album_source())
+
+        self.assertEqual(
+            [candidate.source.external_id for candidate in response.results],
+            ["ATVglum0001", "ATVkillMe02", "OMVwhim0003"],
+        )
+        self.assertEqual(
+            [len(candidate.alternate_sources) for candidate in response.results],
+            [1, 1, 0],
+        )
+        self.assertEqual(response.results[2].duration_ms, 239_000)
+
+    def test_fetch_album_leaves_a_duplicate_title_unpaired(self) -> None:
+        album = load_catalogue_fixture("ytm_album_ego_death.json")
+        album["tracks"][1]["title"] = "Glum"
+        client = Mock()
+        client.get_album.return_value = album
+        client.get_playlist.return_value = load_catalogue_fixture(
+            "ytm_playlist_ego_death.json"
+        )
+
+        response = YouTubeMusicCatalogue(client).fetch_album(album_source())
+
+        self.assertEqual(
+            [candidate.source.external_id for candidate in response.results],
+            ["OMVglum0001", "OMVkillMe02", "ATVwhim0003"],
+        )
+        self.assertEqual(
+            [len(candidate.alternate_sources) for candidate in response.results],
+            [0, 0, 1],
+        )
+
+    def test_fetch_album_keeps_an_atv_track_as_its_own_source(self) -> None:
+        album = load_catalogue_fixture("ytm_album_ego_death.json")
+        album["tracks"][0]["videoType"] = "MUSIC_VIDEO_TYPE_ATV"
+        client = Mock()
+        client.get_album.return_value = album
+        client.get_playlist.return_value = load_catalogue_fixture(
+            "ytm_playlist_ego_death.json"
+        )
+
+        response = YouTubeMusicCatalogue(client).fetch_album(album_source())
+
+        self.assertEqual(response.results[0].source.external_id, "OMVglum0001")
+        self.assertEqual(response.results[0].alternate_sources, [])
+        self.assertEqual(response.results[0].duration_ms, 200_000)
+
+    def test_fetch_album_logs_one_warning_when_the_playlist_fetch_fails(self) -> None:
+        client = Mock()
+        client.get_album.return_value = load_catalogue_fixture(
+            "ytm_album_ego_death.json"
+        )
+        client.get_playlist.side_effect = YTMusicServerError("private details")
+
+        with patch("app.youtube.catalogue.logger.warning") as warning:
+            response = YouTubeMusicCatalogue(client).fetch_album(album_source())
+
+        warning.assert_called_once()
+        self.assertEqual(
+            warning.call_args.args,
+            (
+                "album audio playlist unavailable album_id=%s error_type=%s",
+                "MPREb_ego",
+                "YTMusicServerError",
+            ),
+        )
+        self.assertEqual(
+            [candidate.source.external_id for candidate in response.results],
+            ["OMVglum0001", "OMVkillMe02", "OMVwhim0003"],
+        )
+        self.assertTrue(
+            all(not candidate.alternate_sources for candidate in response.results)
+        )
+
+    def test_fetch_album_without_an_audio_playlist_keeps_album_tracks(self) -> None:
+        album = load_catalogue_fixture("ytm_album_ego_death.json")
+        del album["audioPlaylistId"]
+        client = Mock()
+        client.get_album.return_value = album
+
+        response = YouTubeMusicCatalogue(client).fetch_album(album_source())
+
+        client.get_playlist.assert_not_called()
+        self.assertEqual(
+            [candidate.source.external_id for candidate in response.results],
+            ["OMVglum0001", "OMVkillMe02", "OMVwhim0003"],
+        )
+        self.assertEqual(response.results[1].duration_ms, 187_000)
+
+    def test_fetch_album_same_audio_id_keeps_todays_output(self) -> None:
+        album = load_catalogue_fixture("ytm_album_ego_death.json")
+        playlist = load_catalogue_fixture("ytm_playlist_ego_death.json")
+        playlist["tracks"][0]["videoId"] = "OMVglum0001"
+        client = Mock()
+        client.get_album.return_value = album
+        client.get_playlist.return_value = playlist
+
+        response = YouTubeMusicCatalogue(client).fetch_album(album_source())
+
+        self.assertEqual(response.results[0].source.external_id, "OMVglum0001")
+        self.assertEqual(response.results[0].alternate_sources, [])
+        self.assertEqual(response.results[0].duration_ms, 200_000)

@@ -1,0 +1,56 @@
+{
+  "title": "Ego Death",
+  "type": "Album",
+  "year": 2025,
+  "trackCount": 3,
+  "duration": "10 minutes",
+  "duration_seconds": 646,
+  "audioPlaylistId": "OLAK5uy_ego_death",
+  "artists": [
+    {
+      "name": "Hayley Williams",
+      "id": "UCegoDeathArtist"
+    }
+  ],
+  "thumbnails": [
+    {
+      "url": "https://art.test/ego-death.jpg",
+      "width": 544,
+      "height": 544
+    }
+  ],
+  "tracks": [
+    {
+      "videoId": "OMVglum0001",
+      "title": "Glum",
+      "videoType": "MUSIC_VIDEO_TYPE_OMV",
+      "duration": "3:20",
+      "duration_seconds": 200,
+      "trackNumber": 1,
+      "artists": [
+        {
+          "name": "Hayley Williams",
+          "id": "UCegoDeathArtist"
+        }
+      ]
+    },
+    {
+      "videoId": "OMVkillMe02",
+      "title": "Kill Me",
+      "videoType": "MUSIC_VIDEO_TYPE_OMV",
+      "duration": "3:07",
+      "duration_seconds": 187,
+      "trackNumber": 2,
+      "artists": []
+    },
+    {
+      "videoId": "OMVwhim0003",
+      "title": "Whim",
+      "videoType": "MUSIC_VIDEO_TYPE_OMV",
+      "duration": "3:59",
+      "duration_seconds": 239,
+      "trackNumber": 3,
+      "artists": []
+    }
+  ]
+}

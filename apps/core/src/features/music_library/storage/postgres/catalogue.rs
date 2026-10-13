@@ -21,6 +21,7 @@ use super::decode::{
     repository_error,
 };
 use super::schema::{ALBUM_COLUMNS, ARTIST_COLUMNS, AlbumRow, ArtistRow, folded};
+use super::track_merge::merge_track;
 
 pub(super) struct ResolvedCredit {
     pub(super) name: String,
@@ -38,7 +39,7 @@ impl CatalogueWrite for PgStore {
         let credits = resolve_credits(&self.pool, &metadata).await?;
 
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
-        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits, None).await?;
+        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits, None, &[]).await?;
         tx.commit().await.map_err(repository_error)?;
 
         Ok(Track::new(track_id, metadata))
@@ -49,6 +50,7 @@ impl CatalogueWrite for PgStore {
         source: SourceIdentity,
         metadata: TrackMetadata,
         album_id: Option<&AlbumId>,
+        alternates: &[SourceIdentity],
     ) -> Result<Track, TrackRepositoryError> {
         let credits = resolve_credits(&self.pool, &metadata).await?;
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
@@ -58,6 +60,7 @@ impl CatalogueWrite for PgStore {
             &metadata,
             &credits,
             Some((&self.library_provider_ids(), album_id)),
+            alternates,
         )
         .await?;
         tx.commit().await.map_err(repository_error)?;
@@ -74,7 +77,7 @@ impl CatalogueWrite for PgStore {
         let credits = resolve_credits(&self.pool, &metadata).await?;
 
         let mut tx = self.pool.begin().await.map_err(repository_error)?;
-        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits, None).await?;
+        let track_id = get_or_create_in(&mut tx, &source, &metadata, &credits, None, &[]).await?;
         set_source_file_facts_in(&mut tx, &source, facts).await?;
         tx.commit().await.map_err(repository_error)?;
 
@@ -1108,6 +1111,26 @@ async fn get_or_create_in(
     metadata: &TrackMetadata,
     credits: &[ResolvedCredit],
     provider_scope: Option<(&[String], Option<&AlbumId>)>,
+    alternates: &[SourceIdentity],
+) -> Result<TrackId, TrackRepositoryError> {
+    let track_id = match alternate_source_track(connection, source, alternates).await? {
+        Some(track_id) => track_id,
+        None => resolve_track(connection, source, metadata, credits, provider_scope).await?,
+    };
+
+    update_track_metadata(connection, &track_id, metadata).await?;
+    replace_artist_credits(connection, &track_id, credits).await?;
+    replace_track_genres(connection, &track_id, metadata.genres()).await?;
+
+    Ok(track_id)
+}
+
+async fn resolve_track(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+    metadata: &TrackMetadata,
+    credits: &[ResolvedCredit],
+    provider_scope: Option<(&[String], Option<&AlbumId>)>,
 ) -> Result<TrackId, TrackRepositoryError> {
     let track_id = match resolve_identified_track(connection, metadata).await? {
         Some(identified) => {
@@ -1142,11 +1165,81 @@ async fn get_or_create_in(
         },
     };
 
-    update_track_metadata(connection, &track_id, metadata).await?;
-    replace_artist_credits(connection, &track_id, credits).await?;
-    replace_track_genres(connection, &track_id, metadata.genres()).await?;
-
     Ok(track_id)
+}
+
+async fn alternate_source_track(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+    alternates: &[SourceIdentity],
+) -> Result<Option<TrackId>, TrackRepositoryError> {
+    for alternate in alternates {
+        if alternate == source {
+            continue;
+        }
+        let Some(holder) = find_track_id_by_source_for_update(connection, alternate).await? else {
+            continue;
+        };
+        if alternate.source_scope() != source.source_scope() {
+            return Err(TrackRepositoryError::InvalidData);
+        }
+        match find_track_id_by_source_for_update(connection, source).await? {
+            Some(source_holder) if source_holder != holder => {
+                merge_track(connection, *source_holder.as_uuid(), *holder.as_uuid()).await?;
+                delete_source(connection, alternate).await?;
+            }
+            Some(_) => delete_source(connection, alternate).await?,
+            None => rewrite_source(connection, alternate, source).await?,
+        }
+        return Ok(Some(holder));
+    }
+    Ok(None)
+}
+
+async fn rewrite_source(
+    connection: &mut PgConnection,
+    alternate: &SourceIdentity,
+    source: &SourceIdentity,
+) -> Result<(), TrackRepositoryError> {
+    sqlx::query(
+        r#"
+        UPDATE track_sources
+        SET provider_id = $1, external_id = $2
+        WHERE provider_id = $3
+          AND source_scope = $4
+          AND external_id = $5
+        "#,
+    )
+    .bind(source.provider_id().as_str())
+    .bind(source.external_id())
+    .bind(alternate.provider_id().as_str())
+    .bind(encode_source_scope(alternate.source_scope()))
+    .bind(alternate.external_id())
+    .execute(&mut *connection)
+    .await
+    .map(|_| ())
+    .map_err(repository_error)
+}
+
+async fn delete_source(
+    connection: &mut PgConnection,
+    source: &SourceIdentity,
+) -> Result<(), TrackRepositoryError> {
+    sqlx::query(
+        r#"
+        DELETE FROM track_sources
+        WHERE provider_id = $1
+          AND source_scope = $2
+          AND external_id = $3
+        "#,
+    )
+    .bind(source.provider_id().as_str())
+    .bind(encode_source_scope(source.source_scope()))
+    .bind(source.external_id())
+    .execute(&mut *connection)
+    .await
+    .map(|_| ())
+    .map_err(repository_error)
 }
 
 async fn find_scoped_provider_track_match(

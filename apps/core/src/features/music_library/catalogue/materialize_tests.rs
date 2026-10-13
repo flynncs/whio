@@ -68,6 +68,29 @@ async fn same_album_provider_songs_share_one_track_and_two_sources(pool: PgPool)
 }
 
 #[sqlx::test]
+async fn album_completion_keeps_the_track_that_held_its_video_id(pool: PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let catalogue = Arc::clone(&repository) as Arc<dyn CatalogueWrite>;
+    let sources = Arc::clone(&repository) as Arc<dyn SourceLookup>;
+    let video = song_candidate("OMVglum0001", 200_000);
+    let holder = catalogue
+        .get_or_create_provider(video.source().clone(), video.metadata().clone(), None, &[])
+        .await
+        .unwrap();
+    let candidate = song_candidate("ATVglum0001", 192_000)
+        .with_alternates(vec![provider_source("OMVglum0001")]);
+
+    let hits = super::materialize_album_tracks(&catalogue, &sources, vec![candidate])
+        .await
+        .unwrap();
+
+    assert_eq!(hits[0].track().id(), holder.id());
+    let stored = repository.find_sources(holder.id()).await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].external_id(), "ATVglum0001");
+}
+
+#[sqlx::test]
 async fn album_completion_keeps_the_first_position_of_duplicate_responses(pool: PgPool) {
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let catalogue = Arc::clone(&repository) as Arc<dyn CatalogueWrite>;

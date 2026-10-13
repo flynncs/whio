@@ -50,6 +50,9 @@ pub struct CatalogueCandidate {
         skip_serializing_if = "Option::is_none"
     )]
     pub artwork_url: Option<Option<String>>,
+    /// Other provider identities of the same recording, such as the album track's music-video id. The candidate's source is the identity to play.
+    #[serde(rename = "alternate_sources", skip_serializing_if = "Option::is_none")]
+    pub alternate_sources: Option<Vec<models::SourceIdentity>>,
 }
 
 impl CatalogueCandidate {
@@ -67,6 +70,7 @@ impl CatalogueCandidate {
             disc_number: None,
             album: None,
             artwork_url: None,
+            alternate_sources: None,
         }
     }
 }

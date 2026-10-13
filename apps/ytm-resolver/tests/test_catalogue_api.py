@@ -74,6 +74,7 @@ class CatalogueRoutesTest(unittest.TestCase):
                         "title": "Instant Crush",
                         "artists": [{"name": "Daft Punk"}],
                         "duration_ms": 337000,
+                        "alternate_sources": [],
                     }
                 ]
             },

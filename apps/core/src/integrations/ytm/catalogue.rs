@@ -367,6 +367,19 @@ mod mapping {
                 candidate.source.external_id,
             )?;
 
+            let alternates = candidate
+                .alternate_sources
+                .unwrap_or_default()
+                .into_iter()
+                .map(|alternate| {
+                    SourceIdentity::new(
+                        ProviderId::new(alternate.provider_id)?,
+                        SourceScope::Global,
+                        alternate.external_id,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
             let duration_ms = candidate
                 .duration_ms
                 .flatten()
@@ -398,6 +411,7 @@ mod mapping {
                 .and_then(|url| ArtworkRef::url(url).ok());
 
             CatalogueCandidate::new(source, metadata)
+                .with_alternates(alternates)
                 .with_album(album)
                 .with_artwork(artwork)
                 .with_track_numbers(
@@ -430,6 +444,7 @@ mod mapping {
                 disc_number: None,
                 album: None,
                 artwork_url: None,
+                alternate_sources: None,
             }
         }
 
@@ -514,6 +529,24 @@ mod mapping {
             let membership = CatalogueCandidate::try_from(dto).unwrap().album_track(0);
             assert_eq!(membership.track_number(), None);
             assert_eq!(membership.disc_number(), None);
+        }
+
+        #[test]
+        fn dto_alternates_reach_the_candidate() {
+            let mut dto = candidate();
+            dto.alternate_sources = Some(vec![SourceIdentityDto::new(
+                "example_music".to_owned(),
+                "album-video-id".to_owned(),
+            )]);
+
+            let candidate = CatalogueCandidate::try_from(dto).unwrap();
+
+            assert_eq!(candidate.alternates().len(), 1);
+            assert_eq!(candidate.alternates()[0].external_id(), "album-video-id");
+            assert_eq!(
+                candidate.alternates()[0].provider_id().as_str(),
+                "example_music"
+            );
         }
 
         #[test]

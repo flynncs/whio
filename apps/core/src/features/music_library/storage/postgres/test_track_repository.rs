@@ -1736,12 +1736,296 @@ async fn a_provider_source_attaches_to_one_matching_library_track(pool: PgPool) 
             source("glue-song-video"),
             metadata("Glue Song", &["beabadoobee"], Some(181_000)),
             None,
+            &[],
         )
         .await
         .unwrap();
 
     assert_eq!(provider.id(), local.id());
     assert_eq!(repository.find_sources(local.id()).await.unwrap().len(), 2);
+}
+
+#[sqlx::test]
+async fn an_album_alternate_rewrites_the_source_holding_the_video_id(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = Uuid::now_v7();
+    insert_user(&pool, user, "glum-listener").await;
+    let video = source("glum-video");
+    let audio = source("glum-audio");
+    let track = repository
+        .get_or_create_provider(
+            video.clone(),
+            metadata("Glum", &["Hayley Williams"], Some(200_000)),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+    repository
+        .set_source_artwork(
+            &video,
+            &ArtworkRef::url("https://art.test/glum.jpg".to_owned()).unwrap(),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_starred(user, StateTarget::Track(track.id()), true)
+        .await
+        .unwrap();
+    seed_play(&pool, user, track.id(), chrono::Utc::now()).await;
+
+    let merged = repository
+        .get_or_create_provider(
+            audio.clone(),
+            metadata("Glum", &["Hayley Williams"], Some(192_000)),
+            None,
+            &[video],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(merged.id(), track.id());
+    assert_eq!(merged.duration_ms(), Some(192_000));
+    assert_eq!(
+        repository.find_sources(track.id()).await.unwrap(),
+        vec![audio]
+    );
+    let (owner, artwork) = repository
+        .find_artwork(track.id())
+        .await
+        .unwrap()
+        .expect("artwork survives the rewrite");
+    assert_eq!(owner.external_id(), "glum-audio");
+    assert_eq!(artwork.reference(), "https://art.test/glum.jpg");
+    let state = repository.find_track_state(track.id(), user).await.unwrap();
+    assert!(state.is_starred());
+    assert_eq!(state.play_count(), 1);
+}
+
+#[sqlx::test]
+async fn an_album_alternate_merges_the_audio_track_into_the_video_holder(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = Uuid::now_v7();
+    insert_user(&pool, user, "whim-listener").await;
+    let video = source("whim-video");
+    let audio = source("whim-audio");
+    let audio_track = repository
+        .get_or_create(
+            audio.clone(),
+            metadata("Whim", &["Hayley Williams"], Some(239_000)),
+        )
+        .await
+        .unwrap();
+    let video_track = repository
+        .get_or_create_provider(
+            video.clone(),
+            metadata("Whim", &["Hayley Williams"], Some(216_000)),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_ne!(audio_track.id(), video_track.id());
+    repository
+        .set_starred(user, StateTarget::Track(video_track.id()), true)
+        .await
+        .unwrap();
+    seed_play(&pool, user, audio_track.id(), chrono::Utc::now()).await;
+    seed_play(&pool, user, video_track.id(), chrono::Utc::now()).await;
+
+    let merged = repository
+        .get_or_create_provider(
+            audio.clone(),
+            metadata("Whim", &["Hayley Williams"], Some(216_000)),
+            None,
+            &[video],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(merged.id(), video_track.id());
+    assert_eq!(
+        repository.find_sources(video_track.id()).await.unwrap(),
+        vec![audio]
+    );
+    let state = repository
+        .find_track_state(video_track.id(), user)
+        .await
+        .unwrap();
+    assert!(state.is_starred());
+    assert_eq!(state.play_count(), 2);
+    let audio_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE id = $1")
+        .bind(audio_track.id().as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(audio_rows, 0);
+}
+
+#[sqlx::test]
+async fn an_album_alternate_without_a_holder_creates_the_audio_track(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool);
+    let audio = source("kill-me-audio");
+    let video = source("kill-me-video");
+
+    let track = repository
+        .get_or_create_provider(
+            audio.clone(),
+            metadata("Kill Me", &["Hayley Williams"], Some(168_000)),
+            None,
+            &[video],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repository.find_sources(track.id()).await.unwrap(),
+        vec![audio]
+    );
+}
+
+#[sqlx::test]
+async fn an_album_alternate_rewrites_across_providers(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let video = source("glum-video");
+    let audio = SourceIdentity::new(
+        ProviderId::new("another_music".to_owned()).unwrap(),
+        SourceScope::Named("test-installation".to_owned()),
+        "glum-audio".to_owned(),
+    )
+    .unwrap();
+    let track = repository
+        .get_or_create_provider(
+            video.clone(),
+            metadata("Glum", &["Hayley Williams"], Some(200_000)),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+    repository
+        .set_source_artwork(
+            &video,
+            &ArtworkRef::url("https://art.test/glum.jpg".to_owned()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let merged = repository
+        .get_or_create_provider(
+            audio.clone(),
+            metadata("Glum", &["Hayley Williams"], Some(192_000)),
+            None,
+            &[video],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(merged.id(), track.id());
+    assert_eq!(
+        repository.find_sources(track.id()).await.unwrap(),
+        vec![audio]
+    );
+    let (owner, artwork) = repository
+        .find_artwork(track.id())
+        .await
+        .unwrap()
+        .expect("artwork survives the rewrite");
+    assert_eq!(owner.provider_id().as_str(), "another_music");
+    assert_eq!(owner.external_id(), "glum-audio");
+    assert_eq!(artwork.reference(), "https://art.test/glum.jpg");
+}
+
+#[sqlx::test]
+async fn an_album_alternate_rejects_a_different_source_scope(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let video = source("glum-video");
+    let audio = SourceIdentity::new(
+        ProviderId::new("youtube_music".to_owned()).unwrap(),
+        SourceScope::Named("other-installation".to_owned()),
+        "glum-audio".to_owned(),
+    )
+    .unwrap();
+    let track = repository
+        .get_or_create_provider(
+            video.clone(),
+            metadata("Glum", &["Hayley Williams"], Some(200_000)),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let result = repository
+        .get_or_create_provider(
+            audio,
+            metadata("Glum", &["Hayley Williams"], Some(192_000)),
+            None,
+            std::slice::from_ref(&video),
+        )
+        .await;
+
+    assert!(matches!(result, Err(TrackRepositoryError::InvalidData)));
+    assert_eq!(
+        repository.find_sources(track.id()).await.unwrap(),
+        vec![video]
+    );
+    let tracks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(tracks, 1);
+}
+
+#[sqlx::test]
+async fn an_album_alternate_on_the_source_track_removes_only_the_alternate(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let album = repository
+        .resolve_or_create_album(&AlbumMetadata::new("Ego Death".to_owned()).unwrap())
+        .await
+        .unwrap();
+    let video = source("whim-video");
+    let audio = source("whim-audio");
+    let holder = repository
+        .get_or_create_provider(
+            video.clone(),
+            metadata("Whim", &["Hayley Williams"], Some(216_000)),
+            Some(album.id()),
+            &[],
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), holder.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    let same = repository
+        .get_or_create_provider(
+            audio.clone(),
+            metadata("Whim", &["Hayley Williams"], Some(216_000)),
+            Some(album.id()),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(same.id(), holder.id());
+    assert_eq!(repository.find_sources(holder.id()).await.unwrap().len(), 2);
+
+    let merged = repository
+        .get_or_create_provider(
+            audio.clone(),
+            metadata("Whim", &["Hayley Williams"], Some(216_000)),
+            Some(album.id()),
+            &[video],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(merged.id(), holder.id());
+    assert_eq!(
+        repository.find_sources(holder.id()).await.unwrap(),
+        vec![audio]
+    );
 }
 
 #[sqlx::test]
@@ -1760,6 +2044,7 @@ async fn provider_base_title_matching_does_not_depend_on_full_title_similarity(p
             source("short-base"),
             metadata("A", &["Artist", guest], Some(200_500)),
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -1787,6 +2072,7 @@ async fn provider_matching_rejects_mismatched_secondary_artists(pool: PgPool) {
                 Some(180_000),
             ),
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -1810,6 +2096,7 @@ async fn provider_feature_superset_uses_the_stricter_duration_tolerance(pool: Pg
             source("feature-superset-video"),
             metadata("Shared Song", &["Primary", "Guest"], Some(181_500)),
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -1833,6 +2120,7 @@ async fn a_provider_source_outside_duration_tolerance_stays_separate(pool: PgPoo
             source("glue-song-video"),
             metadata("Glue Song", &["beabadoobee"], Some(182_001)),
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -1863,6 +2151,7 @@ async fn one_matching_track_is_selected_among_similar_library_tracks(pool: PgPoo
             source("unique-match-video"),
             metadata("Shared Song", &["Matching Artist"], Some(180_000)),
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -1888,6 +2177,7 @@ async fn several_library_matches_do_not_attach_a_provider_source(pool: PgPool) {
             source("glue-song-video"),
             metadata("Glue Song", &["beabadoobee"], Some(180_000)),
             None,
+            &[],
         )
         .await
         .unwrap();
@@ -2480,6 +2770,7 @@ async fn provider_matching_rejects_candidate_overflow_for_attach_and_prune(pool:
             source("overflow-provider"),
             metadata("Overflow Song", &["Overflow Target"], Some(180_000)),
             None,
+            &[],
         )
         .await
         .unwrap();

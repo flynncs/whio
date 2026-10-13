@@ -66,6 +66,7 @@ impl CatalogueWrite for FailingTrackRepository {
         _source: SourceIdentity,
         _metadata: TrackMetadata,
         _album_id: Option<&crate::features::music_library::domain::AlbumId>,
+        _alternates: &[SourceIdentity],
     ) -> Result<Track, TrackRepositoryError> {
         Err(TrackRepositoryError::Unavailable)
     }
@@ -2530,6 +2531,7 @@ impl CatalogueWrite for MemoryStore {
         source: SourceIdentity,
         metadata: TrackMetadata,
         _album_id: Option<&AlbumId>,
+        _alternates: &[SourceIdentity],
     ) -> Result<Track, TrackRepositoryError> {
         self.store(source, metadata)
     }

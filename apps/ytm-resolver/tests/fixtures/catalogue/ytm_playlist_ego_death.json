@@ -1,0 +1,28 @@
+{
+  "id": "OLAK5uy_ego_death",
+  "title": "Ego Death",
+  "trackCount": 3,
+  "tracks": [
+    {
+      "videoId": "ATVglum0001",
+      "title": "Glum",
+      "videoType": "MUSIC_VIDEO_TYPE_ATV",
+      "duration": "3:12",
+      "duration_seconds": 192
+    },
+    {
+      "videoId": "ATVkillMe02",
+      "title": "Kill Me",
+      "videoType": "MUSIC_VIDEO_TYPE_ATV",
+      "duration": "2:48",
+      "duration_seconds": 168
+    },
+    {
+      "videoId": "ATVwhim0003",
+      "title": "Whim",
+      "videoType": "MUSIC_VIDEO_TYPE_ATV",
+      "duration": "3:36",
+      "duration_seconds": 216
+    }
+  ]
+}

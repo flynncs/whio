@@ -322,6 +322,12 @@ class CatalogueCandidate(BaseModel):
         None,
         description='Public artwork URL that the core fetches and proxies to clients.',
     )
+    alternate_sources: list[SourceIdentity] = Field(
+        [],
+        description="Other provider identities of the same recording, such as the album track's music-video id. The candidate's source is the identity to play.",
+        max_length=4,
+        validate_default=True,
+    )
 
 
 class CatalogueCandidatesResponse(BaseModel):

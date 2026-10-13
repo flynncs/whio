@@ -128,7 +128,12 @@ async fn materialize_candidates(
             None => None,
         };
         let track = catalogue
-            .get_or_create_provider(source.clone(), metadata, album.as_ref().map(Album::id))
+            .get_or_create_provider(
+                source.clone(),
+                metadata,
+                album.as_ref().map(Album::id),
+                candidate.alternates(),
+            )
             .await
             .map_err(CatalogueError::Repository)?;
         let has_library_source = sources
