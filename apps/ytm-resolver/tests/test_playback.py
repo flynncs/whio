@@ -42,7 +42,7 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 1)
 
     @patch("app.youtube.playback.subprocess.run")
     def test_resolve_translates_unavailable_yt_dlp(self, run) -> None:
@@ -64,10 +64,7 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
     @patch("app.youtube.playback.requests.get")
     @patch("app.youtube.playback.subprocess.run")
     def test_resolve_calls_yt_dlp_and_maps_the_contract(self, run, get) -> None:
-        both_started = threading.Barrier(2)
-
         def resolve_format(*args, **kwargs):
-            both_started.wait(timeout=1)
             return subprocess.CompletedProcess(
                 args=["yt-dlp"],
                 returncode=0,
@@ -93,11 +90,8 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(run.call_count, 2)
-        self.assertEqual(
-            {call.args[0][4] for call in run.call_args_list},
-            {"bestaudio[acodec=opus]", "bestaudio[ext=m4a]"},
-        )
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][4], "bestaudio[ext=m4a]/bestaudio")
         self.assertGreaterEqual(get.call_count, 1)
         for call in get.call_args_list:
             self.assertEqual(call.args[0], "https://media.example.test/audio")
@@ -126,6 +120,7 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
             },
         )
 
+    @patch("app.youtube.playback._AUDIO_FORMATS", ("slow", "fast"))
     @patch("app.youtube.playback._resolve_candidate")
     def test_resolve_returns_when_the_first_candidate_succeeds(
         self,
@@ -144,7 +139,7 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
         )
 
         def resolve_format(video_id, audio_format):
-            if audio_format == "bestaudio[acodec=opus]":
+            if audio_format == "slow":
                 slow_started.set()
                 release_slow.wait(timeout=1)
                 slow_finished.set()
@@ -180,6 +175,7 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
             resolver_thread.join(timeout=1)
             self.assertFalse(resolver_thread.is_alive())
 
+    @patch("app.youtube.playback._AUDIO_FORMATS", ("opus", "aac"))
     @patch("app.youtube.playback.requests.get")
     @patch("app.youtube.playback.subprocess.run")
     def test_resolve_falls_back_when_the_first_url_is_rejected(
@@ -188,7 +184,7 @@ class YouTubeMusicPlaybackTest(unittest.TestCase):
         get,
     ) -> None:
         def resolve_format(command, **kwargs):
-            is_opus = command[4] == "bestaudio[acodec=opus]"
+            is_opus = command[4] == "opus"
             return subprocess.CompletedProcess(
                 args=["yt-dlp"],
                 returncode=0,

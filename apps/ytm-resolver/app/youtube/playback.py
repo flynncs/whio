@@ -21,10 +21,7 @@ from app.generated.resolver_v1 import (
 
 logger = logging.getLogger("uvicorn.error").getChild(__name__)
 
-_AUDIO_FORMATS = (
-    "bestaudio[acodec=opus]",
-    "bestaudio[ext=m4a]",
-)
+_AUDIO_FORMATS = ("bestaudio[ext=m4a]/bestaudio",)
 _RESOLUTION_PASSES = 2
 _RETRY_DELAY_SECONDS = 0.2
 
