@@ -91,7 +91,7 @@ async fn catalogue_search_folds_accents_without_changing_identity_or_display(poo
 
     assert_eq!(
         repository
-            .search_tracks("beyonce", 10, None)
+            .search_tracks("beyonce", 10, None, None)
             .await
             .unwrap()
             .len(),
@@ -99,17 +99,20 @@ async fn catalogue_search_folds_accents_without_changing_identity_or_display(poo
     );
     assert_eq!(
         repository
-            .search_tracks("sigur ros", 10, None)
+            .search_tracks("sigur ros", 10, None, None)
             .await
             .unwrap()
             .len(),
         1
     );
-    let albums = repository.search_albums("marias", 10, None).await.unwrap();
+    let albums = repository
+        .search_albums("marias", 10, None, None)
+        .await
+        .unwrap();
     assert_eq!(albums.len(), 1);
     assert_eq!(albums[0].album().title(), "Ma\u{301}rias");
     let artists = repository
-        .search_artists("marias", 10, None, &ArtistListFilter::default())
+        .search_artists("marias", 10, None, &ArtistListFilter::default(), None)
         .await
         .unwrap();
     assert_eq!(artists.len(), 1);
@@ -126,7 +129,7 @@ async fn catalogue_search_folds_accents_without_changing_identity_or_display(poo
     assert_ne!(plain_artist.id(), accented_artist.id());
     assert_eq!(
         repository
-            .search_artists("jose", 10, None, &ArtistListFilter::default())
+            .search_artists("jose", 10, None, &ArtistListFilter::default(), None)
             .await
             .unwrap()
             .iter()
@@ -636,7 +639,7 @@ async fn search_matches_titles_and_artists_and_ranks_owned_first(pool: sqlx::PgP
         .unwrap();
 
     let by_artist = repository
-        .search_tracks("daft punk", 10, None)
+        .search_tracks("daft punk", 10, None, None)
         .await
         .unwrap();
     assert_eq!(
@@ -648,14 +651,17 @@ async fn search_matches_titles_and_artists_and_ranks_owned_first(pool: sqlx::PgP
         "the owned track outranks the remote one despite the title"
     );
 
-    let by_title = repository.search_tracks("zeb", 10, None).await.unwrap();
+    let by_title = repository
+        .search_tracks("zeb", 10, None, None)
+        .await
+        .unwrap();
     assert_eq!(by_title.len(), 1);
     assert_eq!(by_title[0].track().id(), owned.id());
     assert_eq!(by_title[0].sources().len(), 1);
 
     assert!(
         repository
-            .search_tracks("nothing here", 10, None)
+            .search_tracks("nothing here", 10, None, None)
             .await
             .unwrap()
             .is_empty()
@@ -682,7 +688,10 @@ async fn search_uses_ownership_inside_a_tier(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    let hits = repository.search_tracks("zebra", 10, None).await.unwrap();
+    let hits = repository
+        .search_tracks("zebra", 10, None, None)
+        .await
+        .unwrap();
     assert_eq!(hits.len(), 2);
     assert_eq!(hits[0].track().id(), owned.id());
     assert_eq!(hits[1].track().id(), remote.id());
@@ -734,7 +743,7 @@ async fn search_matches_albums_and_their_artists(pool: sqlx::PgPool) {
 
     assert_eq!(
         repository
-            .search_albums("disc", 10, None)
+            .search_albums("disc", 10, None, None)
             .await
             .unwrap()
             .len(),
@@ -742,7 +751,7 @@ async fn search_matches_albums_and_their_artists(pool: sqlx::PgPool) {
     );
     assert_eq!(
         repository
-            .search_albums("daft", 10, None)
+            .search_albums("daft", 10, None, None)
             .await
             .unwrap()
             .len(),
@@ -751,7 +760,7 @@ async fn search_matches_albums_and_their_artists(pool: sqlx::PgPool) {
     );
     assert!(
         repository
-            .search_albums("nope", 10, None)
+            .search_albums("nope", 10, None, None)
             .await
             .unwrap()
             .is_empty()
@@ -759,7 +768,7 @@ async fn search_matches_albums_and_their_artists(pool: sqlx::PgPool) {
 
     assert_eq!(
         repository
-            .search_artists("daft", 10, None, &ArtistListFilter::default())
+            .search_artists("daft", 10, None, &ArtistListFilter::default(), None)
             .await
             .unwrap()
             .len(),
@@ -767,7 +776,7 @@ async fn search_matches_albums_and_their_artists(pool: sqlx::PgPool) {
     );
     assert!(
         repository
-            .search_artists("nope", 10, None, &ArtistListFilter::default())
+            .search_artists("nope", 10, None, &ArtistListFilter::default(), None)
             .await
             .unwrap()
             .is_empty()

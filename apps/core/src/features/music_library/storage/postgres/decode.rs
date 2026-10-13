@@ -638,12 +638,34 @@ pub(crate) async fn artist_summaries_by_ids(
     artist_ids: &[Uuid],
     user: Option<Uuid>,
 ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
+    artist_summaries(pool, artist_ids, user, true).await
+}
+
+pub(crate) async fn artist_summaries_for_ids(
+    pool: &PgPool,
+    artist_ids: &[Uuid],
+    user: Option<Uuid>,
+) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
+    artist_summaries(pool, artist_ids, user, false).await
+}
+
+async fn artist_summaries(
+    pool: &PgPool,
+    artist_ids: &[Uuid],
+    user: Option<Uuid>,
+    album_artist_gate: bool,
+) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
     if artist_ids.is_empty() {
         return Ok(Vec::new());
     }
 
     let membership = artist_album_artist_membership();
     let (album_count, song_count) = artist_count_expressions(&membership);
+    let gate = if album_artist_gate {
+        format!("AND EXISTS (SELECT 1 FROM ({membership}) AS starred_membership)")
+    } else {
+        String::new()
+    };
     let rows =
         sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>, i64, i64)>(&format!(
             r#"
@@ -651,7 +673,7 @@ pub(crate) async fn artist_summaries_by_ids(
                {album_count} AS album_count, {song_count} AS song_count
         FROM artists AS ar
         WHERE ar.id = ANY($1)
-          AND EXISTS (SELECT 1 FROM ({membership}) AS starred_membership)
+          {gate}
         "#
         ))
         .bind(artist_ids)

@@ -10,7 +10,7 @@ use crate::features::music_library::{
         AlbumId, AlbumListFilter, AlbumListScope, AlbumMetadata, AlbumOrder, AlbumTrack,
         ArtistCredit, ArtistId, CreditRole, FullTextSelector, IdSet, ProviderId, RandomSeed, Range,
         RoleSelector, RoleSet, SelectorText, SortDirection, SourceIdentity, SourceScope,
-        StateTarget, TrackId, TrackMetadata, ValidationError,
+        StateTarget, TrackId, TrackListScope, TrackMetadata, ValidationError,
     },
     library::LibraryId,
     library_state::test_support::seed_play,
@@ -2378,4 +2378,91 @@ async fn mixed_case_release_types_read_lowercase_after_migrating(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(artwork_column.as_deref(), Some("artwork_ref"));
+}
+
+#[sqlx::test]
+async fn album_summaries_keep_the_requested_order_and_skip_missing(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("album-summaries", "Album Summaries")
+        .await
+        .unwrap();
+    let fixture = album_fixture(&repository, &pool).await;
+    repository
+        .set_starred(user, StateTarget::Album(&fixture.other), true)
+        .await
+        .unwrap();
+
+    let summaries = repository
+        .album_summaries(
+            &[fixture.other.clone(), AlbumId::new(), fixture.kept.clone()],
+            Some(user),
+        )
+        .await
+        .unwrap();
+
+    let ids = summaries
+        .iter()
+        .map(|summary| summary.album().id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![fixture.other.clone(), fixture.kept.clone()]);
+    assert!(summaries[0].state().is_starred());
+    assert!(!summaries[1].state().is_starred());
+}
+
+#[sqlx::test]
+async fn search_albums_engaged_scope_hides_cached_rows_without_engagement(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let engaged = repository
+        .resolve_or_create_album(
+            &album("Marble Album").with_album_artist(credit("Marble Artist", None)),
+        )
+        .await
+        .unwrap()
+        .id()
+        .clone();
+    let track = repository
+        .get_or_create(
+            source("local", "marble.flac"),
+            metadata_by("Marble Song", "Marble Artist"),
+        )
+        .await
+        .unwrap();
+    place(&repository, &engaged, track.id()).await;
+    let cached = repository
+        .resolve_or_create_album(
+            &album("Marble Cached").with_album_artist(credit("Marble Artist", None)),
+        )
+        .await
+        .unwrap()
+        .id()
+        .clone();
+
+    let unscoped = repository
+        .search_albums("marble", 25, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.album().id().clone())
+        .collect::<Vec<_>>();
+    assert!(unscoped.contains(&engaged));
+    assert!(unscoped.contains(&cached));
+
+    let scoped = repository
+        .search_albums("marble", 25, None, Some(TrackListScope::Engaged))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.album().id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(scoped, vec![engaged.clone()]);
+
+    let owned = repository
+        .search_albums("marble", 25, None, Some(TrackListScope::Owned))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.album().id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(owned, vec![engaged]);
 }

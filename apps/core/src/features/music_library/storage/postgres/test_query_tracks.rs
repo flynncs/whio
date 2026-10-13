@@ -3072,7 +3072,10 @@ async fn a_track_on_two_albums_reports_its_library_album_without_context(pool: P
         views[0].album().map(|album| album.id()),
         Some(library_album.id())
     );
-    let hits = repository.search_tracks("Care", 10, None).await.unwrap();
+    let hits = repository
+        .search_tracks("Care", 10, None, None)
+        .await
+        .unwrap();
     assert_eq!(hits.len(), 1, "the track is reported once");
     assert_eq!(
         hits[0].album().map(|album| album.id()),
@@ -3132,4 +3135,51 @@ async fn the_primary_album_uses_the_supplied_library_provider_ids(pool: PgPool) 
         archive_album.id()
     };
     assert_eq!(empty.get(track.id().as_uuid()).unwrap().0.id(), smaller);
+}
+
+#[sqlx::test]
+async fn search_tracks_engaged_scope_hides_cached_rows_without_engagement(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let engaged = repository
+        .get_or_create(
+            source("local", "scope.flac"),
+            metadata_by("Scope Song", "Scope Artist"),
+        )
+        .await
+        .unwrap();
+    let cached = repository
+        .get_or_create(
+            source("youtube_music", "scope-cached"),
+            metadata_by("Scope Cached", "Scope Artist"),
+        )
+        .await
+        .unwrap();
+
+    let unscoped = repository
+        .search_tracks("scope", 25, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.track().id().clone())
+        .collect::<Vec<_>>();
+    assert!(unscoped.contains(engaged.id()));
+    assert!(unscoped.contains(cached.id()));
+
+    let scoped = repository
+        .search_tracks("scope", 25, None, Some(TrackListScope::Engaged))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.track().id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(scoped, vec![engaged.id().clone()]);
+
+    let owned = repository
+        .search_tracks("scope", 25, None, Some(TrackListScope::Owned))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|hit| hit.track().id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(owned, vec![engaged.id().clone()]);
 }

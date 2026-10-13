@@ -13,8 +13,8 @@ use crate::features::music_library::{
     domain::{
         AlbumId, AlbumMetadata, AlbumTrack, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort,
         ArtistSummary, CreditRole, FullTextSelector, IdSet, ProviderId, Range, RoleSelector,
-        RoleSet, SortDirection, SourceIdentity, SourceScope, StateTarget, TrackId, TrackMetadata,
-        ValidationError,
+        RoleSet, SortDirection, SourceIdentity, SourceScope, StateTarget, TrackId, TrackListScope,
+        TrackMetadata, ValidationError,
     },
     library::LibraryId,
     library_state::test_support::seed_play,
@@ -1579,7 +1579,7 @@ async fn every_producer_agrees_on_artist_counts(pool: PgPool) {
     .map(|(id, albums, songs)| (*id.as_uuid(), (albums, songs)))
     .collect::<BTreeMap<_, _>>();
     let from_search = repository
-        .search_artists("artist", 25, None, &ArtistListFilter::default())
+        .search_artists("artist", 25, None, &ArtistListFilter::default(), None)
         .await
         .unwrap()
         .into_iter()
@@ -1750,7 +1750,7 @@ async fn song_count_is_computed_on_every_producer(pool: PgPool) {
     );
 
     let search = repository
-        .search_artists("artist", 25, None, &ArtistListFilter::default())
+        .search_artists("artist", 25, None, &ArtistListFilter::default(), None)
         .await
         .unwrap();
 
@@ -1934,7 +1934,7 @@ async fn provider_identity_extends_search_eligibility_without_changing_role_coun
         .with_provider_identity(true);
 
     let found = repository
-        .search_artists("provider search", 25, None, &filter)
+        .search_artists("provider search", 25, None, &filter, None)
         .await
         .unwrap();
     assert_eq!(found.len(), 1);
@@ -2039,4 +2039,170 @@ async fn provider_identity_widens_text_artist_list_and_count(pool: PgPool) {
         [artist.id().clone()]
     );
     assert_eq!(repository.count_artists(None, &widened).await.unwrap(), 1);
+}
+
+#[sqlx::test]
+async fn artist_summaries_keep_the_requested_order_and_skip_missing(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let user = provision(pool.clone())
+        .create_user("artist-summaries", "Artist Summaries")
+        .await
+        .unwrap();
+    let artist = repository
+        .resolve_or_create_artist(&credit("Summary Artist", None))
+        .await
+        .unwrap()
+        .id()
+        .clone();
+    let other = repository
+        .resolve_or_create_artist(&credit("Summary Other", None))
+        .await
+        .unwrap()
+        .id()
+        .clone();
+    repository
+        .set_starred(user, StateTarget::Artist(&other), true)
+        .await
+        .unwrap();
+
+    let summaries = repository
+        .artist_summaries(
+            &[other.clone(), ArtistId::new(), artist.clone()],
+            Some(user),
+        )
+        .await
+        .unwrap();
+
+    let ids = summaries
+        .iter()
+        .map(|summary| summary.artist().id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![other.clone(), artist.clone()]);
+    assert!(summaries[0].state().is_starred());
+    assert!(!summaries[1].state().is_starred());
+}
+
+#[sqlx::test]
+async fn search_artists_engaged_scope_hides_cached_rows_without_engagement(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    let engaged = repository
+        .resolve_or_create_artist(&credit("Marble Voice", None))
+        .await
+        .unwrap()
+        .id()
+        .clone();
+    repository
+        .get_or_create(
+            source("local", "marble-voice.flac"),
+            primary("Marble Song", &["Marble Voice"]),
+        )
+        .await
+        .unwrap();
+    let cached = repository
+        .resolve_or_create_artist(&credit("Marble Cached", None))
+        .await
+        .unwrap()
+        .id()
+        .clone();
+
+    let unscoped = repository
+        .search_artists("marble", 25, None, &ArtistListFilter::new(), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.artist().id().clone())
+        .collect::<Vec<_>>();
+    assert!(unscoped.contains(&engaged));
+    assert!(unscoped.contains(&cached));
+
+    let scoped = repository
+        .search_artists(
+            "marble",
+            25,
+            None,
+            &ArtistListFilter::new(),
+            Some(TrackListScope::Engaged),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.artist().id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(scoped, vec![engaged.clone()]);
+
+    let owned = repository
+        .search_artists(
+            "marble",
+            25,
+            None,
+            &ArtistListFilter::new(),
+            Some(TrackListScope::Owned),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.artist().id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(owned, vec![engaged]);
+}
+
+#[sqlx::test]
+async fn search_artists_engaged_scope_requires_a_credited_track(pool: PgPool) {
+    let repository = PostgresTrackRepository::new(pool.clone());
+    repository
+        .get_or_create(
+            source("local", "marble-voice.flac"),
+            primary("Marble Song", &["Marble Voice"]),
+        )
+        .await
+        .unwrap();
+    let credited = repository
+        .find_artist_by_exact_name("Marble Voice")
+        .await
+        .unwrap()
+        .unwrap();
+    let album = repository
+        .resolve_or_create_album(
+            &album("Marble Record").with_album_artist(credit("Marble Albumonly", None)),
+        )
+        .await
+        .unwrap();
+    let member = repository
+        .get_or_create(
+            source("local", "marble-member.flac"),
+            primary("Marble Member", &["Someone Else"]),
+        )
+        .await
+        .unwrap();
+    place(&repository, album.id(), member.id()).await;
+    let albumonly = repository
+        .find_artist_by_exact_name("Marble Albumonly")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let unscoped = repository
+        .search_artists("marble", 25, None, &ArtistListFilter::new(), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.artist().id().clone())
+        .collect::<Vec<_>>();
+    assert!(unscoped.contains(&credited));
+    assert!(unscoped.contains(&albumonly));
+
+    let scoped = repository
+        .search_artists(
+            "marble",
+            25,
+            None,
+            &ArtistListFilter::new(),
+            Some(TrackListScope::Engaged),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.artist().id().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(scoped, vec![credited]);
 }

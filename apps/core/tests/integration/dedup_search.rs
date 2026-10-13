@@ -8,7 +8,8 @@ use whio_core::{
         SearchService, SearchWindow,
     },
     features::music_library::domain::{
-        AlbumMetadata, AlbumTrack, ProviderId, SourceIdentity, SourceScope, Track, TrackMetadata,
+        AlbumMetadata, AlbumTrack, ProviderId, SourceIdentity, SourceScope, StateTarget, Track,
+        TrackMetadata,
     },
     features::music_library::test_support::{
         CatalogueWrite, LibraryRead, SourceFileFacts, SourceLookup, StateStore,
@@ -22,15 +23,21 @@ const BEYOND_BUDGET: Duration = Duration::ZERO;
 struct Fixture {
     repository: Arc<PostgresTrackRepository>,
     root: PathBuf,
+    user: Uuid,
 }
 
 impl Fixture {
-    fn new(pool: PgPool) -> Self {
+    async fn new(pool: PgPool) -> Self {
         let root = std::env::temp_dir().join(format!("whio-dedup-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
+        let user = whio_core::features::identity::provision(pool.clone())
+            .create_user(&format!("dedup-{}", Uuid::now_v7()), "Dedup Search")
+            .await
+            .unwrap();
         Self {
             repository: Arc::new(PostgresTrackRepository::new(pool)),
             root,
+            user,
         }
     }
 
@@ -74,10 +81,17 @@ impl Fixture {
             "remote-video".into(),
         )
         .unwrap();
-        self.repository
+        let track = self
+            .repository
             .get_or_create(source, metadata(title))
             .await
-            .unwrap()
+            .unwrap();
+        self.repository
+            .set_starred(self.user, StateTarget::Track(track.id()), true)
+            .await
+            .unwrap();
+
+        track
     }
 
     async fn search(
@@ -99,7 +113,7 @@ impl Fixture {
                     SearchQuery::new("Song".into()).unwrap(),
                     SearchWindow::new(SearchLimit::new(25).unwrap(), SearchOffset::default()),
                 ),
-                None,
+                Some(&self.user),
                 &RequestContext::new(RequestId::new("dedup-test".into()).unwrap()),
             )
             .await
@@ -120,7 +134,7 @@ fn metadata(title: &str) -> TrackMetadata {
 
 #[sqlx::test]
 async fn cached_remote_is_replaced_and_its_identity_and_local_album_survive(pool: PgPool) {
-    let f = Fixture::new(pool.clone());
+    let f = Fixture::new(pool.clone()).await;
     let local = f.local("Song", "song.flac").await;
     let remote = f.remote("Song").await;
     let album = f
@@ -155,7 +169,7 @@ async fn cached_remote_is_replaced_and_its_identity_and_local_album_survive(pool
 
 #[sqlx::test]
 async fn suppression_within_budget_replaces_the_remote_hit(pool: PgPool) {
-    let f = Fixture::new(pool.clone());
+    let f = Fixture::new(pool.clone()).await;
     let local = f.local("Song", "song.flac").await;
     let remote = f.remote("Song").await;
     let hits = f.search(DedupMode::Suppress, WITHIN_BUDGET).await;
@@ -172,7 +186,7 @@ async fn suppression_within_budget_replaces_the_remote_hit(pool: PgPool) {
 
 #[sqlx::test]
 async fn suppression_beyond_budget_keeps_the_remote_hit(pool: PgPool) {
-    let f = Fixture::new(pool.clone());
+    let f = Fixture::new(pool.clone()).await;
     let local = f.local("Song", "song.flac").await;
     let remote = f.remote("Song").await;
     let hits = f.search(DedupMode::Suppress, BEYOND_BUDGET).await;
@@ -183,7 +197,7 @@ async fn suppression_beyond_budget_keeps_the_remote_hit(pool: PgPool) {
 
 #[sqlx::test]
 async fn off_and_shadow_are_unaffected(pool: PgPool) {
-    let f = Fixture::new(pool.clone());
+    let f = Fixture::new(pool.clone()).await;
     f.local("Song", "song.flac").await;
     f.remote("Song").await;
     for mode in [DedupMode::Off, DedupMode::Shadow] {
@@ -195,7 +209,7 @@ async fn off_and_shadow_are_unaffected(pool: PgPool) {
 
 #[sqlx::test]
 async fn deleted_or_empty_local_file_keeps_remote_result(pool: PgPool) {
-    let f = Fixture::new(pool.clone());
+    let f = Fixture::new(pool.clone()).await;
     f.local("Song", "song.flac").await;
     let remote = f.remote("Song").await;
     std::fs::remove_file(f.root.join("song.flac")).unwrap();
@@ -222,7 +236,7 @@ async fn ambiguity_and_alternate_recordings_stay_separate(pool: PgPool) {
         "Song (Radio Edit)",
         "Song (Blue Room)",
     ] {
-        let f = Fixture::new(pool.clone());
+        let f = Fixture::new(pool.clone()).await;
         f.local(title, "song.flac").await;
         let remote = f.remote("Song").await;
         assert!(
@@ -233,7 +247,7 @@ async fn ambiguity_and_alternate_recordings_stay_separate(pool: PgPool) {
             "{title}"
         );
     }
-    let f = Fixture::new(pool.clone());
+    let f = Fixture::new(pool.clone()).await;
     f.local("Song", "one.flac").await;
     f.local("Song", "two.flac").await;
     let remote = f.remote("Song").await;
@@ -277,7 +291,7 @@ impl whio_core::features::music_library::catalogue::CatalogueProvider for OneRes
 
 #[sqlx::test]
 async fn fresh_provider_result_uses_local_state_without_changing_album_or_sources(pool: PgPool) {
-    let f = Fixture::new(pool.clone());
+    let f = Fixture::new(pool.clone()).await;
     let local = f.local("Song", "song.flac").await;
     let album = f
         .repository
@@ -340,7 +354,7 @@ async fn fresh_provider_result_uses_local_state_without_changing_album_or_source
 
 #[sqlx::test]
 async fn generic_demo_version_does_not_bypass_the_demo_veto(pool: PgPool) {
-    let f = Fixture::new(pool.clone());
+    let f = Fixture::new(pool.clone()).await;
     f.local("Song (Demo Version)", "song.flac").await;
     let remote = f.remote("Song (Demo Version)").await;
     assert!(

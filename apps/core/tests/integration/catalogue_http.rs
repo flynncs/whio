@@ -9,6 +9,7 @@ use uuid::Uuid;
 use whio_core::features::music_library::test_support::PostgresTrackRepository;
 use whio_core::{
     features::music_library::catalogue::CatalogueCandidate,
+    features::music_library::catalogue::CatalogueProvider,
     features::music_library::catalogue::ProviderError,
     features::music_library::domain::{ProviderId, SourceIdentity, SourceScope, TrackMetadata},
 };
@@ -32,6 +33,28 @@ fn candidate() -> CatalogueCandidate {
     .unwrap();
 
     CatalogueCandidate::new(source, metadata)
+}
+
+struct ProviderOnlyTrack;
+
+#[async_trait::async_trait]
+impl CatalogueProvider for ProviderOnlyTrack {
+    async fn search_tracks(
+        &self,
+        _search: &whio_core::features::music_library::catalogue::CatalogueSearch,
+        _context: &whio_core::platform::request::RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        Ok(vec![CatalogueCandidate::new(
+            SourceIdentity::new(
+                ProviderId::new("youtube_music".to_owned()).unwrap(),
+                SourceScope::Global,
+                "vid-1".to_owned(),
+            )
+            .unwrap(),
+            TrackMetadata::from_names("Provider Song".to_owned(), vec!["Artist".to_owned()], None)
+                .unwrap(),
+        )])
+    }
 }
 
 fn request(body: &str) -> Request<Body> {
@@ -154,7 +177,7 @@ async fn a_disabled_provider_track_is_reported_unavailable(pool: PgPool) {
     use std::sync::Arc;
     use whio_core::{
         features::music_library::availability::ProviderRegistry,
-        features::music_library::catalogue::{LibraryService, SearchService},
+        features::music_library::catalogue::LibraryService,
         features::music_library::test_support::CatalogueWrite,
     };
 
@@ -186,12 +209,9 @@ async fn a_disabled_provider_track_is_reported_unavailable(pool: PgPool) {
         .unwrap();
 
     let ports = StorePorts { store: repository };
-    let search = Arc::new(SearchService::new(
-        ports.library(),
-        ports.catalogue(),
-        ports.sources(),
-        ports.state(),
-    ));
+    let (search, _) = ports.catalogue_service(vec![
+        Arc::new(ProviderOnlyTrack) as Arc<dyn CatalogueProvider>
+    ]);
     let library = Arc::new(
         LibraryService::new(ports.library(), ports.sources(), ports.state())
             .with_registry(ProviderRegistry::with_enabled(Vec::new())),

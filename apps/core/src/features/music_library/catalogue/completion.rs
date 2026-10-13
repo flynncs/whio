@@ -278,15 +278,30 @@ impl CompletionService {
         text: Option<&FullTextSelector>,
         target: u32,
         context: &RequestContext,
-    ) -> Result<Option<Discovery>, CatalogueError> {
+    ) -> Result<Option<Discovery<()>>, CatalogueError> {
         let Some(text) = text else {
             return Ok(None);
         };
         let query = SearchQuery::from_full_text_selector(text);
-        self.search
-            .discover(kind, &query, target.min(PROVIDER_PAGE_LIMIT), context)
-            .await
-            .map(Some)
+        let target = target.min(PROVIDER_PAGE_LIMIT);
+        let discovery = match kind {
+            SearchKind::Tracks => self
+                .search
+                .discover_tracks(&query, target, context)
+                .await?
+                .map(|_| ()),
+            SearchKind::Albums => self
+                .search
+                .discover_albums(&query, target, context)
+                .await?
+                .map(|_| ()),
+            SearchKind::Artists => self
+                .search
+                .discover_artists(&query, target, context)
+                .await?
+                .map(|_| ()),
+        };
+        Ok(Some(discovery))
     }
 
     #[tracing::instrument(skip_all)]

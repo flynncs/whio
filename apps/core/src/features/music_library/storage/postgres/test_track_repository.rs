@@ -1471,7 +1471,10 @@ async fn search_finds_a_title_across_typographic_variants(pool: PgPool) {
         .unwrap();
 
     for query in ["it's just forever", "it\u{2019}s just forever", "IT'S JUST"] {
-        let hits = repository.search_tracks(query, 10, None).await.unwrap();
+        let hits = repository
+            .search_tracks(query, 10, None, None)
+            .await
+            .unwrap();
         assert_eq!(hits.len(), 1, "query {query:?} found nothing");
         assert_eq!(hits[0].track().id(), track.id());
     }
@@ -1500,7 +1503,10 @@ async fn search_ranks_match_quality_before_ownership(pool: PgPool) {
         .await
         .unwrap();
 
-    let hits = repository.search_tracks("zebra", 10, None).await.unwrap();
+    let hits = repository
+        .search_tracks("zebra", 10, None, None)
+        .await
+        .unwrap();
     let ordered = hits
         .iter()
         .map(|hit| (hit.track().id().clone(), hit.match_quality()))
@@ -1530,21 +1536,21 @@ async fn search_does_not_match_inside_a_word(pool: PgPool) {
 
     assert!(
         repository
-            .search_tracks("me", 10, None)
+            .search_tracks("me", 10, None, None)
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
         repository
-            .search_tracks("american", 10, None)
+            .search_tracks("american", 10, None, None)
             .await
             .unwrap()
             .is_empty()
     );
     assert_eq!(
         repository
-            .search_tracks("bitch", 10, None)
+            .search_tracks("bitch", 10, None, None)
             .await
             .unwrap()
             .len(),
@@ -1571,7 +1577,10 @@ async fn search_puts_an_artist_only_match_last(pool: PgPool) {
         .await
         .unwrap();
 
-    let hits = repository.search_tracks("the", 10, None).await.unwrap();
+    let hits = repository
+        .search_tracks("the", 10, None, None)
+        .await
+        .unwrap();
     assert_eq!(hits.len(), 2);
     assert_eq!(hits[0].track().id(), titled.id());
     assert_eq!(hits[0].match_quality(), Some(MatchQuality::Prefix));
@@ -1593,7 +1602,7 @@ async fn search_artists_collapses_rows_sharing_a_name(pool: PgPool) {
         .unwrap();
 
     let artists = repository
-        .search_artists("cage", 10, None, &ArtistListFilter::default())
+        .search_artists("cage", 10, None, &ArtistListFilter::default(), None)
         .await
         .unwrap();
     assert_eq!(artists.len(), 1);
@@ -2006,7 +2015,7 @@ async fn a_rejected_file_leaves_no_source_behind(pool: PgPool) {
     );
     assert!(
         repository
-            .search_tracks("song", 10, None)
+            .search_tracks("song", 10, None, None)
             .await
             .unwrap()
             .is_empty(),
@@ -2145,7 +2154,7 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
         .unwrap();
 
     let hits = repository
-        .search_tracks("daft punk", 10, None)
+        .search_tracks("daft punk", 10, None, None)
         .await
         .unwrap();
     assert_eq!(hits.len(), 2);
@@ -2156,12 +2165,15 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
     );
     assert_eq!(hits[1].track().id(), remote.id());
 
-    let by_title = repository.search_tracks("zeb", 10, None).await.unwrap();
+    let by_title = repository
+        .search_tracks("zeb", 10, None, None)
+        .await
+        .unwrap();
     assert_eq!(by_title.len(), 1);
     assert_eq!(by_title[0].track().id(), owned.id());
     assert!(
         repository
-            .search_tracks("nothing", 10, None)
+            .search_tracks("nothing", 10, None, None)
             .await
             .unwrap()
             .is_empty()
@@ -2181,13 +2193,16 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
         .await
         .unwrap();
 
-    let albums = repository.search_albums("disc", 10, None).await.unwrap();
+    let albums = repository
+        .search_albums("disc", 10, None, None)
+        .await
+        .unwrap();
     assert_eq!(albums.len(), 1);
     assert_eq!(albums[0].album().id(), album.id());
     assert_eq!(albums[0].track_count(), 1);
 
     let artists = repository
-        .search_artists("daft", 10, None, &ArtistListFilter::default())
+        .search_artists("daft", 10, None, &ArtistListFilter::default(), None)
         .await
         .unwrap();
     assert!(
@@ -2197,7 +2212,7 @@ async fn search_ranks_local_sources_first_and_matches_credits(pool: PgPool) {
     );
     assert!(
         repository
-            .search_artists("nope", 10, None, &ArtistListFilter::default())
+            .search_artists("nope", 10, None, &ArtistListFilter::default(), None)
             .await
             .unwrap()
             .is_empty()
@@ -2519,7 +2534,7 @@ async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_iden
     let root = std::env::temp_dir().join(format!("whio-pg-dedup-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("song.flac"), b"media").unwrap();
-    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
     let local_source = SourceIdentity::new(
         ProviderId::new("local".into()).unwrap(),
         SourceScope::Named(root.display().to_string()),
@@ -2554,6 +2569,11 @@ async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_iden
         .await
         .unwrap();
     let user = Uuid::now_v7();
+    insert_user(&pool, user, "pg-dedup").await;
+    repository
+        .set_starred(user, StateTarget::Track(remote.id()), true)
+        .await
+        .unwrap();
     let service = SearchService::new(
         Arc::clone(&repository) as Arc<dyn LibraryRead>,
         Arc::clone(&repository) as Arc<dyn CatalogueWrite>,
@@ -2566,7 +2586,10 @@ async fn search_suppression_uses_postgres_candidates_and_keeps_saved_remote_iden
         SearchWindow::new(SearchLimit::new(25).unwrap(), SearchOffset::new(0).unwrap()),
     );
     let context = RequestContext::new(RequestId::new("pg-dedup".into()).unwrap());
-    let outcome = service.search(&search, None, &context).await.unwrap();
+    let outcome = service
+        .search(&search, Some(&user), &context)
+        .await
+        .unwrap();
     assert_eq!(outcome.tracks.len(), 1);
     assert_eq!(outcome.tracks[0].track().id(), local.id());
     assert!(repository.find_track(remote.id()).await.unwrap().is_some());

@@ -8,10 +8,10 @@ use uuid::Uuid;
 use crate::features::music_library::{
     availability::ProviderRegistry,
     domain::{
-        Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumPage, AlbumSummary,
-        AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort, ArtistSummary,
-        FullTextSelector, GenreSummary, LOCAL_PROVIDER_ID, LibraryState, RandomSeed, Range,
-        Resource, RoleSelector, RoleSet, SearchTerms, SortDirection, SourceIdentity,
+        Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumListScope, AlbumOrder, AlbumPage,
+        AlbumSummary, AlbumTrack, Artist, ArtistCredit, ArtistId, ArtistListFilter, ArtistSort,
+        ArtistSummary, FullTextSelector, GenreSummary, LOCAL_PROVIDER_ID, LibraryState, RandomSeed,
+        Range, Resource, RoleSelector, RoleSet, SearchTerms, SortDirection, SourceIdentity,
         SourceRepresentationFacts, Track, TrackHit, TrackId, TrackListFilter, TrackListScope,
         TrackOrder, TrackPage, TrackView, YOUTUBE_MUSIC_PROVIDER_ID,
     },
@@ -64,17 +64,18 @@ pub(super) async fn dedup_candidate_ids(
 
 use super::PostgresLibraryStore;
 use super::decode::{
-    album_states, albums_for_tracks, artist_count_expressions, attach_album_state,
-    attach_album_states, attach_artist_states, credits_for_tracks, decode_album,
-    decode_album_summary, decode_artist, decode_artist_summary, decode_byte, decode_integer,
-    decode_membership, decode_source, decode_track, genres_for_tracks, hits_from_rows,
-    repository_error, sources_for_tracks, track_states,
+    album_states, album_summaries_by_ids, albums_for_tracks, artist_count_expressions,
+    artist_summaries_for_ids, attach_album_state, attach_album_states, attach_artist_states,
+    credits_for_tracks, decode_album, decode_album_summary, decode_artist, decode_artist_summary,
+    decode_byte, decode_integer, decode_membership, decode_source, decode_track, genres_for_tracks,
+    hits_from_rows, repository_error, sources_for_tracks, track_states,
 };
 use super::schema::{
     ALBUM_BROWSE_COLUMNS, ALBUM_BROWSE_FROM, ALBUM_COLUMNS, ARTIST_COLUMNS, AlbumBrowseRow,
-    AlbumEntryRow, AlbumRow, ArtistRow, CREDIT_NORMALIZED, TRACK_COLUMNS, TRACK_ENGAGED,
-    TRACK_OWNED, TrackPageRow, TrackRecord, TrackSearchRow, album_scope, artist_membership,
-    artist_scope, folded, primary_album_order, search_folded,
+    AlbumEntryRow, AlbumRow, ArtistRow, CREDIT_NORMALIZED, TRACK_COLUMNS, TrackPageRow,
+    TrackRecord, TrackSearchRow, album_scope, artist_credited_engagement, artist_membership,
+    artist_owned_scope, artist_scope, folded, primary_album_order, search_folded, track_engaged,
+    track_owned,
 };
 use crate::features::music_library::domain::{
     album_quality, normalize_for_matching, track_quality,
@@ -663,6 +664,7 @@ impl LibraryRead for PgStore {
         query: &str,
         limit: u32,
         user: Option<Uuid>,
+        scope: Option<TrackListScope>,
     ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
         let terms = SearchTerms::new(query);
 
@@ -670,19 +672,24 @@ impl LibraryRead for PgStore {
             return Ok(Vec::new());
         }
 
+        let library_ids = self.library_provider_ids();
+        let scope_clause = match scope {
+            Some(scope) => format!(" AND {}", track_search_scope(scope, 4, 5)),
+            None => String::new(),
+        };
         let title = SearchMatch::new("t.title_normalized", "$1");
         let credit = SearchMatch::new(CREDIT_NORMALIZED, "$1");
-        let rows = sqlx::query_as::<_, TrackSearchRow>(&format!(
+        let statement = format!(
             r#"
             SELECT {TRACK_COLUMNS}
             FROM tracks AS t
-            WHERE {title_matches}
+            WHERE ({title_matches}
                OR EXISTS (
                    SELECT 1
                    FROM track_artist_credits AS credits
                    WHERE credits.track_id = t.id
                      AND {credit_matches}
-               )
+               )){scope_clause}
             ORDER BY
                 {title_rank},
                 EXISTS (
@@ -696,13 +703,18 @@ impl LibraryRead for PgStore {
             title_matches = title.any(),
             credit_matches = credit.any(),
             title_rank = title.rank(),
-        ))
-        .bind(query.trim())
-        .bind(LOCAL_PROVIDER_ID)
-        .bind(i64::from(limit))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(repository_error)?;
+        );
+        let mut statement_query = sqlx::query_as::<_, TrackSearchRow>(&statement)
+            .bind(query.trim())
+            .bind(LOCAL_PROVIDER_ID)
+            .bind(i64::from(limit));
+        if scope.is_some() {
+            statement_query = statement_query.bind(user).bind(&library_ids);
+        }
+        let rows = statement_query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(repository_error)?;
 
         let mut hits = hits_from_rows(&self.pool, rows, user, &self.library_provider_ids()).await?;
         for hit in &mut hits {
@@ -713,11 +725,36 @@ impl LibraryRead for PgStore {
         Ok(hits)
     }
 
+    async fn album_summaries(
+        &self,
+        album_ids: &[AlbumId],
+        user: Option<Uuid>,
+    ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
+        let ids = album_ids
+            .iter()
+            .map(|album_id| *album_id.as_uuid())
+            .collect::<Vec<_>>();
+        album_summaries_by_ids(&self.pool, &ids, user).await
+    }
+
+    async fn artist_summaries(
+        &self,
+        artist_ids: &[ArtistId],
+        user: Option<Uuid>,
+    ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
+        let ids = artist_ids
+            .iter()
+            .map(|artist_id| *artist_id.as_uuid())
+            .collect::<Vec<_>>();
+        artist_summaries_for_ids(&self.pool, &ids, user).await
+    }
+
     async fn search_albums(
         &self,
         query: &str,
         limit: u32,
         user: Option<Uuid>,
+        scope: Option<TrackListScope>,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
         let terms = SearchTerms::new(query);
 
@@ -725,19 +762,24 @@ impl LibraryRead for PgStore {
             return Ok(Vec::new());
         }
 
+        let library_ids = self.library_provider_ids();
+        let scope_clause = match scope {
+            Some(scope) => format!(" AND {}", album_search_scope(scope, 3, 4)),
+            None => String::new(),
+        };
         let title = SearchMatch::new("a.title_normalized", "$1");
         let artist = SearchMatch::new("album_artists.name_normalized", "$1");
-        let rows = sqlx::query_as::<_, AlbumBrowseRow>(&format!(
+        let statement = format!(
             r#"
             SELECT {ALBUM_BROWSE_COLUMNS}
             {ALBUM_BROWSE_FROM}
-            WHERE {title_matches}
+            WHERE ({title_matches}
                OR EXISTS (
                    SELECT 1
                    FROM artists AS album_artists
                    WHERE album_artists.id = a.album_artist_id
                      AND {artist_matches}
-               )
+               )){scope_clause}
             GROUP BY a.id, ar.id
             ORDER BY
                 {title_rank},
@@ -747,12 +789,17 @@ impl LibraryRead for PgStore {
             title_matches = title.any(),
             artist_matches = artist.any(),
             title_rank = title.rank(),
-        ))
-        .bind(query.trim())
-        .bind(i64::from(limit))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(repository_error)?;
+        );
+        let mut statement_query = sqlx::query_as::<_, AlbumBrowseRow>(&statement)
+            .bind(query.trim())
+            .bind(i64::from(limit));
+        if scope.is_some() {
+            statement_query = statement_query.bind(user).bind(&library_ids);
+        }
+        let rows = statement_query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(repository_error)?;
 
         let mut summaries = rows
             .into_iter()
@@ -778,6 +825,7 @@ impl LibraryRead for PgStore {
         limit: u32,
         user: Option<Uuid>,
         filter: &ArtistListFilter,
+        scope: Option<TrackListScope>,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         let terms = SearchTerms::new(query);
 
@@ -785,9 +833,14 @@ impl LibraryRead for PgStore {
             return Ok(Vec::new());
         }
 
+        let library_ids = self.library_provider_ids();
+        let scope_clause = match scope {
+            Some(scope) => format!(" AND {}", artist_search_scope(scope, 3, 4)),
+            None => String::new(),
+        };
         let name = SearchMatch::new("ar.name_normalized", "$1");
         let ranked = SearchMatch::new("picked.name_normalized", "$1");
-        let mut predicates = TrackPredicates::new(3);
+        let mut predicates = TrackPredicates::new(if scope.is_some() { 5 } else { 3 });
         let selectors = artist_membership_selectors(filter, &mut predicates);
         let membership = predicates.where_clause();
         let statement = format!(
@@ -803,6 +856,7 @@ impl LibraryRead for PgStore {
                 FROM artists AS ar
                 WHERE {name_matches}
                   {membership}
+                  {scope_clause}
                 ORDER BY ar.name_normalized,
                          (ar.musicbrainz_artist_id IS NULL),
                          album_count DESC,
@@ -824,6 +878,9 @@ impl LibraryRead for PgStore {
             )
             .bind(query.trim())
             .bind(i64::from(limit));
+        if scope.is_some() {
+            query = query.bind(user).bind(&library_ids);
+        }
 
         for value in predicates.values() {
             query = value.bind(query);
@@ -1056,13 +1113,14 @@ impl PgStore {
                     if filter.provider_discovered() && filter.title().is_some() =>
                 {
                     format!(
-                        "({TRACK_ENGAGED} OR EXISTS (SELECT 1 FROM track_sources AS discovered_track \
+                        "({} OR EXISTS (SELECT 1 FROM track_sources AS discovered_track \
                      WHERE discovered_track.track_id = t.id \
-                       AND discovered_track.provider_id <> ALL($2::TEXT[])))"
+                       AND discovered_track.provider_id <> ALL($2::TEXT[])))",
+                        track_engaged(1, 2)
                     )
                 }
-                TrackListScope::Engaged => TRACK_ENGAGED.to_owned(),
-                TrackListScope::Owned => TRACK_OWNED.to_owned(),
+                TrackListScope::Engaged => track_engaged(1, 2),
+                TrackListScope::Owned => track_owned(1, 2),
             },
         };
         let selectors = predicates.where_clause();
@@ -2346,6 +2404,27 @@ struct ArtistSelectors {
     membership: String,
     album_count: String,
     song_count: String,
+}
+
+fn track_search_scope(scope: TrackListScope, user_bind: u8, libraries_bind: u8) -> String {
+    match scope {
+        TrackListScope::Engaged => track_engaged(user_bind, libraries_bind),
+        TrackListScope::Owned => track_owned(user_bind, libraries_bind),
+    }
+}
+
+fn album_search_scope(scope: TrackListScope, user_bind: u8, libraries_bind: u8) -> String {
+    match scope {
+        TrackListScope::Engaged => album_scope(AlbumListScope::Engaged, user_bind, libraries_bind),
+        TrackListScope::Owned => album_scope(AlbumListScope::Owned, user_bind, libraries_bind),
+    }
+}
+
+fn artist_search_scope(scope: TrackListScope, user_bind: u8, libraries_bind: u8) -> String {
+    match scope {
+        TrackListScope::Engaged => artist_credited_engagement(user_bind, libraries_bind),
+        TrackListScope::Owned => artist_owned_scope(user_bind, libraries_bind),
+    }
 }
 
 fn album_filter_scope(filter: &AlbumListFilter, user_bind: u8, libraries_bind: u8) -> String {

@@ -4486,6 +4486,16 @@ async fn provider_only_subsonic_songs_use_an_unknown_representation(pool: PgPool
         .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
         .await
         .unwrap();
+    let flynn: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind("flynn")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    ports
+        .store
+        .set_starred(flynn, StateTarget::Track(track.id()), true)
+        .await
+        .unwrap();
 
     let calls = Arc::new(AtomicUsize::new(0));
     let (search, library) = ports.bare_catalogue();

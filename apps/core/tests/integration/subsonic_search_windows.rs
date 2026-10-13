@@ -380,7 +380,10 @@ async fn seed_album_artist_membership(pool: &PgPool) {
             local_source("path-search-credit"),
             TrackMetadata::from_names(
                 "Search Song".to_owned(),
-                vec!["Search Trackcredit".to_owned()],
+                vec![
+                    "Search Albumartist".to_owned(),
+                    "Search Trackcredit".to_owned(),
+                ],
                 Some(1_000),
             )
             .unwrap()
@@ -462,7 +465,7 @@ async fn the_read_takes_one_membership(pool: PgPool) {
             .filter(|name| name.starts_with("Search "))
             .collect::<BTreeSet<_>>();
         let searched = repository
-            .search_artists("search", 25, None, &filter)
+            .search_artists("search", 25, None, &filter, None)
             .await
             .unwrap()
             .into_iter()

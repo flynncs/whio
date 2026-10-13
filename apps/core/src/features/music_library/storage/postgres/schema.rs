@@ -184,46 +184,7 @@ pub(crate) fn album_scope(scope: AlbumListScope, user_bind: u8, libraries_bind: 
     }
 }
 
-pub(crate) const TRACK_ENGAGED: &str = "(EXISTS (
-        SELECT 1 FROM track_sources AS owned
-        WHERE owned.track_id = t.id AND owned.provider_id = ANY($2::TEXT[])
-    )
-    OR EXISTS (
-        SELECT 1 FROM track_favorites AS fav
-        WHERE fav.track_id = t.id AND fav.user_id = $1
-    )
-    OR EXISTS (
-        SELECT 1 FROM track_ratings AS rating
-        WHERE rating.track_id = t.id AND rating.user_id = $1
-    )
-    OR EXISTS (
-        SELECT 1 FROM track_play_stats AS play
-        WHERE play.track_id = t.id AND play.user_id = $1 AND play.play_count > 0
-    )
-    OR EXISTS (
-        SELECT 1 FROM playlist_entries AS entry
-        JOIN playlists AS list ON list.id = entry.playlist_id
-        WHERE entry.track_id = t.id AND list.user_id = $1
-    )
-    OR EXISTS (
-        SELECT 1 FROM restore_queue_entries AS queued
-        WHERE queued.track_id = t.id AND queued.queue_user_id = $1
-    ))";
-
-pub(crate) const TRACK_OWNED: &str = "($1::UUID IS NOT NULL OR $1::UUID IS NULL) AND EXISTS (
-        SELECT 1 FROM track_sources AS owned
-        WHERE owned.track_id = t.id AND owned.provider_id = ANY($2::TEXT[])
-    )";
-
-pub(crate) type StateRow = (
-    Uuid,
-    Option<chrono::DateTime<chrono::Utc>>,
-    Option<i16>,
-    i64,
-    Option<chrono::DateTime<chrono::Utc>>,
-);
-
-fn artist_engaged_track(user_bind: u8, libraries_bind: u8) -> String {
+pub(crate) fn track_engaged(user_bind: u8, libraries_bind: u8) -> String {
     format!(
         "(EXISTS (
         SELECT 1 FROM track_sources AS engaged_source
@@ -255,30 +216,72 @@ fn artist_engaged_track(user_bind: u8, libraries_bind: u8) -> String {
     )
 }
 
-pub(crate) fn artist_scope(user_bind: u8, libraries_bind: u8) -> String {
-    let engaged_track = artist_engaged_track(user_bind, libraries_bind);
-    let engaged_album = album_scope(AlbumListScope::Engaged, user_bind, libraries_bind);
+pub(crate) fn track_owned(user_bind: u8, libraries_bind: u8) -> String {
+    format!(
+        "(${user_bind}::UUID IS NOT NULL OR ${user_bind}::UUID IS NULL) AND EXISTS (
+        SELECT 1 FROM track_sources AS owned
+        WHERE owned.track_id = t.id AND owned.provider_id = ANY(${libraries_bind}::TEXT[])
+    )"
+    )
+}
+
+pub(crate) type StateRow = (
+    Uuid,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<i16>,
+    i64,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
+
+pub(crate) fn artist_owned_scope(user_bind: u8, libraries_bind: u8) -> String {
+    let owned_album = album_scope(AlbumListScope::Owned, user_bind, libraries_bind);
 
     format!(
         "(EXISTS (
-        SELECT 1 FROM track_artist_credits AS engaged_credit
-        JOIN tracks AS t ON t.id = engaged_credit.track_id
-        WHERE engaged_credit.artist_id = ar.id
-          AND {engaged_track}
+        SELECT 1 FROM track_artist_credits AS owned_credit
+        JOIN track_sources AS owned ON owned.track_id = owned_credit.track_id
+        WHERE owned_credit.artist_id = ar.id
+          AND owned.provider_id = ANY(${libraries_bind}::TEXT[])
     )
     OR EXISTS (
         SELECT 1 FROM albums AS a
+        WHERE a.album_artist_id = ar.id AND {owned_album}
+    ))"
+    )
+}
+
+pub(crate) fn artist_credited_engagement(user_bind: u8, libraries_bind: u8) -> String {
+    let engaged_track = track_engaged(user_bind, libraries_bind);
+
+    format!(
+        "(EXISTS (
+        SELECT 1 FROM track_artist_credits AS credited
+        JOIN tracks AS t ON t.id = credited.track_id
+        WHERE credited.artist_id = ar.id
+          AND {engaged_track}
+    )
+    OR EXISTS (
+        SELECT 1 FROM artist_favorites AS credited_favorite
+        WHERE credited_favorite.artist_id = ar.id
+          AND credited_favorite.user_id = ${user_bind}
+    )
+    OR EXISTS (
+        SELECT 1 FROM artist_ratings AS credited_rating
+        WHERE credited_rating.artist_id = ar.id
+          AND credited_rating.user_id = ${user_bind}
+    ))"
+    )
+}
+
+pub(crate) fn artist_scope(user_bind: u8, libraries_bind: u8) -> String {
+    let credited = artist_credited_engagement(user_bind, libraries_bind);
+    let engaged_album = album_scope(AlbumListScope::Engaged, user_bind, libraries_bind);
+
+    format!(
+        "({credited}
+    OR EXISTS (
+        SELECT 1 FROM albums AS a
         WHERE a.album_artist_id = ar.id AND {engaged_album}
-    )
-    OR EXISTS (
-        SELECT 1 FROM artist_favorites AS engaged_artist_favorite
-        WHERE engaged_artist_favorite.artist_id = ar.id
-          AND engaged_artist_favorite.user_id = ${user_bind}
-    )
-    OR EXISTS (
-        SELECT 1 FROM artist_ratings AS engaged_artist_rating
-        WHERE engaged_artist_rating.artist_id = ar.id
-          AND engaged_artist_rating.user_id = ${user_bind}
     ))"
     )
 }

@@ -1,3 +1,5 @@
+use crate::features::identity::provision;
+use crate::features::music_library::library_state::test_support::seed_play;
 use crate::features::music_library::storage::contracts::{
     CatalogueWrite, DuplicateReport, LibraryRead, SourceLookup, StateStore,
 };
@@ -19,13 +21,14 @@ use tracing_subscriber::{Layer, layer::SubscriberExt};
 use super::*;
 use crate::{
     features::music_library::catalogue::{
-        ArtistListFilter, CatalogueCandidate, CataloguePage, SearchKind, SearchLimit, SearchOffset,
-        SearchQuery, SearchRequest, SearchWindow, SearchWindows,
+        ArtistListFilter, CatalogueCandidate, CataloguePage, RoleSelector, RoleSet, SearchKind,
+        SearchLimit, SearchOffset, SearchQuery, SearchRequest, SearchWindow, SearchWindows,
     },
     features::music_library::{
         domain::{
-            Album, AlbumId, AlbumMetadata, AlbumTrack, Artist, ArtistCredit, ArtistId, ArtworkRef,
-            ProviderId, SourceIdentity, SourceScope, Track, TrackMetadata,
+            Album, AlbumId, AlbumMetadata, AlbumSummary, AlbumTrack, Artist, ArtistCredit,
+            ArtistId, ArtistSummary, ArtworkRef, ProviderId, SourceIdentity, SourceScope, Track,
+            TrackListScope, TrackMetadata,
         },
         storage::contracts::TrackRepositoryError,
         storage::postgres::PostgresTrackRepository,
@@ -324,16 +327,73 @@ fn provider(stub: impl CatalogueProvider + 'static) -> Arc<dyn CatalogueProvider
     Arc::new(stub) as Arc<dyn CatalogueProvider>
 }
 
-struct HangingProvider;
+struct ListedProvider {
+    albums: Vec<AlbumMetadata>,
+    artists: Vec<ArtistCredit>,
+}
 
 #[async_trait]
-impl CatalogueProvider for HangingProvider {
+impl CatalogueProvider for ListedProvider {
     async fn search_tracks(
         &self,
         _search: &CatalogueSearch,
         _context: &RequestContext,
     ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
-        std::future::pending().await
+        Ok(Vec::new())
+    }
+
+    async fn search_albums(
+        &self,
+        search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<CataloguePage<AlbumMetadata>, ProviderError> {
+        Ok(CataloguePage::new(page_items(&self.albums, search), None))
+    }
+
+    async fn search_artists(
+        &self,
+        search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<CataloguePage<ArtistCredit>, ProviderError> {
+        Ok(CataloguePage::new(page_items(&self.artists, search), None))
+    }
+}
+
+fn page_items<T: Clone>(items: &[T], search: &CatalogueSearch) -> Vec<T> {
+    let start = search.offset().get() as usize;
+    let end = start
+        .saturating_add(search.limit().get() as usize)
+        .min(items.len());
+
+    items.get(start..end).unwrap_or_default().to_vec()
+}
+
+struct FailingListProvider;
+
+#[async_trait]
+impl CatalogueProvider for FailingListProvider {
+    async fn search_tracks(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<Vec<CatalogueCandidate>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn search_albums(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<CataloguePage<AlbumMetadata>, ProviderError> {
+        Err(ProviderError::ProviderUnavailable)
+    }
+
+    async fn search_artists(
+        &self,
+        _search: &CatalogueSearch,
+        _context: &RequestContext,
+    ) -> Result<CataloguePage<ArtistCredit>, ProviderError> {
+        Err(ProviderError::ProviderUnavailable)
     }
 }
 
@@ -509,16 +569,30 @@ async fn materialize_assigns_stable_ids_uses_latest_metadata_and_dedupes(pool: s
     let catalogue = service(pool.clone(), vec![provider(resolver)]);
 
     let first = catalogue.search(&search(), None, &context()).await.unwrap();
-    let second = catalogue.search(&search(), None, &context()).await.unwrap();
     let (first_a, first_b) = (&first.tracks[0], &first.tracks[1]);
     assert_ne!(first_a.track().id(), first_b.track().id());
-    assert_eq!(first_a.track().id(), second.tracks[0].track().id());
     assert_eq!(first_a.track().title(), "Old title");
-    assert_eq!(second.tracks[0].track().title(), "New title");
     assert_eq!(first_a.sources()[0].external_id(), "source-a");
     assert_eq!(first_b.sources()[0].external_id(), "source-b");
 
-    let third = catalogue.search(&search(), None, &context()).await.unwrap();
+    let user = provision(pool.clone())
+        .create_user("materialize", "Materialize")
+        .await
+        .unwrap();
+    seed_play(&pool, user, first_a.track().id(), chrono::Utc::now()).await;
+    seed_play(&pool, user, first_b.track().id(), chrono::Utc::now()).await;
+
+    let second = catalogue
+        .search(&search(), Some(&user), &context())
+        .await
+        .unwrap();
+    assert_eq!(first_a.track().id(), second.tracks[0].track().id());
+    assert_eq!(second.tracks[0].track().title(), "New title");
+
+    let third = catalogue
+        .search(&search(), Some(&user), &context())
+        .await
+        .unwrap();
     let titles = third
         .tracks
         .iter()
@@ -698,41 +772,69 @@ async fn deep_pages_walk_the_provider_window(pool: sqlx::PgPool) {
     assert_eq!(outcome.tracks[9].track().title(), "P39");
 }
 
-const WITHIN_SEARCH_BUDGET: Duration = Duration::from_secs(2);
 const BEYOND_SEARCH_BUDGET: Duration = Duration::ZERO;
 
-#[sqlx::test]
-async fn the_within_budget_search_is_complete(pool: sqlx::PgPool) {
-    let working = StubProvider::new(vec![Ok(vec![candidate("ytm-1", "YTM Song")])]);
-    let catalogue = service(
-        pool.clone(),
-        vec![provider(HangingProvider), provider(working)],
+#[tokio::test(start_paused = true)]
+async fn the_within_budget_search_is_complete() {
+    let (materialised, _receiver) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialised));
+    let (held_started, mut held_started_rx) = mpsc::unbounded_channel();
+    let (held_settled, mut held_settled_rx) = mpsc::unbounded_channel();
+    let (working_started, mut working_started_rx) = mpsc::unbounded_channel();
+    let (working_settled, mut working_settled_rx) = mpsc::unbounded_channel();
+    let held_release = StdArc::new(Semaphore::new(0));
+    let working_release = StdArc::new(Semaphore::new(0));
+    let held = HeldTrackProvider::new(
+        StdArc::new(Gate::new(held_started, StdArc::clone(&held_release), 1)),
+        vec![Ok(vec![candidate("held-1", "Held Song")])],
     )
-    .with_search_budget(WITHIN_SEARCH_BUDGET);
-    let started = Instant::now();
-    let (hits, _status) = catalogue
-        .discover_tracks(
-            &SearchQuery::new("Daft Punk".to_owned()).unwrap(),
-            10,
-            &context(),
-        )
-        .await
-        .unwrap();
-    assert!(started.elapsed() < Duration::from_secs(5));
+    .with_settled(held_settled);
+    let working = HeldTrackProvider::new(
+        StdArc::new(Gate::new(
+            working_started,
+            StdArc::clone(&working_release),
+            1,
+        )),
+        vec![Ok(vec![candidate("ytm-1", "YTM Song")])],
+    )
+    .with_settled(working_settled);
+    let catalogue = StdArc::new(held_service(
+        &store,
+        vec![provider(held), provider(working)],
+    ));
+    let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
+    let request_context = context();
+    let service = StdArc::clone(&catalogue);
+    let mut task =
+        tokio::spawn(async move { service.discover_tracks(&query, 10, &request_context).await });
+    wait_for_provider_start(&mut held_started_rx).await;
+    wait_for_provider_start(&mut working_started_rx).await;
+
+    working_release.add_permits(1);
+    wait_for_settled(&mut working_settled_rx).await;
+
+    let mut discovery = response_at_budget(&mut task).await;
+    let hits = discovery.take_items();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].track().title(), "YTM Song");
+    assert_eq!(discovery.pending(), 1);
 
+    held_release.add_permits(1);
+    wait_for_settled(&mut held_settled_rx).await;
+
+    let (materialised, _receiver) = mpsc::unbounded_channel();
+    let store = StdArc::new(MemoryStore::new(materialised));
     let current = StdArc::new(AtomicUsize::new(0));
     let maximum = StdArc::new(AtomicUsize::new(0));
     let providers: Vec<Arc<dyn CatalogueProvider>> = (0..10)
         .map(|_| {
-            Arc::new(ConcurrencyProbe {
+            provider(ConcurrencyProbe {
                 current: StdArc::clone(&current),
                 maximum: StdArc::clone(&maximum),
-            }) as Arc<dyn CatalogueProvider>
+            })
         })
         .collect();
-    service(pool.clone(), providers)
+    held_service(&store, providers)
         .search(&search(), None, &context())
         .await
         .unwrap();
@@ -818,6 +920,7 @@ impl LibraryRead for AlbumReadFails {
         _query: &str,
         _limit: u32,
         _user: Option<Uuid>,
+        _scope: Option<TrackListScope>,
     ) -> Result<Vec<crate::features::music_library::domain::AlbumSummary>, TrackRepositoryError>
     {
         Err(TrackRepositoryError::Unavailable)
@@ -1802,12 +1905,20 @@ async fn the_mux_runs_only_requested_kinds(pool: sqlx::PgPool) {
 #[sqlx::test]
 async fn a_failing_kind_degrades_when_another_kind_answers(pool: sqlx::PgPool) {
     let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
-    repository
+    let album = repository
         .resolve_or_create_album(
             &AlbumMetadata::new("Answer Album".to_owned())
                 .unwrap()
                 .with_album_artist(ArtistCredit::new("Answer Artist".to_owned(), None).unwrap()),
         )
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(local_source(), named_metadata("Zebra"))
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
         .await
         .unwrap();
     let catalogue =
@@ -1826,6 +1937,398 @@ async fn a_failing_kind_degrades_when_another_kind_answers(pool: sqlx::PgPool) {
     assert_eq!(outcome.albums.len(), 1);
     assert_eq!(outcome.confidence, SearchConfidence::None);
 }
+
+fn provider_album(title: &str, artist: &str, external_id: &str) -> AlbumMetadata {
+    AlbumMetadata::new(title.to_owned())
+        .unwrap()
+        .with_provider(Some(provider_source_for_test(external_id)))
+        .with_album_artist(
+            ArtistCredit::new(artist.to_owned(), None)
+                .unwrap()
+                .with_provider(Some(provider_source_for_test(&format!(
+                    "{external_id}-artist"
+                )))),
+        )
+}
+
+fn provider_artist(name: &str, external_id: &str) -> ArtistCredit {
+    ArtistCredit::new(name.to_owned(), None)
+        .unwrap()
+        .with_provider(Some(provider_source_for_test(external_id)))
+}
+
+fn credited_metadata(title: &str, artist: &str) -> TrackMetadata {
+    TrackMetadata::from_names(title.to_owned(), vec![artist.to_owned()], Some(1_000)).unwrap()
+}
+
+fn album_titles(albums: &[AlbumSummary]) -> Vec<String> {
+    albums
+        .iter()
+        .map(|album| album.album().title().to_owned())
+        .collect()
+}
+
+fn artist_names(artists: &[ArtistSummary]) -> Vec<String> {
+    artists
+        .iter()
+        .map(|artist| artist.artist().name().to_owned())
+        .collect()
+}
+
+async fn engage_album(repository: &PostgresTrackRepository, title: &str, artist: &str) -> AlbumId {
+    let album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new(title.to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new(artist.to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(local_source(), credited_metadata("Local Song", artist))
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), track.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+
+    album.id().clone()
+}
+
+async fn engage_artist(repository: &PostgresTrackRepository, artist: &str) {
+    repository
+        .get_or_create(local_source(), credited_metadata("Local Song", artist))
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn album_search_keeps_provider_order_and_hides_unengaged_cached_rows(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Hayley Williams Karaoke Covers".to_owned()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let catalogue = Fixture { store: repository }.service(vec![provider(ListedProvider {
+        albums: vec![
+            provider_album("Hayley Williams Karaoke", "Cover Band", "album-karaoke"),
+            provider_album("Petals for Armor", "Hayley Williams", "album-petals"),
+        ],
+        artists: Vec::new(),
+    })]);
+    let query = SearchQuery::new("hayley williams".to_owned()).unwrap();
+
+    let albums = catalogue
+        .search_albums(&query, window(10, 0), None, &context())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        album_titles(&albums),
+        ["Hayley Williams Karaoke", "Petals for Armor"]
+    );
+}
+
+#[sqlx::test]
+async fn album_search_slices_the_provider_window(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let catalogue = Fixture { store: repository }.service(vec![provider(ListedProvider {
+        albums: vec![
+            provider_album("Hayley One", "Hayley Williams", "album-1"),
+            provider_album("Hayley Two", "Hayley Williams", "album-2"),
+            provider_album("Hayley Three", "Hayley Williams", "album-3"),
+        ],
+        artists: Vec::new(),
+    })]);
+    let query = SearchQuery::new("hayley".to_owned()).unwrap();
+
+    let albums = catalogue
+        .search_albums(&query, window(1, 1), None, &context())
+        .await
+        .unwrap();
+
+    assert_eq!(album_titles(&albums), ["Hayley Two"]);
+}
+
+#[sqlx::test]
+async fn album_search_puts_an_engaged_library_album_first_without_duplicating_it(
+    pool: sqlx::PgPool,
+) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    engage_album(&repository, "Petals for Armor", "Hayley Williams").await;
+    let catalogue = Fixture { store: repository }.service(vec![provider(ListedProvider {
+        albums: vec![
+            provider_album("Hayley Williams Karaoke", "Cover Band", "album-karaoke"),
+            provider_album("Petals for Armor", "Hayley Williams", "album-petals"),
+        ],
+        artists: Vec::new(),
+    })]);
+    let query = SearchQuery::new("hayley williams".to_owned()).unwrap();
+
+    let albums = catalogue
+        .search_albums(&query, window(10, 0), None, &context())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        album_titles(&albums),
+        ["Petals for Armor", "Hayley Williams Karaoke"]
+    );
+    assert!(albums[0].match_quality().is_some());
+    assert!(albums[1].match_quality().is_none());
+}
+
+#[sqlx::test]
+async fn album_search_keeps_an_engaged_album_the_provider_does_not_return(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    engage_album(&repository, "Petals for Armor", "Hayley Williams").await;
+    let catalogue = Fixture { store: repository }.service(vec![provider(ListedProvider {
+        albums: vec![provider_album(
+            "Hayley Williams Karaoke",
+            "Cover Band",
+            "album-karaoke",
+        )],
+        artists: Vec::new(),
+    })]);
+    let query = SearchQuery::new("hayley williams".to_owned()).unwrap();
+
+    let albums = catalogue
+        .search_albums(&query, window(10, 0), None, &context())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        album_titles(&albums),
+        ["Petals for Armor", "Hayley Williams Karaoke"]
+    );
+}
+
+#[sqlx::test]
+async fn album_search_degrades_a_provider_failure_to_the_engaged_library(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    engage_album(&repository, "Petals for Armor", "Hayley Williams").await;
+    let catalogue = Fixture { store: repository }.service(vec![provider(FailingListProvider)]);
+    let query = SearchQuery::new("hayley williams".to_owned()).unwrap();
+
+    let albums = catalogue
+        .search_albums(&query, window(10, 0), None, &context())
+        .await
+        .unwrap();
+
+    assert_eq!(album_titles(&albums), ["Petals for Armor"]);
+}
+
+#[sqlx::test]
+async fn artist_search_lists_a_provider_artist_and_an_engaged_library_artist(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    engage_artist(&repository, "Hayley Williams").await;
+    let catalogue = Fixture { store: repository }.service(vec![provider(ListedProvider {
+        albums: Vec::new(),
+        artists: vec![
+            provider_artist("Cover Band", "artist-cover"),
+            provider_artist("Hayley Williams", "artist-hayley"),
+        ],
+    })]);
+    let query = SearchQuery::new("hayley williams".to_owned()).unwrap();
+
+    let artists = catalogue
+        .search_artists(
+            &query,
+            window(10, 0),
+            &ArtistListFilter::default(),
+            None,
+            &context(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(artist_names(&artists), ["Hayley Williams", "Cover Band"]);
+    assert!(artists[0].match_quality().is_some());
+    assert!(artists[1].match_quality().is_none());
+}
+
+#[sqlx::test]
+async fn artist_search_hides_an_unengaged_cached_artist(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    repository
+        .resolve_or_create_artist(
+            &ArtistCredit::new("Hayley Williams Covers".to_owned(), None).unwrap(),
+        )
+        .await
+        .unwrap();
+    let catalogue = Fixture { store: repository }.service(vec![provider(ListedProvider {
+        albums: Vec::new(),
+        artists: vec![provider_artist("Hayley Williams", "artist-hayley")],
+    })]);
+    let query = SearchQuery::new("hayley williams".to_owned()).unwrap();
+
+    let artists = catalogue
+        .search_artists(
+            &query,
+            window(10, 0),
+            &ArtistListFilter::default(),
+            None,
+            &context(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(artist_names(&artists), ["Hayley Williams"]);
+}
+
+#[sqlx::test]
+async fn artist_search_lists_a_fresh_provider_artist_without_a_library_match(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    let catalogue = Fixture { store: repository }.service(vec![provider(ListedProvider {
+        albums: Vec::new(),
+        artists: vec![provider_artist("grentperez", "artist-grentperez")],
+    })]);
+    let query = SearchQuery::new("grent perez".to_owned()).unwrap();
+    let filter = ArtistListFilter::new()
+        .with_role(Some(RoleSet::new(vec![RoleSelector::AlbumArtist]).unwrap()))
+        .with_provider_identity(true);
+
+    let artists = catalogue
+        .search_artists(&query, window(10, 0), &filter, None, &context())
+        .await
+        .unwrap();
+
+    assert_eq!(artist_names(&artists), ["grentperez"]);
+}
+
+#[sqlx::test]
+async fn artist_search_degrades_a_provider_failure_to_the_engaged_library(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    engage_artist(&repository, "Hayley Williams").await;
+    let catalogue = Fixture { store: repository }.service(vec![provider(FailingListProvider)]);
+    let query = SearchQuery::new("hayley williams".to_owned()).unwrap();
+
+    let artists = catalogue
+        .search_artists(
+            &query,
+            window(10, 0),
+            &ArtistListFilter::default(),
+            None,
+            &context(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(artist_names(&artists), ["Hayley Williams"]);
+}
+
+#[sqlx::test]
+async fn song_search_hides_an_unengaged_cached_track(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    repository
+        .get_or_create(
+            provider_source_for_test("cached-song"),
+            named_metadata("Daft Punk"),
+        )
+        .await
+        .unwrap();
+    let catalogue = Fixture { store: repository }.service(Vec::new());
+
+    let outcome = catalogue
+        .search(&track_search(), None, &context())
+        .await
+        .unwrap();
+
+    assert!(outcome.tracks.is_empty());
+}
+
+#[sqlx::test]
+async fn song_search_an_unengaged_cached_track_is_not_strong_confidence(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    repository
+        .get_or_create(
+            provider_source_for_test("cached-song"),
+            named_metadata("Daft Punk"),
+        )
+        .await
+        .unwrap();
+    let catalogue = Fixture { store: repository }.service(Vec::new());
+
+    let outcome = catalogue
+        .search(&track_search(), None, &context())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.confidence, SearchConfidence::None);
+}
+
+#[sqlx::test]
+async fn song_search_keeps_a_played_track_known(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool.clone()));
+    let user = provision(pool.clone())
+        .create_user("song-played", "Song Played")
+        .await
+        .unwrap();
+    let track = repository
+        .get_or_create(
+            provider_source_for_test("played-song"),
+            named_metadata("Daft Punk"),
+        )
+        .await
+        .unwrap();
+    seed_play(&pool, user, track.id(), chrono::Utc::now()).await;
+    let catalogue = Fixture { store: repository }.service(Vec::new());
+
+    let outcome = catalogue
+        .search(&track_search(), Some(&user), &context())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.tracks.len(), 1);
+    assert_eq!(outcome.tracks[0].track().id(), track.id());
+}
+
+#[sqlx::test]
+async fn artist_search_requires_an_engagement_the_eviction_predicate_shares(pool: sqlx::PgPool) {
+    let repository = Arc::new(PostgresTrackRepository::new(pool));
+    engage_artist(&repository, "Marble Voice").await;
+    let album = repository
+        .resolve_or_create_album(
+            &AlbumMetadata::new("Marble Record".to_owned())
+                .unwrap()
+                .with_album_artist(ArtistCredit::new("Marble Albumonly".to_owned(), None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let member = repository
+        .get_or_create(
+            local_source_at("marble-member"),
+            credited_metadata("Marble Member", "Someone Else"),
+        )
+        .await
+        .unwrap();
+    repository
+        .set_album_track(album.id(), member.id(), &AlbumTrack::unplaced())
+        .await
+        .unwrap();
+    let catalogue = Fixture { store: repository }.service(vec![provider(ListedProvider {
+        albums: Vec::new(),
+        artists: Vec::new(),
+    })]);
+    let query = SearchQuery::new("marble".to_owned()).unwrap();
+
+    let artists = catalogue
+        .search_artists(
+            &query,
+            window(10, 0),
+            &ArtistListFilter::default(),
+            None,
+            &context(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(artist_names(&artists), ["Marble Voice"]);
+}
+
 #[test]
 fn the_default_budget_is_unchanged() {
     let store = Arc::new(FailingTrackRepository);
@@ -2128,6 +2631,7 @@ impl LibraryRead for MemoryStore {
         query: &str,
         limit: u32,
         _user: Option<Uuid>,
+        _scope: Option<TrackListScope>,
     ) -> Result<Vec<SearchHit>, TrackRepositoryError> {
         let needle = query.to_lowercase();
         Ok(self
@@ -2144,6 +2648,42 @@ impl LibraryRead for MemoryStore {
             })
             .take(limit as usize)
             .cloned()
+            .collect())
+    }
+
+    async fn album_summaries(
+        &self,
+        album_ids: &[AlbumId],
+        _user: Option<Uuid>,
+    ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
+        let albums = self.albums.lock();
+
+        Ok(album_ids
+            .iter()
+            .filter_map(|album_id| {
+                albums
+                    .iter()
+                    .find(|album| album.id() == album_id)
+                    .map(|album| AlbumSummary::new(album.clone(), None, 0, 0, chrono::Utc::now()))
+            })
+            .collect())
+    }
+
+    async fn artist_summaries(
+        &self,
+        artist_ids: &[ArtistId],
+        _user: Option<Uuid>,
+    ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
+        let artists = self.artists.lock();
+
+        Ok(artist_ids
+            .iter()
+            .filter_map(|artist_id| {
+                artists
+                    .iter()
+                    .find(|artist| artist.id() == artist_id)
+                    .map(|artist| ArtistSummary::new(artist.clone(), 0))
+            })
             .collect())
     }
 }
@@ -2700,8 +3240,8 @@ async fn a_late_invalid_error_is_logged_exactly_once() {
         operation,
     ));
     wait_for_provider_start(&mut started_rx).await;
-    let (items, discovery) = response_at_budget(&mut task).await;
-    assert!(items.is_empty());
+    let mut discovery = response_at_budget(&mut task).await;
+    assert!(discovery.take_items().is_empty());
     assert_eq!(discovery.pending(), 1);
 
     release.add_permits(1);
@@ -2808,11 +3348,8 @@ async fn a_held_album_provider_materialises_after_the_response() {
     let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
     let request_context = context();
     let service = StdArc::clone(&catalogue);
-    let mut task = tokio::spawn(async move {
-        service
-            .discover(SearchKind::Albums, &query, 10, &request_context)
-            .await
-    });
+    let mut task =
+        tokio::spawn(async move { service.discover_albums(&query, 10, &request_context).await });
     wait_for_provider_start(&mut started_rx).await;
     assert_eq!(response_at_budget(&mut task).await.pending(), 1);
     assert!(store.album_titles().is_empty());
@@ -2847,11 +3384,8 @@ async fn a_held_artist_provider_materialises_after_the_response() {
     let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
     let request_context = context();
     let service = StdArc::clone(&catalogue);
-    let mut task = tokio::spawn(async move {
-        service
-            .discover(SearchKind::Artists, &query, 10, &request_context)
-            .await
-    });
+    let mut task =
+        tokio::spawn(async move { service.discover_artists(&query, 10, &request_context).await });
     wait_for_provider_start(&mut started_rx).await;
     assert_eq!(response_at_budget(&mut task).await.pending(), 1);
     assert!(store.artist_names().is_empty());
@@ -2879,11 +3413,8 @@ async fn a_held_album_provider_materialises_after_caller_cancellation() {
     let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
     let request_context = context();
     let service = StdArc::clone(&catalogue);
-    let task = tokio::spawn(async move {
-        service
-            .discover(SearchKind::Albums, &query, 10, &request_context)
-            .await
-    });
+    let task =
+        tokio::spawn(async move { service.discover_albums(&query, 10, &request_context).await });
     wait_for_provider_start(&mut started_rx).await;
 
     task.abort();
@@ -2918,11 +3449,8 @@ async fn a_late_album_storage_failure_is_logged() {
     let query = SearchQuery::new("Daft Punk".to_owned()).unwrap();
     let request_context = context();
     let service = StdArc::clone(&catalogue);
-    let mut task = tokio::spawn(async move {
-        service
-            .discover(SearchKind::Albums, &query, 10, &request_context)
-            .await
-    });
+    let mut task =
+        tokio::spawn(async move { service.discover_albums(&query, 10, &request_context).await });
     wait_for_provider_start(&mut started_rx).await;
     assert_eq!(response_at_budget(&mut task).await.pending(), 1);
 
@@ -2962,9 +3490,9 @@ async fn all_providers_pending_is_an_empty_success() {
     wait_for_provider_start(&mut started_rx).await;
     wait_for_provider_start(&mut started_rx).await;
 
-    let (hits, discovery) = response_at_budget(&mut task).await;
+    let mut discovery = response_at_budget(&mut task).await;
 
-    assert!(hits.is_empty());
+    assert!(discovery.take_items().is_empty());
     assert_eq!(discovery.pending(), 2);
 
     release.add_permits(2);
@@ -3005,14 +3533,14 @@ async fn a_request_beyond_the_outstanding_limit_is_pending_not_an_error() {
         wait_for_provider_start(&mut started_rx).await;
     }
 
-    let (_, blocked) = catalogue
+    let blocked = catalogue
         .discover_tracks(&query, 10, &context())
         .await
         .unwrap();
     assert_eq!(blocked.pending(), MAX_OUTSTANDING_TASKS);
     assert_eq!(gate.call_count(), MAX_SOURCE_CONCURRENCY);
 
-    let (_, held) = response_at_budget(&mut task).await;
+    let held = response_at_budget(&mut task).await;
     assert_eq!(held.pending(), MAX_OUTSTANDING_TASKS);
 
     release.add_permits(MAX_SOURCE_CONCURRENCY);
@@ -3020,7 +3548,7 @@ async fn a_request_beyond_the_outstanding_limit_is_pending_not_an_error() {
         wait_for_settled(&mut finished_rx).await;
     }
 
-    let (_, reused) = catalogue
+    let reused = catalogue
         .discover_tracks(&query, 10, &context())
         .await
         .unwrap();
@@ -3061,7 +3589,7 @@ async fn a_task_whose_provider_deadline_passes_while_waiting_ends_without_callin
         wait_for_provider_start(&mut started_rx).await;
     }
 
-    let (_, discovery) = response_at_budget(&mut task).await;
+    let discovery = response_at_budget(&mut task).await;
     assert_eq!(discovery.pending(), MAX_OUTSTANDING_TASKS);
     assert_eq!(gate.call_count(), MAX_SOURCE_CONCURRENCY);
     assert_eq!(gate.maximum(), MAX_SOURCE_CONCURRENCY);
@@ -3073,7 +3601,7 @@ async fn a_task_whose_provider_deadline_passes_while_waiting_ends_without_callin
     assert_eq!(gate.call_count(), MAX_SOURCE_CONCURRENCY);
     assert_eq!(gate.maximum(), MAX_SOURCE_CONCURRENCY);
 
-    let (_, reused) = catalogue
+    let reused = catalogue
         .discover_tracks(&query, 10, &context())
         .await
         .unwrap();

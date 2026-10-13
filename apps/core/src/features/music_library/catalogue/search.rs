@@ -11,8 +11,9 @@ use crate::{
     },
     features::music_library::{
         domain::{
-            AlbumSummary, ArtistListFilter, ArtistSummary, SearchConfidence, SearchTerms, TrackId,
-            ValidationError, best_field_quality,
+            AlbumId, AlbumSummary, ArtistId, ArtistListFilter, ArtistSummary, MatchQuality,
+            SearchConfidence, SearchTerms, TrackId, TrackListScope, ValidationError,
+            best_field_quality,
         },
         storage::contracts::{CatalogueWrite, LibraryRead, SourceLookup, StateStore},
     },
@@ -62,14 +63,14 @@ pub enum SearchKind {
     Artists,
 }
 
-pub struct Discovery {
+pub struct Discovery<T> {
     first_error: Option<CatalogueError>,
     any_success: bool,
-    tracks: Option<Vec<SearchHit>>,
+    items: Vec<T>,
     pending: usize,
 }
 
-impl Discovery {
+impl<T> Discovery<T> {
     pub fn pending(&self) -> usize {
         self.pending
     }
@@ -82,8 +83,17 @@ impl Discovery {
         }
     }
 
-    fn take_tracks(&mut self) -> Option<Vec<SearchHit>> {
-        self.tracks.take()
+    pub fn take_items(&mut self) -> Vec<T> {
+        std::mem::take(&mut self.items)
+    }
+
+    pub fn map<U>(self, mut map: impl FnMut(T) -> U) -> Discovery<U> {
+        Discovery {
+            first_error: self.first_error,
+            any_success: self.any_success,
+            items: self.items.into_iter().map(&mut map).collect(),
+            pending: self.pending,
+        }
     }
 }
 
@@ -306,55 +316,86 @@ impl SearchService {
         }
     }
 
-    #[tracing::instrument(skip_all, fields(kind = ?kind, target))]
-    pub async fn discover(
+    #[tracing::instrument(skip_all, fields(kind = "track", target))]
+    pub async fn discover_tracks(
         &self,
-        kind: SearchKind,
         query: &SearchQuery,
         target: u32,
         context: &RequestContext,
-    ) -> Result<Discovery, CatalogueError> {
+    ) -> Result<Discovery<SearchHit>, CatalogueError> {
         let target = target.min(super::MAX_SEARCH_OFFSET);
-        match kind {
-            SearchKind::Tracks => {
-                let (tracks, mut discovery) = self.discover_tracks(query, target, context).await?;
-                discovery.tracks = Some(tracks);
-                Ok(discovery)
-            }
-            SearchKind::Albums => {
-                self.discover_page_kind(
-                    kind,
-                    query,
-                    target,
-                    context,
-                    |provider, search, context| async move {
-                        provider.search_albums(&search, &context).await
-                    },
-                    |catalogue, sources, album| async move {
-                        super::materialize::materialize_album(&catalogue, &sources, &album).await?;
-                        Ok(())
-                    },
-                )
-                .await
-            }
-            SearchKind::Artists => {
-                self.discover_page_kind(
-                    kind,
-                    query,
-                    target,
-                    context,
-                    |provider, search, context| async move {
-                        provider.search_artists(&search, &context).await
-                    },
-                    |catalogue, sources, artist| async move {
-                        super::materialize::materialize_artist(&catalogue, &sources, &artist)
-                            .await?;
-                        Ok(())
-                    },
-                )
-                .await
-            }
-        }
+        let query = query.clone();
+        let context = context.clone();
+        let catalogue = Arc::clone(&self.catalogue);
+        let sources = Arc::clone(&self.source_lookup);
+        run_provider_tasks(
+            self.providers.clone(),
+            Arc::clone(&self.concurrency),
+            Arc::clone(&self.outstanding),
+            self.search_budget,
+            self.response_budget,
+            SearchKind::Tracks,
+            move |provider| {
+                let query = query.clone();
+                let context = context.clone();
+                let catalogue = Arc::clone(&catalogue);
+                let sources = Arc::clone(&sources);
+                async move {
+                    Self::search_source(provider, catalogue, sources, query, target, context).await
+                }
+            },
+        )
+        .await
+    }
+
+    #[tracing::instrument(skip_all, fields(kind = "album", target))]
+    pub async fn discover_albums(
+        &self,
+        query: &SearchQuery,
+        target: u32,
+        context: &RequestContext,
+    ) -> Result<Discovery<AlbumId>, CatalogueError> {
+        let target = target.min(super::MAX_SEARCH_OFFSET);
+        self.discover_page_kind(
+            SearchKind::Albums,
+            query,
+            target,
+            context,
+            |provider, search, context| async move {
+                provider.search_albums(&search, &context).await
+            },
+            |catalogue, sources, album| async move {
+                let album = super::materialize::materialize_album(&catalogue, &sources, &album)
+                    .await?;
+                Ok(album.id().clone())
+            },
+        )
+        .await
+    }
+
+    #[tracing::instrument(skip_all, fields(kind = "artist", target))]
+    pub async fn discover_artists(
+        &self,
+        query: &SearchQuery,
+        target: u32,
+        context: &RequestContext,
+    ) -> Result<Discovery<ArtistId>, CatalogueError> {
+        let target = target.min(super::MAX_SEARCH_OFFSET);
+        self.discover_page_kind(
+            SearchKind::Artists,
+            query,
+            target,
+            context,
+            |provider, search, context| async move {
+                provider.search_artists(&search, &context).await
+            },
+            |catalogue, sources, artist| async move {
+                let artist = super::materialize::materialize_artist(&catalogue, &sources, &artist)
+                    .await?;
+                Ok(artist.id().clone())
+            },
+        )
+        .await
     }
 
     #[tracing::instrument(skip_all, fields(kind = "track", window = ?window))]
@@ -367,16 +408,21 @@ impl SearchService {
     ) -> Result<TrackSearch, CatalogueError> {
         let known = self
             .library
-            .search_tracks(query.as_str(), window.target(), user.copied())
+            .search_tracks(
+                query.as_str(),
+                window.target(),
+                user.copied(),
+                Some(TrackListScope::Engaged),
+            )
             .await
             .map_err(CatalogueError::Repository)?;
         let mut discovery = self
-            .discover(SearchKind::Tracks, query, window.target(), context)
+            .discover_tracks(query, window.target(), context)
             .await?;
-        let fresh = discovery.take_tracks().unwrap_or_default();
+        let fresh = discovery.take_items();
         let (known, fresh) = self.dedup_tracks(known, fresh, user, context).await;
         let confidence = library_confidence(&SearchTerms::new(query.as_str()), &known);
-        let merged = merge_by_track(known.into_iter().chain(fresh));
+        let merged = merge_hits(known.into_iter().chain(fresh));
         if let Some(error) = discovery.failure(!merged.is_empty()) {
             return Err(error);
         }
@@ -418,18 +464,32 @@ impl SearchService {
         user: Option<&Uuid>,
         context: &RequestContext,
     ) -> Result<Vec<AlbumSummary>, CatalogueError> {
-        let discovery = self
-            .discover(SearchKind::Albums, query, window.target(), context)
-            .await?;
-        let albums = self
+        let terms = SearchTerms::new(query.as_str());
+        let known = self
             .library
-            .search_albums(query.as_str(), window.target(), user.copied())
+            .search_albums(
+                query.as_str(),
+                window.target(),
+                user.copied(),
+                Some(TrackListScope::Engaged),
+            )
             .await
             .map_err(CatalogueError::Repository)?;
-        if let Some(error) = discovery.failure(!albums.is_empty()) {
+        let mut discovery = self
+            .discover_albums(query, window.target(), context)
+            .await?;
+        let fresh_ids = discovery.take_items();
+        let fresh = self
+            .library
+            .album_summaries(&fresh_ids, user.copied())
+            .await
+            .map_err(CatalogueError::Repository)?;
+        let confidence = library_confidence(&terms, &known);
+        let merged = merge_hits(known.into_iter().chain(fresh));
+        if let Some(error) = discovery.failure(!merged.is_empty()) {
             return Err(error);
         }
-        Ok(window.slice(albums))
+        Ok(window.slice(order_by_confidence(merged, confidence, window.target())))
     }
 
     #[tracing::instrument(skip_all, fields(kind = "artist", window = ?window))]
@@ -441,51 +501,36 @@ impl SearchService {
         user: Option<&Uuid>,
         context: &RequestContext,
     ) -> Result<Vec<ArtistSummary>, CatalogueError> {
-        let discovery = self
-            .discover(SearchKind::Artists, query, window.target(), context)
-            .await?;
-        let artists = self
+        let terms = SearchTerms::new(query.as_str());
+        let known = self
             .library
-            .search_artists(query.as_str(), window.target(), user.copied(), filter)
+            .search_artists(
+                query.as_str(),
+                window.target(),
+                user.copied(),
+                filter,
+                Some(TrackListScope::Engaged),
+            )
             .await
             .map_err(CatalogueError::Repository)?;
-        if let Some(error) = discovery.failure(!artists.is_empty()) {
+        let mut discovery = self
+            .discover_artists(query, window.target(), context)
+            .await?;
+        let fresh_ids = discovery.take_items();
+        let fresh = self
+            .library
+            .artist_summaries(&fresh_ids, user.copied())
+            .await
+            .map_err(CatalogueError::Repository)?;
+        let confidence = library_confidence(&terms, &known);
+        let merged = merge_hits(known.into_iter().chain(fresh));
+        if let Some(error) = discovery.failure(!merged.is_empty()) {
             return Err(error);
         }
-        Ok(window.slice(artists))
+        Ok(window.slice(order_by_confidence(merged, confidence, window.target())))
     }
 
-    async fn discover_tracks(
-        &self,
-        query: &SearchQuery,
-        target: u32,
-        context: &RequestContext,
-    ) -> Result<(Vec<SearchHit>, Discovery), CatalogueError> {
-        let query = query.clone();
-        let context = context.clone();
-        let catalogue = Arc::clone(&self.catalogue);
-        let sources = Arc::clone(&self.source_lookup);
-        run_provider_tasks(
-            self.providers.clone(),
-            Arc::clone(&self.concurrency),
-            Arc::clone(&self.outstanding),
-            self.search_budget,
-            self.response_budget,
-            SearchKind::Tracks,
-            move |provider| {
-                let query = query.clone();
-                let context = context.clone();
-                let catalogue = Arc::clone(&catalogue);
-                let sources = Arc::clone(&sources);
-                async move {
-                    Self::search_source(provider, catalogue, sources, query, target, context).await
-                }
-            },
-        )
-        .await
-    }
-
-    async fn discover_page_kind<P, F, Fut, M, MFut>(
+    async fn discover_page_kind<P, T, F, Fut, M, MFut>(
         &self,
         kind: SearchKind,
         query: &SearchQuery,
@@ -493,9 +538,10 @@ impl SearchService {
         context: &RequestContext,
         fetch: F,
         materialize: M,
-    ) -> Result<Discovery, CatalogueError>
+    ) -> Result<Discovery<T>, CatalogueError>
     where
         P: Send + 'static,
+        T: Send + 'static,
         F: Fn(Arc<dyn CatalogueProvider>, CatalogueSearch, RequestContext) -> Fut
             + Clone
             + Send
@@ -509,13 +555,13 @@ impl SearchService {
             + Send
             + Sync
             + 'static,
-        MFut: Future<Output = Result<(), CatalogueError>> + Send + 'static,
+        MFut: Future<Output = Result<T, CatalogueError>> + Send + 'static,
     {
         let query = query.clone();
         let context = context.clone();
         let catalogue = Arc::clone(&self.catalogue);
         let sources = Arc::clone(&self.source_lookup);
-        let (_, discovery) = run_provider_tasks(
+        run_provider_tasks(
             self.providers.clone(),
             Arc::clone(&self.concurrency),
             Arc::clone(&self.outstanding),
@@ -532,15 +578,17 @@ impl SearchService {
                 async move {
                     let page =
                         fetch_catalogue_pages(provider, &query, target, &context, fetch).await?;
+                    let mut items = Vec::with_capacity(page.len());
                     for item in page {
-                        materialize(Arc::clone(&catalogue), Arc::clone(&sources), item).await?;
+                        items.push(
+                            materialize(Arc::clone(&catalogue), Arc::clone(&sources), item).await?,
+                        );
                     }
-                    Ok(Vec::<()>::new())
+                    Ok(items)
                 }
             },
         )
-        .await?;
-        Ok(discovery)
+        .await
     }
 
     async fn search_source(
@@ -583,7 +631,7 @@ async fn run_provider_tasks<T, F, Fut>(
     response_budget: Duration,
     kind: SearchKind,
     operation: F,
-) -> Result<(Vec<T>, Discovery), CatalogueError>
+) -> Result<Discovery<T>, CatalogueError>
 where
     T: Send + 'static,
     F: Fn(Arc<dyn CatalogueProvider>) -> Fut + Clone + Send + Sync + 'static,
@@ -693,15 +741,12 @@ where
             }
         }
     }
-    Ok((
+    Ok(Discovery {
+        first_error: access_error.or(first_error),
+        any_success,
         items,
-        Discovery {
-            first_error: access_error.or(first_error),
-            any_success,
-            tracks: None,
-            pending: provider_count - finished,
-        },
-    ))
+        pending: provider_count - finished,
+    })
 }
 
 fn failure_outcome(error: &CatalogueError) -> &'static str {
@@ -763,7 +808,76 @@ fn invalid_provider_cursor() -> CatalogueError {
     ))
 }
 
-fn library_confidence(terms: &SearchTerms, hits: &[SearchHit]) -> SearchConfidence {
+trait RankedHit {
+    type Id: Eq + std::hash::Hash;
+
+    fn id(&self) -> Self::Id;
+    fn match_quality(&self) -> Option<MatchQuality>;
+    fn match_fields(&self) -> Vec<&str>;
+    fn absorb(&mut self, other: Self);
+}
+
+impl RankedHit for SearchHit {
+    type Id = TrackId;
+
+    fn id(&self) -> TrackId {
+        self.track().id().clone()
+    }
+
+    fn match_quality(&self) -> Option<MatchQuality> {
+        SearchHit::match_quality(self)
+    }
+
+    fn match_fields(&self) -> Vec<&str> {
+        std::iter::once(self.track().title())
+            .chain(self.track().artists().iter().map(|artist| artist.name()))
+            .collect()
+    }
+
+    fn absorb(&mut self, other: Self) {
+        SearchHit::merge(self, other);
+    }
+}
+
+impl RankedHit for AlbumSummary {
+    type Id = AlbumId;
+
+    fn id(&self) -> AlbumId {
+        self.album().id().clone()
+    }
+
+    fn match_quality(&self) -> Option<MatchQuality> {
+        AlbumSummary::match_quality(self)
+    }
+
+    fn match_fields(&self) -> Vec<&str> {
+        std::iter::once(self.album().title())
+            .chain(self.album_artist().map(|artist| artist.name()))
+            .collect()
+    }
+
+    fn absorb(&mut self, _other: Self) {}
+}
+
+impl RankedHit for ArtistSummary {
+    type Id = ArtistId;
+
+    fn id(&self) -> ArtistId {
+        self.artist().id().clone()
+    }
+
+    fn match_quality(&self) -> Option<MatchQuality> {
+        ArtistSummary::match_quality(self)
+    }
+
+    fn match_fields(&self) -> Vec<&str> {
+        vec![self.artist().name()]
+    }
+
+    fn absorb(&mut self, _other: Self) {}
+}
+
+fn library_confidence<T: RankedHit>(terms: &SearchTerms, hits: &[T]) -> SearchConfidence {
     if hits.is_empty() {
         return SearchConfidence::None;
     }
@@ -773,10 +887,7 @@ fn library_confidence(terms: &SearchTerms, hits: &[SearchHit]) -> SearchConfiden
 
     let best = best_field_quality(
         terms,
-        hits.iter().flat_map(|hit| {
-            std::iter::once(hit.track().title())
-                .chain(hit.track().artists().iter().map(|artist| artist.name()))
-        }),
+        hits.iter().flat_map(|hit| hit.match_fields().into_iter()),
     );
 
     match best {
@@ -810,15 +921,16 @@ fn degrade_provider_failure<T>(
     }
 }
 
-fn merge_by_track(hits: impl IntoIterator<Item = SearchHit>) -> Vec<SearchHit> {
-    let mut positions: HashMap<TrackId, usize> = HashMap::new();
-    let mut unique: Vec<SearchHit> = Vec::new();
-    for hit in hits {
-        match positions.get(hit.track().id()).copied() {
-            Some(index) => unique[index].merge(hit),
+fn merge_hits<T: RankedHit>(items: impl IntoIterator<Item = T>) -> Vec<T> {
+    let mut positions: HashMap<T::Id, usize> = HashMap::new();
+    let mut unique: Vec<T> = Vec::new();
+    for item in items {
+        let id = item.id();
+        match positions.get(&id).copied() {
+            Some(index) => unique[index].absorb(item),
             None => {
-                positions.insert(hit.track().id().clone(), unique.len());
-                unique.push(hit);
+                positions.insert(id, unique.len());
+                unique.push(item);
             }
         }
     }
@@ -826,14 +938,14 @@ fn merge_by_track(hits: impl IntoIterator<Item = SearchHit>) -> Vec<SearchHit> {
     unique
 }
 
-fn order_by_confidence(
-    hits: Vec<SearchHit>,
+fn order_by_confidence<T: RankedHit>(
+    items: Vec<T>,
     confidence: SearchConfidence,
     target: u32,
-) -> Vec<SearchHit> {
-    let (mut library_hits, provider_hits): (Vec<SearchHit>, Vec<SearchHit>) = hits
+) -> Vec<T> {
+    let (mut library_hits, provider_hits): (Vec<T>, Vec<T>) = items
         .into_iter()
-        .partition(|hit| hit.match_quality().is_some());
+        .partition(|item| item.match_quality().is_some());
     if !provider_hits.is_empty() {
         library_hits.truncate(library_window(target) as usize);
     }

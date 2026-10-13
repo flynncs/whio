@@ -4,7 +4,8 @@ use uuid::Uuid;
 use crate::features::music_library::domain::{
     Album, AlbumEntry, AlbumId, AlbumListFilter, AlbumOrder, AlbumPage, AlbumSummary, Artist,
     ArtistId, ArtistListFilter, ArtistSort, ArtistSummary, GenreSummary, ProviderEntityState,
-    SourceIdentity, Track, TrackHit, TrackId, TrackListFilter, TrackOrder, TrackPage, TrackView,
+    SourceIdentity, Track, TrackHit, TrackId, TrackListFilter, TrackListScope, TrackOrder,
+    TrackPage, TrackView,
 };
 
 use super::TrackRepositoryError;
@@ -145,6 +146,7 @@ pub trait LibraryRead: Send + Sync {
         _query: &str,
         _limit: u32,
         _user: Option<Uuid>,
+        _scope: Option<TrackListScope>,
     ) -> Result<Vec<TrackHit>, TrackRepositoryError> {
         Ok(Vec::new())
     }
@@ -154,6 +156,7 @@ pub trait LibraryRead: Send + Sync {
         _query: &str,
         _limit: u32,
         _user: Option<Uuid>,
+        _scope: Option<TrackListScope>,
     ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
         Ok(Vec::new())
     }
@@ -164,8 +167,25 @@ pub trait LibraryRead: Send + Sync {
         _limit: u32,
         _user: Option<Uuid>,
         _filter: &ArtistListFilter,
+        _scope: Option<TrackListScope>,
     ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
         Ok(Vec::new())
+    }
+
+    async fn album_summaries(
+        &self,
+        _album_ids: &[AlbumId],
+        _user: Option<Uuid>,
+    ) -> Result<Vec<AlbumSummary>, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unsupported)
+    }
+
+    async fn artist_summaries(
+        &self,
+        _artist_ids: &[ArtistId],
+        _user: Option<Uuid>,
+    ) -> Result<Vec<ArtistSummary>, TrackRepositoryError> {
+        Err(TrackRepositoryError::Unsupported)
     }
 
     async fn find_artist_by_exact_name(

@@ -405,11 +405,11 @@ async fn a_partial_nbsp_query_finds_the_stored_title(pool: PgPool) {
         .unwrap();
 
     let hits = repository
-        .search_tracks("Song\u{a0}One", 25, None)
+        .search_tracks("Song\u{a0}One", 25, None, None)
         .await
         .unwrap();
     let repeated = repository
-        .search_tracks("Song\u{a0}One", 25, None)
+        .search_tracks("Song\u{a0}One", 25, None, None)
         .await
         .unwrap();
 
@@ -430,7 +430,7 @@ async fn a_space_query_does_not_reach_an_nbsp_title(pool: PgPool) {
         .unwrap();
 
     let hits = repository
-        .search_tracks("Song One", 25, None)
+        .search_tracks("Song One", 25, None, None)
         .await
         .unwrap();
 
@@ -448,7 +448,7 @@ async fn an_nbsp_query_does_not_reach_a_space_title(pool: PgPool) {
         .unwrap();
 
     let hits = repository
-        .search_tracks("Song\u{a0}One", 25, None)
+        .search_tracks("Song\u{a0}One", 25, None, None)
         .await
         .unwrap();
 
@@ -468,7 +468,7 @@ async fn a_partial_nbsp_query_finds_the_stored_album(pool: PgPool) {
         .unwrap();
 
     let hits = repository
-        .search_albums("Song\u{a0}One", 25, None)
+        .search_albums("Song\u{a0}One", 25, None, None)
         .await
         .unwrap();
 
@@ -500,7 +500,7 @@ async fn a_partial_nbsp_query_finds_a_role_filtered_artist(pool: PgPool) {
     let filter = ArtistListFilter::new()
         .with_role(Some(RoleSet::new(vec![RoleSelector::Composer]).unwrap()));
     let hits = repository
-        .search_artists("Cage\u{a0}the", 25, None, &filter)
+        .search_artists("Cage\u{a0}the", 25, None, &filter, None)
         .await
         .unwrap();
 
@@ -519,11 +519,11 @@ async fn a_padded_track_query_matches_the_stored_title(pool: PgPool) {
         .unwrap();
 
     let trimmed = repository
-        .search_tracks("Song One", 25, None)
+        .search_tracks("Song One", 25, None, None)
         .await
         .unwrap();
     let padded = repository
-        .search_tracks("  Song One  ", 25, None)
+        .search_tracks("  Song One  ", 25, None, None)
         .await
         .unwrap();
 
@@ -544,7 +544,7 @@ async fn a_padded_album_query_matches_the_stored_album(pool: PgPool) {
         .unwrap();
 
     let padded = repository
-        .search_albums("  Song One  ", 25, None)
+        .search_albums("  Song One  ", 25, None, None)
         .await
         .unwrap();
 
@@ -563,7 +563,7 @@ async fn a_padded_artist_query_matches_the_stored_artist(pool: PgPool) {
         .unwrap();
 
     let padded = repository
-        .search_artists("  Song One  ", 25, None, &ArtistListFilter::new())
+        .search_artists("  Song One  ", 25, None, &ArtistListFilter::new(), None)
         .await
         .unwrap();
 
@@ -582,7 +582,7 @@ async fn a_padded_stored_title_is_still_reachable(pool: PgPool) {
         .unwrap();
 
     let hits = repository
-        .search_tracks("Song One", 25, None)
+        .search_tracks("Song One", 25, None, None)
         .await
         .unwrap();
 
