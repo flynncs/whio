@@ -119,11 +119,35 @@ pub(crate) struct EnumerationWindow {
 
 impl EnumerationWindow {
     pub(crate) fn new(count: u32, offset: u32) -> Result<Self, SearchError> {
-        if count > MAX_PAGE_LIMIT {
+        if count > MAX_ENUMERATION_COUNT {
             return Err(SearchError::InvalidSearch);
         }
 
         Ok(Self { count, offset })
+    }
+
+    async fn collect<T, F, Fut>(&self, mut fetch: F) -> Result<Vec<T>, SearchError>
+    where
+        F: FnMut(u32, PageLimit) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<T>, CatalogueError>>,
+    {
+        let mut items = Vec::new();
+        let mut fetched = 0;
+        while fetched < self.count {
+            let size = (self.count - fetched).min(MAX_PAGE_LIMIT);
+            let limit = PageLimit::new(size).map_err(|_| SearchError::InvalidSearch)?;
+            let page = fetch(self.offset.saturating_add(fetched), limit)
+                .await
+                .map_err(SearchError::Catalogue)?;
+            let page_len = u32::try_from(page.len()).unwrap_or(u32::MAX);
+            items.extend(page);
+            fetched = fetched.saturating_add(page_len);
+            if page_len < size {
+                break;
+            }
+        }
+
+        Ok(items)
     }
 }
 
@@ -139,64 +163,58 @@ pub(crate) async fn enumerate(
     request: &EnumerationRequest,
     tags: SourceTags,
 ) -> Result<SearchResult, SearchError> {
-    let songs = if request.songs.count == 0 {
-        Vec::new()
-    } else {
-        let limit = PageLimit::new(request.songs.count).map_err(|_| SearchError::InvalidSearch)?;
+    let songs = request
+        .songs
+        .collect(|offset, limit| async move {
+            library
+                .track_page(
+                    offset,
+                    limit,
+                    TrackOrder::Title,
+                    &TrackListFilter::new(),
+                    user,
+                )
+                .await
+                .map(|page| page.items().to_vec())
+        })
+        .await?
+        .iter()
+        .map(|view| mapping::child_from_view(view, tags))
+        .collect();
 
-        library
-            .track_page(
-                request.songs.offset,
-                limit,
-                TrackOrder::Title,
-                &TrackListFilter::new(),
-                user,
-            )
-            .await
-            .map_err(SearchError::Catalogue)?
-            .items()
-            .iter()
-            .map(|view| mapping::child_from_view(view, tags))
-            .collect()
-    };
+    let albums = request
+        .albums
+        .collect(|offset, limit| async move {
+            library
+                .album_list(
+                    offset,
+                    limit.get(),
+                    AlbumOrder::Name,
+                    AlbumListFilter::new(),
+                    user,
+                )
+                .await
+        })
+        .await?
+        .iter()
+        .map(mapping::album_from_summary)
+        .collect();
 
-    let albums = if request.albums.count == 0 {
-        Vec::new()
-    } else {
-        library
-            .album_list(
-                request.albums.offset,
-                request.albums.count,
-                AlbumOrder::Name,
-                AlbumListFilter::new(),
-                user,
-            )
-            .await
-            .map_err(SearchError::Catalogue)?
-            .iter()
-            .map(mapping::album_from_summary)
-            .collect()
-    };
-
-    let artists = if request.artists.count == 0 {
-        Vec::new()
-    } else {
-        let filter = album_artist_filter(false).map_err(|_| SearchError::InvalidSearch)?;
-
-        library
-            .artist_list(
-                request.artists.offset,
-                request.artists.count,
-                ArtistSort::Name,
-                &filter,
-                user,
-            )
-            .await
-            .map_err(SearchError::Catalogue)?
-            .iter()
-            .map(mapping::artist_from_summary)
-            .collect()
-    };
+    let filter = album_artist_filter(false).map_err(|_| SearchError::InvalidSearch)?;
+    let artists = request
+        .artists
+        .collect(|offset, limit| {
+            let filter = &filter;
+            async move {
+                library
+                    .artist_list(offset, limit.get(), ArtistSort::Name, filter, user)
+                    .await
+            }
+        })
+        .await?
+        .iter()
+        .map(mapping::artist_from_summary)
+        .collect();
 
     Ok(SearchResult {
         songs,
@@ -205,6 +223,7 @@ pub(crate) async fn enumerate(
     })
 }
 
+const MAX_ENUMERATION_COUNT: u32 = 10_000;
 const DEFAULT_BROWSE_SIZE: u32 = 100;
 const MAX_BROWSE_SIZE: u32 = 500;
 

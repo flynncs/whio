@@ -749,17 +749,21 @@ async fn artists_group_into_indexes(pool: sqlx::PgPool) {
 }
 
 #[test]
-fn enumeration_windows_reject_counts_above_the_page_limit() {
+fn enumeration_windows_accept_counts_above_the_page_limit_up_to_ten_thousand() {
     assert!(matches!(
-        EnumerationWindow::new(MAX_PAGE_LIMIT, 0),
-        Ok(window) if window.count == MAX_PAGE_LIMIT
+        EnumerationWindow::new(1000, 1000),
+        Ok(window) if window.count == 1000 && window.offset == 1000
+    ));
+    assert!(matches!(
+        EnumerationWindow::new(10_000, 0),
+        Ok(window) if window.count == 10_000
     ));
     assert!(matches!(
         EnumerationWindow::new(0, 5),
         Ok(window) if window.count == 0 && window.offset == 5
     ));
     assert!(matches!(
-        EnumerationWindow::new(MAX_PAGE_LIMIT + 1, 0),
+        EnumerationWindow::new(10_001, 0),
         Err(SearchError::InvalidSearch)
     ));
 }
@@ -793,6 +797,36 @@ async fn enumerate_pages_each_kind_independently(pool: sqlx::PgPool) {
     assert_eq!(result.albums[0].name, "Random Access Memories");
     assert_eq!(result.artists.len(), 1);
     assert_eq!(result.artists[0].name, "Daft Punk");
+}
+
+#[sqlx::test]
+async fn enumerate_fills_a_count_above_the_page_limit_from_several_pages(pool: sqlx::PgPool) {
+    let names = (0..MAX_PAGE_LIMIT + 20)
+        .map(|index| format!("Album {index:04}"))
+        .collect::<Vec<_>>();
+    let titles = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let (library, calls) = counting_catalogue(pool.clone(), &titles).await;
+    let request = EnumerationRequest {
+        songs: EnumerationWindow::new(0, 0).expect("valid window"),
+        albums: EnumerationWindow::new(1000, 10).expect("valid window"),
+        artists: EnumerationWindow::new(0, 0).expect("valid window"),
+    };
+
+    let result = enumerate(&library, None, &request, SourceTags::Off)
+        .await
+        .expect("the enumeration succeeds");
+
+    assert_eq!(result.albums.len(), names.len() - 10);
+    assert_eq!(result.albums[0].name, "Album 0010");
+    assert_eq!(
+        result.albums.last().map(|album| album.name.as_str()),
+        names.last().map(String::as_str)
+    );
+    assert_eq!(
+        calls.albums(),
+        2,
+        "a short second page ends the enumeration"
+    );
 }
 
 #[sqlx::test]

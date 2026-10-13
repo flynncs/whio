@@ -2715,15 +2715,47 @@ async fn song_count_above_25_is_honoured(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn song_count_above_max_is_an_invalid_search_error(pool: PgPool) {
+async fn arpeggi_sync_pages_of_one_thousand_are_served(pool: PgPool) {
+    seed_three_kinds(&pool).await;
+    let (app, secret) = enumeration_client(pool, vec![]);
+    let auth = auth_query("flynn", &secret);
+
+    for (window, artists) in [
+        (
+            "artistCount=1000&artistOffset=0&albumCount=0&songCount=0",
+            false,
+        ),
+        (
+            "artistCount=1000&artistOffset=1000&albumCount=0&songCount=0",
+            true,
+        ),
+    ] {
+        let (status, body) = get_status(
+            app.clone(),
+            &subsonic_search3(&format!("query=&{window}"), &auth),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "window: {window}");
+        let listed = &body["subsonic-response"]["searchResult3"]["artist"];
+        assert_eq!(
+            listed.as_array().is_none_or(Vec::is_empty),
+            artists,
+            "window: {window}"
+        );
+    }
+}
+
+#[sqlx::test]
+async fn enumeration_count_above_max_is_an_invalid_search_error(pool: PgPool) {
     seed_three_kinds(&pool).await;
     let (app, secret) = enumeration_client(pool, vec![]);
     let auth = auth_query("flynn", &secret);
 
     for window in [
-        "songCount=501",
-        "albumCount=501",
-        "artistCount=501",
+        "songCount=10001",
+        "albumCount=10001",
+        "artistCount=10001",
         "songCount=abc",
         "songOffset=abc",
     ] {
