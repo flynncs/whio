@@ -591,10 +591,39 @@ mod tests {
     async fn collect(body: MediaBody) -> Result<Vec<u8>, MediaFetchError> {
         let mut stream = body.chunks;
         let mut collected = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            collected.extend_from_slice(&chunk?);
-        }
+        tokio::time::timeout(HANG_GUARD, async {
+            while let Some(chunk) = stream.next().await {
+                collected.extend_from_slice(&chunk?);
+            }
+            Ok(())
+        })
+        .await
+        .expect("the conversion body must finish")?;
         Ok(collected)
+    }
+
+    const HANG_GUARD: Duration = Duration::from_secs(10);
+
+    async fn next_chunk(stream: &mut MediaByteStream) -> Bytes {
+        tokio::time::timeout(HANG_GUARD, stream.next())
+            .await
+            .expect("the conversion must emit a chunk")
+            .expect("the conversion must not end")
+            .expect("the chunk must not be an error")
+    }
+
+    async fn on_thread<T: Send + 'static>(
+        what: &'static str,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(work());
+        });
+        tokio::time::timeout(HANG_GUARD, receiver)
+            .await
+            .unwrap_or_else(|_| panic!("{what} did not finish"))
+            .unwrap_or_else(|_| panic!("{what} panicked"))
     }
 
     async fn installed(limit: usize) -> FfmpegConverter {
@@ -746,14 +775,14 @@ mod tests {
     fn watch_liveness(path: std::path::PathBuf) -> Arc<Notify> {
         let finished = Arc::new(Notify::new());
         let signal = Arc::clone(&finished);
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
+        std::thread::spawn(move || {
+            use std::io::Read;
 
-            let Ok(mut file) = tokio::fs::File::open(&path).await else {
+            let Ok(mut file) = std::fs::File::open(&path) else {
                 return;
             };
             let mut buffer = [0u8; 64];
-            while matches!(file.read(&mut buffer).await, Ok(count) if count > 0) {}
+            while matches!(file.read(&mut buffer), Ok(count) if count > 0) {}
             signal.notify_one();
         });
         finished
@@ -761,28 +790,32 @@ mod tests {
 
     #[cfg(unix)]
     async fn release_fifo(path: &std::path::Path) {
-        use tokio::io::AsyncWriteExt;
+        let path = path.to_path_buf();
+        on_thread("releasing a held stand-in", move || {
+            use std::io::Write;
 
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .await
-            .unwrap();
-        let _ = file.write_all(b"x").await;
+            let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let _ = file.write_all(b"x");
+        })
+        .await;
     }
 
     #[cfg(unix)]
     async fn read_fifo(path: &std::path::Path) {
-        use tokio::io::AsyncReadExt;
+        let path = path.to_path_buf();
+        on_thread("waiting for a stand-in marker", move || {
+            use std::io::Read;
 
-        let mut file = tokio::fs::File::open(path).await.unwrap();
-        let mut byte = [0u8; 1];
-        let _ = file.read(&mut byte).await.unwrap();
+            let mut file = std::fs::File::open(path).unwrap();
+            let mut byte = [0u8; 1];
+            let _ = file.read(&mut byte).unwrap();
+        })
+        .await;
     }
 
     #[cfg(unix)]
     async fn wait_for(signal: &Notify, message: &str) {
-        tokio::time::timeout(Duration::from_secs(10), signal.notified())
+        tokio::time::timeout(HANG_GUARD, signal.notified())
             .await
             .unwrap_or_else(|_| panic!("{message}"));
     }
@@ -856,7 +889,7 @@ mod tests {
             .await
             .unwrap();
         let mut chunks = body.chunks;
-        assert_eq!(&chunks.next().await.unwrap().unwrap()[..], b"ADTS");
+        assert_eq!(&next_chunk(&mut chunks).await[..], b"ADTS");
         assert_pending(
             &mut chunks,
             "the body must stay open while the child is held",
@@ -923,7 +956,7 @@ mod tests {
             .await
             .unwrap();
         let mut chunks = body.chunks;
-        assert_eq!(&chunks.next().await.unwrap().unwrap()[..], b"ADTS");
+        assert_eq!(&next_chunk(&mut chunks).await[..], b"ADTS");
         read_fifo(&closed).await;
         wait_for(
             &stdout_eof,
